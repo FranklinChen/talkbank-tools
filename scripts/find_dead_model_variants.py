@@ -6,36 +6,59 @@ that is never constructed in non-test code anywhere in the search root
 is dead.
 
 Method:
-  1. Enumerate every `pub enum` in the model crate and its variants.
-  2. For each variant `EnumName::Variant`, search the search root
-     (excluding test modules and tests/ dirs) for any constructor or
-     pattern-match site.
-  3. A variant with NO non-test constructor — including no thiserror
-     `#[from]` auto-construction — is dead.
+  1. Enumerate every `pub enum` in `--model-root` and its variants.
+  2. For each variant, search `--search-root` (non-test code) for any
+     constructor reference, falling back to "no constructor → dead."
+  3. Skip whole enums whose `#[derive(...)]` includes a derive that
+     constructs variants from external input — clap (`Subcommand`,
+     `ValueEnum`, `Args`, `Parser`), serde (`Deserialize`), schemars
+     (`JsonSchema`), strum (`EnumString`, `FromRepr`). All variants of
+     such enums are reachable via the macro-generated path.
 
-Detected constructor shapes:
-  - `EnumName::Variant(...)` or `EnumName::Variant { ... }` — explicit
-    full-path construction.
-  - `Self::Variant(...)` or `Self::Variant { ... }` — in-impl
-    construction inside the enum's own `impl` block. Restricted to the
-    enum's home file to avoid false positives from `Self` in other types.
-  - Variants with `#[from]` on a tuple-payload field — thiserror
-    auto-implements `From<T>` for these variants, so they are
-    constructed implicitly via `?`/`.into()` even though no source line
-    contains `EnumName::Variant`.
+Detected constructor shapes (positive — count as live):
+  - `EnumName::Variant(...)` or `EnumName::Variant { ... }` — full-path.
+  - `Self::Variant(...)` / `Self::Variant { ... }` — in-impl construction
+    inside the enum's home file (Self in other files refers to a
+    different type, hence the file restriction).
+  - Variants with `#[from] FieldType` on a tuple payload — thiserror
+    auto-implements `From<FieldType> for EnumName`, so the variant is
+    constructed implicitly via `?` / `.into()` / `.map_err(Foo::from)`
+    even when no source line spells `EnumName::Variant`.
 
-Known limitations (still false-positive prone for):
-  - Macro-generated constructors other than thiserror `#[from]`.
-  - `Default` impls that mention a variant via `Self::Variant` pattern
-    (counted) but `EnumName::default()` calls upstream are not tracked.
-  - `serde` deserialization — variants reachable only via parsed input
-    show up as dead unless they're also constructed in code.
+Detected non-constructor shapes (negative — discard the match):
+  - Match arms (`EnumName::Variant => ...` on the same line as the
+    variant identifier).
+  - Markdown rustdoc links: `` [`EnumName::Variant`] `` (backtick
+    disambiguates from a Rust slice literal `[Foo::A, Foo::B]`, which
+    IS counted as construction context).
+  - `use` / `pub use` import lines.
+  - Doc-comment lines (`///` or `//!`).
+  - `matches!(...)` invocations.
+
+Known remaining limitations:
+  - Macro-generated constructors other than thiserror `#[from]` and the
+    listed input-driven derives.
+  - `Default` impls that construct a variant via `Self::Variant` are
+    counted only if the impl is in the enum's home file.
 
 Usage:
     python3 find_dead_model_variants.py \\
         --model-root <path-to-model-crate-src> \\
         --search-root <path-to-workspace-or-crate-with-consumers> \\
-        --output <markdown-report-path>
+        --output <markdown-report-path> \\
+        [--label <crate-name-for-report-title>]
+
+Output: a markdown report listing each enum, its dead variants, and
+counts in the summary section.
+
+Future direction: this script duplicates infrastructure already in
+`xtask/src/wide_struct_audit.rs` (workspace .rs walker, brace-depth
+declaration parser). Porting to a sibling `xtask/src/dead_variant_audit.rs`
+would consolidate the audit primitives. The current per-variant `rg`
+invocation pattern (~1250 invocations on talkbank-model) is also the
+audit's dominant cost — batching all variant patterns into a single
+ripgrep alternation walk would yield ~10× speedup. Both deferred
+until the audit becomes a CI gate (post-vacation ErrorCode cleanup).
 """
 
 from __future__ import annotations
@@ -219,52 +242,53 @@ def extract_variant_names(cleaned: str) -> list[str]:
     return re.findall(r"\b([A-Z][A-Za-z0-9_]*)\s*,", cleaned + ",")
 
 
-def search_constructor(enum: str, variant: str, home_file: Path, search_root: Path) -> list[str]:
-    """Return matching file:line entries for the variant outside tests.
+def _rg(pattern: str, path: Path, exclude_tests: bool = False) -> list[str]:
+    """Run ripgrep with `path:line:content` output, optionally excluding
+    test paths via globs. Falls back to `grep -rn` if `rg` is missing.
 
-    Searches two patterns:
-      - `EnumName::Variant` anywhere (covers external callers and in-impl
-        construction that uses the full path)
-      - `Self::Variant` only inside the enum's home file (Rust idiom for
-        in-impl construction inside `impl EnumName { ... }`)
+    `--with-filename` is set on every call: rg drops the path field on
+    single-file inputs by default, and the downstream parser depends on
+    the 3-field format.
+    """
+    rg_cmd: list[str] = ["rg", "--no-heading", "--with-filename", "-n"]
+    if exclude_tests:
+        rg_cmd += [
+            "-g", "!**/tests/**",
+            "-g", "!**/test_*.rs",
+            "-g", "!**/*_tests.rs",
+        ]
+    rg_cmd += [pattern, str(path)]
+    try:
+        result = subprocess.run(rg_cmd, capture_output=True, text=True, check=False)
+        return result.stdout.splitlines()
+    except FileNotFoundError:
+        # rg not installed; fall back to grep. The exclude-globs map
+        # imperfectly to grep's --exclude-dir, but the test-path filter
+        # in `_filter_test_paths` catches what slips through.
+        grep_cmd = ["grep", "-rn", "--include=*.rs"]
+        if exclude_tests:
+            grep_cmd += ["--exclude-dir=tests"]
+        grep_cmd += [pattern, str(path)]
+        result = subprocess.run(grep_cmd, capture_output=True, text=True, check=False)
+        return result.stdout.splitlines()
+
+
+def search_constructor(enum: str, variant: str, home_file: Path, search_root: Path) -> list[str]:
+    """Return `path:line:content` entries for the variant outside tests.
+
+    Searches two patterns: `EnumName::Variant` anywhere in `search_root`
+    (external callers + full-path in-impl construction), plus
+    `Self::Variant` restricted to the enum's home file (Rust idiom for
+    in-impl construction). The home-file restriction is critical:
+    `Self::Variant` in some other file refers to that file's `Self`,
+    not this enum, and would silently inflate the constructor count.
     """
     full_pattern = rf"\b{enum}::{variant}\b"
     self_pattern = rf"\bSelf::{variant}\b"
     lines: list[str] = []
-    # External / full-path references
-    try:
-        result = subprocess.run(
-            [
-                "rg", "--no-heading", "-n",
-                "-g", "!**/tests/**",
-                "-g", "!**/test_*.rs",
-                "-g", "!**/*_tests.rs",
-                full_pattern, str(search_root),
-            ],
-            capture_output=True, text=True, check=False,
-        )
-        lines.extend(result.stdout.splitlines())
-    except FileNotFoundError:
-        result = subprocess.run(
-            ["grep", "-rn", "--include=*.rs",
-             "--exclude-dir=tests",
-             full_pattern, str(search_root)],
-            capture_output=True, text=True, check=False,
-        )
-        lines.extend(result.stdout.splitlines())
-    # `Self::Variant` references in the enum's home file (covers in-impl
-    # construction). We restrict to the home file because `Self::Variant`
-    # in an arbitrary file refers to a different `Self` and could be
-    # noise.
+    lines.extend(_rg(full_pattern, search_root, exclude_tests=True))
     if home_file.exists():
-        # `--with-filename` forces the 3-field `path:line:content` output
-        # even on single-file searches; without it, rg drops the path on
-        # single-file inputs and downstream parsing breaks.
-        result = subprocess.run(
-            ["rg", "--no-heading", "--with-filename", "-n", self_pattern, str(home_file)],
-            capture_output=True, text=True, check=False,
-        )
-        lines.extend(result.stdout.splitlines())
+        lines.extend(_rg(self_pattern, home_file))
     # Filter out lines inside `#[cfg(test)]` modules. This is approximate
     # — we strip lines whose file path contains test markers (already
     # handled by --glob exclusions) and lines within `mod tests {`.
@@ -272,29 +296,16 @@ def search_constructor(enum: str, variant: str, home_file: Path, search_root: Pa
     # file has `#[cfg(test)]` declared at module scope earlier and the
     # match line is inside that module. To keep this robust without an
     # AST, we just exclude lines that are obviously inside `mod tests {`.
+    # Filter only by file path (drop test fixtures); per-line constructor
+    # vs pattern-match classification happens in `is_constructor`.
     filtered: list[str] = []
     for ln in lines:
-        # ln format: path:line:content
         parts = ln.split(":", 2)
         if len(parts) < 3:
             continue
-        path, line_no, content = parts
-        # Skip if the file path is a test fixture
+        path = parts[0]
         if any(p in path for p in TEST_PATH_PATTERNS):
             continue
-        # Skip pure pattern-match arms inside writer code? No — match
-        # arms count as live consumers but NOT producers. We're looking
-        # for constructors, so distinguish:
-        #   - `EnumName::Variant {` or `EnumName::Variant(` followed
-        #     by struct-literal or tuple-construction = constructor
-        #   - `EnumName::Variant { .. } => ...` = pattern match (consumer)
-        #   - `matches!(x, EnumName::Variant ...)` = test-style consumer
-        # For dead-code purposes, a variant is dead if NO constructor exists.
-        # We approximate "constructor" as: not a pattern-match arm and
-        # not inside a `match` block. Simpler heuristic: look for
-        # `EnumName::Variant(` immediately followed by something that
-        # isn't `..)` or for `EnumName::Variant {` or for `EnumName::Variant)`
-        # (unit variant).
         filtered.append(ln)
     return filtered
 
@@ -312,10 +323,11 @@ def is_constructor(content: str, enum: str, variant: str) -> bool:
       - A doc comment (line starts with `///`)
     Otherwise returns True (constructor or other live use).
     """
-    s = re.sub(r"//.*", "", content).strip() if not content.lstrip().startswith("///") else ""
-    if not s:
+    stripped = content.lstrip()
+    if stripped.startswith("///") or stripped.startswith("//!"):
         return False
-    if s.lstrip().startswith("///") or s.lstrip().startswith("//!"):
+    s = re.sub(r"//.*", "", content).strip()
+    if not s:
         return False
     if "matches!" in s:
         return False
