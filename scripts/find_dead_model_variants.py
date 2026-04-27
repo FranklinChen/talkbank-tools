@@ -1,41 +1,51 @@
-"""Find dead enum variants in talkbank-model.
+"""Find dead enum variants in a Rust crate's model.
 
-The parser is the canonical producer of all model values from CHAT input.
-Therefore: any enum variant defined in talkbank-model that is never
-constructed in non-test code is dead.
+A model crate's parser/builder code is the canonical producer of its
+own data types. Therefore: any enum variant defined in the model crate
+that is never constructed in non-test code anywhere in the search root
+is dead.
 
 Method:
-  1. Enumerate every `pub enum` in talkbank-model and its variants.
-  2. For each variant `EnumName::Variant`, search all of crates/
+  1. Enumerate every `pub enum` in the model crate and its variants.
+  2. For each variant `EnumName::Variant`, search the search root
      (excluding test modules and tests/ dirs) for any constructor or
      pattern-match site.
-  3. A variant with NO non-test constructor anywhere in the workspace
-     is dead.
+  3. A variant with NO non-test constructor — including no thiserror
+     `#[from]` auto-construction — is dead.
 
-Limitations:
-  - Constructors via `.into()` from `From<T>` impls are caught only if
-    the From impl is detected as a non-test "constructor" (we count
-    `impl From<T> for EnumName` blocks).
-  - This is a static analysis; if a variant has a constructor only in
-    a doctest, it's treated as dead (correct outcome — doctests are
-    documentation, not production code).
-  - We treat any constructor outside #[cfg(test)] modules and tests/
-    files as "live."
+Detected constructor shapes:
+  - `EnumName::Variant(...)` or `EnumName::Variant { ... }` — explicit
+    full-path construction.
+  - `Self::Variant(...)` or `Self::Variant { ... }` — in-impl
+    construction inside the enum's own `impl` block. Restricted to the
+    enum's home file to avoid false positives from `Self` in other types.
+  - Variants with `#[from]` on a tuple-payload field — thiserror
+    auto-implements `From<T>` for these variants, so they are
+    constructed implicitly via `?`/`.into()` even though no source line
+    contains `EnumName::Variant`.
 
-Output:
-  A markdown report listing each enum, its variants, and whether each
-  variant is dead.
+Known limitations (still false-positive prone for):
+  - Macro-generated constructors other than thiserror `#[from]`.
+  - `Default` impls that mention a variant via `Self::Variant` pattern
+    (counted) but `EnumName::default()` calls upstream are not tracked.
+  - `serde` deserialization — variants reachable only via parsed input
+    show up as dead unless they're also constructed in code.
+
+Usage:
+    python3 find_dead_model_variants.py \\
+        --model-root <path-to-model-crate-src> \\
+        --search-root <path-to-workspace-or-crate-with-consumers> \\
+        --output <markdown-report-path>
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-MODEL_ROOT = Path("/Users/chen/talkbank/talkbank-tools/crates/talkbank-model/src")
-SEARCH_ROOT = Path("/Users/chen/talkbank/talkbank-tools/crates")
 TEST_PATH_PATTERNS = ("tests/", "/tests/", "_tests.rs", "test_", "/test/")
 
 
@@ -46,13 +56,19 @@ ENUM_DECL_RE = re.compile(
 )
 
 
-def find_enums() -> dict[str, tuple[list[str], Path]]:
-    """Return {enum_name: ([variant_names], home_file)} for every pub enum
-    in the model crate. The `home_file` is the .rs file the enum is
-    defined in — needed to resolve `Self::Variant` constructions inside
-    that enum's impl blocks."""
-    out: dict[str, tuple[list[str], Path]] = {}
-    for rs in MODEL_ROOT.rglob("*.rs"):
+def find_enums(model_root: Path) -> dict[str, tuple[list[str], Path, set[str]]]:
+    """Return `{enum_name: (variant_names, home_file, from_variants)}` for
+    every `pub enum` in the model crate.
+
+    `home_file` is the .rs file the enum is defined in — needed to
+    resolve `Self::Variant` constructions inside that enum's impl blocks.
+
+    `from_variants` is the set of variant names that have a thiserror
+    `#[from]` attribute on at least one field. These get auto-implemented
+    `From<T>` impls; treat them as having implicit constructors.
+    """
+    out: dict[str, tuple[list[str], Path, set[str]]] = {}
+    for rs in model_root.rglob("*.rs"):
         if any(p in str(rs) for p in TEST_PATH_PATTERNS):
             continue
         text = rs.read_text(encoding="utf-8", errors="replace")
@@ -74,8 +90,60 @@ def find_enums() -> dict[str, tuple[list[str], Path]]:
             # nested {}, [], (...), comments, attribute lines first.
             cleaned = strip_nested(body)
             variants = extract_variant_names(cleaned)
+            from_variants = extract_from_variants(body)
             if variants:
-                out[name] = (variants, rs)
+                out[name] = (variants, rs, from_variants)
+    return out
+
+
+def extract_from_variants(body: str) -> set[str]:
+    """Return variant names whose tuple/struct field carries thiserror
+    `#[from]`. The shapes we recognize:
+
+        Variant(#[from] Type),
+        Variant(#[from] Type, OtherFields),
+        Variant {
+            #[from]
+            source: Type,
+            ...
+        },
+
+    For each, the variant name is the `\\b([A-Z][A-Za-z0-9_]*)` token
+    immediately preceding the `(` or `{` containing `#[from]`.
+    """
+    out: set[str] = set()
+    # Walk variant by variant. For a tuple variant `Name(...)`, look
+    # for `#[from]` inside the parens. For a struct variant
+    # `Name { ... }`, look for `#[from]` inside the braces.
+    # We use a stateful scanner: find each top-level CamelCase token,
+    # then walk forward to see whether the next non-whitespace char is
+    # `(` or `{`, and whether the matching closing paren/brace is
+    # preceded by content containing `#[from]`.
+    i = 0
+    while i < len(body):
+        m = re.search(r"\b([A-Z][A-Za-z0-9_]*)\s*([\({,])", body[i:])
+        if not m:
+            break
+        variant_name = m.group(1)
+        opener = m.group(2)
+        absolute_idx = i + m.start(2)
+        if opener in "({":
+            close = ")" if opener == "(" else "}"
+            depth = 1
+            j = absolute_idx + 1
+            while j < len(body) and depth > 0:
+                if body[j] == opener:
+                    depth += 1
+                elif body[j] == close:
+                    depth -= 1
+                j += 1
+            payload = body[absolute_idx + 1 : j - 1]
+            if "#[from]" in payload:
+                out.add(variant_name)
+            i = j
+        else:
+            # Bare unit variant; no payload, no #[from].
+            i = absolute_idx + 1
     return out
 
 
@@ -109,7 +177,7 @@ def extract_variant_names(cleaned: str) -> list[str]:
     return re.findall(r"\b([A-Z][A-Za-z0-9_]*)\s*,", cleaned + ",")
 
 
-def search_constructor(enum: str, variant: str, home_file: Path) -> list[str]:
+def search_constructor(enum: str, variant: str, home_file: Path, search_root: Path) -> list[str]:
     """Return matching file:line entries for the variant outside tests.
 
     Searches two patterns:
@@ -129,7 +197,7 @@ def search_constructor(enum: str, variant: str, home_file: Path) -> list[str]:
                 "-g", "!**/tests/**",
                 "-g", "!**/test_*.rs",
                 "-g", "!**/*_tests.rs",
-                full_pattern, str(SEARCH_ROOT),
+                full_pattern, str(search_root),
             ],
             capture_output=True, text=True, check=False,
         )
@@ -138,7 +206,7 @@ def search_constructor(enum: str, variant: str, home_file: Path) -> list[str]:
         result = subprocess.run(
             ["grep", "-rn", "--include=*.rs",
              "--exclude-dir=tests",
-             full_pattern, str(SEARCH_ROOT)],
+             full_pattern, str(search_root)],
             capture_output=True, text=True, check=False,
         )
         lines.extend(result.stdout.splitlines())
@@ -231,36 +299,76 @@ def is_constructor(content: str, enum: str, variant: str) -> bool:
 
 
 def main() -> int:
-    enums = find_enums()
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0] if __doc__ else None)
+    parser.add_argument(
+        "--model-root",
+        type=Path,
+        required=True,
+        help="Path to the model crate's `src/` directory; enums are enumerated here.",
+    )
+    parser.add_argument(
+        "--search-root",
+        type=Path,
+        required=True,
+        help="Path to the workspace or crate(s) where consumers live; variant references are searched here.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path to write the markdown audit report.",
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Optional label for the report title (e.g. crate name). Defaults to the model-root's parent dir name.",
+    )
+    args = parser.parse_args()
+
+    if not args.model_root.is_dir():
+        print(f"error: --model-root {args.model_root} is not a directory", file=sys.stderr)
+        return 1
+    if not args.search_root.is_dir():
+        print(f"error: --search-root {args.search_root} is not a directory", file=sys.stderr)
+        return 1
+
+    label = args.label or args.model_root.parent.name
+    enums = find_enums(args.model_root)
     if not enums:
-        print("no enums found", file=sys.stderr)
+        print("no enums found in model-root", file=sys.stderr)
         return 1
 
     out_lines: list[str] = []
-    out_lines.append("# Dead Variant Audit — talkbank-model\n")
+    out_lines.append(f"# Dead Variant Audit — `{label}`\n")
     out_lines.append("Generated by `scripts/find_dead_model_variants.py`.\n")
     out_lines.append(
-        "**Method.** Enumerate every `pub enum` in talkbank-model. "
-        "For each variant, search all `crates/` (non-test code only) "
-        "for any reference. Variants with zero non-test references — "
-        "or with references that are pattern-match arms only (no "
-        "constructor) — are flagged dead.\n"
+        f"**Method.** Enumerate every `pub enum` in `{args.model_root}`. "
+        f"For each variant, search `{args.search_root}` (non-test code only) "
+        "for any reference. A variant is flagged dead when it has no "
+        "explicit constructor (`EnumName::Variant` / `Self::Variant`), "
+        "no thiserror `#[from]` auto-constructor, and no other live "
+        "reference outside pattern-match arms / doc links / use statements.\n"
     )
     out_lines.append(
-        "**Limitation.** The constructor-vs-pattern detection is "
-        "heuristic. A variant flagged here should be inspected "
-        "manually before removal.\n"
+        "**Limitation.** Macro-generated constructors other than thiserror "
+        "`#[from]` are not detected. A variant flagged here should be "
+        "inspected manually before removal.\n"
     )
 
     total_dead = 0
     total_variants = 0
+    total_from_skipped = 0
     for enum_name in sorted(enums):
-        variants, home_file = enums[enum_name]
+        variants, home_file, from_variants = enums[enum_name]
         total_variants += len(variants)
         out_lines.append(f"\n## `{enum_name}` ({len(variants)} variants)\n")
         any_dead_in_enum = False
         for v in variants:
-            refs = search_constructor(enum_name, v, home_file)
+            if v in from_variants:
+                # thiserror auto-constructor; not dead, skip silently.
+                total_from_skipped += 1
+                continue
+            refs = search_constructor(enum_name, v, home_file, args.search_root)
             constructors = [
                 ln for ln in refs
                 if is_constructor(
@@ -280,16 +388,20 @@ def main() -> int:
         if not any_dead_in_enum:
             out_lines.append("(all variants have constructors)")
 
-    out_lines.append(f"\n## Summary\n")
+    out_lines.append("\n## Summary\n")
     out_lines.append(f"- Enums scanned: **{len(enums)}**")
     out_lines.append(f"- Variants total: **{total_variants}**")
     out_lines.append(f"- Confirmed dead: **{total_dead}**")
+    out_lines.append(f"- Skipped (`#[from]` auto-constructor, treated as live): **{total_from_skipped}**")
 
-    out_path = Path("/Users/chen/talkbank/docs/investigations/2026-04-27-talkbank-model-dead-variants.md")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(out_lines))
-    print(f"wrote {out_path}", file=sys.stderr)
-    print(f"  {len(enums)} enums, {total_variants} variants, {total_dead} dead", file=sys.stderr)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text("\n".join(out_lines))
+    print(f"wrote {args.output}", file=sys.stderr)
+    print(
+        f"  {len(enums)} enums, {total_variants} variants, "
+        f"{total_dead} dead, {total_from_skipped} via #[from]",
+        file=sys.stderr,
+    )
     return 0
 
 
