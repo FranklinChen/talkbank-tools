@@ -5,9 +5,10 @@
 //! with a reviewed field cap and classification.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::Result;
+use crate::rust_scan::{brace_delta, rust_scan_roots, walkdir};
 
 const WIDE_STRUCT_THRESHOLD: usize = 10;
 
@@ -294,34 +295,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     },
 ];
 
-fn rust_scan_roots(root: &Path) -> Vec<PathBuf> {
-    ["src", "crates", "tests", "spec/tools", "examples", "fuzz"]
-        .iter()
-        .map(|relative| root.join(relative))
-        .collect()
-}
-
-fn walkdir(dir: &Path) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("");
-                if !matches!(name, ".git" | "target" | "grammar" | "__pycache__") {
-                    result.extend(walkdir(&path));
-                }
-            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
-                result.push(path);
-            }
-        }
-    }
-    result
-}
-
 fn scan_named_structs(root: &Path) -> Vec<NamedStructInfo> {
     let mut structs = Vec::new();
     for base in rust_scan_roots(root) {
@@ -402,14 +375,6 @@ fn struct_name_from_declaration(line: &str) -> Option<String> {
     } else {
         Some(name.to_string())
     }
-}
-
-fn brace_delta(line: &str) -> isize {
-    line.chars().fold(0isize, |delta, ch| match ch {
-        '{' => delta + 1,
-        '}' => delta - 1,
-        _ => delta,
-    })
 }
 
 fn is_named_field(line: &str) -> bool {
