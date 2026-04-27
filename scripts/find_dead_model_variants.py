@@ -56,25 +56,52 @@ ENUM_DECL_RE = re.compile(
 )
 
 
-def find_enums(model_root: Path) -> dict[str, tuple[list[str], Path, set[str]]]:
-    """Return `{enum_name: (variant_names, home_file, from_variants)}` for
-    every `pub enum` in the model crate.
+# Enum-level derive attributes that construct variants from external
+# input (serialized data, CLI args, env vars, etc.). When ANY of these
+# is on the enum, ALL of its variants are reachable via the macro-
+# generated path even if no source line names them — they get
+# constructed by clap's argument parser, serde's Deserialize, or other
+# input-driven dispatch.
+EXTERNAL_INPUT_DERIVES = (
+    "Subcommand",       # clap subcommand dispatch
+    "ValueEnum",        # clap value-enum
+    "Args",             # clap argument struct (rare on enums)
+    "Parser",           # clap top-level Parser
+    "Deserialize",      # serde
+    "JsonSchema",       # schemars (input-driven via deserialization)
+    "EnumString",       # strum FromStr
+    "FromRepr",         # strum from integer repr
+)
 
-    `home_file` is the .rs file the enum is defined in — needed to
-    resolve `Self::Variant` constructions inside that enum's impl blocks.
 
-    `from_variants` is the set of variant names that have a thiserror
-    `#[from]` attribute on at least one field. These get auto-implemented
-    `From<T>` impls; treat them as having implicit constructors.
+def find_enums(model_root: Path) -> dict[str, tuple[list[str], Path, set[str], bool]]:
+    """Return `{enum_name: (variant_names, home_file, from_variants, externally_constructible)}`
+    for every `pub enum` in the model crate.
+
+    * `home_file`: the .rs file the enum is defined in — needed to
+      resolve `Self::Variant` constructions inside its impl blocks.
+    * `from_variants`: variant names with thiserror `#[from]` on a
+      field (auto-`From<T>` impl).
+    * `externally_constructible`: True when the enum's `#[derive(...)]`
+      list includes a derive that constructs variants from external
+      input (clap subcommand, serde Deserialize, etc.). All variants of
+      such enums are treated as live.
     """
-    out: dict[str, tuple[list[str], Path, set[str]]] = {}
+    out: dict[str, tuple[list[str], Path, set[str], bool]] = {}
     for rs in model_root.rglob("*.rs"):
         if any(p in str(rs) for p in TEST_PATH_PATTERNS):
             continue
         text = rs.read_text(encoding="utf-8", errors="replace")
-        # Find each `pub enum Name {` and grab its body.
+        # Find each `pub enum Name {` and grab its body. We also need
+        # to look at the `#[derive(...)]` block(s) immediately preceding
+        # the `pub enum` to detect external-input-driven derives.
         for match in re.finditer(r"\bpub enum\s+(\w+)\s*\{", text):
             name = match.group(1)
+            # Look back at the 1KB preceding the enum decl to find
+            # `#[derive(...)]` attributes on this enum.
+            preamble_start = max(0, match.start() - 1024)
+            preamble = text[preamble_start : match.start()]
+            externally_constructible = _has_external_input_derive(preamble)
             # Walk braces to find the matching closing brace.
             depth = 1
             i = match.end()
@@ -92,8 +119,23 @@ def find_enums(model_root: Path) -> dict[str, tuple[list[str], Path, set[str]]]:
             variants = extract_variant_names(cleaned)
             from_variants = extract_from_variants(body)
             if variants:
-                out[name] = (variants, rs, from_variants)
+                out[name] = (variants, rs, from_variants, externally_constructible)
     return out
+
+
+def _has_external_input_derive(preamble: str) -> bool:
+    """Return True if the `#[derive(...)]` block immediately preceding
+    an enum mentions any derive that constructs variants from external
+    input. We scan all `#[derive(...)]` clauses in the preamble (an
+    enum can carry several `#[derive]` lines and `#[cfg_attr]`-gated
+    derives in a row)."""
+    for m in re.finditer(r"#\[(?:cfg_attr\s*\([^)]+,\s*)?derive\s*\(([^)]*)\)\s*\)?\s*\]", preamble):
+        derive_list = m.group(1)
+        # Strip path qualifiers like `serde::Deserialize` → `Deserialize`.
+        names = re.findall(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Z][A-Za-z0-9_]*)", derive_list)
+        if any(n in EXTERNAL_INPUT_DERIVES for n in names):
+            return True
+    return False
 
 
 def extract_from_variants(body: str) -> set[str]:
@@ -286,9 +328,12 @@ def is_constructor(content: str, enum: str, variant: str) -> bool:
         idx = s.find(needle)
         if idx < 0:
             continue
-        # Line within a markdown rustdoc link, e.g. `[`Foo::Bar`]`
+        # Line within a markdown rustdoc link, e.g. `[`Foo::Bar`]`. The
+        # disambiguator is the backtick: `[`Name`]` is rustdoc, while
+        # plain `[Name, ...]` is a Rust slice literal which is valid
+        # constructor context.
         head = s[:idx]
-        if head.endswith("[`") or head.endswith("["):
+        if head.endswith("[`"):
             continue
         # Arrow after the variant on the same line → pattern-match arm.
         tail = s[idx + len(needle):]
@@ -358,9 +403,16 @@ def main() -> int:
     total_dead = 0
     total_variants = 0
     total_from_skipped = 0
+    total_external_skipped = 0
     for enum_name in sorted(enums):
-        variants, home_file, from_variants = enums[enum_name]
+        variants, home_file, from_variants, externally_constructible = enums[enum_name]
         total_variants += len(variants)
+        if externally_constructible:
+            # All variants reachable via clap/serde/etc. — skip the whole enum
+            # (don't even render a section, to keep the report focused on
+            # actually-actionable findings).
+            total_external_skipped += len(variants)
+            continue
         out_lines.append(f"\n## `{enum_name}` ({len(variants)} variants)\n")
         any_dead_in_enum = False
         for v in variants:
@@ -392,14 +444,19 @@ def main() -> int:
     out_lines.append(f"- Enums scanned: **{len(enums)}**")
     out_lines.append(f"- Variants total: **{total_variants}**")
     out_lines.append(f"- Confirmed dead: **{total_dead}**")
-    out_lines.append(f"- Skipped (`#[from]` auto-constructor, treated as live): **{total_from_skipped}**")
+    out_lines.append(f"- Skipped (`#[from]` thiserror auto-constructor): **{total_from_skipped}**")
+    out_lines.append(
+        f"- Skipped (clap / serde / strum / similar derive constructs variants from input): "
+        f"**{total_external_skipped}**"
+    )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(out_lines))
     print(f"wrote {args.output}", file=sys.stderr)
     print(
         f"  {len(enums)} enums, {total_variants} variants, "
-        f"{total_dead} dead, {total_from_skipped} via #[from]",
+        f"{total_dead} dead, {total_from_skipped} via #[from], "
+        f"{total_external_skipped} via input-derives",
         file=sys.stderr,
     )
     return 0
