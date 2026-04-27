@@ -332,6 +332,22 @@ pub enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Verify that an utseg run preserved the gated invariants
+    /// (file count, main-tier bullets, `@Media` linkage). %wor drops
+    /// on split utterances are reported informationally.
+    ///
+    /// Compares two corpus directories — the pre-utseg input and the
+    /// post-utseg output. Exit 0 on pass, 1 on regression.
+    ValidateUtseg {
+        /// Pre-utseg corpus directory (input).
+        input: PathBuf,
+        /// Post-utseg corpus directory (output).
+        output: PathBuf,
+        /// Suppress the per-file report; emit only the verdict line.
+        #[arg(long)]
+        quiet: bool,
+    },
+
     /// Show alignment visualization for debugging
     ShowAlignment {
         /// Input CHAT file path

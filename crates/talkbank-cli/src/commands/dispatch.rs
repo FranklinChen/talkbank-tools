@@ -74,6 +74,7 @@ impl Commands {
     const fn family(&self) -> CommandFamily {
         match self {
             Self::Validate { .. }
+            | Self::ValidateUtseg { .. }
             | Self::ShowAlignment { .. }
             | Self::Watch { .. }
             | Self::Lint { .. } => CommandFamily::Validation,
@@ -154,6 +155,16 @@ impl CommandFamilyService for ValidationCommandService {
                         check_xphon,
                     },
                 );
+            }
+            Commands::ValidateUtseg {
+                input,
+                output,
+                quiet,
+            } => {
+                let rc = super::validate_utseg::run_validate_utseg(&input, &output, quiet);
+                if rc != 0 {
+                    std::process::exit(rc);
+                }
             }
             Commands::ShowAlignment {
                 input,
