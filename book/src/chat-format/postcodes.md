@@ -1,0 +1,155 @@
+# Postcodes (`[+ ...]`)
+
+**Status:** Reference
+**Last updated:** 2026-04-27 19:01 EDT
+
+A **postcode** is a tagged annotation token that attaches to an
+*utterance as a whole* and appears after the terminator. The
+canonical CHAT syntax is `[+ <text>]`. Postcodes carry researcher /
+analysis tags about the utterance — whether it should be excluded
+from analysis, how it should be coded, what kind of speech act it
+represents — without modifying the utterance's word content.
+
+## Syntax and Scope
+
+```text
+*CHI:   I want cookie .  [+ exc]
+*MOT:   what did you say ?  [+ imp]
+*CHI:   no I don't want it !  [+ neg] [+ trn]
+```
+
+Three structural facts to internalize:
+
+1. **Postcodes attach to the utterance, not to a word.** They sit
+   after the terminator, on the main tier, alongside (but distinct
+   from) any utterance-level bullet. Unlike word-scoped annotations
+   (`[: ...]` replacement, `[% ...]` comment, `[= ...]` explanation,
+   `[* ...]` error code), a postcode does not modify the
+   interpretation of any single word — it tags the whole utterance.
+2. **Multiple postcodes may follow a single terminator.** They are
+   ordered, but the order is not semantically privileged.
+3. **The body is free-form text.** The CHAT word grammar is *not*
+   applied to postcode contents. Researchers can write arbitrary
+   tags, codes, descriptions, comments, or analytic notes. The model
+   stores the raw text and leaves interpretation to downstream
+   tooling and conventions.
+
+## Common Postcodes
+
+These are widely used across CHILDES, AphasiaBank, and TalkBank
+collections. The CHAT manual is the source of truth; this list is
+illustrative, not exhaustive.
+
+| Postcode | Meaning |
+|---|---|
+| `[+ exc]` | Exclude utterance from analysis. The utterance is preserved in the transcript but tagged so analytic tools (CLAN's `freq`, `mlu`, etc.) can skip it. |
+| `[+ trn]` | Translation utterance. |
+| `[+ bch]` | Backchannel — listener-side acknowledgement (`mhm`, `yeah`) that should not be counted as a substantive turn. |
+| `[+ jar]` | Jargon — vocalization with utterance-like prosody but without identifiable lexical content. |
+| `[+ gram]` | Grammatical (utterance is grammatically well-formed for purposes of the analysis). |
+| `[+ imp]` | Imperative / imitation prompt, depending on convention. |
+| `[+ neg]` | Negative-form utterance. |
+| `[+ <free text>]` | Any researcher-defined tag. The CHAT format does not enforce a closed vocabulary. |
+
+Per-corpus conventions vary. When ingesting a corpus, check the
+corpus-specific documentation for the postcodes in use.
+
+## What Postcodes Are NOT
+
+Postcodes are easy to confuse with several other CHAT annotation
+forms because they all use square brackets. The differences are
+substantive and load-bearing.
+
+| Form | Scope | Body validation | Purpose |
+|---|---|---|---|
+| `[+ ...]` | **Utterance-level** (this doc) | None — free text | Researcher / analysis tag attached to the whole utterance |
+| `[: ...]` | **Word-level** | Replacement words ARE validated as CHAT words | Sanctioned-form correction of the preceding word (see `replacements.md`) |
+| `[% ...]` | **Word-level** | None — free text | Free-form comment about the preceding word or local span |
+| `[= ...]` | **Word-level** | None — free text | Explanation of unclear / non-standard speech (often paired with `xxx` / `yyy` placeholders) |
+| `[* ...]` | **Word-level** | None — error code text | Error coding for the preceding word, optionally with a structured code |
+
+Two consequences worth pinning down explicitly:
+
+- **A postcode cannot carry per-word semantics.** If you want to
+  attach a comment, replacement, or error code to a single word, use
+  the appropriate word-scoped form. Stretching a postcode to mean
+  "this word is X" loses the per-word position downstream tools
+  depend on.
+- **A word-scoped annotation cannot tag an utterance.** If you want
+  to mark an entire utterance for exclusion or translation, use a
+  postcode. A `[% exclude this]` after a word does not mean "exclude
+  the utterance" to any consumer.
+
+## Quotation Postcodes (Special Case)
+
+Two postcode texts have structural meaning enforced by the validator
+rather than by convention:
+
+| Postcode | Meaning |
+|---|---|
+| `["/]` | Quotation **begin** marker |
+| `["/.]` | Quotation **end** marker |
+
+These are used to demarcate quoted speech that spans more than one
+utterance. They must appear in balanced pairs within a transcript;
+the `E242` validator (`talkbank-model::validation::utterance::quotation`)
+fires when an end appears without a preceding begin or a begin appears
+without a matching end. The text MUST match exactly — trailing
+whitespace or alternative punctuation breaks the match and the pair
+is treated as unbalanced.
+
+This validator is opt-in via `enable_quotation_validation` on
+`ValidationContext`; it is currently disabled in the default profile.
+
+## Position in the AST
+
+Postcodes are stored on `MainTierContent` as a typed list:
+
+```rust
+pub struct MainTierContent {
+    pub content: Vec<UtteranceContent>,         // word-level content
+    pub terminator: Terminator,                 // ., ?, ! etc.
+    pub postcodes: TierPostcodes,               // [+ ...] tokens, after the terminator
+    pub bullet: Option<Bullet>,                 // optional terminal media bullet
+}
+```
+
+(Roughly — see `talkbank-model/src/model/content/tier_content.rs` for
+the exact shape.)
+
+Because postcodes live at the utterance level, the per-word
+traversal helpers (`walk_words`, `walk_words_mut`) do not visit
+them. Code that needs to read or rewrite postcodes accesses the
+list directly.
+
+The model stores postcode text as `SmolStr` and preserves it
+verbatim through CHAT roundtrips. Downstream tooling — including
+CLAN command implementations such as `freq`, `mlu`, `kideval` — is
+responsible for interpreting individual postcode values per its own
+conventions.
+
+## Tooling Rules
+
+Tools that emit or consume CHAT must respect the scope distinction.
+
+- **Emitters:** when adding a researcher tag to an utterance, attach
+  a `Postcode` to the utterance's `MainTierContent`, not a
+  `ContentAnnotation` to a word. Both serialize, but only the former
+  reaches downstream consumers as utterance-level metadata.
+- **Consumers:** when reading utterance-level tags (e.g.,
+  implementing an "exclude" filter), iterate `main.content.postcodes`
+  on each utterance — not the word-level annotations in
+  `UtteranceContent`. The two lists are populated by different
+  parser branches and have different semantics.
+- **Round-trip preservers** (extract→modify→inject pipelines like
+  the batchalign3 NLP injection passes): preserve the postcode list
+  unchanged. None of the standard NLP passes have a reason to add,
+  remove, or reorder postcodes.
+
+## References
+
+- CHAT manual: [Postcodes](https://talkbank.org/0info/manuals/CHAT.html#Postcodes)
+- CHAT manual: [Excluded Utterance Postcode](https://talkbank.org/0info/manuals/CHAT.html#ExcludedUtterancePostcode)
+- CHAT manual: [Included Utterance Postcode](https://talkbank.org/0info/manuals/CHAT.html#IncludedUtterancePostcode)
+- Model: `talkbank-model/src/model/content/postcode.rs`
+- Quotation validator: `talkbank-model/src/validation/utterance/quotation.rs`
