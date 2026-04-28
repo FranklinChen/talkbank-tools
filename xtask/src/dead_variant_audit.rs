@@ -110,9 +110,9 @@ fn find_enums(search_root: &Path, model_root: &Path) -> Vec<EnumInfo> {
         out.extend(parse_enums_in_file(&relative, &text));
     }
     out.sort_by(|left, right| {
-        left.name.cmp(&right.name).then_with(|| {
-            left.home_path.cmp(&right.home_path)
-        })
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.home_path.cmp(&right.home_path))
     });
     out
 }
@@ -202,7 +202,11 @@ fn enum_name_from_declaration(line: &str) -> Option<String> {
     let name = declaration.split('{').next()?.trim();
     let name = name.split('<').next()?.trim();
     let name = name.split_whitespace().next()?.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// Extract a variant identifier from a single trimmed line.
@@ -405,13 +409,13 @@ fn is_constructor(content: &str, qualifier: &str, variant: &str) -> bool {
 /// Whether any of the entries in `entries` is a constructor for
 /// `(qualifier, variant)`. For Self:: matches, also checks that the
 /// match is in the enum's home file.
-fn has_constructor(
-    entries: &[MatchEntry],
-    enum_info: &EnumInfo,
-    variant: &str,
-) -> bool {
+fn has_constructor(entries: &[MatchEntry], enum_info: &EnumInfo, variant: &str) -> bool {
     entries.iter().any(|entry| {
-        let qualifier = if entry.via_self { "Self" } else { &enum_info.name };
+        let qualifier = if entry.via_self {
+            "Self"
+        } else {
+            &enum_info.name
+        };
         if entry.via_self && entry.path != enum_info.home_path {
             return false;
         }
@@ -504,7 +508,10 @@ fn render_report(
 
     out.push_str("\n## Summary\n\n");
     out.push_str(&format!("- Enums scanned: **{}**\n", counts.enums_total));
-    out.push_str(&format!("- Variants total: **{}**\n", counts.variants_total));
+    out.push_str(&format!(
+        "- Variants total: **{}**\n",
+        counts.variants_total
+    ));
     out.push_str(&format!("- Confirmed dead: **{}**\n", counts.dead));
     out.push_str(&format!(
         "- Skipped (`#[from]` thiserror auto-constructor): **{}**\n",
@@ -542,33 +549,35 @@ pub fn run(repo_root: &Path, args: Vec<String>) -> Result<()> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--model-root" => {
-                model_root = Some(PathBuf::from(iter.next().ok_or(
-                    "lint-dead-variants: --model-root requires a path argument",
-                )?));
+                model_root = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or("lint-dead-variants: --model-root requires a path argument")?,
+                ));
             }
             "--search-root" => {
-                search_root = Some(PathBuf::from(iter.next().ok_or(
-                    "lint-dead-variants: --search-root requires a path argument",
-                )?));
+                search_root = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or("lint-dead-variants: --search-root requires a path argument")?,
+                ));
             }
             "--output" => {
-                output = Some(PathBuf::from(iter.next().ok_or(
-                    "lint-dead-variants: --output requires a path argument",
-                )?));
+                output = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or("lint-dead-variants: --output requires a path argument")?,
+                ));
             }
             "--label" => {
-                label = Some(iter.next().ok_or(
-                    "lint-dead-variants: --label requires a string argument",
-                )?);
+                label = Some(
+                    iter.next()
+                        .ok_or("lint-dead-variants: --label requires a string argument")?,
+                );
             }
             other => return Err(format!("lint-dead-variants: unknown arg {other:?}").into()),
         }
     }
 
-    let model_root = model_root
-        .ok_or("lint-dead-variants: --model-root is required")?;
-    let search_root = search_root
-        .ok_or("lint-dead-variants: --search-root is required")?;
+    let model_root = model_root.ok_or("lint-dead-variants: --model-root is required")?;
+    let search_root = search_root.ok_or("lint-dead-variants: --search-root is required")?;
     let output = output.ok_or("lint-dead-variants: --output is required")?;
 
     let model_root = if model_root.is_absolute() {

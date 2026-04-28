@@ -543,7 +543,9 @@ async fn cancel_records_provenance() {
     assert_eq!(resp.status(), 200);
     let raw_job: serde_json::Value = resp.json().await.expect("parse job json");
     assert_eq!(
-        raw_job.get("last_cancelled_source").and_then(|v| v.as_str()),
+        raw_job
+            .get("last_cancelled_source")
+            .and_then(|v| v.as_str()),
         Some("tui"),
         "jobs.last_cancelled_source must reflect the cancel-body source field; got {raw_job:?}"
     );
@@ -553,7 +555,9 @@ async fn cancel_records_provenance() {
         "jobs.last_cancelled_host must reflect the cancel-body host field"
     );
     assert_eq!(
-        raw_job.get("last_cancelled_reason").and_then(|v| v.as_str()),
+        raw_job
+            .get("last_cancelled_reason")
+            .and_then(|v| v.as_str()),
         Some("user-pressed-cancel"),
         "jobs.last_cancelled_reason must reflect the cancel-body reason field"
     );
@@ -697,7 +701,9 @@ async fn cancel_twice_records_two_audit_rows() {
         .expect("GET job");
     let raw_job: serde_json::Value = resp.json().await.expect("parse");
     assert_eq!(
-        raw_job.get("last_cancelled_reason").and_then(|v| v.as_str()),
+        raw_job
+            .get("last_cancelled_reason")
+            .and_then(|v| v.as_str()),
         Some("user-pressed-cancel-again-nothing-happened"),
         "jobs.last_cancelled_reason must reflect the most recent cancel"
     );
@@ -747,12 +753,17 @@ async fn cancellations_endpoint_returns_typed_records() {
         .await
         .expect("GET cancellations");
     assert_eq!(resp.status(), 200);
-    let records: Vec<batchalign_app::api::CancellationRecord> =
-        resp.json().await.expect("parse typed CancellationRecord list");
+    let records: Vec<batchalign_app::api::CancellationRecord> = resp
+        .json()
+        .await
+        .expect("parse typed CancellationRecord list");
     assert_eq!(records.len(), 1);
     let r = &records[0];
     assert_eq!(r.source, batchalign_app::api::CancelSource::Tui);
-    assert_eq!(r.host.as_ref().map(|h| h.as_ref()), Some("endpoint-test-host"));
+    assert_eq!(
+        r.host.as_ref().map(|h| h.as_ref()),
+        Some("endpoint-test-host")
+    );
     assert_eq!(r.pid.map(|p| p.0), Some(7777));
     assert!(r.accepted);
 }

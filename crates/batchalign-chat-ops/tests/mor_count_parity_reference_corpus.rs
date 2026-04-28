@@ -51,8 +51,7 @@ fn collect_cha_files(root: &PathBuf) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.file_type().is_file()
-                && e.path().extension().and_then(|x| x.to_str()) == Some("cha")
+            e.file_type().is_file() && e.path().extension().and_then(|x| x.to_str()) == Some("cha")
         })
         .map(|e| e.into_path())
         .collect()

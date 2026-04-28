@@ -958,10 +958,7 @@ fn cancel_running_job() -> turmoil::Result {
                 Some("tui"),
                 "jobs.last_cancelled_source must reflect provenance under turmoil"
             );
-            assert_eq!(
-                info["last_cancelled_host"].as_str(),
-                Some("turmoil-client")
-            );
+            assert_eq!(info["last_cancelled_host"].as_str(), Some("turmoil-client"));
             assert_eq!(
                 info["last_cancelled_reason"].as_str(),
                 Some("turmoil-cancel-test")
@@ -969,9 +966,7 @@ fn cancel_running_job() -> turmoil::Result {
 
             // Audit endpoint must surface the row.
             let resp = client
-                .request(get(&format!(
-                    "{SERVER_BASE}/jobs/{job_id}/cancellations"
-                )))
+                .request(get(&format!("{SERVER_BASE}/jobs/{job_id}/cancellations")))
                 .await
                 .t()?;
             let audit = body_json(resp).await?;

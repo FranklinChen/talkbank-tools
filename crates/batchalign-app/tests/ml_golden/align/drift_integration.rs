@@ -111,7 +111,10 @@ async fn drift_samtale_seiden2() {
     };
     let dir = root.join("samtale");
     if !dir.is_dir() {
-        eprintln!("SKIP: drift_samtale_seiden2: {} does not exist", dir.display());
+        eprintln!(
+            "SKIP: drift_samtale_seiden2: {} does not exist",
+            dir.display()
+        );
         return;
     }
     let Some(session) = require_live_direct(

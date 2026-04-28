@@ -239,9 +239,7 @@ async fn capabilities_test_echo() {
         "test-echo capabilities must include Morphosyntax (smoke check on the universal-advertise contract)"
     );
     assert!(
-        caps.engine_versions
-            .values()
-            .all(|v| v == "test-echo"),
+        caps.engine_versions.values().all(|v| v == "test-echo"),
         "every engine_version on a test-echo worker must be the string \"test-echo\"; got {:?}",
         caps.engine_versions
     );

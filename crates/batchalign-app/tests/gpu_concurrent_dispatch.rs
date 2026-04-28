@@ -886,15 +886,14 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
     // ~28 minutes for an 8-25 minute ASR pass to finish on its own.
     // Here the worker delay is 8s; anything close to 8s means the kill
     // didn't actually interrupt the call.
-    let dispatch_result =
-        tokio::time::timeout(Duration::from_secs(6), dispatch_handle)
-            .await
-            .expect(
-                "dispatch must return within 6s after worker kill — \
+    let dispatch_result = tokio::time::timeout(Duration::from_secs(6), dispatch_handle)
+        .await
+        .expect(
+            "dispatch must return within 6s after worker kill — \
                  hitting this timeout means the kill didn't propagate and \
                  we're back to waiting for natural completion",
-            )
-            .expect("dispatch task panicked");
+        )
+        .expect("dispatch task panicked");
     let dispatch_elapsed = dispatch_start.elapsed();
     assert!(
         dispatch_result.is_err(),

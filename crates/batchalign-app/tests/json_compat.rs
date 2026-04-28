@@ -186,10 +186,10 @@ fn snapshot_job_info() {
         control_plane: None,
         batch_progress: None,
         execution_plan: None,
-    last_cancelled_at: None,
-    last_cancelled_source: None,
-    last_cancelled_host: None,
-    last_cancelled_reason: None,
+        last_cancelled_at: None,
+        last_cancelled_source: None,
+        last_cancelled_host: None,
+        last_cancelled_reason: None,
     };
     insta::assert_json_snapshot!("job_info", info);
 }

@@ -320,7 +320,11 @@ fn emit_text_report(result: &GateResult) {
         }
     }
 
-    let losers: Vec<_> = result.files.iter().filter(|f| f.lost_main_bullets()).collect();
+    let losers: Vec<_> = result
+        .files
+        .iter()
+        .filter(|f| f.lost_main_bullets())
+        .collect();
     if !losers.is_empty() {
         println!("FAIL: {} files lost MAIN-TIER bullets:", losers.len());
         let mut sorted = losers.clone();
@@ -339,7 +343,11 @@ fn emit_text_report(result: &GateResult) {
         }
     }
 
-    let linkage_changes: Vec<_> = result.files.iter().filter(|f| f.linkage_changed()).collect();
+    let linkage_changes: Vec<_> = result
+        .files
+        .iter()
+        .filter(|f| f.linkage_changed())
+        .collect();
     if !linkage_changes.is_empty() {
         println!(
             "FAIL: {} files changed @Media linkage state:",
@@ -356,10 +364,7 @@ fn emit_text_report(result: &GateResult) {
     }
 
     println!();
-    println!(
-        "VERDICT: {}",
-        if result.passed() { "PASS" } else { "FAIL" }
-    );
+    println!("VERDICT: {}", if result.passed() { "PASS" } else { "FAIL" });
 }
 
 #[cfg(test)]
@@ -400,7 +405,10 @@ mod tests {
             "*CHI:\tone two .\n*CHI:\tthree . \u{15}0_1000\u{15}\n",
         );
         let rc = run_validate_utseg(dir_in.path(), dir_out.path(), true);
-        assert_eq!(rc, 0, "main-tier bullet preserved on last child should pass");
+        assert_eq!(
+            rc, 0,
+            "main-tier bullet preserved on last child should pass"
+        );
     }
 
     #[test]
@@ -447,7 +455,11 @@ mod tests {
         let dir_in = tempdir().unwrap();
         let dir_out = tempdir().unwrap();
         write_file(dir_in.path(), "a.cha", "*CHI:\tone . \u{15}0_500\u{15}\n");
-        write_file(dir_in.path(), "b.cha", "*CHI:\ttwo . \u{15}500_1000\u{15}\n");
+        write_file(
+            dir_in.path(),
+            "b.cha",
+            "*CHI:\ttwo . \u{15}500_1000\u{15}\n",
+        );
         write_file(dir_out.path(), "a.cha", "*CHI:\tone . \u{15}0_500\u{15}\n");
         let rc = run_validate_utseg(dir_in.path(), dir_out.path(), true);
         assert_eq!(rc, 1, "missing output file must fail the gate");

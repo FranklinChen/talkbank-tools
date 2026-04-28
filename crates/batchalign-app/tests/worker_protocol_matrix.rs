@@ -400,9 +400,10 @@ fn validate_asr_request(
     asr_request: &AsrRequestV2,
 ) -> Result<(), String> {
     match (&asr_request.backend, &asr_request.input) {
-        (AsrBackendV2::LocalWhisper | AsrBackendV2::WhisperHub, AsrInputV2::PreparedAudio(input)) => {
-            require_attachment_kind(request, &input.audio_ref_id, "prepared_audio")
-        }
+        (
+            AsrBackendV2::LocalWhisper | AsrBackendV2::WhisperHub,
+            AsrInputV2::PreparedAudio(input),
+        ) => require_attachment_kind(request, &input.audio_ref_id, "prepared_audio"),
         (AsrBackendV2::LocalWhisper | AsrBackendV2::WhisperHub, other) => Err(format!(
             "ASR backend {} requires prepared_audio input, got {}",
             asr_backend_label(asr_request.backend),
