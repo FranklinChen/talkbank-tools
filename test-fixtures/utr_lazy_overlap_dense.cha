@@ -1,0 +1,13 @@
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	PAR Participant, INV Investigator
+@ID:	eng|test|PAR|||||Participant|||
+@ID:	eng|test|INV|||||Investigator|||
+@Media:	test, audio
+*PAR:	I grew up in Princeton and came to graduate school at Chapel Hill in ninety one or maybe ninety two .
+*INV:	+< oh okay .
+*INV:	+< mhm .
+*INV:	+< oh .
+*INV:	+< mhm .
+@End

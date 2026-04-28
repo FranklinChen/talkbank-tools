@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TranslationResultV2",
+  "description": "Batched translation response payload.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "description": "Item results aligned to the prepared batch payload order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TranslationItemResultV2"
+      }
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "$defs": {
+    "TranslationItemResultV2": {
+      "description": "One translation item result returned by Python.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Optional per-item runtime error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "raw_translation": {
+          "description": "Raw model translation when inference succeeded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

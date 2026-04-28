@@ -1,0 +1,326 @@
+[
+  {
+    "speaker": "INV",
+    "start_ms": 2155,
+    "end_ms": 5537,
+    "text": "tell me &-um a story about this picture ."
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 5637,
+    "end_ms": 8699,
+    "text": "tell me a story with a beginning middle and end ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 9921,
+    "end_ms": 10421,
+    "text": "okay . [+ exc]"
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 10301,
+    "end_ms": 12122,
+    "text": "this is the family going on vacation ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 13243,
+    "end_ms": 14744,
+    "text": "and dad's driving ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 14985,
+    "end_ms": 17528,
+    "text": "mom is <in the> [//] on the passenger side ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 18410,
+    "end_ms": 24317,
+    "text": "and &-uh looks like a set of twins , &-uh boy twins ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 24899,
+    "end_ms": 28804,
+    "text": "and &-uh the one little boy has a dog ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 29605,
+    "end_ms": 31566,
+    "text": "and &-uh they're hanging out the window ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 31946,
+    "end_ms": 33587,
+    "text": "and there's a little sister ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 34388,
+    "end_ms": 35848,
+    "text": "and she's blowing bubblegum ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 37230,
+    "end_ms": 44234,
+    "text": "and &-uh that [//] so , they start out on this vacation ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 45645,
+    "end_ms": 47966,
+    "text": "and it looks like it's morning ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 48066,
+    "end_ms": 49327,
+    "text": "but at least it's daylight ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 50428,
+    "end_ms": 57973,
+    "text": "and then by the time they arrive at their destination , it's &-uh dark . \u001550428_"
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 58254,
+    "end_ms": 59314,
+    "text": "mom is asleep ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 59395,
+    "end_ms": 62238,
+    "text": "dad looks like he's really tired at the wheel ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 63260,
+    "end_ms": 69868,
+    "text": "and the little boy is looking out the window with the dog and the little girl ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 69849,
+    "end_ms": 71650,
+    "text": "oh there's grandma in the back ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 71871,
+    "end_ms": 73753,
+    "text": "she's in the back with the other twin ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 73754,
+    "end_ms": 74734,
+    "text": "I didn't see her ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 76025,
+    "end_ms": 78329,
+    "text": "oh yeah she's in the first one as well ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 78631,
+    "end_ms": 84444,
+    "text": "so , anyway grandma is sitting in the back with the other twin who [//] boy who"
+  },
+  {
+    "speaker": "INV",
+    "start_ms": null,
+    "end_ms": null,
+    "text": "alright ."
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 89325,
+    "end_ms": 91526,
+    "text": "are you familiar with the story of Cinderella ?"
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 92727,
+    "end_ms": 93227,
+    "text": "yes ."
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 93467,
+    "end_ms": 93967,
+    "text": "okay ."
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 94248,
+    "end_ms": 98851,
+    "text": "so , we're gonna take a few minutes to look at some pictures to refresh your mem"
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 99351,
+    "end_ms": 104034,
+    "text": "and then you'll have a chance to tell me the story of Cinderella in your own wor"
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 105457,
+    "end_ms": 106587,
+    "text": "so , here are the pictures ."
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 139715,
+    "end_ms": 140215,
+    "text": "okay ."
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 140455,
+    "end_ms": 145218,
+    "text": "so , now I want you to tell me the story of Cinderella in your own words . \u00151404"
+  },
+  {
+    "speaker": "INV",
+    "start_ms": 145839,
+    "end_ms": 153304,
+    "text": "you can use any details from the pictures that you just saw [/] saw or from the"
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 155245,
+    "end_ms": 157666,
+    "text": "&-uh Cinderella is an only child ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 159629,
+    "end_ms": 162771,
+    "text": "and &-um she doesn't have a mother ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 163212,
+    "end_ms": 164613,
+    "text": "but her father is there ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 164894,
+    "end_ms": 165554,
+    "text": "he remarries ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 166825,
+    "end_ms": 172532,
+    "text": "and &-um I'm gonna say he remarries a duchess or something ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 172573,
+    "end_ms": 174975,
+    "text": "but anyway she has two stepdaughters ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 176037,
+    "end_ms": 177298,
+    "text": "they're not very friendly ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 177419,
+    "end_ms": 181384,
+    "text": "and the stepmother uses Cinderella as [/] as a maid ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 182225,
+    "end_ms": 185368,
+    "text": "well , there's a ball that's going to happen ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 186210,
+    "end_ms": 191196,
+    "text": "and &-um Cinderella wants to go ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 191457,
+    "end_ms": 196944,
+    "text": "and the fairy godmother shows up and provides a gown for her ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 196925,
+    "end_ms": 198967,
+    "text": "and she goes to the ball ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 199128,
+    "end_ms": 202211,
+    "text": "and she dances with [/] with the prince ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 202692,
+    "end_ms": 212084,
+    "text": "and the stepmother and <the [/] the stepdaughters are [/] are not> [//] &-uh her"
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 212405,
+    "end_ms": 214986,
+    "text": "but anyway she [/] she loses the slipper ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 216108,
+    "end_ms": 225114,
+    "text": "and so , the prince is trying to find out the princess that he danced with . \u001521"
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 225915,
+    "end_ms": 232483,
+    "text": "and so , in order to do that , he has to find out whose foot fits the shoe . \u001522"
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 232363,
+    "end_ms": 236629,
+    "text": "and then he'll know that she was the one that danced with him ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 236569,
+    "end_ms": 240734,
+    "text": "so , anyway they come to her door ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 240655,
+    "end_ms": 242446,
+    "text": "she tries on [/] on the slipper ."
+  },
+  {
+    "speaker": "PAR",
+    "start_ms": 242470,
+    "end_ms": 243212,
+    "text": "it fits ."
+  }
+]

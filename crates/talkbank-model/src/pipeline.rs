@@ -64,6 +64,43 @@ use crate::ParseError;
 
 use crate::ChatFile;
 
+/// Minimum structural validity required before a higher-level pipeline should
+/// spend additional work on a parsed CHAT file.
+///
+/// These levels are cumulative and intentionally coarser than the full
+/// validator's error taxonomy. They exist so orchestration layers can decide
+/// whether a file is safe enough for downstream processing without hard-coding
+/// command-specific checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ValidityLevel {
+    /// L0: The file parsed without syntax-level parse errors.
+    Parseable = 0,
+    /// L1: The file is structurally complete enough for text-oriented passes.
+    StructurallyComplete = 1,
+    /// L2: The main tier content is well-formed enough for word-sensitive work.
+    MainTierValid = 2,
+}
+
+/// A coarse-grained preflight validation failure tagged with the minimum gate
+/// level it belongs to.
+///
+/// This is intentionally lighter-weight than the full parser/validator error
+/// model. It exists for orchestration layers that need actionable gate failures
+/// without depending on command-specific plumbing.
+#[derive(Debug, Clone)]
+pub struct GateValidationError {
+    /// Human-readable description of the failed gate.
+    pub message: String,
+    /// The gate level at which the failure occurred.
+    pub level: ValidityLevel,
+}
+
+impl std::fmt::Display for GateValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[L{}] {}", self.level as u8, self.message)
+    }
+}
+
 /// Options for parse-and-validate pipeline.
 #[derive(Debug, Clone, Default)]
 pub struct ParseValidateOptions {

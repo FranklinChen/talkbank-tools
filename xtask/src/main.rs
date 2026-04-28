@@ -66,6 +66,7 @@ fn main() {
     }
 }
 
+mod ci_hygiene;
 mod dead_variant_audit;
 mod docs_sync;
 mod rust_scan;
@@ -87,6 +88,7 @@ fn run_main() -> Result<()> {
             run_affected_rust(mode)
         }
         Some("lint-wide-structs") => wide_struct_audit::run(repo_root()),
+        Some("lint-ci-hygiene") => ci_hygiene::run(repo_root()),
         Some("lint-docs-sync") => docs_sync::run(repo_root()),
         Some("lint-dead-variants") => {
             let rest: Vec<String> = args.collect();
@@ -97,7 +99,7 @@ fn run_main() -> Result<()> {
 }
 
 fn usage_error() -> DynError {
-    "usage: cargo run -q -p xtask -- {affected-rust {packages|check|clippy|test}|lint-wide-structs|lint-docs-sync|lint-dead-variants ...}".into()
+    "usage: cargo run -q -p xtask -- {affected-rust {packages|check|clippy|test}|lint-wide-structs|lint-ci-hygiene|lint-docs-sync|lint-dead-variants ...}".into()
 }
 
 fn run_affected_rust(mode: AffectedMode) -> Result<()> {

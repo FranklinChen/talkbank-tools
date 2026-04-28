@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhisperTokenTimingResultV2",
+  "description": "Forced-alignment token response returned before Rust token-to-word\nreconciliation.",
+  "type": "object",
+  "properties": {
+    "tokens": {
+      "description": "Raw token timings in model order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WhisperTokenTimingV2"
+      }
+    }
+  },
+  "required": [
+    "tokens"
+  ],
+  "$defs": {
+    "DurationSeconds": {
+      "description": "Duration measured in fractional seconds.",
+      "type": "number",
+      "format": "double"
+    },
+    "WhisperTokenTimingV2": {
+      "description": "One raw Whisper forced-alignment token span returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "type": "object",
+      "properties": {
+        "text": {
+          "description": "Surface token text returned by the FA runtime.",
+          "type": "string"
+        },
+        "time_s": {
+          "description": "Token onset timestamp in seconds.",
+          "$ref": "#/$defs/DurationSeconds"
+        }
+      },
+      "required": [
+        "text",
+        "time_s"
+      ]
+    }
+  }
+}

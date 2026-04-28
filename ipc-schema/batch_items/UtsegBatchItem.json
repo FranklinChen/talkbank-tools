@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UtsegBatchItem",
+  "description": "Input payload for a single utterance segmentation request.\n\nMatches the Python `UtsegBatchItem` Pydantic model.",
+  "type": "object",
+  "properties": {
+    "text": {
+      "description": "Full utterance text (for constituency parsing).",
+      "type": "string"
+    },
+    "words": {
+      "description": "Tokenized words from the utterance.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "words",
+    "text"
+  ]
+}

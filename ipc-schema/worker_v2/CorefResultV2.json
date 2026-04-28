@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CorefResultV2",
+  "description": "Batched coreference response payload.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "description": "Item results aligned to the prepared batch payload order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CorefItemResultV2"
+      }
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "$defs": {
+    "CorefAnnotationV2": {
+      "description": "One per-sentence coreference annotation returned by Python.",
+      "type": "object",
+      "properties": {
+        "sentence_idx": {
+          "description": "Sentence index inside the corresponding document item.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "words": {
+          "description": "Per-word chain references parallel to the sentence words.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/CorefChainRefV2"
+            }
+          }
+        }
+      },
+      "required": [
+        "sentence_idx",
+        "words"
+      ]
+    },
+    "CorefChainRefV2": {
+      "description": "One structured coreference chain reference returned by Python.",
+      "type": "object",
+      "properties": {
+        "chain_id": {
+          "description": "Chain identifier assigned by the coreference runtime.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "is_end": {
+          "description": "Whether the current word ends this mention.",
+          "type": "boolean"
+        },
+        "is_start": {
+          "description": "Whether the current word starts this mention.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "chain_id",
+        "is_start",
+        "is_end"
+      ]
+    },
+    "CorefItemResultV2": {
+      "description": "One coreference item result returned by Python.",
+      "type": "object",
+      "properties": {
+        "annotations": {
+          "description": "Structured sparse annotations when inference succeeded.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/CorefAnnotationV2"
+          }
+        },
+        "error": {
+          "description": "Optional per-item runtime error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

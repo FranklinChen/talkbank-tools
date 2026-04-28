@@ -1,0 +1,88 @@
+[package]
+name = "batchalign-app"
+version = "0.1.0"
+description = "batchalign3 application: types, server, worker pool, cache"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["server"]
+
+# HTTP server, Temporal backend, SQLite job persistence, OpenAPI schema.
+# Disable this feature for direct-mode-only builds that do not need axum,
+# temporal, or the route/DB layer.
+server = [
+    "dep:axum",
+    "dep:tower-http",
+    "dep:utoipa",
+    "dep:temporalio-client",
+    "dep:temporalio-common",
+    "dep:temporalio-macros",
+    "dep:temporalio-sdk",
+    "dep:temporalio-sdk-core",
+]
+
+# Embed the React dashboard (frontend/dist/) into the binary at compile time.
+# Requires `make build-dashboard` first. Without this feature, the dashboard is
+# served from $BATCHALIGN_DASHBOARD_DIR or ~/.batchalign3/dashboard/ only.
+embed-dashboard = ["dep:include_dir"]
+
+[dependencies]
+# ── Always required (engine + direct mode) ────────────────────────────
+batchalign-types = { workspace = true }
+batchalign-chat-ops = { workspace = true }
+batchalign-revai = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+libc = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+dirs = { workspace = true }
+walkdir = { workspace = true }
+sysinfo = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+schemars = { workspace = true }
+toml = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+moka = { workspace = true }
+fs2 = { workspace = true }
+tempfile = "3"
+
+# ── Staged remote execution (rsync orchestrator polls via HTTP) ──────
+reqwest = { workspace = true }
+
+# ── Server-only (optional, behind "server" feature) ──────────────────
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
+temporalio-client = { workspace = true, optional = true }
+temporalio-common = { workspace = true, optional = true }
+temporalio-macros = { workspace = true, optional = true }
+temporalio-sdk = { workspace = true, optional = true }
+temporalio-sdk-core = { workspace = true, optional = true }
+
+# ── Embed dashboard (optional) ───────────────────────────────────────
+include_dir = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+reqwest = { workspace = true }
+insta = { workspace = true }
+
+# Deterministic simulation testing (network faults, virtual time)
+turmoil = "0.7"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

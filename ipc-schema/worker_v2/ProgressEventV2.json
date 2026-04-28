@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProgressEventV2",
+  "description": "Progress event emitted by long-running V2 tasks.",
+  "type": "object",
+  "properties": {
+    "completed": {
+      "description": "Completed units.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "request_id": {
+      "description": "Correlation id of the request being updated.",
+      "$ref": "#/$defs/WorkerRequestIdV2"
+    },
+    "stage": {
+      "description": "Stable progress stage label.",
+      "type": "string"
+    },
+    "total": {
+      "description": "Total units expected.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "request_id",
+    "completed",
+    "total",
+    "stage"
+  ],
+  "$defs": {
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
+      "type": "string"
+    }
+  }
+}

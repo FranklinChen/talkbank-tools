@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TranslationItemResultV2",
+  "description": "One translation item result returned by Python.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "description": "Optional per-item runtime error.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "raw_translation": {
+      "description": "Raw model translation when inference succeeded.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

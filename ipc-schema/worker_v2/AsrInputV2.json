@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AsrInputV2",
+  "description": "ASR input variants for V2.",
+  "oneOf": [
+    {
+      "description": "Local prepared audio path.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "prepared_audio"
+        }
+      },
+      "$ref": "#/$defs/PreparedAudioInputV2",
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "Provider-local media path.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "provider_media"
+        }
+      },
+      "$ref": "#/$defs/ProviderMediaInputV2",
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "Previously submitted provider job.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "submitted_job"
+        }
+      },
+      "$ref": "#/$defs/SubmittedJobInputV2",
+      "required": [
+        "kind"
+      ]
+    }
+  ],
+  "$defs": {
+    "NumSpeakers": {
+      "description": "Number of speakers in a recording.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "PreparedAudioInputV2": {
+      "description": "Request-time reference to a prepared audio artifact.",
+      "type": "object",
+      "properties": {
+        "audio_ref_id": {
+          "description": "Artifact id of the audio descriptor included in `attachments`.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "audio_ref_id"
+      ]
+    },
+    "ProviderMediaInputV2": {
+      "description": "Temporary cloud-provider media input retained during migration.",
+      "type": "object",
+      "properties": {
+        "media_path": {
+          "description": "Media file path readable by the worker host.",
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        },
+        "num_speakers": {
+          "description": "Expected number of speakers for diarization-aware providers.",
+          "$ref": "#/$defs/NumSpeakers"
+        }
+      },
+      "required": [
+        "media_path",
+        "num_speakers"
+      ]
+    },
+    "SubmittedJobInputV2": {
+      "description": "Previously submitted provider job id.",
+      "type": "object",
+      "properties": {
+        "provider_job_id": {
+          "description": "Provider job identifier to poll.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "provider_job_id"
+      ]
+    },
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

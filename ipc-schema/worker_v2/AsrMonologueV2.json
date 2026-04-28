@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AsrMonologueV2",
+  "description": "One speaker-attributed monologue returned by a provider ASR backend.",
+  "type": "object",
+  "properties": {
+    "elements": {
+      "description": "Ordered elements inside the monologue.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AsrElementV2"
+      }
+    },
+    "speaker": {
+      "description": "Stable speaker label chosen by the worker adapter.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "speaker",
+    "elements"
+  ],
+  "$defs": {
+    "AsrElementKindV2": {
+      "description": "Stable vocabulary for one monologue element returned by an ASR provider.",
+      "oneOf": [
+        {
+          "description": "Lexical content that should become transcript tokens.",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "Punctuation emitted by the provider.",
+          "type": "string",
+          "const": "punctuation"
+        }
+      ]
+    },
+    "AsrElementV2": {
+      "description": "One raw ASR element inside a speaker monologue.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Optional model/provider confidence score.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "end_s": {
+          "description": "End timestamp in seconds when the provider exposes one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DurationSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "description": "Stable element kind selected by the worker adapter.",
+          "$ref": "#/$defs/AsrElementKindV2"
+        },
+        "start_s": {
+          "description": "Start timestamp in seconds when the provider exposes one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DurationSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "value": {
+          "description": "Surface token or punctuation value.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "kind"
+      ]
+    },
+    "DurationSeconds": {
+      "description": "Duration measured in fractional seconds.",
+      "type": "number",
+      "format": "double"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CorefBatchItem",
+  "description": "Input payload for a single coref request — one complete document.\n\nUnlike morphosyntax/translate where each item is one utterance,\neach `CorefBatchItem` contains ALL sentences from one file because\ncoreference resolution needs cross-sentence context.",
+  "type": "object",
+  "properties": {
+    "sentences": {
+      "description": "List of sentences, each a list of words.",
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "required": [
+    "sentences"
+  ]
+}

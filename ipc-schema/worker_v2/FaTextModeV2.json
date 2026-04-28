@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FaTextModeV2",
+  "description": "Text-joining mode for forced-alignment payloads.",
+  "oneOf": [
+    {
+      "description": "Join words with spaces before model invocation.",
+      "type": "string",
+      "const": "space_joined"
+    },
+    {
+      "description": "Join words as character stream.",
+      "type": "string",
+      "const": "char_joined"
+    }
+  ]
+}

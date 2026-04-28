@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PreparedAudioEncodingV2",
+  "description": "PCM encoding used for prepared audio artifacts.",
+  "oneOf": [
+    {
+      "description": "Little-endian float32 PCM frames.",
+      "type": "string",
+      "const": "pcm_f32le"
+    }
+  ]
+}

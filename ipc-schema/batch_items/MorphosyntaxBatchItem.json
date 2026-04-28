@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MorphosyntaxBatchItem",
+  "description": "Batch item for NLP processing.\n\n`special_forms` carries typed enums internally (for Rust-side injection)\nbut serializes to `(Option<String>, Option<String>)` for the Python V2\nwire protocol, where Pydantic expects `list[list[str | None]]`.",
+  "type": "object",
+  "properties": {
+    "lang": {
+      "description": "Language code for this utterance (ISO 639-3).",
+      "type": "string"
+    },
+    "special_forms": {
+      "description": "Special form and language per word: (form_type, resolved_language).\n\nSerializes form_type via `FormType::write_chat()` and language via\n`LanguageResolution::as_language_code()` so the JSON wire format is\n`[string|null, string|null]` — matching the Python Pydantic model.",
+      "type": "array",
+      "items": {
+        "type": "array",
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        ]
+      }
+    },
+    "terminator": {
+      "description": "Utterance terminator string.",
+      "type": "string"
+    },
+    "words": {
+      "description": "Word texts for NLP processing.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "words",
+    "terminator",
+    "special_forms",
+    "lang"
+  ]
+}

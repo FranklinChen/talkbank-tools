@@ -1,0 +1,38 @@
+---
+source: crates/batchalign-cli/src/doctor_cmd.rs
+assertion_line: 1035
+expression: report
+---
+{
+  "detected": {
+    "os": "mac_os",
+    "arch": "arm64",
+    "cpu_logical_count": 12,
+    "cpu_physical_count": 8,
+    "ram_total_mb": 65536,
+    "ram_available_mb": 32768,
+    "gpu": {
+      "kind": "apple_mps",
+      "functional_for_batchalign": false,
+      "reason_excluded": "apple_silicon_kernel_deadlock"
+    },
+    "disk_free_mb_for_cache": 500000,
+    "hostname": "test-host",
+    "detection_timestamp": 1700000000.0,
+    "detection_warnings": []
+  },
+  "effective": {
+    "gpu_thread_pool_size": 1,
+    "force_cpu": true,
+    "max_total_workers": 10,
+    "max_concurrent_jobs": 4,
+    "memory_gate_mb": 8000,
+    "max_workers_per_key_gpu": 4,
+    "max_workers_per_key_stanza": 5,
+    "max_workers_per_key_io": 1
+  },
+  "validation": {
+    "warnings": [],
+    "errors": []
+  }
+}

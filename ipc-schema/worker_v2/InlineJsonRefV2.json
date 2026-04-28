@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InlineJsonRefV2",
+  "description": "Small inline JSON attachment.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "Stable artifact id referenced by request payloads.",
+      "$ref": "#/$defs/WorkerArtifactIdV2"
+    },
+    "value": {
+      "description": "Inline JSON payload carried with the envelope."
+    }
+  },
+  "required": [
+    "id",
+    "value"
+  ],
+  "$defs": {
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

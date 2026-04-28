@@ -1,11 +1,16 @@
 # talkbank-tools
 
+**Status:** Current
+**Last updated:** 2026-04-28 16:51 EDT
+
 [![CI](https://github.com/TalkBank/talkbank-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/TalkBank/talkbank-tools/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
 The CHAT toolchain from [TalkBank](https://talkbank.org/). Parses, validates, converts, and analyzes [CHAT](https://talkbank.org/0info/manuals/CHAT.html) transcription files — the standard format for annotated speech data across child language, aphasia, dementia, bilingualism, and conversation analysis research.
 
 **`chatter`** is the CLI. The same engine powers a **VS Code extension** with live diagnostics and a **Rust API** for building your own tools.
+
+This repo also now carries the imported **Batchalign** application stack: `crates/batchalign-*`, the `batchalign/` Python package, `pyo3/`, the dashboard frontend, and desktop wrapper sources. The unification is still in progress, but `talkbank-tools` is already the canonical home for the merged engineering surface.
 
 **Windows, macOS, and Linux.** See [docs/PLATFORM-SUPPORT.md](docs/PLATFORM-SUPPORT.md) for platform support tiers.
 
@@ -296,7 +301,7 @@ for utterance in file.utterances() {
 }
 ```
 
-[batchalign3](https://github.com/TalkBank/batchalign3) builds on these crates for its NLP pipeline — parsing CHAT, extracting words for ML inference, and injecting results back into the AST.
+The same repo now also contains the Batchalign stack — shared deterministic CHAT/text logic is being re-homed into canonical `talkbank-*` crates, while the Batchalign runtime/application layer lives under `crates/batchalign-*`, `batchalign/`, `frontend/`, and `pyo3/`.
 
 | Crate | What it does |
 |-------|--------------|
@@ -307,6 +312,10 @@ for utterance in file.utterances() {
 | [`talkbank-cli`](crates/talkbank-cli/) | `chatter` CLI binary with interactive TUI |
 | [`talkbank-lsp`](crates/talkbank-lsp/) | Language Server with incremental parsing and 12 custom commands |
 | [`talkbank-derive`](crates/talkbank-derive/) | Proc macros: SemanticEq, SpanShift, error_code_enum |
+| [`batchalign-types`](crates/batchalign-types/) | Shared Batchalign API, job, and worker protocol types |
+| [`batchalign-chat-ops`](crates/batchalign-chat-ops/) | Batchalign CHAT-aware ops, FA/speaker seams, compatibility layer during merge |
+| [`batchalign-app`](crates/batchalign-app/) | Batchalign server/runtime orchestration and API surface |
+| [`batchalign-cli`](crates/batchalign-cli/) | `batchalign3` CLI binary and operational commands |
 | [`chatter-desktop`](desktop/) | Native desktop validation app (Tauri v2, React) |
 
 See the [integration guide](book/src/integrating/library-usage.md) for API usage, the [JSON output reference](book/src/integrating/json-output.md), and the [diagnostic contract](book/src/integrating/diagnostic-contract.md).
@@ -332,6 +341,7 @@ chatter cache clear                   # clear cached results
 | **[Validation Errors](book/src/user-guide/validation-errors.md)** | All 198 error codes with examples and fixes |
 | **[VS Code Extension](book/src/user-guide/vscode-extension.md)** | Setup, features, and configuration |
 | **[Desktop App](book/src/user-guide/desktop-app.md)** | Drag-and-drop validation for non-terminal users |
+| **[Batchalign Book](batchalign-book/src/introduction.md)** | Batchalign CLI, server, worker, and developer docs during the merge |
 | **[Integration Guide](book/src/integrating/library-usage.md)** | Rust API, JSON output format, JSON Schema, diagnostic contract |
 | **[CHAT Manual](https://talkbank.org/0info/manuals/CHAT.html)** | The official CHAT format specification (talkbank.org) |
 

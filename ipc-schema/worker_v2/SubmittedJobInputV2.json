@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SubmittedJobInputV2",
+  "description": "Previously submitted provider job id.",
+  "type": "object",
+  "properties": {
+    "provider_job_id": {
+      "description": "Provider job identifier to poll.",
+      "$ref": "#/$defs/WorkerArtifactIdV2"
+    }
+  },
+  "required": [
+    "provider_job_id"
+  ],
+  "$defs": {
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

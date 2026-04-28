@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MorphosyntaxResultV2",
+  "description": "Batched morphosyntax response payload.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "description": "Item results aligned to the prepared batch payload order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MorphosyntaxItemResultV2"
+      }
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "$defs": {
+    "MorphosyntaxItemResultV2": {
+      "description": "One morphosyntax item result returned by Python.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Optional per-item runtime error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "raw_sentences": {
+          "description": "Raw Stanza `doc.to_dict()` sentence arrays when inference succeeded.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        }
+      }
+    }
+  }
+}

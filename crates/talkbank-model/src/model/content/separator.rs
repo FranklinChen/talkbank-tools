@@ -276,12 +276,8 @@ impl WriteChat for Separator {
             Separator::Comma { .. } => w.write_str(","),
             Separator::Semicolon { .. } => w.write_str(";"),
             Separator::Colon { .. } => w.write_str(":"),
-            Separator::Tag { .. } => {
-                w.write_char(crate::chars::TAG_MARKER)
-            }
-            Separator::Vocative { .. } => {
-                w.write_char(crate::chars::VOCATIVE_MARKER)
-            }
+            Separator::Tag { .. } => w.write_char(crate::chars::TAG_MARKER),
+            Separator::Vocative { .. } => w.write_char(crate::chars::VOCATIVE_MARKER),
             Separator::CaContinuation { .. } => w.write_str("[^c]"),
             Separator::UnmarkedEnding { .. } => w.write_str("\u{221E}"),
             Separator::Uptake { .. } => w.write_str("\u{2261}"),

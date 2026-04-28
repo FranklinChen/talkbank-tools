@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhisperChunkResultV2",
+  "description": "One ASR result built from raw Whisper chunks.",
+  "type": "object",
+  "properties": {
+    "chunks": {
+      "description": "Raw chunk spans.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WhisperChunkSpanV2"
+      }
+    },
+    "lang": {
+      "description": "Transcript language.",
+      "$ref": "#/$defs/LanguageCode3"
+    },
+    "text": {
+      "description": "Concatenated transcript text.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "lang",
+    "text",
+    "chunks"
+  ],
+  "$defs": {
+    "DurationSeconds": {
+      "description": "Duration measured in fractional seconds.",
+      "type": "number",
+      "format": "double"
+    },
+    "LanguageCode3": {
+      "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected — use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
+      "type": "string"
+    },
+    "WhisperChunkSpanV2": {
+      "description": "One raw Whisper chunk span returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "type": "object",
+      "properties": {
+        "end_s": {
+          "description": "End timestamp in seconds.",
+          "$ref": "#/$defs/DurationSeconds"
+        },
+        "start_s": {
+          "description": "Start timestamp in seconds.",
+          "$ref": "#/$defs/DurationSeconds"
+        },
+        "text": {
+          "description": "Surface text for the chunk.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "start_s",
+        "end_s"
+      ]
+    }
+  }
+}

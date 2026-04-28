@@ -1,0 +1,31 @@
+name: Batchalign Book
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'batchalign-book/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'batchalign-book/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Batchalign Book
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install mdBook
+        uses: taiki-e/install-action@mdbook
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid --locked
+      - name: Build book
+        run: make batchalign-book-build
+      - name: Upload book artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: batchalign-book
+          path: batchalign-book/build/

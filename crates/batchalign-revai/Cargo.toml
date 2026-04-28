@@ -1,0 +1,13 @@
+[package]
+name = "batchalign-revai"
+version = "0.1.0"
+description = "Shared Rev.AI client for batchalign3 Rust control-plane and PyO3 bindings"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+reqwest = { version = "0.13", features = ["multipart", "json", "blocking"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

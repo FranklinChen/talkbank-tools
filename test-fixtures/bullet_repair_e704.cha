@@ -1,0 +1,126 @@
+@UTF8
+@PID:	11312/c-00037477-1
+@Begin
+@Languages:	spa, glg
+@Participants:	UEL Target_Child, PIL Investigator, INA Target_Child, AND Target_Child, GON Target_Child, BLA Investigator, GAR Target_Child
+@ID:	spa, glg|Koine|UEL|3;03.04|male|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|PIL||female|Breogán||Investigator|||
+@ID:	spa, glg|Koine|INA|3;02.06|female|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|AND|2;11.22|male|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|GON|3;01.10|male|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|BLA||female|Breogán||Investigator|||
+@ID:	spa, glg|Koine|GAR|3;03.11|female|Breogán||Target_Child|||
+@Birth of GAR:	23-AUG-1994
+@Birth of UEL:	31-AUG-1994
+@Birth of GON:	24-OCT-1994
+@Birth of AND:	12-DEC-1994
+@Birth of PIL:	04-DEC-1997
+@Birth of BLA:	04-DEC-1997
+@Media:	bre4_03, audio
+@Comment:	ISA
+@Location:	Santiago de Compostela
+@Situation:	en la escuela infantil
+@Activities:	descripción de láminas
+@Comment:	4.3
+@Date:	04-DEC-1997
+@Types:	long, toyplay, TD
+*PIL:	e ti peinaste polas mañáns ? 2000_3261
+%mor:	cconj|e pron|tú-Prs-Acc-S2 propn|peinaste propn|pola propn|mañáns ?
+%gra:	1|2|CC 2|0|ROOT 3|2|FLAT 4|2|FLAT 5|2|FLAT 6|2|PUNCT
+%wor:	e 2000_2060 ti 2060_2240 peinaste 2240_2741 polas 2741_2981 mañáns 2981_3261 ?
+*UEL:	sí (.) xxx . 3416_4067
+%xmod:	ˈsi (.) *
+%xpho:	ˈsi (.) *
+%mor:	intj|sí .
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	sí 3416_4067 .
+*PIL:	a ver (.) ti que fas polas mañáns ? 3988_4228
+%mor:	adp|a verb|ver-Inf-S pron|tú-Prs-Acc-S2 sconj|que propn|fas-Acc noun|pola propn|mañáns ?
+%gra:	1|2|MARK 2|0|ROOT 3|2|OBJ 4|5|MARK 5|2|OBJ 6|5|COMPOUND 7|5|FLAT 8|2|PUNCT
+%wor:	a 4163_4223 ver 4223_4228 ti que fas polas mañáns ?
+*UEL:	galleta . 5425_6852
+%xmod:	ɡaˈʎeta
+%xpho:	ɡaˈʎeta
+%mor:	noun|galleta-Fem .
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	galleta .
+*AND:	xxx [<] .
+%wor:	.
+*PIL:	y esto ? 12095_12335
+%act:	señala la lámina
+%mor:	cconj|y pron|este-Dem-S1 ?
+%gra:	1|2|CC 2|0|ROOT 3|2|PUNCT
+%wor:	y 12095_12155 esto 12155_12335 ?
+*UEL:	un lapis . 10212_11437
+%xmod:	ˈun ˈlapis
+%xpho:	ˈun ˈlapis
+%mor:	det|uno-Masc-Ind-Art-Sing noun|lapis-Masc .
+%gra:	1|2|DET 2|0|ROOT 3|2|PUNCT
+%wor:	un lapis .
+*PIL:	www .
+%exp:	durante unos instantes el ruido de fondo impide que se entiendan las palabras de los niños y de la entrevistadora
+%wor:	.
+*PIL:	que dixeche antes que non oín ? 11940_27820
+%add:	AND
+%mor:	sconj|que verb|dixechar-Fin-Ind-Pres-S3 adv|antes sconj|que x|non noun|oín-Masc ?
+%gra:	1|2|MARK 2|0|ROOT 3|2|ADVMOD 4|3|FIXED 5|6|CASE 6|3|OBL 7|2|PUNCT
+%wor:	que 11940_12080 dixeche 12080_12340 antes 12340_12620 que 12620_12721 non 12721_12821 oín 12821_27820 ?
+*UEL:	una chica . 25820_27140
+%xmod:	ˈuna ˈʧika
+%xpho:	ˈuna ˈʧika
+%com:	UEL ha contestado aunque la pregunta no iba dirigida a él
+%mor:	det|uno-Fem-Ind-Art-Sing noun|chica-Fem .
+%gra:	1|2|DET 2|0|ROOT 3|2|PUNCT
+%wor:	una 26200_26500 chica 26500_26821 .
+*PIL:	pero antes dixeche outra cousa (.) Gonzalo . 26898_27188
+%mor:	cconj|pero adv|antes propn|dixeche propn|outra propn|cousa propn|gonzalo .
+%gra:	1|3|CC 2|3|ADVMOD 3|0|ROOT 4|3|FLAT 5|3|FLAT 6|3|FLAT 7|3|PUNCT
+%wor:	pero 27181_27188 antes dixeche outra cousa Gonzalo .
+*PIL:	que dixo ? 28824_29224
+%mor:	sconj|que adj|dixo-S1 ?
+%gra:	1|2|MARK 2|0|ROOT 3|2|PUNCT
+%wor:	que 28824_28924 dixo 28924_29224 ?
+*PIL:	unha +//. 29585_29966
+%mor:	intj|unha +//.
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	unha 29585_29966 +//.
+*UEL:	unha chica . 31228_32739
+%xmod:	ˈuŋa ˈʧika
+%xpho:	ˈuŋa ˈʧika
+%mor:	adj|unho-S1 noun|chica-Fem .
+%gra:	1|2|AMOD 2|0|ROOT 3|2|PUNCT
+%wor:	unha 31948_32209 chica 32209_32569 .
+*PIL:	sí (.) pero é unha chica xxx . 33028_33188
+%mor:	intj|sí cconj|pero cconj|é adj|unho-S1 noun|chica-Fem .
+%gra:	1|5|ADVCL 2|5|CC 3|5|COP 4|5|AMOD 5|0|ROOT 6|5|PUNCT
+%wor:	sí 33070_33188 pero é unha chica .
+*PIL:	coma min ? 36936_37817
+%mor:	noun|coma-Fem noun|min ?
+%gra:	1|0|ROOT 2|1|DEP 3|1|PUNCT
+%wor:	coma 36936_37216 min 37216_37817 ?
+*INA:	una señora . 36960_38641
+%com:	no pronunica la nasal palatal con claridad
+%mor:	det|uno-Fem-Ind-Art-Sing noun|señora-Fem .
+%gra:	1|2|DET 2|0|ROOT 3|2|PUNCT
+%wor:	una 36960_38001 señora 38001_38641 .
+*PIL:	una señora . 39088_39628
+%mor:	det|uno-Fem-Ind-Art-Sing noun|señora-Fem .
+%gra:	1|2|DET 2|0|ROOT 3|2|PUNCT
+%wor:	una 39222_39442 señora 39442_39628 .
+*PIL:	y qué tiene esta señora aquí en la mano ? 40788_42268
+%mor:	cconj|y pron|qué-Int-S1 verb|tener-Fin-Ind-Pres-S3 det|este-Fem-Def-Dem-Sing noun|señora-Fem adv|aquí adp|en det|el-Fem-Def-Art-Sing noun|mano-Fem ?
+%gra:	1|3|CC 2|3|OBJ 3|0|ROOT 4|5|DET 5|3|NSUBJ 6|3|ADVMOD 7|9|CASE 8|9|DET 9|3|OBL 10|3|PUNCT
+%wor:	y 40903_40984 qué 40984_41124 tiene 41124_41364 esta 41364_41564 señora 41564_41964 aquí 41964_42064 en 42064_42165 la 42165_42268 mano ?
+*PIL:	a ver (.) qué tiene ? 42625_42945
+%mor:	adp|a verb|ver-Inf-S pron|qué-Int-S1 verb|tener-Fin-Ind-Pres-S3 ?
+%gra:	1|2|MARK 2|0|ROOT 3|4|NSUBJ 4|2|CCOMP 5|2|PUNCT
+%wor:	a 42625_42645 ver 42645_42785 qué 42785_42845 tiene 42845_42945 ?
+*PIL:	qué tiene ? 42945_43266
+%mor:	pron|qué-Int-S1 verb|tener-Fin-Ind-Pres-S3 ?
+%gra:	1|2|NSUBJ 2|0|ROOT 3|2|PUNCT
+%wor:	qué 42945_43005 tiene 43005_43266 ?
+*AND:	un teléfono . 50434_51595
+%mor:	det|uno-Masc-Ind-Art-Sing noun|teléfono-Masc .
+%gra:	1|2|DET 2|0|ROOT 3|2|PUNCT
+%wor:	un 50434_50614 teléfono 50614_51595 .
+@End

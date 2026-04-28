@@ -1,0 +1,16 @@
+# Summary
+
+- [Introduction](index.md)
+- [Chapter 1: Executive Summary](01-executive-summary.md)
+- [Chapter 2: Stop-Ship Findings](02-stop-ship-findings.md)
+- [Chapter 3: System Architecture](03-system-architecture.md)
+- [Chapter 4: Repository Boundaries and talkbank-tools](04-repo-boundaries.md)
+- [Chapter 5: Packaging, Versioning, and Release Engineering](05-release-engineering.md)
+- [Chapter 6: Test Strategy and Quality Gates](06-test-strategy.md)
+- [Chapter 7: Worker Runtime and Concurrency](07-worker-runtime.md)
+- [Chapter 8: Control Plane and State Management](08-control-plane.md)
+- [Chapter 9: Cross-Platform Story](09-cross-platform.md)
+- [Chapter 10: Documentation, Product Surface, and Compatibility](10-docs-and-compatibility.md)
+- [Chapter 11: Remediation Roadmap](11-remediation-roadmap.md)
+- [Chapter 12: Rewrite Decision](12-rewrite-decision.md)
+- [Appendix: Evidence and Reproductions](appendix-evidence.md)

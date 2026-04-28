@@ -41,6 +41,31 @@
 pub mod json;
 pub use json::*;
 
+pub mod asr_postprocess;
+pub mod benchmark;
+pub mod build_chat;
+pub mod compare;
+pub mod constituency;
+pub mod coref;
+pub mod decisions;
+pub mod dependent_tiers;
+pub mod diff;
+pub mod dp_align;
+pub mod extract;
+pub mod inject;
+pub mod merge_abbrev;
+pub mod morphosyntax;
+pub mod parse;
+pub mod retokenize;
+pub mod serialize;
+pub mod tokenizer_realign;
+pub mod translate;
+pub mod utseg;
+pub mod utseg_compute;
+pub mod validate;
+pub mod wer_conform;
+pub use merge_abbrev::merge_abbreviations;
+
 // CHAT → TalkBank XML emission (Rust replacement for Java Chatter's XML output).
 pub mod xml;
 

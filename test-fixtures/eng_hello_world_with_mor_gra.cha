@@ -1,0 +1,9 @@
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	CHI Target_Child
+@ID:	eng|test|CHI|3;|male|||Target_Child|||
+*CHI:	hello world .
+%mor:	n|hello n|world .
+%gra:	1|2|SUBJ 2|0|ROOT 3|2|PUNCT
+@End

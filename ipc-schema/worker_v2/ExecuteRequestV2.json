@@ -1,0 +1,882 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecuteRequestV2",
+  "description": "One top-level V2 execution request.",
+  "type": "object",
+  "properties": {
+    "attachments": {
+      "description": "Prepared artifacts attached to the request.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ArtifactRefV2"
+      }
+    },
+    "payload": {
+      "description": "Typed task payload.",
+      "$ref": "#/$defs/TaskRequestV2"
+    },
+    "request_id": {
+      "description": "Correlation id for the request.",
+      "$ref": "#/$defs/WorkerRequestIdV2"
+    },
+    "task": {
+      "description": "Task family being executed.",
+      "$ref": "#/$defs/InferenceTaskV2"
+    }
+  },
+  "required": [
+    "request_id",
+    "task",
+    "payload",
+    "attachments"
+  ],
+  "$defs": {
+    "ArtifactRefV2": {
+      "description": "Prepared artifact reference carried alongside one execute request.",
+      "oneOf": [
+        {
+          "description": "Prepared PCM audio view.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prepared_audio"
+            }
+          },
+          "$ref": "#/$defs/PreparedAudioRefV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Prepared UTF-8 JSON or text view.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prepared_text"
+            }
+          },
+          "$ref": "#/$defs/PreparedTextRefV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Small inline JSON attachment.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "inline_json"
+            }
+          },
+          "$ref": "#/$defs/InlineJsonRefV2",
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "AsrBackendV2": {
+      "description": "ASR backend selected by the Rust control plane.",
+      "oneOf": [
+        {
+          "description": "Local Whisper runtime hosted in Python.",
+          "type": "string",
+          "const": "local_whisper"
+        },
+        {
+          "description": "HuggingFace Whisper community fine-tune, resolved per-language.\nThe same worker-side ``WhisperASRHandle`` hosts the model; this\nenum variant exists so the control-plane pool key and the worker\nbootstrap can select the fine-tune loader over the stock loader.",
+          "type": "string",
+          "const": "whisper_hub"
+        },
+        {
+          "description": "Tencent Cantonese ASR provider.",
+          "type": "string",
+          "const": "hk_tencent"
+        },
+        {
+          "description": "Aliyun Cantonese ASR provider.",
+          "type": "string",
+          "const": "hk_aliyun"
+        },
+        {
+          "description": "FunASR Cantonese provider.",
+          "type": "string",
+          "const": "hk_funaudio"
+        },
+        {
+          "description": "Rev.AI provider.",
+          "type": "string",
+          "const": "revai"
+        }
+      ]
+    },
+    "AsrInputV2": {
+      "description": "ASR input variants for V2.",
+      "oneOf": [
+        {
+          "description": "Local prepared audio path.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prepared_audio"
+            }
+          },
+          "$ref": "#/$defs/PreparedAudioInputV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Provider-local media path.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "provider_media"
+            }
+          },
+          "$ref": "#/$defs/ProviderMediaInputV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Previously submitted provider job.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "submitted_job"
+            }
+          },
+          "$ref": "#/$defs/SubmittedJobInputV2",
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "AsrRequestV2": {
+      "description": "V2 ASR request payload.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Backend selected by Rust.",
+          "$ref": "#/$defs/AsrBackendV2"
+        },
+        "input": {
+          "description": "Backend-specific input transport.",
+          "$ref": "#/$defs/AsrInputV2"
+        },
+        "lang": {
+          "description": "Worker-runtime language hint for the transcript.\n\nThis may be a concrete ISO 639-3 code or the `\"auto\"` worker sentinel\nused by local Whisper auto-detect.",
+          "$ref": "#/$defs/WorkerLanguage"
+        }
+      },
+      "required": [
+        "lang",
+        "backend",
+        "input"
+      ]
+    },
+    "AvqiRequestV2": {
+      "description": "V2 AVQI request payload.",
+      "type": "object",
+      "properties": {
+        "cs_audio_ref_id": {
+          "description": "Reference to the prepared continuous-speech audio attachment.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "sv_audio_ref_id": {
+          "description": "Reference to the prepared sustained-vowel audio attachment.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "cs_audio_ref_id",
+        "sv_audio_ref_id"
+      ]
+    },
+    "ByteLengthV2": {
+      "description": "Byte length inside a prepared artifact file.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "ByteOffsetV2": {
+      "description": "Byte offset inside a prepared artifact file.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "ChannelCountV2": {
+      "description": "Number of channels in a prepared audio artifact.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "CorefRequestV2": {
+      "description": "V2 coreference request payload.",
+      "type": "object",
+      "properties": {
+        "item_count": {
+          "description": "Number of document items frozen into the prepared batch payload.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lang": {
+          "description": "Primary language routed by Rust.",
+          "$ref": "#/$defs/LanguageCode3"
+        },
+        "payload_ref_id": {
+          "description": "Reference to the prepared text batch payload.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "lang",
+        "payload_ref_id",
+        "item_count"
+      ]
+    },
+    "FaBackendV2": {
+      "description": "Forced-alignment backend selected by the Rust control plane.",
+      "oneOf": [
+        {
+          "description": "Whisper token-timestamp alignment.",
+          "type": "string",
+          "const": "whisper"
+        },
+        {
+          "description": "MMS Wave2Vec forced alignment.",
+          "type": "string",
+          "const": "wave2vec"
+        },
+        {
+          "description": "Cantonese Wave2Vec forced alignment.",
+          "type": "string",
+          "const": "wav2vec_canto"
+        }
+      ]
+    },
+    "FaTextModeV2": {
+      "description": "Text-joining mode for forced-alignment payloads.",
+      "oneOf": [
+        {
+          "description": "Join words with spaces before model invocation.",
+          "type": "string",
+          "const": "space_joined"
+        },
+        {
+          "description": "Join words as character stream.",
+          "type": "string",
+          "const": "char_joined"
+        }
+      ]
+    },
+    "ForcedAlignmentRequestV2": {
+      "description": "V2 forced-alignment request payload.",
+      "type": "object",
+      "properties": {
+        "audio_ref_id": {
+          "description": "Reference to the prepared audio span.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "backend": {
+          "description": "Backend selected by Rust.",
+          "$ref": "#/$defs/FaBackendV2"
+        },
+        "pauses": {
+          "description": "Whether pause markers should be preserved.",
+          "type": "boolean"
+        },
+        "payload_ref_id": {
+          "description": "Reference to the prepared text/JSON payload for the word arrays.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "text_mode": {
+          "description": "Text shaping mode requested by Rust.",
+          "$ref": "#/$defs/FaTextModeV2"
+        }
+      },
+      "required": [
+        "backend",
+        "payload_ref_id",
+        "audio_ref_id",
+        "text_mode",
+        "pauses"
+      ]
+    },
+    "FrameCountV2": {
+      "description": "Number of audio frames in a prepared artifact.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "InferenceTaskV2": {
+      "description": "High-level V2 task family.",
+      "oneOf": [
+        {
+          "description": "Morphosyntax tagging.",
+          "type": "string",
+          "const": "morphosyntax"
+        },
+        {
+          "description": "Utterance segmentation.",
+          "type": "string",
+          "const": "utseg"
+        },
+        {
+          "description": "Machine translation.",
+          "type": "string",
+          "const": "translate"
+        },
+        {
+          "description": "Coreference annotation.",
+          "type": "string",
+          "const": "coref"
+        },
+        {
+          "description": "Automatic speech recognition.",
+          "type": "string",
+          "const": "asr"
+        },
+        {
+          "description": "Forced alignment.",
+          "type": "string",
+          "const": "forced_alignment"
+        },
+        {
+          "description": "Speaker diarization.",
+          "type": "string",
+          "const": "speaker"
+        },
+        {
+          "description": "OpenSMILE feature extraction.",
+          "type": "string",
+          "const": "opensmile"
+        },
+        {
+          "description": "AVQI feature extraction.",
+          "type": "string",
+          "const": "avqi"
+        }
+      ]
+    },
+    "InlineJsonRefV2": {
+      "description": "Small inline JSON attachment.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable artifact id referenced by request payloads.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "value": {
+          "description": "Inline JSON payload carried with the envelope."
+        }
+      },
+      "required": [
+        "id",
+        "value"
+      ]
+    },
+    "LanguageCode3": {
+      "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected — use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
+      "type": "string"
+    },
+    "MorphosyntaxRequestV2": {
+      "description": "V2 morphosyntax request payload.",
+      "type": "object",
+      "properties": {
+        "item_count": {
+          "description": "Number of utterance items frozen into the prepared batch payload.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lang": {
+          "description": "Primary language routed by Rust.",
+          "$ref": "#/$defs/LanguageCode3"
+        },
+        "payload_ref_id": {
+          "description": "Reference to the prepared text batch payload.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "retokenize": {
+          "description": "Whether Stanza/PyCantonese should re-tokenize the input.\n\nWhen `true`, CJK word segmentation is applied before POS tagging:\n- Cantonese (`yue`): PyCantonese `segment()` groups characters into words\n- Mandarin (`cmn`/`zho`): Stanza neural tokenizer segments the text\n\nDefaults to `false` for backward compatibility with workers that do not\nyet understand this field.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "lang",
+        "payload_ref_id",
+        "item_count"
+      ]
+    },
+    "NumSpeakers": {
+      "description": "Number of speakers in a recording.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "OpenSmileRequestV2": {
+      "description": "V2 openSMILE request payload.",
+      "type": "object",
+      "properties": {
+        "audio_ref_id": {
+          "description": "Reference to the prepared audio attachment.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "feature_level": {
+          "description": "Requested openSMILE feature-level name.",
+          "type": "string"
+        },
+        "feature_set": {
+          "description": "Requested openSMILE feature-set name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "audio_ref_id",
+        "feature_set",
+        "feature_level"
+      ]
+    },
+    "PreparedAudioEncodingV2": {
+      "description": "PCM encoding used for prepared audio artifacts.",
+      "oneOf": [
+        {
+          "description": "Little-endian float32 PCM frames.",
+          "type": "string",
+          "const": "pcm_f32le"
+        }
+      ]
+    },
+    "PreparedAudioInputV2": {
+      "description": "Request-time reference to a prepared audio artifact.",
+      "type": "object",
+      "properties": {
+        "audio_ref_id": {
+          "description": "Artifact id of the audio descriptor included in `attachments`.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "audio_ref_id"
+      ]
+    },
+    "PreparedAudioRefV2": {
+      "description": "File-backed prepared audio artifact.",
+      "type": "object",
+      "properties": {
+        "byte_len": {
+          "description": "Byte length inside the artifact file.",
+          "$ref": "#/$defs/ByteLengthV2"
+        },
+        "byte_offset": {
+          "description": "Byte offset inside the artifact file.",
+          "$ref": "#/$defs/ByteOffsetV2"
+        },
+        "channels": {
+          "description": "Number of channels in the artifact view.",
+          "$ref": "#/$defs/ChannelCountV2"
+        },
+        "encoding": {
+          "description": "PCM encoding for the prepared audio.",
+          "$ref": "#/$defs/PreparedAudioEncodingV2"
+        },
+        "frame_count": {
+          "description": "Number of frames in the view.",
+          "$ref": "#/$defs/FrameCountV2"
+        },
+        "id": {
+          "description": "Stable artifact id referenced by request payloads.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "path": {
+          "description": "Filesystem path to the prepared artifact.",
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        },
+        "sample_rate_hz": {
+          "description": "Sample rate in Hz.",
+          "$ref": "#/$defs/SampleRateHzV2"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "encoding",
+        "channels",
+        "sample_rate_hz",
+        "frame_count",
+        "byte_offset",
+        "byte_len"
+      ]
+    },
+    "PreparedTextEncodingV2": {
+      "description": "Encoding used for prepared text artifacts.",
+      "oneOf": [
+        {
+          "description": "UTF-8 JSON text stored on disk.",
+          "type": "string",
+          "const": "utf8_json"
+        }
+      ]
+    },
+    "PreparedTextRefV2": {
+      "description": "File-backed prepared text artifact.",
+      "type": "object",
+      "properties": {
+        "byte_len": {
+          "description": "Byte length inside the artifact file.",
+          "$ref": "#/$defs/ByteLengthV2"
+        },
+        "byte_offset": {
+          "description": "Byte offset inside the artifact file.",
+          "$ref": "#/$defs/ByteOffsetV2"
+        },
+        "encoding": {
+          "description": "Encoding used by the file content.",
+          "$ref": "#/$defs/PreparedTextEncodingV2"
+        },
+        "id": {
+          "description": "Stable artifact id referenced by request payloads.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "path": {
+          "description": "Filesystem path to the prepared artifact.",
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "encoding",
+        "byte_offset",
+        "byte_len"
+      ]
+    },
+    "ProviderMediaInputV2": {
+      "description": "Temporary cloud-provider media input retained during migration.",
+      "type": "object",
+      "properties": {
+        "media_path": {
+          "description": "Media file path readable by the worker host.",
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        },
+        "num_speakers": {
+          "description": "Expected number of speakers for diarization-aware providers.",
+          "$ref": "#/$defs/NumSpeakers"
+        }
+      },
+      "required": [
+        "media_path",
+        "num_speakers"
+      ]
+    },
+    "SampleRateHzV2": {
+      "description": "Audio sample rate in Hz carried by prepared artifacts.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "SpeakerBackendV2": {
+      "description": "Speaker diarization backend selected by Rust.",
+      "oneOf": [
+        {
+          "description": "Pyannote diarization backend.",
+          "type": "string",
+          "const": "pyannote"
+        },
+        {
+          "description": "NeMo diarization backend.",
+          "type": "string",
+          "const": "nemo"
+        }
+      ]
+    },
+    "SpeakerInputV2": {
+      "description": "Current input variants for speaker diarization.",
+      "oneOf": [
+        {
+          "description": "Prepared mono PCM audio owned by Rust.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prepared_audio"
+            }
+          },
+          "$ref": "#/$defs/SpeakerPreparedAudioInputV2",
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "SpeakerPreparedAudioInputV2": {
+      "description": "Prepared-audio speaker input owned by Rust.",
+      "type": "object",
+      "properties": {
+        "audio_ref_id": {
+          "description": "Artifact id of the prepared mono PCM audio view.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "audio_ref_id"
+      ]
+    },
+    "SpeakerRequestV2": {
+      "description": "V2 speaker diarization request payload.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Backend selected by Rust.",
+          "$ref": "#/$defs/SpeakerBackendV2"
+        },
+        "expected_speakers": {
+          "description": "Expected number of speakers when known.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NumSpeakers"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": {
+          "description": "Input transport for the speaker runtime.",
+          "$ref": "#/$defs/SpeakerInputV2"
+        }
+      },
+      "required": [
+        "backend",
+        "input"
+      ]
+    },
+    "SubmittedJobInputV2": {
+      "description": "Previously submitted provider job id.",
+      "type": "object",
+      "properties": {
+        "provider_job_id": {
+          "description": "Provider job identifier to poll.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "provider_job_id"
+      ]
+    },
+    "TaskRequestV2": {
+      "description": "Typed execute payload carried by one V2 request.",
+      "oneOf": [
+        {
+          "description": "Automatic speech recognition request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "asr"
+            }
+          },
+          "$ref": "#/$defs/AsrRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Forced-alignment request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "forced_alignment"
+            }
+          },
+          "$ref": "#/$defs/ForcedAlignmentRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Morphosyntax request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "morphosyntax"
+            }
+          },
+          "$ref": "#/$defs/MorphosyntaxRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Utterance-segmentation request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "utseg"
+            }
+          },
+          "$ref": "#/$defs/UtsegRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Translation request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "translate"
+            }
+          },
+          "$ref": "#/$defs/TranslateRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Coreference request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "coref"
+            }
+          },
+          "$ref": "#/$defs/CorefRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Speaker diarization request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "speaker"
+            }
+          },
+          "$ref": "#/$defs/SpeakerRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "OpenSMILE request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "opensmile"
+            }
+          },
+          "$ref": "#/$defs/OpenSmileRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "AVQI request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "avqi"
+            }
+          },
+          "$ref": "#/$defs/AvqiRequestV2",
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "TranslateRequestV2": {
+      "description": "V2 translation request payload.",
+      "type": "object",
+      "properties": {
+        "item_count": {
+          "description": "Number of utterance items frozen into the prepared batch payload.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "payload_ref_id": {
+          "description": "Reference to the prepared text batch payload.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "source_lang": {
+          "description": "Source language determined by Rust.",
+          "$ref": "#/$defs/LanguageCode3"
+        },
+        "target_lang": {
+          "description": "Target language requested by Rust.",
+          "$ref": "#/$defs/LanguageCode3"
+        }
+      },
+      "required": [
+        "source_lang",
+        "target_lang",
+        "payload_ref_id",
+        "item_count"
+      ]
+    },
+    "UtsegRequestV2": {
+      "description": "V2 utterance-segmentation request payload.",
+      "type": "object",
+      "properties": {
+        "item_count": {
+          "description": "Number of utterance items frozen into the prepared batch payload.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lang": {
+          "description": "Primary language routed by Rust.",
+          "$ref": "#/$defs/LanguageCode3"
+        },
+        "payload_ref_id": {
+          "description": "Reference to the prepared text batch payload.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "lang",
+        "payload_ref_id",
+        "item_count"
+      ]
+    },
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerLanguage": {
+      "description": "Worker-runtime language string: ISO 639-3 code, \"auto\", or empty string.",
+      "type": "string"
+    },
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
+      "type": "string"
+    }
+  }
+}

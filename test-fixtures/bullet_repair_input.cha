@@ -1,0 +1,102 @@
+@UTF8
+@PID:	11312/a-00009208-1
+@Begin
+@Languages:	spa, glg
+@Participants:	PIL Investigator, REN Target_Child, UEL Target_Child, XUL Target_Child, MAR Target_Child, URA Target_Child, JUL Target_Child, ANC Investigator, TIN Target_Child
+@ID:	spa, glg|Koine|PIL|0;06.15|female|Breogán||Investigator|||
+@ID:	spa, glg|Koine|REN|2;09.04|male|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|UEL|2;02.28|male|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|XUL|2;06.06|female|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|MAR|2;09.19|female|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|URA|2;06.02|female|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|JUL|2;10.28|female|Breogán||Target_Child|||
+@ID:	spa, glg|Koine|ANC|0;00.07|female|Breogán||Investigator|||
+@ID:	spa, glg|Koine|TIN|2;07.26|male|Breogán||Target_Child|||
+@Birth of PIL:	27-NOV-1996
+@Birth of ANC:	04-JUN-1997
+@Birth of JUL:	14-JUL-1994
+@Birth of URA:	09-DEC-1994
+@Birth of MAR:	23-AUG-1994
+@Birth of REN:	07-SEP-1994
+@Birth of TIN:	16-OCT-1994
+@Birth of XUL:	05-DEC-1994
+@Media:	bre3_02, audio
+@Date:	11-JUN-1997
+@Types:	long, toyplay, TD
+*REN:	bux [*] . 2000_2140
+%xpar:	bux=bus $PHO ;
+%xphon:	$SUS
+%mor:	noun|bux-Masc .
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	bux 2000_2140 .
+*PIL:	un bus ! 4801_5902
+%mor:	det|uno-Masc-Ind-Art-Sing noun|bus-Masc !
+%gra:	1|2|DET 2|0|ROOT 3|2|PUNCT
+%wor:	un 4801_4961 bus 4961_5902 !
+*PIL:	es un autobús . 7079_7459
+%mor:	aux|ser-Fin-Ind-Pres-S3 det|uno-Masc-Ind-Art-Sing noun|autobús-Masc .
+%gra:	1|3|COP 2|3|DET 3|0|ROOT 4|3|PUNCT
+%wor:	es 7282_7442 un 7442_7459 autobús .
+*PIL:	quién va en autobús a la guardería ? 9879_10099
+%mor:	pron|quién-Int-S1 verb|ir-Fin-Ind-Pres-S3 adp|en noun|autobús-Masc adp|a det|el-Fem-Def-Art-Sing noun|guardería-Fem ?
+%gra:	1|2|NSUBJ 2|0|ROOT 3|4|CASE 4|2|OBL 5|7|CASE 6|7|DET 7|2|OBL 8|2|PUNCT
+%wor:	quién va en autobús a 9879_10099 la guardería ?
+*URA:	yo [>] ! 10584_10664
+%mor:	pron|yo-Prs-Nom-S1 !
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	yo 10584_10664 !
+*REN:	yo [<] ! 10744_10824
+%mor:	pron|yo-Prs-Nom-S1 !
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	yo 10744_10824 !
+*MAR:	yo [>] ! 11244_11304
+%mor:	pron|yo-Prs-Nom-S1 !
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	yo 11244_11304 !
+*REN:	yo [<] ! 11445_11525
+%mor:	pron|yo-Prs-Nom-S1 !
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	yo 11445_11525 !
+*XUL:	yo . 11421_13326
+%xmod:	ˈʎo
+%xpho:	ˈʎo
+%mor:	pron|yo-Prs-Nom-S1 .
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	yo 11685_11765 .
+*PIL:	todos +/. 13567_13848
+%mor:	pron|todo-Tot-P1 +/.
+%gra:	1|0|ROOT 2|1|PUNCT
+%wor:	todos 13567_13848 +/.
+*JUL:	y mi abuelo xxx +//. 13848_19092
+%mor:	cconj|y det|mi-Def-Prs-Sing-S noun|abuelo-Masc +//.
+%gra:	1|3|CC 2|3|DET 3|0|ROOT 4|3|PUNCT
+%wor:	y 13848_13988 mi 13988_18792 abuelo 18792_19092 +//.
+*PIL:	tu abuelo qué ? 19172_23396
+%mor:	det|tu-Def-Prs-Sing-S noun|abuelo-Masc pron|qué-Int-S1 ?
+%gra:	1|2|DET 2|0|ROOT 3|2|NSUBJ 4|2|PUNCT
+%wor:	tu 19172_21775 abuelo 21775_22435 qué 22435_23396 ?
+*JUL:	que voy en autobux [*] <a ve la abuela> [*] . 18999_22579
+%xpar:	autobux=autobús $PHO ; ve=ver $PHO ; a ve la abuela=a ver a la abuela $CON ;
+%xphon:	$SUS ; $OMI
+%mor:	sconj|que verb|ir-Fin-Ind-Pres-S1 adp|en noun|autobux-Masc adp|a verb|ver-Fin-Ind-Pres-S3 det|el-Fem-Def-Art-Sing noun|abuela-Fem-Acc .
+%gra:	1|2|MARK 2|0|ROOT 3|4|CASE 4|2|OBL 5|6|MARK 6|2|ADVCL 7|8|DET 8|6|OBJ 9|2|PUNCT
+%wor:	que voy en autobux a ve la abuela .
+*PIL:	vas en autobús a ver a la abuela ? 23339_24499
+%mor:	verb|ir-Fin-Ind-Pres-S adp|en noun|autobús-Masc adp|a verb|ver-Inf-S adp|a det|el-Fem-Def-Art-Sing noun|abuela-Fem-Acc ?
+%gra:	1|0|ROOT 2|3|CASE 3|1|OBL 4|5|MARK 5|1|ADVCL 6|8|CASE 7|8|DET 8|5|OBJ 9|1|PUNCT
+%wor:	vas en autobús a ver a la abuela ?
+*PIL:	y dónde vive la abuela ? 25019_25979
+%mor:	cconj|y adv|dónde verb|vivir-Fin-Ind-Pres-S3 det|el-Fem-Def-Art-Sing noun|abuela-Fem ?
+%gra:	1|3|CC 2|3|ADVMOD 3|0|ROOT 4|5|DET 5|3|NSUBJ 6|3|PUNCT
+%wor:	y 25398_25418 dónde 25418_25538 vive 25538_25758 la 25758_25818 abuela 25818_25979 ?
+*JUL:	en la caza [*] de xxx . 26639_27059
+%xpar:	caza=casa $PHO ;
+%xphon:	$SUS-FRON
+%mor:	adp|en det|el-Fem-Def-Art-Sing noun|caza-Fem adp|de .
+%gra:	1|3|CASE 2|3|DET 3|0|ROOT 4|3|CASE 5|3|PUNCT
+%wor:	en 26979_27059 la caza de .
+*PIL:	ah (.) bueno . 29279_29499
+%mor:	adv|ah adj|buen-S1 .
+%gra:	1|2|ADVMOD 2|0|ROOT 3|2|PUNCT
+%wor:	ah 29461_29499 bueno .
+@End

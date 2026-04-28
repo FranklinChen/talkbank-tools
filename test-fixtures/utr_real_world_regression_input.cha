@@ -1,0 +1,77 @@
+@UTF8
+@Window:	178_712_944_930_-1_-1_8852_0_8852_0
+@Begin
+@Languages:	eng
+@Participants:	PAR Investigator, INV Participant
+@ID:	eng|ExampleCorpus|PAR|71;00.|female|MCI||Investigator|||
+@ID:	eng|ExampleCorpus|INV|||||Participant|||
+@Media:	utr-regression-trimmed, audio
+@Comment:	Batchalign 0.8.1-post.12, ASR Engine rev.
+@G:	Rockwell
+*INV:	tell me &-um a story about this picture .
+*INV:	tell me a story with a beginning middle and end .
+*PAR:	okay . [+ exc]
+*PAR:	this is the family going on vacation .
+*PAR:	and dad's driving .
+*PAR:	mom is <in the> [//] on the passenger side .
+*PAR:	and &-uh looks like a set of twins , &-uh boy twins .
+*PAR:	and &-uh the one little boy has a dog .
+*PAR:	and &-uh they're hanging out the window .
+*PAR:	and there's a little sister .
+*PAR:	and she's blowing bubblegum .
+*PAR:	and &-uh that [//] so , they start out on this vacation .
+*PAR:	and it looks like it's morning .
+*PAR:	but at least it's daylight .
+*PAR:	and then by the time they arrive at their destination , it's &-uh
+	dark .
+*PAR:	mom is asleep .
+*PAR:	dad looks like he's really tired at the wheel .
+*PAR:	and the little boy is looking out the window with the dog and the
+	little girl .
+*PAR:	oh there's grandma in the back .
+*PAR:	she's in the back with the other twin .
+*PAR:	I didn't see her .
+*PAR:	oh yeah she's in the first one as well .
+*PAR:	so , anyway grandma is sitting in the back with the other twin who
+	[//] boy who was asleep .
+*INV:	alright .
+@G:	Cinderella_Intro
+*INV:	are you familiar with the story of Cinderella ?
+*PAR:	yes .
+*INV:	okay .
+*INV:	so , we're gonna take a few minutes to look at some pictures to
+	refresh your memory .
+*INV:	and then you'll have a chance to tell me the story of Cinderella in
+	your own words .
+*INV:	so , here are the pictures .
+@G:	Cinderella
+*INV:	okay .
+*INV:	so , now I want you to tell me the story of Cinderella in your own
+	words .
+*INV:	you can use any details from the pictures that you just saw [/] saw
+	or from the story as you already knew it .
+*PAR:	&-uh Cinderella is an only child .
+*PAR:	and &-um she doesn't have a mother .
+*PAR:	but her father is there .
+*PAR:	he remarries .
+*PAR:	and &-um I'm gonna say he remarries a duchess or something .
+*PAR:	but anyway she has two stepdaughters .
+*PAR:	they're not very friendly .
+*PAR:	and the stepmother uses Cinderella as [/] as a maid .
+*PAR:	well , there's a ball that's going to happen .
+*PAR:	and &-um Cinderella wants to go .
+*PAR:	and the fairy godmother shows up and provides a gown for her .
+*PAR:	and she goes to the ball .
+*PAR:	and she dances with [/] with the prince .
+*PAR:	and the stepmother and <the [/] the stepdaughters are [/] are not>
+	[//] &-uh her stepsisters are not very happy about it .
+*PAR:	but anyway she [/] she loses the slipper .
+*PAR:	and so , the prince is trying to find out the princess that he
+	danced with .
+*PAR:	and so , in order to do that , he has to find out whose foot fits
+	the shoe .
+*PAR:	and then he'll know that she was the one that danced with him .
+*PAR:	so , anyway they come to her door .
+*PAR:	she tries on [/] on the slipper .
+*PAR:	it fits .
+@End

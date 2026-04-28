@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CorefRequestV2",
+  "description": "V2 coreference request payload.",
+  "type": "object",
+  "properties": {
+    "item_count": {
+      "description": "Number of document items frozen into the prepared batch payload.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "lang": {
+      "description": "Primary language routed by Rust.",
+      "$ref": "#/$defs/LanguageCode3"
+    },
+    "payload_ref_id": {
+      "description": "Reference to the prepared text batch payload.",
+      "$ref": "#/$defs/WorkerArtifactIdV2"
+    }
+  },
+  "required": [
+    "lang",
+    "payload_ref_id",
+    "item_count"
+  ],
+  "$defs": {
+    "LanguageCode3": {
+      "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected — use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
+      "type": "string"
+    },
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

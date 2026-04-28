@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MonologueAsrResultV2",
+  "description": "One ASR result built from provider-shaped speaker monologues.",
+  "type": "object",
+  "properties": {
+    "lang": {
+      "description": "Transcript language reported by the provider adapter.",
+      "$ref": "#/$defs/LanguageCode3"
+    },
+    "monologues": {
+      "description": "Speaker-grouped ASR output.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AsrMonologueV2"
+      }
+    }
+  },
+  "required": [
+    "lang",
+    "monologues"
+  ],
+  "$defs": {
+    "AsrElementKindV2": {
+      "description": "Stable vocabulary for one monologue element returned by an ASR provider.",
+      "oneOf": [
+        {
+          "description": "Lexical content that should become transcript tokens.",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "Punctuation emitted by the provider.",
+          "type": "string",
+          "const": "punctuation"
+        }
+      ]
+    },
+    "AsrElementV2": {
+      "description": "One raw ASR element inside a speaker monologue.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Optional model/provider confidence score.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "end_s": {
+          "description": "End timestamp in seconds when the provider exposes one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DurationSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "description": "Stable element kind selected by the worker adapter.",
+          "$ref": "#/$defs/AsrElementKindV2"
+        },
+        "start_s": {
+          "description": "Start timestamp in seconds when the provider exposes one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DurationSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "value": {
+          "description": "Surface token or punctuation value.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "kind"
+      ]
+    },
+    "AsrMonologueV2": {
+      "description": "One speaker-attributed monologue returned by a provider ASR backend.",
+      "type": "object",
+      "properties": {
+        "elements": {
+          "description": "Ordered elements inside the monologue.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AsrElementV2"
+          }
+        },
+        "speaker": {
+          "description": "Stable speaker label chosen by the worker adapter.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "speaker",
+        "elements"
+      ]
+    },
+    "DurationSeconds": {
+      "description": "Duration measured in fractional seconds.",
+      "type": "number",
+      "format": "double"
+    },
+    "LanguageCode3": {
+      "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected — use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
+      "type": "string"
+    }
+  }
+}

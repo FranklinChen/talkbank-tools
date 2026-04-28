@@ -1,0 +1,14 @@
+[book]
+title = "Batchalign"
+authors = ["TalkBank Project"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "build"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+git-repository-url = "https://github.com/TalkBank/talkbank-tools"

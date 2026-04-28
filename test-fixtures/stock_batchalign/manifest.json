@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "hk-05b-clip-whisper",
+      "description": "In-repo Cantonese benchmark case using the 05b clip and a normalized benchmark-only gold CHAT transcript.",
+      "command": "benchmark",
+      "audio_path": "../../batchalign/tests/hk/fixtures/05b_clip.mp3",
+      "gold_path": "../../batchalign/tests/hk/fixtures/benchmark/05b_clip.cha",
+      "argv": [
+        "--lang",
+        "yue",
+        "--whisper",
+        "-n",
+        "1"
+      ]
+    }
+  ]
+}

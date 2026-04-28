@@ -1,0 +1,9 @@
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	CHI Target_Child
+@ID:	eng|test|CHI||female|||Target_Child|||
+@Media:	test, audio
+*CHI:	hello . 0_10000
+*CHI:	world . 10000_25000
+@End

@@ -1,0 +1,152 @@
+name: Batchalign Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to publish (e.g. v1.0.0)"
+        required: true
+      publish_pypi:
+        description: "Publish to PyPI"
+        type: boolean
+        default: true
+      publish_github:
+        description: "Create GitHub Release with wheels"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build CLI binary (macOS / Windows — native)
+        if: runner.os != 'Linux'
+        run: |
+          cargo build --release -p batchalign-cli --target ${{ matrix.target }}
+          mkdir -p batchalign/_bin
+      - name: Stage CLI binary (macOS)
+        if: runner.os == 'macOS'
+        run: cp target/${{ matrix.target }}/release/batchalign3 batchalign/_bin/batchalign3
+      - name: Stage CLI binary (Windows)
+        if: runner.os == 'Windows'
+        run: copy target\${{ matrix.target }}\release\batchalign3.exe batchalign\_bin\batchalign3.exe
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist
+          before-script-linux: |
+            set -euo pipefail
+            cargo build --release -p batchalign-cli --target "$MATURIN_TARGET"
+            mkdir -p batchalign/_bin
+            cp "target/${MATURIN_TARGET}/release/batchalign3" batchalign/_bin/batchalign3
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/
+
+  wheel-smoke:
+    name: Wheel Smoke (${{ matrix.os }})
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/
+      - name: Install wheel in clean environment
+        run: uv tool install --from dist/*.whl batchalign3
+        shell: bash
+      - name: Verify batchalign3 --help
+        run: batchalign3 --help
+      - name: Verify batchalign3 version
+        run: batchalign3 version
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sdist
+          path: dist/
+
+  github-release:
+    if: inputs.publish_github
+    needs: [build, sdist, wheel-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: "{wheel-*,sdist}"
+          merge-multiple: true
+          path: dist/
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${{ inputs.tag }}" \
+            --title "Batchalign ${{ inputs.tag }}" \
+            --generate-notes \
+            dist/*
+
+  publish-pypi:
+    if: inputs.publish_pypi
+    needs: [build, sdist, wheel-smoke]
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: "{wheel-*,sdist}"
+          merge-multiple: true
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

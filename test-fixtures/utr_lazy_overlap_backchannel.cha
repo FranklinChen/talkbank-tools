@@ -1,0 +1,11 @@
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	PAR Participant, INV Investigator
+@ID:	eng|test|PAR|||||Participant|||
+@ID:	eng|test|INV|||||Investigator|||
+@Media:	test, audio
+*PAR:	I went to the store yesterday .
+*INV:	+< mhm .
+*PAR:	and I bought some groceries .
+@End

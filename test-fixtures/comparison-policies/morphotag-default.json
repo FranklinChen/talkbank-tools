@@ -1,0 +1,15 @@
+{
+  "description": "Conservative allowed differences for morphotag comparisons against Jan 9 legacy batchalign or batchalignhk baselines.",
+  "rewrites": [
+    {
+      "id": "strip-wor-form-markers",
+      "description": "Allow legacy @s/@c markers on %wor lines in the stock baseline while comparing spoken forms.",
+      "target": "baseline",
+      "line_prefixes": [
+        "%wor:"
+      ],
+      "pattern": "(@[sc])(?=(\\s|$))",
+      "replace": ""
+    }
+  ]
+}

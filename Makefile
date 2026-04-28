@@ -1,4 +1,4 @@
-.PHONY: help symbols-gen generated-check test-gen mine-candidates test test-affected test-grammar test-generated test-fragment-semantics test-legacy-fragment-parity test-parity build clean check check-affected verify parser-guard chat-anchors-check fuzz-check hooks-check book book-serve coverage smoke check-specs ci-local ci-full install-hooks lint-affected
+.PHONY: help symbols-gen generated-check test-gen mine-candidates test test-affected test-grammar test-generated test-fragment-semantics test-legacy-fragment-parity test-parity batchalign-check batchalign-test-rust batchalign-test-integration batchalign-build-pyo3 batchalign-build-wheel batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-build batchalign-book-build batchalign-ci-rust build clean check check-affected verify parser-guard chat-anchors-check fuzz-check hooks-check book book-serve coverage smoke check-specs ci-local ci-full install-hooks lint-affected
 
 help:
 	@echo "TalkBank Core Library Tasks"
@@ -13,6 +13,16 @@ help:
 	@echo "  make test-generated Run spec-generated parser/validation tests"
 	@echo "  make test-legacy-fragment-parity Run legacy word-fragment parity audit"
 	@echo "  make test-parity    Run full-file parser parity tests"
+	@echo "  make batchalign-check Fast compile check for imported Batchalign Rust crates"
+	@echo "  make batchalign-test-rust Run imported Batchalign Rust library suites"
+	@echo "  make batchalign-test-integration Run imported Batchalign focused integration gates"
+	@echo "  make batchalign-build-pyo3 Build the imported standalone PyO3 crate"
+	@echo "  make batchalign-build-wheel Build the imported Batchalign wheel"
+	@echo "  make batchalign-runtime-check Verify imported runtime constants"
+	@echo "  make batchalign-dashboard-api-check Verify dashboard API artifacts"
+	@echo "  make batchalign-dashboard-build Build the imported dashboard frontend"
+	@echo "  make batchalign-book-build Build the imported Batchalign book"
+	@echo "  make batchalign-ci-rust Run the imported Batchalign Rust/PyO3 CI command set"
 	@echo "  make build          Build all components"
 	@echo "  make check          Fast compile check"
 	@echo "  make check-affected Fast dependency-aware compile check"
@@ -139,6 +149,66 @@ test-parity:
 test-affected:
 	cargo run -q -p xtask -- affected-rust test
 
+batchalign-check:
+	@echo "==> Checking imported Batchalign Rust crates..."
+	cargo check -p batchalign-types -p batchalign-revai -p batchalign-chat-ops -p batchalign-app -p batchalign-cli --all-targets
+
+batchalign-test-rust:
+	@echo "==> Testing imported batchalign-types..."
+	cargo test -p batchalign-types --lib -q
+	@echo "==> Testing imported batchalign-revai..."
+	cargo test -p batchalign-revai --lib -q
+	@echo "==> Testing imported batchalign-chat-ops..."
+	cargo test -p batchalign-chat-ops --lib -q
+	@echo "==> Testing imported batchalign-app..."
+	cargo test -p batchalign-app --lib -q
+	@echo "==> Testing imported batchalign-cli..."
+	cargo test -p batchalign-cli --lib -q
+
+batchalign-test-integration:
+	@echo "==> Running imported Batchalign CI hygiene..."
+	cargo run -q -p xtask -- lint-ci-hygiene
+	@echo "==> Testing imported batchalign-cli CI proxy..."
+	cargo test -p batchalign-cli --test ci_checks -q
+	@echo "==> Testing imported batchalign-app focused integration gates..."
+	cargo test -p batchalign-app --test json_compat --test workflow_helpers -q
+
+batchalign-build-pyo3:
+	@echo "==> Building imported standalone PyO3 crate..."
+	cargo build --manifest-path pyo3/Cargo.toml -q
+
+batchalign-build-wheel:
+	@echo "==> Building imported Batchalign wheel..."
+	@if [ ! -x batchalign/_bin/batchalign3 ] && [ ! -f batchalign/_bin/batchalign3.exe ]; then \
+	  echo "==> Staging bundled batchalign3 binary..."; \
+	  cargo build --release -p batchalign-cli; \
+	  mkdir -p batchalign/_bin; \
+	  cp target/release/batchalign3 batchalign/_bin/batchalign3; \
+	fi
+	uv build --wheel --out-dir dist/
+
+batchalign-runtime-check:
+	@echo "==> Verifying imported runtime constants..."
+	python3 scripts/check_runtime_drift.py
+
+batchalign-dashboard-api-check:
+	@echo "==> Verifying imported dashboard API artifacts..."
+	bash scripts/check_dashboard_api_drift.sh
+
+batchalign-dashboard-build:
+	@echo "==> Building imported dashboard frontend..."
+	cd frontend && npm ci && npm run build
+
+batchalign-book-build:
+	@echo "==> Building imported Batchalign book..."
+	mdbook build batchalign-book
+
+batchalign-ci-rust:
+	@$(MAKE) batchalign-check
+	@$(MAKE) batchalign-test-rust
+	@$(MAKE) batchalign-test-integration
+	@$(MAKE) batchalign-build-pyo3
+
 # Build all components
 build:
 	@$(MAKE) symbols-gen
@@ -195,6 +265,8 @@ verify:
 	@$(MAKE) generated-check
 	@echo "==> [G13] Fuzz workspace isolation"
 	@$(MAKE) fuzz-check
+	@echo "==> [G14] Imported Batchalign Rust/PyO3 gate"
+	@$(MAKE) batchalign-ci-rust
 
 # Reference corpus grammar node type coverage
 coverage:
@@ -252,6 +324,8 @@ ci-full:
 	@scripts/check-errorsink-option-signatures.sh
 	@echo "==> generated artifacts check"
 	@$(MAKE) generated-check
+	@echo "==> imported Batchalign Rust/PyO3 gate"
+	@$(MAKE) batchalign-ci-rust
 	@echo "✓ ci-full passed"
 
 # Install git hooks (pre-push).

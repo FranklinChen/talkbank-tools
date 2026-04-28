@@ -1,0 +1,24 @@
+{
+  "captured_on": "2026-02-24",
+  "chat_parser_throughput": {
+    "benchmark": "chat_parser_throughput",
+    "bytes_per_doc": 166,
+    "docs_per_s": 22364.798,
+    "elapsed_s": 0.017885,
+    "iterations": 400,
+    "mib_per_s": 3.541
+  },
+  "job_store_latency": {
+    "benchmark": "job_store_latency",
+    "cancelled_jobs": 0,
+    "completed_jobs": 20,
+    "elapsed_s": 0.072931,
+    "failed_jobs": 0,
+    "files_per_job": 6,
+    "job_count": 20,
+    "jobs_per_s": 274.232,
+    "latency_ms_p50": 19.534,
+    "latency_ms_p95": 35.303,
+    "max_concurrent_jobs": 4
+  }
+}

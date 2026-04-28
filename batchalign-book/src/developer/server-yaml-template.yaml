@@ -1,0 +1,50 @@
+# Batchalign server configuration template.
+#
+# Install to ~/.batchalign3/server.yaml on the server machine.
+#
+# media_mappings: Maps the user's data directory names to the
+# corresponding media volumes on the server.  The client auto-detects
+# the mapping key from the input path, so users just run:
+#
+#   batchalign3 align /path/to/childes-data/Eng-NA/SomeCorpus/ \
+#       --server http://SERVER_HOST:8000
+#
+# and the server resolves media at:
+#   /path/to/media/childes/Eng-NA/SomeCorpus/FILENAME
+
+default_lang: eng
+max_concurrent_jobs: 8
+port: 8000
+
+# Max worker processes per job (0 = auto-tune based on RAM/GPU).
+# Each worker loads its own pipeline; multi-file jobs process in parallel.
+# max_workers_per_job: 0
+
+# Pre-load morphotag and align pipelines on startup (main thread).
+# Prevents MPS deadlock on first request from a background thread.
+warmup_commands:
+  - morphotag
+  - align
+
+# No fallback roots -- all media access must go through explicit mappings.
+# This prevents accidental full-volume walks on NFS mounts.
+media_roots: []
+
+# Deterministic mappings: user data/KEY_NAME/ -> server volume path.
+media_mappings:
+  childes-data:  /path/to/media/childes
+  homebank-data: /path/to/media/homebank
+  aphasia-data:  /path/to/media/aphasia
+  asd-data:      /path/to/media/asd
+  biling-data:   /path/to/media/biling
+  ca-data:       /path/to/media/ca
+  class-data:    /path/to/media/class
+  dementia-data: /path/to/media/dementia
+  fluency-data:  /path/to/media/fluency
+  motor-data:    /path/to/media/motor
+  phon-data:     /path/to/media/phon
+  psychosis-data: /path/to/media/psychosis
+  rhd-data:      /path/to/media/rhd
+  samtale-data:  /path/to/media/samtale
+  slabank-data:  /path/to/media/slabank
+  tbi-data:      /path/to/media/tbi

@@ -11,22 +11,29 @@ description = "Transformation pipelines for CHAT format (CHAT ↔ JSON, normaliz
 readme = "README.md"
 
 [dependencies]
+aho-corasick = { workspace = true }
 blake3 = { workspace = true }
 crossbeam-channel = "0.5"
+csv = { workspace = true }
 dirs = { workspace = true }
 jsonschema = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 num_cpus = "1.17"
 quick-xml = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smallvec = { workspace = true }
 sqlx = { workspace = true }
+strsim = { workspace = true }
 talkbank-model = { workspace = true }
 talkbank-parser = { workspace = true }
 talkbank-re2c-parser = { workspace = true }
 thiserror = { workspace = true } #unified
 tokio = { workspace = true }
 tracing = { workspace = true }
+whatlang = { workspace = true }
+zhconv = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

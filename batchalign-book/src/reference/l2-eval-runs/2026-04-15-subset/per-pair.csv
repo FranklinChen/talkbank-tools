@@ -1,0 +1,5 @@
+pair_key,files,at_s_total,spliced,splice_rate,l2xxx,missing_mor,heuristic_clean,heuristic_clean_rate,flag_L2Xxx,flag_MissingMor,flag_PropnForFunctionWord,flag_FeaturePosMismatch,top_pos
+"cat,spa",3,308,308,1.000,0,0,299,0.971,0,0,0,9,"noun:115, pron:53, verb:53, adj:30, sconj:13"
+"deu,eng",3,477,473,0.992,0,4,470,0.985,0,4,0,3,"noun:149, propn:56, verb:44, pron:41, adv:34"
+"eng,spa",3,2420,2389,0.987,0,31,2363,0.976,0,31,9,17,"pron:437, verb:425, noun:291, det:224, adp:176"
+"fra,nld",3,73,73,1.000,0,0,73,1.000,0,0,0,0,"noun:51, intj:9, propn:4, verb:2, adv:2"

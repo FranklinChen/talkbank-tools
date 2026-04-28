@@ -1,0 +1,18 @@
+# flaky-tests.toml — tests exempt from the Phase E history-driven
+# ordering because they're known to flake for operational reasons
+# that aren't the "fix the bug" kind.
+#
+# Contract (see docs/test-management-convention.md §"Flaky-test
+# registry" in the private workspace):
+#
+#   [[flaky]]
+#   test_id = "batchalign/tests/path/test_x.py::test_flaky"
+#   reason = "one sentence on why it flakes — not 'sometimes fails'"
+#   owner = "who owns the fix"
+#   target_fix_date = "YYYY-MM-DD"
+#
+# An empty file is the preferred state. If Phase E's priority ordering
+# surfaces a test as highest-priority run after run, either register
+# it here (with a plan) or fix the flake.
+
+# (no registered flaky tests at 2026-04-23 22:38 EDT)

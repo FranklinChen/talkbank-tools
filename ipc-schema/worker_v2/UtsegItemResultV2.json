@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UtsegItemResultV2",
+  "description": "One utseg item result returned by Python.",
+  "type": "object",
+  "properties": {
+    "assignments": {
+      "description": "Direct word-group assignments when inference succeeded without raw trees.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "integer",
+        "format": "uint",
+        "minimum": 0
+      }
+    },
+    "error": {
+      "description": "Optional per-item runtime error.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trees": {
+      "description": "Raw constituency trees when inference succeeded.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

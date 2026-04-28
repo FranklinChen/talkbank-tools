@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CorefChainRefV2",
+  "description": "One structured coreference chain reference returned by Python.",
+  "type": "object",
+  "properties": {
+    "chain_id": {
+      "description": "Chain identifier assigned by the coreference runtime.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "is_end": {
+      "description": "Whether the current word ends this mention.",
+      "type": "boolean"
+    },
+    "is_start": {
+      "description": "Whether the current word starts this mention.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "chain_id",
+    "is_start",
+    "is_end"
+  ]
+}

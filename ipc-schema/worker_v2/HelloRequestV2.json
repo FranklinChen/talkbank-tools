@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HelloRequestV2",
+  "description": "Initial V2 handshake request sent by Rust.",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "description": "Requested protocol version.",
+      "$ref": "#/$defs/WorkerProtocolVersionV2"
+    },
+    "worker_kind": {
+      "description": "Worker role the parent process expects.",
+      "$ref": "#/$defs/WorkerKindV2"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "worker_kind"
+  ],
+  "$defs": {
+    "WorkerKindV2": {
+      "description": "Worker role selected during the protocol handshake.",
+      "oneOf": [
+        {
+          "description": "Stateless inference worker process.",
+          "type": "string",
+          "const": "infer"
+        }
+      ]
+    },
+    "WorkerProtocolVersionV2": {
+      "description": "Worker protocol major version.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    }
+  }
+}

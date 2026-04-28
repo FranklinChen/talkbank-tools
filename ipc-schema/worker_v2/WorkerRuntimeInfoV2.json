@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkerRuntimeInfoV2",
+  "description": "Runtime information returned during the V2 handshake.",
+  "type": "object",
+  "properties": {
+    "free_threaded": {
+      "description": "Whether the runtime is free-threaded.",
+      "type": "boolean"
+    },
+    "python_version": {
+      "description": "Python runtime version used by the worker.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "python_version",
+    "free_threaded"
+  ]
+}

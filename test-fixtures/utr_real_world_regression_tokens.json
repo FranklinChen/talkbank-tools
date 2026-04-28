@@ -1,0 +1,2232 @@
+[
+  {
+    "text": "At",
+    "start_ms": 105,
+    "end_ms": 325
+  },
+  {
+    "text": "the",
+    "start_ms": 325,
+    "end_ms": 445
+  },
+  {
+    "text": "bottom",
+    "start_ms": 445,
+    "end_ms": 685
+  },
+  {
+    "text": "Tell",
+    "start_ms": 2155,
+    "end_ms": 2445
+  },
+  {
+    "text": "me",
+    "start_ms": 2445,
+    "end_ms": 2645
+  },
+  {
+    "text": "um",
+    "start_ms": 2905,
+    "end_ms": 3125
+  },
+  {
+    "text": "a",
+    "start_ms": 3485,
+    "end_ms": 3605
+  },
+  {
+    "text": "story",
+    "start_ms": 3655,
+    "end_ms": 4005
+  },
+  {
+    "text": "about",
+    "start_ms": 4135,
+    "end_ms": 4485
+  },
+  {
+    "text": "this",
+    "start_ms": 4675,
+    "end_ms": 4965
+  },
+  {
+    "text": "picture",
+    "start_ms": 4965,
+    "end_ms": 5285
+  },
+  {
+    "text": "Tell",
+    "start_ms": 5595,
+    "end_ms": 5885
+  },
+  {
+    "text": "me",
+    "start_ms": 5885,
+    "end_ms": 6045
+  },
+  {
+    "text": "a",
+    "start_ms": 6125,
+    "end_ms": 6245
+  },
+  {
+    "text": "story",
+    "start_ms": 6245,
+    "end_ms": 6485
+  },
+  {
+    "text": "with",
+    "start_ms": 6515,
+    "end_ms": 6805
+  },
+  {
+    "text": "a",
+    "start_ms": 6845,
+    "end_ms": 6965
+  },
+  {
+    "text": "beginning",
+    "start_ms": 6965,
+    "end_ms": 7325
+  },
+  {
+    "text": "middle",
+    "start_ms": 7385,
+    "end_ms": 7805
+  },
+  {
+    "text": "and",
+    "start_ms": 7945,
+    "end_ms": 8165
+  },
+  {
+    "text": "end",
+    "start_ms": 8225,
+    "end_ms": 8445
+  },
+  {
+    "text": "Okay",
+    "start_ms": 9915,
+    "end_ms": 10205
+  },
+  {
+    "text": "this",
+    "start_ms": 10205,
+    "end_ms": 10485
+  },
+  {
+    "text": "is",
+    "start_ms": 10485,
+    "end_ms": 10645
+  },
+  {
+    "text": "the",
+    "start_ms": 10645,
+    "end_ms": 10765
+  },
+  {
+    "text": "family",
+    "start_ms": 10765,
+    "end_ms": 11005
+  },
+  {
+    "text": "going",
+    "start_ms": 11055,
+    "end_ms": 11405
+  },
+  {
+    "text": "on",
+    "start_ms": 11405,
+    "end_ms": 11605
+  },
+  {
+    "text": "vacation",
+    "start_ms": 11925,
+    "end_ms": 12125
+  },
+  {
+    "text": "Dad's",
+    "start_ms": 13895,
+    "end_ms": 14245
+  },
+  {
+    "text": "driving",
+    "start_ms": 14245,
+    "end_ms": 14485
+  },
+  {
+    "text": "Mom",
+    "start_ms": 14905,
+    "end_ms": 15125
+  },
+  {
+    "text": "is",
+    "start_ms": 15145,
+    "end_ms": 15365
+  },
+  {
+    "text": "in",
+    "start_ms": 15365,
+    "end_ms": 15565
+  },
+  {
+    "text": "the",
+    "start_ms": 15565,
+    "end_ms": 15685
+  },
+  {
+    "text": "on",
+    "start_ms": 15865,
+    "end_ms": 16085
+  },
+  {
+    "text": "the",
+    "start_ms": 16085,
+    "end_ms": 16205
+  },
+  {
+    "text": "passenger",
+    "start_ms": 16235,
+    "end_ms": 16845
+  },
+  {
+    "text": "side",
+    "start_ms": 16845,
+    "end_ms": 17125
+  },
+  {
+    "text": "and",
+    "start_ms": 18225,
+    "end_ms": 18445
+  },
+  {
+    "text": "uh",
+    "start_ms": 19065,
+    "end_ms": 19285
+  },
+  {
+    "text": "looks",
+    "start_ms": 20435,
+    "end_ms": 20785
+  },
+  {
+    "text": "like",
+    "start_ms": 20785,
+    "end_ms": 21025
+  },
+  {
+    "text": "a",
+    "start_ms": 21065,
+    "end_ms": 21185
+  },
+  {
+    "text": "set",
+    "start_ms": 21185,
+    "end_ms": 21385
+  },
+  {
+    "text": "of",
+    "start_ms": 21385,
+    "end_ms": 21545
+  },
+  {
+    "text": "twins",
+    "start_ms": 21635,
+    "end_ms": 21985
+  },
+  {
+    "text": "uh",
+    "start_ms": 22325,
+    "end_ms": 22545
+  },
+  {
+    "text": "boy",
+    "start_ms": 23565,
+    "end_ms": 23785
+  },
+  {
+    "text": "twins",
+    "start_ms": 23915,
+    "end_ms": 24265
+  },
+  {
+    "text": "And",
+    "start_ms": 24885,
+    "end_ms": 25105
+  },
+  {
+    "text": "uh",
+    "start_ms": 25245,
+    "end_ms": 25465
+  },
+  {
+    "text": "the",
+    "start_ms": 26405,
+    "end_ms": 26625
+  },
+  {
+    "text": "one",
+    "start_ms": 26645,
+    "end_ms": 26865
+  },
+  {
+    "text": "little",
+    "start_ms": 26865,
+    "end_ms": 27105
+  },
+  {
+    "text": "boy",
+    "start_ms": 27605,
+    "end_ms": 27825
+  },
+  {
+    "text": "has",
+    "start_ms": 27925,
+    "end_ms": 28145
+  },
+  {
+    "text": "a",
+    "start_ms": 28225,
+    "end_ms": 28345
+  },
+  {
+    "text": "dog",
+    "start_ms": 28405,
+    "end_ms": 28625
+  },
+  {
+    "text": "And",
+    "start_ms": 29525,
+    "end_ms": 29745
+  },
+  {
+    "text": "uh",
+    "start_ms": 29805,
+    "end_ms": 30025
+  },
+  {
+    "text": "they're",
+    "start_ms": 30025,
+    "end_ms": 30425
+  },
+  {
+    "text": "hanging",
+    "start_ms": 30425,
+    "end_ms": 30625
+  },
+  {
+    "text": "out",
+    "start_ms": 30685,
+    "end_ms": 30905
+  },
+  {
+    "text": "the",
+    "start_ms": 30905,
+    "end_ms": 31065
+  },
+  {
+    "text": "window",
+    "start_ms": 31065,
+    "end_ms": 31305
+  },
+  {
+    "text": "and",
+    "start_ms": 31805,
+    "end_ms": 32025
+  },
+  {
+    "text": "there's",
+    "start_ms": 32025,
+    "end_ms": 32385
+  },
+  {
+    "text": "a",
+    "start_ms": 32465,
+    "end_ms": 32585
+  },
+  {
+    "text": "little",
+    "start_ms": 32585,
+    "end_ms": 32865
+  },
+  {
+    "text": "sister",
+    "start_ms": 32865,
+    "end_ms": 33225
+  },
+  {
+    "text": "and",
+    "start_ms": 33965,
+    "end_ms": 34185
+  },
+  {
+    "text": "she's",
+    "start_ms": 34235,
+    "end_ms": 34585
+  },
+  {
+    "text": "blowing",
+    "start_ms": 34585,
+    "end_ms": 35025
+  },
+  {
+    "text": "bubble",
+    "start_ms": 35085,
+    "end_ms": 35505
+  },
+  {
+    "text": "gumm",
+    "start_ms": 35655,
+    "end_ms": 35945
+  },
+  {
+    "text": "And",
+    "start_ms": 37165,
+    "end_ms": 37385
+  },
+  {
+    "text": "uh",
+    "start_ms": 38605,
+    "end_ms": 38825
+  },
+  {
+    "text": "that",
+    "start_ms": 39375,
+    "end_ms": 39665
+  },
+  {
+    "text": "so",
+    "start_ms": 40765,
+    "end_ms": 40985
+  },
+  {
+    "text": "they",
+    "start_ms": 42545,
+    "end_ms": 42835
+  },
+  {
+    "text": "start",
+    "start_ms": 42835,
+    "end_ms": 43115
+  },
+  {
+    "text": "out",
+    "start_ms": 43135,
+    "end_ms": 43355
+  },
+  {
+    "text": "on",
+    "start_ms": 43355,
+    "end_ms": 43515
+  },
+  {
+    "text": "this",
+    "start_ms": 43515,
+    "end_ms": 43755
+  },
+  {
+    "text": "vacation",
+    "start_ms": 44035,
+    "end_ms": 44275
+  },
+  {
+    "text": "and",
+    "start_ms": 45585,
+    "end_ms": 45805
+  },
+  {
+    "text": "it",
+    "start_ms": 46225,
+    "end_ms": 46445
+  },
+  {
+    "text": "looks",
+    "start_ms": 46535,
+    "end_ms": 46885
+  },
+  {
+    "text": "like",
+    "start_ms": 46885,
+    "end_ms": 47125
+  },
+  {
+    "text": "it's",
+    "start_ms": 47155,
+    "end_ms": 47445
+  },
+  {
+    "text": "morning",
+    "start_ms": 47445,
+    "end_ms": 47805
+  },
+  {
+    "text": "but",
+    "start_ms": 48025,
+    "end_ms": 48245
+  },
+  {
+    "text": "at",
+    "start_ms": 48245,
+    "end_ms": 48445
+  },
+  {
+    "text": "least",
+    "start_ms": 48445,
+    "end_ms": 48605
+  },
+  {
+    "text": "it's",
+    "start_ms": 48635,
+    "end_ms": 48925
+  },
+  {
+    "text": "daylight",
+    "start_ms": 49085,
+    "end_ms": 49325
+  },
+  {
+    "text": "And",
+    "start_ms": 50385,
+    "end_ms": 50605
+  },
+  {
+    "text": "then",
+    "start_ms": 50675,
+    "end_ms": 50965
+  },
+  {
+    "text": "by",
+    "start_ms": 51705,
+    "end_ms": 51925
+  },
+  {
+    "text": "the",
+    "start_ms": 51925,
+    "end_ms": 52045
+  },
+  {
+    "text": "time",
+    "start_ms": 52045,
+    "end_ms": 52205
+  },
+  {
+    "text": "they",
+    "start_ms": 52235,
+    "end_ms": 52525
+  },
+  {
+    "text": "arrive",
+    "start_ms": 52545,
+    "end_ms": 52965
+  },
+  {
+    "text": "at",
+    "start_ms": 53785,
+    "end_ms": 54005
+  },
+  {
+    "text": "that",
+    "start_ms": 54255,
+    "end_ms": 54495
+  },
+  {
+    "text": "destination",
+    "start_ms": 54565,
+    "end_ms": 55255
+  },
+  {
+    "text": "it's",
+    "start_ms": 56285,
+    "end_ms": 56575
+  },
+  {
+    "text": "uh",
+    "start_ms": 56955,
+    "end_ms": 57175
+  },
+  {
+    "text": "dark",
+    "start_ms": 57525,
+    "end_ms": 57815
+  },
+  {
+    "text": "Mom",
+    "start_ms": 58315,
+    "end_ms": 58535
+  },
+  {
+    "text": "is",
+    "start_ms": 58635,
+    "end_ms": 58855
+  },
+  {
+    "text": "asleep",
+    "start_ms": 58855,
+    "end_ms": 59095
+  },
+  {
+    "text": "Dad",
+    "start_ms": 59355,
+    "end_ms": 59575
+  },
+  {
+    "text": "looks",
+    "start_ms": 59575,
+    "end_ms": 59855
+  },
+  {
+    "text": "like",
+    "start_ms": 59855,
+    "end_ms": 60095
+  },
+  {
+    "text": "he's",
+    "start_ms": 60165,
+    "end_ms": 60455
+  },
+  {
+    "text": "really",
+    "start_ms": 60455,
+    "end_ms": 60855
+  },
+  {
+    "text": "tired",
+    "start_ms": 60905,
+    "end_ms": 61255
+  },
+  {
+    "text": "at",
+    "start_ms": 61355,
+    "end_ms": 61575
+  },
+  {
+    "text": "the",
+    "start_ms": 61575,
+    "end_ms": 61735
+  },
+  {
+    "text": "wheel",
+    "start_ms": 61735,
+    "end_ms": 62015
+  },
+  {
+    "text": "and",
+    "start_ms": 63235,
+    "end_ms": 63455
+  },
+  {
+    "text": "the",
+    "start_ms": 64035,
+    "end_ms": 64255
+  },
+  {
+    "text": "little",
+    "start_ms": 64255,
+    "end_ms": 64495
+  },
+  {
+    "text": "boy",
+    "start_ms": 64635,
+    "end_ms": 64855
+  },
+  {
+    "text": "is",
+    "start_ms": 65895,
+    "end_ms": 66115
+  },
+  {
+    "text": "looking",
+    "start_ms": 66115,
+    "end_ms": 66355
+  },
+  {
+    "text": "out",
+    "start_ms": 66415,
+    "end_ms": 66635
+  },
+  {
+    "text": "the",
+    "start_ms": 66635,
+    "end_ms": 66795
+  },
+  {
+    "text": "window",
+    "start_ms": 66795,
+    "end_ms": 67035
+  },
+  {
+    "text": "with",
+    "start_ms": 67105,
+    "end_ms": 67395
+  },
+  {
+    "text": "the",
+    "start_ms": 67395,
+    "end_ms": 67595
+  },
+  {
+    "text": "dog",
+    "start_ms": 67655,
+    "end_ms": 67875
+  },
+  {
+    "text": "and",
+    "start_ms": 68215,
+    "end_ms": 68435
+  },
+  {
+    "text": "the",
+    "start_ms": 68815,
+    "end_ms": 69035
+  },
+  {
+    "text": "little",
+    "start_ms": 69035,
+    "end_ms": 69235
+  },
+  {
+    "text": "girl",
+    "start_ms": 69235,
+    "end_ms": 69515
+  },
+  {
+    "text": "Oh",
+    "start_ms": 69735,
+    "end_ms": 69955
+  },
+  {
+    "text": "there's",
+    "start_ms": 69955,
+    "end_ms": 70315
+  },
+  {
+    "text": "grandma",
+    "start_ms": 70315,
+    "end_ms": 70555
+  },
+  {
+    "text": "in",
+    "start_ms": 70735,
+    "end_ms": 70955
+  },
+  {
+    "text": "the",
+    "start_ms": 70955,
+    "end_ms": 71075
+  },
+  {
+    "text": "back",
+    "start_ms": 71075,
+    "end_ms": 71275
+  },
+  {
+    "text": "She's",
+    "start_ms": 71525,
+    "end_ms": 71875
+  },
+  {
+    "text": "in",
+    "start_ms": 71875,
+    "end_ms": 72035
+  },
+  {
+    "text": "the",
+    "start_ms": 72035,
+    "end_ms": 72115
+  },
+  {
+    "text": "back",
+    "start_ms": 72115,
+    "end_ms": 72315
+  },
+  {
+    "text": "with",
+    "start_ms": 72315,
+    "end_ms": 72475
+  },
+  {
+    "text": "the",
+    "start_ms": 72475,
+    "end_ms": 72675
+  },
+  {
+    "text": "other",
+    "start_ms": 72675,
+    "end_ms": 72995
+  },
+  {
+    "text": "twin",
+    "start_ms": 73065,
+    "end_ms": 73355
+  },
+  {
+    "text": "I",
+    "start_ms": 73635,
+    "end_ms": 73755
+  },
+  {
+    "text": "didn't",
+    "start_ms": 73755,
+    "end_ms": 73955
+  },
+  {
+    "text": "see",
+    "start_ms": 73955,
+    "end_ms": 74075
+  },
+  {
+    "text": "her",
+    "start_ms": 74095,
+    "end_ms": 74315
+  },
+  {
+    "text": "Oh",
+    "start_ms": 75865,
+    "end_ms": 76085
+  },
+  {
+    "text": "yeah",
+    "start_ms": 76085,
+    "end_ms": 76325
+  },
+  {
+    "text": "she's",
+    "start_ms": 76405,
+    "end_ms": 76725
+  },
+  {
+    "text": "in",
+    "start_ms": 76725,
+    "end_ms": 76845
+  },
+  {
+    "text": "the",
+    "start_ms": 76845,
+    "end_ms": 77005
+  },
+  {
+    "text": "first",
+    "start_ms": 77005,
+    "end_ms": 77165
+  },
+  {
+    "text": "one",
+    "start_ms": 77185,
+    "end_ms": 77405
+  },
+  {
+    "text": "as",
+    "start_ms": 77625,
+    "end_ms": 77845
+  },
+  {
+    "text": "well",
+    "start_ms": 77845,
+    "end_ms": 78005
+  },
+  {
+    "text": "So",
+    "start_ms": 78545,
+    "end_ms": 78765
+  },
+  {
+    "text": "anyway",
+    "start_ms": 78825,
+    "end_ms": 79245
+  },
+  {
+    "text": "grandma",
+    "start_ms": 79635,
+    "end_ms": 80125
+  },
+  {
+    "text": "is",
+    "start_ms": 80345,
+    "end_ms": 80565
+  },
+  {
+    "text": "sitting",
+    "start_ms": 80565,
+    "end_ms": 80765
+  },
+  {
+    "text": "in",
+    "start_ms": 80785,
+    "end_ms": 81005
+  },
+  {
+    "text": "the",
+    "start_ms": 81005,
+    "end_ms": 81125
+  },
+  {
+    "text": "back",
+    "start_ms": 81125,
+    "end_ms": 81325
+  },
+  {
+    "text": "with",
+    "start_ms": 81395,
+    "end_ms": 81685
+  },
+  {
+    "text": "the",
+    "start_ms": 81865,
+    "end_ms": 82085
+  },
+  {
+    "text": "other",
+    "start_ms": 82085,
+    "end_ms": 82285
+  },
+  {
+    "text": "twin",
+    "start_ms": 82355,
+    "end_ms": 82645
+  },
+  {
+    "text": "who",
+    "start_ms": 82745,
+    "end_ms": 82965
+  },
+  {
+    "text": "boy",
+    "start_ms": 83265,
+    "end_ms": 83485
+  },
+  {
+    "text": "who",
+    "start_ms": 83545,
+    "end_ms": 83765
+  },
+  {
+    "text": "was",
+    "start_ms": 83765,
+    "end_ms": 83925
+  },
+  {
+    "text": "asleep",
+    "start_ms": 83925,
+    "end_ms": 84245
+  },
+  {
+    "text": "All",
+    "start_ms": 86215,
+    "end_ms": 86435
+  },
+  {
+    "text": "right",
+    "start_ms": 86435,
+    "end_ms": 86595
+  },
+  {
+    "text": "Are",
+    "start_ms": 89245,
+    "end_ms": 89465
+  },
+  {
+    "text": "you",
+    "start_ms": 89465,
+    "end_ms": 89585
+  },
+  {
+    "text": "familiar",
+    "start_ms": 89745,
+    "end_ms": 89865
+  },
+  {
+    "text": "with",
+    "start_ms": 89895,
+    "end_ms": 90185
+  },
+  {
+    "text": "the",
+    "start_ms": 90185,
+    "end_ms": 90345
+  },
+  {
+    "text": "story",
+    "start_ms": 90345,
+    "end_ms": 90625
+  },
+  {
+    "text": "of",
+    "start_ms": 90685,
+    "end_ms": 90905
+  },
+  {
+    "text": "Cinderella",
+    "start_ms": 90905,
+    "end_ms": 91505
+  },
+  {
+    "text": "Yes",
+    "start_ms": 92595,
+    "end_ms": 92815
+  },
+  {
+    "text": "Okay",
+    "start_ms": 93245,
+    "end_ms": 93535
+  },
+  {
+    "text": "So",
+    "start_ms": 93915,
+    "end_ms": 94135
+  },
+  {
+    "text": "we're",
+    "start_ms": 94145,
+    "end_ms": 94495
+  },
+  {
+    "text": "gonna",
+    "start_ms": 94495,
+    "end_ms": 94615
+  },
+  {
+    "text": "take",
+    "start_ms": 95005,
+    "end_ms": 95295
+  },
+  {
+    "text": "a",
+    "start_ms": 95415,
+    "end_ms": 95535
+  },
+  {
+    "text": "few",
+    "start_ms": 95535,
+    "end_ms": 95655
+  },
+  {
+    "text": "minutes",
+    "start_ms": 95655,
+    "end_ms": 95895
+  },
+  {
+    "text": "to",
+    "start_ms": 95955,
+    "end_ms": 96175
+  },
+  {
+    "text": "look",
+    "start_ms": 96175,
+    "end_ms": 96375
+  },
+  {
+    "text": "at",
+    "start_ms": 96655,
+    "end_ms": 96815
+  },
+  {
+    "text": "some",
+    "start_ms": 96815,
+    "end_ms": 96975
+  },
+  {
+    "text": "pictures",
+    "start_ms": 96975,
+    "end_ms": 97415
+  },
+  {
+    "text": "to",
+    "start_ms": 97555,
+    "end_ms": 97775
+  },
+  {
+    "text": "refresh",
+    "start_ms": 97775,
+    "end_ms": 98135
+  },
+  {
+    "text": "your",
+    "start_ms": 98135,
+    "end_ms": 98375
+  },
+  {
+    "text": "memory",
+    "start_ms": 98375,
+    "end_ms": 98615
+  },
+  {
+    "text": "and",
+    "start_ms": 99235,
+    "end_ms": 99455
+  },
+  {
+    "text": "then",
+    "start_ms": 99455,
+    "end_ms": 99615
+  },
+  {
+    "text": "you'll",
+    "start_ms": 99615,
+    "end_ms": 99975
+  },
+  {
+    "text": "have",
+    "start_ms": 99975,
+    "end_ms": 100175
+  },
+  {
+    "text": "a",
+    "start_ms": 100215,
+    "end_ms": 100335
+  },
+  {
+    "text": "chance",
+    "start_ms": 100335,
+    "end_ms": 100535
+  },
+  {
+    "text": "to",
+    "start_ms": 100595,
+    "end_ms": 100815
+  },
+  {
+    "text": "tell",
+    "start_ms": 100815,
+    "end_ms": 101055
+  },
+  {
+    "text": "me",
+    "start_ms": 101055,
+    "end_ms": 101255
+  },
+  {
+    "text": "the",
+    "start_ms": 101435,
+    "end_ms": 101655
+  },
+  {
+    "text": "story",
+    "start_ms": 101655,
+    "end_ms": 101935
+  },
+  {
+    "text": "of",
+    "start_ms": 101935,
+    "end_ms": 102135
+  },
+  {
+    "text": "Cinderella",
+    "start_ms": 102135,
+    "end_ms": 102695
+  },
+  {
+    "text": "in",
+    "start_ms": 102795,
+    "end_ms": 103015
+  },
+  {
+    "text": "your",
+    "start_ms": 103015,
+    "end_ms": 103215
+  },
+  {
+    "text": "own",
+    "start_ms": 103215,
+    "end_ms": 103415
+  },
+  {
+    "text": "words",
+    "start_ms": 103415,
+    "end_ms": 103735
+  },
+  {
+    "text": "So",
+    "start_ms": 105335,
+    "end_ms": 105555
+  },
+  {
+    "text": "here",
+    "start_ms": 105555,
+    "end_ms": 105795
+  },
+  {
+    "text": "are",
+    "start_ms": 105795,
+    "end_ms": 105995
+  },
+  {
+    "text": "the",
+    "start_ms": 105995,
+    "end_ms": 106155
+  },
+  {
+    "text": "pictures",
+    "start_ms": 106155,
+    "end_ms": 106555
+  },
+  {
+    "text": "Okay",
+    "start_ms": 139695,
+    "end_ms": 139985
+  },
+  {
+    "text": "So",
+    "start_ms": 140365,
+    "end_ms": 140585
+  },
+  {
+    "text": "now",
+    "start_ms": 140645,
+    "end_ms": 140865
+  },
+  {
+    "text": "I",
+    "start_ms": 140945,
+    "end_ms": 141065
+  },
+  {
+    "text": "want",
+    "start_ms": 141065,
+    "end_ms": 141265
+  },
+  {
+    "text": "you",
+    "start_ms": 141265,
+    "end_ms": 141385
+  },
+  {
+    "text": "to",
+    "start_ms": 141385,
+    "end_ms": 141545
+  },
+  {
+    "text": "tell",
+    "start_ms": 141545,
+    "end_ms": 141785
+  },
+  {
+    "text": "me",
+    "start_ms": 141785,
+    "end_ms": 141945
+  },
+  {
+    "text": "the",
+    "start_ms": 142005,
+    "end_ms": 142225
+  },
+  {
+    "text": "story",
+    "start_ms": 142225,
+    "end_ms": 142545
+  },
+  {
+    "text": "of",
+    "start_ms": 142685,
+    "end_ms": 142905
+  },
+  {
+    "text": "Cinderella",
+    "start_ms": 142905,
+    "end_ms": 143545
+  },
+  {
+    "text": "in",
+    "start_ms": 143725,
+    "end_ms": 143945
+  },
+  {
+    "text": "your",
+    "start_ms": 143945,
+    "end_ms": 144065
+  },
+  {
+    "text": "own",
+    "start_ms": 144125,
+    "end_ms": 144345
+  },
+  {
+    "text": "words",
+    "start_ms": 144355,
+    "end_ms": 144705
+  },
+  {
+    "text": "You",
+    "start_ms": 145565,
+    "end_ms": 145785
+  },
+  {
+    "text": "can",
+    "start_ms": 145805,
+    "end_ms": 146025
+  },
+  {
+    "text": "use",
+    "start_ms": 146165,
+    "end_ms": 146385
+  },
+  {
+    "text": "any",
+    "start_ms": 146605,
+    "end_ms": 146825
+  },
+  {
+    "text": "details",
+    "start_ms": 146825,
+    "end_ms": 147305
+  },
+  {
+    "text": "from",
+    "start_ms": 147535,
+    "end_ms": 147825
+  },
+  {
+    "text": "the",
+    "start_ms": 147825,
+    "end_ms": 148025
+  },
+  {
+    "text": "pictures",
+    "start_ms": 148025,
+    "end_ms": 148545
+  },
+  {
+    "text": "that",
+    "start_ms": 148575,
+    "end_ms": 148865
+  },
+  {
+    "text": "you",
+    "start_ms": 148865,
+    "end_ms": 149065
+  },
+  {
+    "text": "just",
+    "start_ms": 149065,
+    "end_ms": 149265
+  },
+  {
+    "text": "saw",
+    "start_ms": 149365,
+    "end_ms": 149585
+  },
+  {
+    "text": "or",
+    "start_ms": 150365,
+    "end_ms": 150585
+  },
+  {
+    "text": "from",
+    "start_ms": 150815,
+    "end_ms": 151105
+  },
+  {
+    "text": "the",
+    "start_ms": 151325,
+    "end_ms": 151545
+  },
+  {
+    "text": "story",
+    "start_ms": 151545,
+    "end_ms": 151825
+  },
+  {
+    "text": "as",
+    "start_ms": 151925,
+    "end_ms": 152145
+  },
+  {
+    "text": "you",
+    "start_ms": 152145,
+    "end_ms": 152305
+  },
+  {
+    "text": "already",
+    "start_ms": 152305,
+    "end_ms": 152505
+  },
+  {
+    "text": "knew",
+    "start_ms": 152505,
+    "end_ms": 152785
+  },
+  {
+    "text": "it",
+    "start_ms": 152785,
+    "end_ms": 152905
+  },
+  {
+    "text": "Uh",
+    "start_ms": 155085,
+    "end_ms": 155305
+  },
+  {
+    "text": "Cinderella",
+    "start_ms": 155315,
+    "end_ms": 155985
+  },
+  {
+    "text": "is",
+    "start_ms": 156205,
+    "end_ms": 156425
+  },
+  {
+    "text": "an",
+    "start_ms": 156565,
+    "end_ms": 156785
+  },
+  {
+    "text": "only",
+    "start_ms": 156785,
+    "end_ms": 157065
+  },
+  {
+    "text": "child",
+    "start_ms": 157195,
+    "end_ms": 157545
+  },
+  {
+    "text": "and",
+    "start_ms": 159635,
+    "end_ms": 159855
+  },
+  {
+    "text": "um",
+    "start_ms": 160555,
+    "end_ms": 160775
+  },
+  {
+    "text": "she",
+    "start_ms": 161395,
+    "end_ms": 161615
+  },
+  {
+    "text": "doesn't",
+    "start_ms": 161615,
+    "end_ms": 161935
+  },
+  {
+    "text": "have",
+    "start_ms": 161935,
+    "end_ms": 162095
+  },
+  {
+    "text": "a",
+    "start_ms": 162175,
+    "end_ms": 162295
+  },
+  {
+    "text": "mother",
+    "start_ms": 162295,
+    "end_ms": 162495
+  },
+  {
+    "text": "but",
+    "start_ms": 163075,
+    "end_ms": 163295
+  },
+  {
+    "text": "her",
+    "start_ms": 163295,
+    "end_ms": 163455
+  },
+  {
+    "text": "father",
+    "start_ms": 163455,
+    "end_ms": 163615
+  },
+  {
+    "text": "is",
+    "start_ms": 163755,
+    "end_ms": 163975
+  },
+  {
+    "text": "there",
+    "start_ms": 163975,
+    "end_ms": 164215
+  },
+  {
+    "text": "He",
+    "start_ms": 164635,
+    "end_ms": 164855
+  },
+  {
+    "text": "remarries",
+    "start_ms": 165055,
+    "end_ms": 165535
+  },
+  {
+    "text": "and",
+    "start_ms": 166545,
+    "end_ms": 166765
+  },
+  {
+    "text": "um",
+    "start_ms": 167985,
+    "end_ms": 168205
+  },
+  {
+    "text": "I'm",
+    "start_ms": 168745,
+    "end_ms": 168965
+  },
+  {
+    "text": "gonna",
+    "start_ms": 168965,
+    "end_ms": 169045
+  },
+  {
+    "text": "say",
+    "start_ms": 169045,
+    "end_ms": 169205
+  },
+  {
+    "text": "he",
+    "start_ms": 169205,
+    "end_ms": 169405
+  },
+  {
+    "text": "remarries",
+    "start_ms": 169605,
+    "end_ms": 170005
+  },
+  {
+    "text": "a",
+    "start_ms": 170125,
+    "end_ms": 170245
+  },
+  {
+    "text": "doctor",
+    "start_ms": 171175,
+    "end_ms": 171595
+  },
+  {
+    "text": "or",
+    "start_ms": 171815,
+    "end_ms": 172035
+  },
+  {
+    "text": "something",
+    "start_ms": 172035,
+    "end_ms": 172395
+  },
+  {
+    "text": "But",
+    "start_ms": 172535,
+    "end_ms": 172755
+  },
+  {
+    "text": "anyway",
+    "start_ms": 173215,
+    "end_ms": 173635
+  },
+  {
+    "text": "she",
+    "start_ms": 173775,
+    "end_ms": 173995
+  },
+  {
+    "text": "has",
+    "start_ms": 174015,
+    "end_ms": 174235
+  },
+  {
+    "text": "two",
+    "start_ms": 174255,
+    "end_ms": 174475
+  },
+  {
+    "text": "stepdaughters",
+    "start_ms": 174475,
+    "end_ms": 175235
+  },
+  {
+    "text": "They're",
+    "start_ms": 175825,
+    "end_ms": 176315
+  },
+  {
+    "text": "not",
+    "start_ms": 176315,
+    "end_ms": 176475
+  },
+  {
+    "text": "very",
+    "start_ms": 176475,
+    "end_ms": 176715
+  },
+  {
+    "text": "friendly",
+    "start_ms": 176955,
+    "end_ms": 177075
+  },
+  {
+    "text": "and",
+    "start_ms": 177335,
+    "end_ms": 177555
+  },
+  {
+    "text": "the",
+    "start_ms": 177555,
+    "end_ms": 177675
+  },
+  {
+    "text": "stepmother",
+    "start_ms": 177675,
+    "end_ms": 178195
+  },
+  {
+    "text": "uses",
+    "start_ms": 179075,
+    "end_ms": 179365
+  },
+  {
+    "text": "Cinderella",
+    "start_ms": 179365,
+    "end_ms": 179885
+  },
+  {
+    "text": "as",
+    "start_ms": 180145,
+    "end_ms": 180365
+  },
+  {
+    "text": "as",
+    "start_ms": 180545,
+    "end_ms": 180765
+  },
+  {
+    "text": "a",
+    "start_ms": 180845,
+    "end_ms": 180965
+  },
+  {
+    "text": "maid",
+    "start_ms": 181035,
+    "end_ms": 181325
+  },
+  {
+    "text": "Well",
+    "start_ms": 182205,
+    "end_ms": 182495
+  },
+  {
+    "text": "there's",
+    "start_ms": 182765,
+    "end_ms": 183255
+  },
+  {
+    "text": "a",
+    "start_ms": 183455,
+    "end_ms": 183575
+  },
+  {
+    "text": "ball",
+    "start_ms": 183575,
+    "end_ms": 183855
+  },
+  {
+    "text": "that's",
+    "start_ms": 184075,
+    "end_ms": 184495
+  },
+  {
+    "text": "going",
+    "start_ms": 184495,
+    "end_ms": 184735
+  },
+  {
+    "text": "to",
+    "start_ms": 184735,
+    "end_ms": 184935
+  },
+  {
+    "text": "happen",
+    "start_ms": 184935,
+    "end_ms": 185175
+  },
+  {
+    "text": "and",
+    "start_ms": 186235,
+    "end_ms": 186455
+  },
+  {
+    "text": "um",
+    "start_ms": 187275,
+    "end_ms": 187495
+  },
+  {
+    "text": "Cinderella",
+    "start_ms": 188915,
+    "end_ms": 189585
+  },
+  {
+    "text": "wants",
+    "start_ms": 190115,
+    "end_ms": 190465
+  },
+  {
+    "text": "to",
+    "start_ms": 190485,
+    "end_ms": 190705
+  },
+  {
+    "text": "go",
+    "start_ms": 190705,
+    "end_ms": 190905
+  },
+  {
+    "text": "and",
+    "start_ms": 191405,
+    "end_ms": 191625
+  },
+  {
+    "text": "the",
+    "start_ms": 191925,
+    "end_ms": 192145
+  },
+  {
+    "text": "ferry",
+    "start_ms": 192305,
+    "end_ms": 192545
+  },
+  {
+    "text": "godmother",
+    "start_ms": 192895,
+    "end_ms": 193505
+  },
+  {
+    "text": "shows",
+    "start_ms": 193505,
+    "end_ms": 193825
+  },
+  {
+    "text": "up",
+    "start_ms": 193885,
+    "end_ms": 194105
+  },
+  {
+    "text": "and",
+    "start_ms": 194205,
+    "end_ms": 194425
+  },
+  {
+    "text": "provides",
+    "start_ms": 194945,
+    "end_ms": 195505
+  },
+  {
+    "text": "a",
+    "start_ms": 195585,
+    "end_ms": 195705
+  },
+  {
+    "text": "gown",
+    "start_ms": 195815,
+    "end_ms": 196105
+  },
+  {
+    "text": "for",
+    "start_ms": 196125,
+    "end_ms": 196345
+  },
+  {
+    "text": "her",
+    "start_ms": 196345,
+    "end_ms": 196545
+  },
+  {
+    "text": "And",
+    "start_ms": 196805,
+    "end_ms": 197025
+  },
+  {
+    "text": "she",
+    "start_ms": 197605,
+    "end_ms": 197825
+  },
+  {
+    "text": "goes",
+    "start_ms": 197865,
+    "end_ms": 198105
+  },
+  {
+    "text": "to",
+    "start_ms": 198125,
+    "end_ms": 198345
+  },
+  {
+    "text": "the",
+    "start_ms": 198345,
+    "end_ms": 198505
+  },
+  {
+    "text": "ball",
+    "start_ms": 198535,
+    "end_ms": 198825
+  },
+  {
+    "text": "and",
+    "start_ms": 199045,
+    "end_ms": 199265
+  },
+  {
+    "text": "she",
+    "start_ms": 199845,
+    "end_ms": 200065
+  },
+  {
+    "text": "dances",
+    "start_ms": 200165,
+    "end_ms": 200585
+  },
+  {
+    "text": "with",
+    "start_ms": 200615,
+    "end_ms": 200905
+  },
+  {
+    "text": "with",
+    "start_ms": 201255,
+    "end_ms": 201545
+  },
+  {
+    "text": "the",
+    "start_ms": 201565,
+    "end_ms": 201785
+  },
+  {
+    "text": "prince",
+    "start_ms": 201785,
+    "end_ms": 202105
+  },
+  {
+    "text": "and",
+    "start_ms": 202685,
+    "end_ms": 202905
+  },
+  {
+    "text": "the",
+    "start_ms": 203885,
+    "end_ms": 204105
+  },
+  {
+    "text": "stepmother",
+    "start_ms": 204105,
+    "end_ms": 204665
+  },
+  {
+    "text": "and",
+    "start_ms": 204965,
+    "end_ms": 205185
+  },
+  {
+    "text": "the",
+    "start_ms": 205765,
+    "end_ms": 205985
+  },
+  {
+    "text": "stepdaughters",
+    "start_ms": 205985,
+    "end_ms": 206745
+  },
+  {
+    "text": "are",
+    "start_ms": 207005,
+    "end_ms": 207225
+  },
+  {
+    "text": "are",
+    "start_ms": 207405,
+    "end_ms": 207625
+  },
+  {
+    "text": "not",
+    "start_ms": 207645,
+    "end_ms": 207865
+  },
+  {
+    "text": "uh",
+    "start_ms": 208325,
+    "end_ms": 208545
+  },
+  {
+    "text": "her",
+    "start_ms": 209285,
+    "end_ms": 209505
+  },
+  {
+    "text": "stepsisters",
+    "start_ms": 209505,
+    "end_ms": 210145
+  },
+  {
+    "text": "are",
+    "start_ms": 210165,
+    "end_ms": 210385
+  },
+  {
+    "text": "not",
+    "start_ms": 210385,
+    "end_ms": 210585
+  },
+  {
+    "text": "very",
+    "start_ms": 210585,
+    "end_ms": 210785
+  },
+  {
+    "text": "happy",
+    "start_ms": 210785,
+    "end_ms": 211065
+  },
+  {
+    "text": "about",
+    "start_ms": 211115,
+    "end_ms": 211465
+  },
+  {
+    "text": "it",
+    "start_ms": 211465,
+    "end_ms": 211625
+  },
+  {
+    "text": "But",
+    "start_ms": 212165,
+    "end_ms": 212385
+  },
+  {
+    "text": "anyway",
+    "start_ms": 212405,
+    "end_ms": 212825
+  },
+  {
+    "text": "she",
+    "start_ms": 212845,
+    "end_ms": 213065
+  },
+  {
+    "text": "she",
+    "start_ms": 213365,
+    "end_ms": 213585
+  },
+  {
+    "text": "loses",
+    "start_ms": 213915,
+    "end_ms": 214265
+  },
+  {
+    "text": "the",
+    "start_ms": 214265,
+    "end_ms": 214465
+  },
+  {
+    "text": "slipper",
+    "start_ms": 214465,
+    "end_ms": 214905
+  },
+  {
+    "text": "And",
+    "start_ms": 216175,
+    "end_ms": 216395
+  },
+  {
+    "text": "so",
+    "start_ms": 217535,
+    "end_ms": 217755
+  },
+  {
+    "text": "the",
+    "start_ms": 218095,
+    "end_ms": 218315
+  },
+  {
+    "text": "prince",
+    "start_ms": 218315,
+    "end_ms": 218595
+  },
+  {
+    "text": "is",
+    "start_ms": 218815,
+    "end_ms": 219035
+  },
+  {
+    "text": "trying",
+    "start_ms": 219175,
+    "end_ms": 219595
+  },
+  {
+    "text": "to",
+    "start_ms": 219595,
+    "end_ms": 219755
+  },
+  {
+    "text": "find",
+    "start_ms": 219755,
+    "end_ms": 219995
+  },
+  {
+    "text": "out",
+    "start_ms": 220095,
+    "end_ms": 220315
+  },
+  {
+    "text": "the",
+    "start_ms": 221905,
+    "end_ms": 222125
+  },
+  {
+    "text": "princess",
+    "start_ms": 223335,
+    "end_ms": 223535
+  },
+  {
+    "text": "that",
+    "start_ms": 223535,
+    "end_ms": 223775
+  },
+  {
+    "text": "he",
+    "start_ms": 223915,
+    "end_ms": 224135
+  },
+  {
+    "text": "danced",
+    "start_ms": 224195,
+    "end_ms": 224615
+  },
+  {
+    "text": "with",
+    "start_ms": 224615,
+    "end_ms": 224815
+  },
+  {
+    "text": "And",
+    "start_ms": 225855,
+    "end_ms": 226075
+  },
+  {
+    "text": "so",
+    "start_ms": 227195,
+    "end_ms": 227415
+  },
+  {
+    "text": "in",
+    "start_ms": 227415,
+    "end_ms": 227575
+  },
+  {
+    "text": "order",
+    "start_ms": 227575,
+    "end_ms": 227775
+  },
+  {
+    "text": "to",
+    "start_ms": 227795,
+    "end_ms": 228015
+  },
+  {
+    "text": "do",
+    "start_ms": 228015,
+    "end_ms": 228175
+  },
+  {
+    "text": "that",
+    "start_ms": 228175,
+    "end_ms": 228415
+  },
+  {
+    "text": "he",
+    "start_ms": 228635,
+    "end_ms": 228855
+  },
+  {
+    "text": "has",
+    "start_ms": 228855,
+    "end_ms": 229055
+  },
+  {
+    "text": "to",
+    "start_ms": 229055,
+    "end_ms": 229255
+  },
+  {
+    "text": "find",
+    "start_ms": 229255,
+    "end_ms": 229495
+  },
+  {
+    "text": "out",
+    "start_ms": 229595,
+    "end_ms": 229815
+  },
+  {
+    "text": "whose",
+    "start_ms": 230465,
+    "end_ms": 230815
+  },
+  {
+    "text": "foot",
+    "start_ms": 230845,
+    "end_ms": 231135
+  },
+  {
+    "text": "fits",
+    "start_ms": 231325,
+    "end_ms": 231615
+  },
+  {
+    "text": "the",
+    "start_ms": 231675,
+    "end_ms": 231895
+  },
+  {
+    "text": "shoe",
+    "start_ms": 231895,
+    "end_ms": 232135
+  },
+  {
+    "text": "and",
+    "start_ms": 232155,
+    "end_ms": 232375
+  },
+  {
+    "text": "then",
+    "start_ms": 232375,
+    "end_ms": 232455
+  },
+  {
+    "text": "he'll",
+    "start_ms": 232465,
+    "end_ms": 232815
+  },
+  {
+    "text": "know",
+    "start_ms": 232815,
+    "end_ms": 232935
+  },
+  {
+    "text": "And",
+    "start_ms": 233715,
+    "end_ms": 233935
+  },
+  {
+    "text": "she",
+    "start_ms": 234425,
+    "end_ms": 234645
+  },
+  {
+    "text": "was",
+    "start_ms": 234645,
+    "end_ms": 234845
+  },
+  {
+    "text": "the",
+    "start_ms": 234845,
+    "end_ms": 235045
+  },
+  {
+    "text": "one",
+    "start_ms": 235045,
+    "end_ms": 235205
+  },
+  {
+    "text": "that",
+    "start_ms": 235205,
+    "end_ms": 235445
+  },
+  {
+    "text": "danced",
+    "start_ms": 235445,
+    "end_ms": 235845
+  },
+  {
+    "text": "with",
+    "start_ms": 235845,
+    "end_ms": 236005
+  },
+  {
+    "text": "him",
+    "start_ms": 236005,
+    "end_ms": 236205
+  },
+  {
+    "text": "So",
+    "start_ms": 236585,
+    "end_ms": 236805
+  },
+  {
+    "text": "anyway",
+    "start_ms": 236945,
+    "end_ms": 237365
+  },
+  {
+    "text": "they",
+    "start_ms": 239385,
+    "end_ms": 239675
+  },
+  {
+    "text": "come",
+    "start_ms": 239675,
+    "end_ms": 239875
+  },
+  {
+    "text": "to",
+    "start_ms": 239875,
+    "end_ms": 240035
+  },
+  {
+    "text": "her",
+    "start_ms": 240035,
+    "end_ms": 240195
+  },
+  {
+    "text": "door",
+    "start_ms": 240195,
+    "end_ms": 240475
+  },
+  {
+    "text": "she",
+    "start_ms": 240575,
+    "end_ms": 240795
+  },
+  {
+    "text": "tries",
+    "start_ms": 240795,
+    "end_ms": 241035
+  },
+  {
+    "text": "on",
+    "start_ms": 241135,
+    "end_ms": 241355
+  },
+  {
+    "text": "on",
+    "start_ms": 241575,
+    "end_ms": 241795
+  },
+  {
+    "text": "the",
+    "start_ms": 241795,
+    "end_ms": 241955
+  },
+  {
+    "text": "slipper",
+    "start_ms": 241955,
+    "end_ms": 242355
+  },
+  {
+    "text": "it",
+    "start_ms": 242455,
+    "end_ms": 242675
+  },
+  {
+    "text": "fits",
+    "start_ms": 242745,
+    "end_ms": 243035
+  },
+  {
+    "text": "and",
+    "start_ms": 243815,
+    "end_ms": 244035
+  },
+  {
+    "text": "then",
+    "start_ms": 244035,
+    "end_ms": 244275
+  }
+]

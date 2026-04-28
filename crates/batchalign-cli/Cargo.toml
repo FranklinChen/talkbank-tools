@@ -1,0 +1,74 @@
+[package]
+name = "batchalign-cli"
+version = "1.0.0"
+description = "clap CLI, dispatch router, daemon lifecycle"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["binary-entry", "server", "embed-dashboard"]
+binary-entry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+# HTTP server, Temporal backend, and related serve/openapi commands.
+# Disable for a direct-mode-only CLI binary without axum/temporal.
+server = ["batchalign-app/server"]
+embed-dashboard = ["batchalign-app/embed-dashboard"]
+
+[[bin]]
+name = "batchalign3"
+path = "src/main.rs"
+required-features = ["binary-entry"]
+
+[dependencies]
+batchalign-app = { workspace = true }
+batchalign-chat-ops = { workspace = true }
+# TalkBank crates — for `eval l2-morphotag` AST-first analyzer (Rust port of
+# `scripts/l2-eval/analyze.py`). Uses `walk_words(TierDomain::Mor)` for precise
+# pairing of main-tier @s words with %mor/%gra items.
+talkbank-model = { workspace = true }
+talkbank-parser = { workspace = true }
+csv = { workspace = true }
+schemars = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+indicatif = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+walkdir = { workspace = true }
+sqlx = { workspace = true }
+rand = { workspace = true }
+fs2 = { workspace = true }
+libc = { workspace = true }
+zip = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+sysinfo = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }
+batchalign-app = { workspace = true }
+batchalign-types = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+toml = { workspace = true }
+rstest = { workspace = true }

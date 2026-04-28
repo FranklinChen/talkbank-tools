@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SpeakerBackendV2",
+  "description": "Speaker diarization backend selected by Rust.",
+  "oneOf": [
+    {
+      "description": "Pyannote diarization backend.",
+      "type": "string",
+      "const": "pyannote"
+    },
+    {
+      "description": "NeMo diarization backend.",
+      "type": "string",
+      "const": "nemo"
+    }
+  ]
+}

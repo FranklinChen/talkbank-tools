@@ -1,0 +1,11 @@
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	CHI Target_Child, MOT Mother
+@ID:	eng|test|CHI||female|||Target_Child|||
+@ID:	eng|test|MOT||female|||Mother|||
+@Media:	test, audio
+*CHI:	hello world .
+*MOT:	goodbye world .
+*CHI:	more words here .
+@End

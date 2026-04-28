@@ -1,0 +1,381 @@
+name: Batchalign Python
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-cli:
+    name: Build CLI Binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dashboard
+        run: make batchalign-dashboard-build
+      - name: Build CLI binary
+        run: cargo build --release -p batchalign-cli
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cli-binary
+          path: target/release/batchalign3
+          retention-days: 1
+
+  build-wheel:
+    name: Build Wheel (${{ matrix.python-version }})
+    needs: build-cli
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "pyo3 -> target"
+          key: build-${{ matrix.python-version }}
+      - uses: actions/download-artifact@v6
+        with:
+          name: cli-binary
+          path: batchalign/_bin/
+      - name: Make CLI binary executable
+        run: chmod +x batchalign/_bin/batchalign3
+      - name: Build wheel
+        run: make batchalign-build-wheel
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheel-${{ matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 1
+
+  test:
+    name: Test (${{ matrix.python-version }})
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-${{ matrix.python-version }}
+          path: dist/
+      - name: Install from pre-built wheel
+        run: |
+          uv sync --group dev --no-install-project
+          uv pip install --no-deps dist/*.whl
+          rm -rf batchalign_core/
+      - name: Run tests
+        run: uv run --no-sync pytest batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'
+
+  smoke-test:
+    name: Wheel Smoke Test
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-3.12
+          path: dist/
+      - name: Install wheel in clean environment
+        run: uv tool install --from dist/*.whl batchalign3
+      - name: Smoke test — batchalign3 --help
+        run: batchalign3 --help
+      - name: Smoke test — batchalign3 version
+        run: batchalign3 version
+
+  typecheck:
+    name: Type Check & CI Hygiene
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-3.12
+          path: dist/
+      - name: Install from pre-built wheel
+        run: |
+          uv sync --group dev --no-install-project
+          uv pip install --no-deps dist/*.whl
+          rm -rf batchalign_core/
+      - name: Verify retirement gates
+        run: |
+          test ! -e batchalign/cli/cli.py
+          test ! -e batchalign/serve/app.py
+          test ! -e batchalign/serve/job_store.py
+      - name: CI hygiene (Rust)
+        run: cargo test -p batchalign-cli --test ci_checks -q
+      - name: Verify runtime constants
+        run: python3 scripts/check_runtime_drift.py
+      - name: Strict mypy
+        run: uv run --no-sync mypy
+
+  generated-artifacts:
+    name: Generated Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: Verify dashboard API artifacts
+        run: make batchalign-dashboard-api-check
+
+  dashboard-web-build:
+    name: Dashboard Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: Verify API drift
+        run: make batchalign-dashboard-api-check
+      - name: Build dashboard
+        run: make batchalign-dashboard-build
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Python audit
+        run: |
+          uv export --no-hashes --no-dev --no-emit-project > requirements-audit.txt
+          uvx pip-audit -r requirements-audit.txt
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: RustSec audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@cargo-deny
+      - name: cargo-deny
+        run: cargo deny check
+
+  rust-integration:
+    name: Rust Integration
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dashboard
+        run: make batchalign-dashboard-build
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-3.12
+          path: dist/
+      - name: Install batchalign
+        run: |
+          uv sync --group dev --no-install-project
+          uv pip install --no-deps dist/*.whl
+          rm -rf batchalign_core/
+      - name: Rust imported crate check
+        run: make batchalign-check
+      - name: Server startup smoke test
+        env:
+          BATCHALIGN_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: |
+          cargo build -p batchalign-cli
+          ./target/debug/batchalign3 serve start \
+            --foreground --test-echo --warmup off --port 18123 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18123/health | grep -q '"status":"ok"'; then
+              echo "Server healthy after ${i}s"
+              kill $SERVER_PID
+              wait $SERVER_PID 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start within 30s"
+          kill $SERVER_PID 2>/dev/null || true
+          exit 1
+
+  coverage:
+    name: Coverage
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android /usr/share/swift
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-3.12
+          path: dist/
+      - name: Install from pre-built wheel
+        run: |
+          uv sync --group dev --no-install-project
+          uv pip install --no-deps dist/*.whl
+          rm -rf batchalign_core/
+      - name: Python coverage
+        run: uv run --no-sync pytest --cov=batchalign --cov-report=lcov:lcov-python.info batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'
+      - name: Rust PyO3 coverage
+        run: cargo llvm-cov nextest --manifest-path pyo3/Cargo.toml --lcov --output-path lcov-rust.info
+      - name: Rust workspace coverage
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov-rust-workspace.info
+
+  dashboard-smoke:
+    name: Dashboard Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend/e2e/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dashboard-release
+      - name: Run smoke suite
+        env:
+          BATCHALIGN_PLAYWRIGHT_WITH_DEPS: "1"
+          RUSTFLAGS: -C debuginfo=0
+        run: bash scripts/run_react_dashboard_smoke.sh
+
+  dashboard-e2e:
+    name: Dashboard E2E
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android /usr/share/swift
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dashboard-release
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-3.12
+          path: dist/
+      - name: Install from pre-built wheel
+        run: |
+          uv sync --group dev --no-install-project
+          uv pip install --no-deps dist/*.whl
+          rm -rf batchalign_core/
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend/e2e/package-lock.json
+      - name: Run E2E suite
+        env:
+          BATCHALIGN_PLAYWRIGHT_WITH_DEPS: "1"
+          BATCHALIGN_REAL_SERVER_E2E: "1"
+          RUSTFLAGS: -C debuginfo=0
+        run: |
+          export BATCHALIGN_PYTHON="$(uv run --no-sync python -c 'import sys; print(sys.executable)')"
+          bash scripts/run_react_dashboard_smoke.sh

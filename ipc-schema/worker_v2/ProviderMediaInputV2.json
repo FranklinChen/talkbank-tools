@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProviderMediaInputV2",
+  "description": "Temporary cloud-provider media input retained during migration.",
+  "type": "object",
+  "properties": {
+    "media_path": {
+      "description": "Media file path readable by the worker host.",
+      "$ref": "#/$defs/WorkerArtifactPathV2"
+    },
+    "num_speakers": {
+      "description": "Expected number of speakers for diarization-aware providers.",
+      "$ref": "#/$defs/NumSpeakers"
+    }
+  },
+  "required": [
+    "media_path",
+    "num_speakers"
+  ],
+  "$defs": {
+    "NumSpeakers": {
+      "description": "Number of speakers in a recording.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

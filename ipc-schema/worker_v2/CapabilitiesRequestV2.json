@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CapabilitiesRequestV2",
+  "description": "Request for task capability metadata.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "Correlation id for the capability lookup.",
+      "$ref": "#/$defs/WorkerRequestIdV2"
+    }
+  },
+  "required": [
+    "request_id"
+  ],
+  "$defs": {
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
+      "type": "string"
+    }
+  }
+}

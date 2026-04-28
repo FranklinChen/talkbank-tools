@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PreparedTextRefV2",
+  "description": "File-backed prepared text artifact.",
+  "type": "object",
+  "properties": {
+    "byte_len": {
+      "description": "Byte length inside the artifact file.",
+      "$ref": "#/$defs/ByteLengthV2"
+    },
+    "byte_offset": {
+      "description": "Byte offset inside the artifact file.",
+      "$ref": "#/$defs/ByteOffsetV2"
+    },
+    "encoding": {
+      "description": "Encoding used by the file content.",
+      "$ref": "#/$defs/PreparedTextEncodingV2"
+    },
+    "id": {
+      "description": "Stable artifact id referenced by request payloads.",
+      "$ref": "#/$defs/WorkerArtifactIdV2"
+    },
+    "path": {
+      "description": "Filesystem path to the prepared artifact.",
+      "$ref": "#/$defs/WorkerArtifactPathV2"
+    }
+  },
+  "required": [
+    "id",
+    "path",
+    "encoding",
+    "byte_offset",
+    "byte_len"
+  ],
+  "$defs": {
+    "ByteLengthV2": {
+      "description": "Byte length inside a prepared artifact file.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "ByteOffsetV2": {
+      "description": "Byte offset inside a prepared artifact file.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "PreparedTextEncodingV2": {
+      "description": "Encoding used for prepared text artifacts.",
+      "oneOf": [
+        {
+          "description": "UTF-8 JSON text stored on disk.",
+          "type": "string",
+          "const": "utf8_json"
+        }
+      ]
+    },
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

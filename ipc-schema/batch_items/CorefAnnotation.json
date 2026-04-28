@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CorefAnnotation",
+  "description": "A single coref annotation for one sentence (bracket notation format).\n\nUsed for injection into `%xcoref` tiers and for backwards-compatible\nwire format.",
+  "type": "object",
+  "properties": {
+    "annotation": {
+      "description": "Coreference annotation string in bracket notation, e.g. `\"(0, -, (1, 1)\"`.",
+      "type": "string"
+    },
+    "sentence_idx": {
+      "description": "Index into the `sentences` array of the corresponding `CorefBatchItem`.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "sentence_idx",
+    "annotation"
+  ]
+}

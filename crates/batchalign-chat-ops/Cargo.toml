@@ -1,0 +1,39 @@
+[package]
+name = "batchalign-chat-ops"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared CHAT manipulation functions for batchalign (extract, inject, cache, parse, serialize)"
+publish = false
+
+[dependencies]
+aho-corasick = "1.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
+schemars = { workspace = true }
+blake3 = { workspace = true }
+smallvec = { version = "1.15", features = ["serde", "union", "const_generics"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zhconv = "0.4.1"
+# Fast non-cryptographic hasher (the one rustc itself uses).
+# Used for the per-sentence `ud_to_chunk_idx` map in `nlp::mapping`
+# and any other hot-path small-integer-keyed map — FxHash
+# outperforms std's SipHash by ~2-4× on small integer keys and
+# avoids the random-state cost per HashMap construction.
+rustc-hash = "2.1"
+
+# TalkBank crates — path deps to talkbank-tools
+talkbank-model = { workspace = true }
+talkbank-parser = { workspace = true }
+talkbank-transform = { workspace = true }
+strsim = "0.11.1"
+whatlang = "0.18"
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }

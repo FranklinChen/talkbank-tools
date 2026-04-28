@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CapabilitiesResponseV2",
+  "description": "Response describing task capabilities for the worker.",
+  "type": "object",
+  "properties": {
+    "engine_versions": {
+      "description": "Engine version strings keyed by task name.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/EngineVersion"
+      }
+    },
+    "request_id": {
+      "description": "Correlation id that matches the request.",
+      "$ref": "#/$defs/WorkerRequestIdV2"
+    },
+    "tasks": {
+      "description": "Task capabilities advertised by the runtime.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TaskCapabilityV2"
+      }
+    }
+  },
+  "required": [
+    "request_id",
+    "tasks",
+    "engine_versions"
+  ],
+  "$defs": {
+    "EngineVersion": {
+      "description": "ML engine version string for cache keying (e.g. `\"stanza-1.9.2\"`, non-empty).",
+      "type": "string"
+    },
+    "InferenceTaskV2": {
+      "description": "High-level V2 task family.",
+      "oneOf": [
+        {
+          "description": "Morphosyntax tagging.",
+          "type": "string",
+          "const": "morphosyntax"
+        },
+        {
+          "description": "Utterance segmentation.",
+          "type": "string",
+          "const": "utseg"
+        },
+        {
+          "description": "Machine translation.",
+          "type": "string",
+          "const": "translate"
+        },
+        {
+          "description": "Coreference annotation.",
+          "type": "string",
+          "const": "coref"
+        },
+        {
+          "description": "Automatic speech recognition.",
+          "type": "string",
+          "const": "asr"
+        },
+        {
+          "description": "Forced alignment.",
+          "type": "string",
+          "const": "forced_alignment"
+        },
+        {
+          "description": "Speaker diarization.",
+          "type": "string",
+          "const": "speaker"
+        },
+        {
+          "description": "OpenSMILE feature extraction.",
+          "type": "string",
+          "const": "opensmile"
+        },
+        {
+          "description": "AVQI feature extraction.",
+          "type": "string",
+          "const": "avqi"
+        }
+      ]
+    },
+    "TaskCapabilityV2": {
+      "description": "One task capability advertised by a V2 worker.",
+      "type": "object",
+      "properties": {
+        "accepted_inputs": {
+          "description": "Attachment/input kinds the task can consume.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkerAttachmentKindV2"
+          }
+        },
+        "supports_progress_events": {
+          "description": "Whether the task can emit progress events.",
+          "type": "boolean"
+        },
+        "task": {
+          "description": "Task family supported by the worker.",
+          "$ref": "#/$defs/InferenceTaskV2"
+        }
+      },
+      "required": [
+        "task",
+        "accepted_inputs",
+        "supports_progress_events"
+      ]
+    },
+    "WorkerAttachmentKindV2": {
+      "description": "Small artifact-kind vocabulary advertised in task capabilities.",
+      "oneOf": [
+        {
+          "description": "File-backed prepared PCM audio.",
+          "type": "string",
+          "const": "prepared_audio"
+        },
+        {
+          "description": "File-backed prepared text/JSON.",
+          "type": "string",
+          "const": "prepared_text"
+        },
+        {
+          "description": "Inline JSON attachment carried inside the envelope.",
+          "type": "string",
+          "const": "inline_json"
+        },
+        {
+          "description": "Provider-local media path that Rust still has not replaced.",
+          "type": "string",
+          "const": "provider_media"
+        },
+        {
+          "description": "Previously submitted provider job identifier.",
+          "type": "string",
+          "const": "submitted_job"
+        }
+      ]
+    },
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TranslateBatchItem",
+  "description": "Input payload for a single translation request.\n\nMatches the Python `TranslateBatchItem` wire format.",
+  "type": "object",
+  "properties": {
+    "text": {
+      "description": "Source-language text to translate.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "text"
+  ]
+}

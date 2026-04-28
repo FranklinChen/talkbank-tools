@@ -10,6 +10,9 @@ fn wide_struct_audit_passes() {
     let status = Command::new("cargo")
         .args(["run", "-q", "-p", "xtask", "--", "lint-wide-structs"])
         .status()
-        .expect("failed to run cargo xtask lint-wide-structs");
-    assert!(status.success(), "cargo xtask lint-wide-structs failed");
+        .expect("failed to run cargo run -q -p xtask -- lint-wide-structs");
+    assert!(
+        status.success(),
+        "cargo run -q -p xtask -- lint-wide-structs failed"
+    );
 }

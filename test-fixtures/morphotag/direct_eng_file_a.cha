@@ -1,0 +1,10 @@
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	CHI Target_Child, MOT Mother
+@ID:	eng|test|CHI|2;0.||||Target_Child|||
+@ID:	eng|test|MOT|||||Mother|||
+*CHI:	the dog is running .
+*MOT:	yes the dog is very fast .
+*CHI:	I want to play .
+@End

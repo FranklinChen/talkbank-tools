@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ShutdownRequestV2",
+  "description": "Shutdown request sent to a V2 worker.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "Correlation id for the shutdown message.",
+      "$ref": "#/$defs/WorkerRequestIdV2"
+    }
+  },
+  "required": [
+    "request_id"
+  ],
+  "$defs": {
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
+      "type": "string"
+    }
+  }
+}

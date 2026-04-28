@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkerAttachmentKindV2",
+  "description": "Small artifact-kind vocabulary advertised in task capabilities.",
+  "oneOf": [
+    {
+      "description": "File-backed prepared PCM audio.",
+      "type": "string",
+      "const": "prepared_audio"
+    },
+    {
+      "description": "File-backed prepared text/JSON.",
+      "type": "string",
+      "const": "prepared_text"
+    },
+    {
+      "description": "Inline JSON attachment carried inside the envelope.",
+      "type": "string",
+      "const": "inline_json"
+    },
+    {
+      "description": "Provider-local media path that Rust still has not replaced.",
+      "type": "string",
+      "const": "provider_media"
+    },
+    {
+      "description": "Previously submitted provider job identifier.",
+      "type": "string",
+      "const": "submitted_job"
+    }
+  ]
+}

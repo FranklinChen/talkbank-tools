@@ -27,14 +27,18 @@ pub mod alignment;
 pub mod chars;
 pub mod errors;
 pub mod generated;
+pub mod indices;
 pub mod model;
 pub mod parser_api;
 pub mod pipeline;
+pub mod text_types;
 pub mod validation;
 
 pub use alignment::*;
 pub use errors::*;
+pub use indices::{UtteranceIdx, WordIdx};
 pub use model::*;
 pub use parser_api::*;
 pub use pipeline::*;
+pub use text_types::{ChatCleanedText, ChatRawText};
 pub use validation::{Validate, ValidationContext, resolve_word_language};

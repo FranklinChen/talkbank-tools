@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PreparedTextEncodingV2",
+  "description": "Encoding used for prepared text artifacts.",
+  "oneOf": [
+    {
+      "description": "UTF-8 JSON text stored on disk.",
+      "type": "string",
+      "const": "utf8_json"
+    }
+  ]
+}

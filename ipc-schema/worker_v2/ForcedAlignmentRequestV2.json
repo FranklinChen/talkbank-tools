@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ForcedAlignmentRequestV2",
+  "description": "V2 forced-alignment request payload.",
+  "type": "object",
+  "properties": {
+    "audio_ref_id": {
+      "description": "Reference to the prepared audio span.",
+      "$ref": "#/$defs/WorkerArtifactIdV2"
+    },
+    "backend": {
+      "description": "Backend selected by Rust.",
+      "$ref": "#/$defs/FaBackendV2"
+    },
+    "pauses": {
+      "description": "Whether pause markers should be preserved.",
+      "type": "boolean"
+    },
+    "payload_ref_id": {
+      "description": "Reference to the prepared text/JSON payload for the word arrays.",
+      "$ref": "#/$defs/WorkerArtifactIdV2"
+    },
+    "text_mode": {
+      "description": "Text shaping mode requested by Rust.",
+      "$ref": "#/$defs/FaTextModeV2"
+    }
+  },
+  "required": [
+    "backend",
+    "payload_ref_id",
+    "audio_ref_id",
+    "text_mode",
+    "pauses"
+  ],
+  "$defs": {
+    "FaBackendV2": {
+      "description": "Forced-alignment backend selected by the Rust control plane.",
+      "oneOf": [
+        {
+          "description": "Whisper token-timestamp alignment.",
+          "type": "string",
+          "const": "whisper"
+        },
+        {
+          "description": "MMS Wave2Vec forced alignment.",
+          "type": "string",
+          "const": "wave2vec"
+        },
+        {
+          "description": "Cantonese Wave2Vec forced alignment.",
+          "type": "string",
+          "const": "wav2vec_canto"
+        }
+      ]
+    },
+    "FaTextModeV2": {
+      "description": "Text-joining mode for forced-alignment payloads.",
+      "oneOf": [
+        {
+          "description": "Join words with spaces before model invocation.",
+          "type": "string",
+          "const": "space_joined"
+        },
+        {
+          "description": "Join words as character stream.",
+          "type": "string",
+          "const": "char_joined"
+        }
+      ]
+    },
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

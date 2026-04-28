@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SpeakerRequestV2",
+  "description": "V2 speaker diarization request payload.",
+  "type": "object",
+  "properties": {
+    "backend": {
+      "description": "Backend selected by Rust.",
+      "$ref": "#/$defs/SpeakerBackendV2"
+    },
+    "expected_speakers": {
+      "description": "Expected number of speakers when known.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NumSpeakers"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "input": {
+      "description": "Input transport for the speaker runtime.",
+      "$ref": "#/$defs/SpeakerInputV2"
+    }
+  },
+  "required": [
+    "backend",
+    "input"
+  ],
+  "$defs": {
+    "NumSpeakers": {
+      "description": "Number of speakers in a recording.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "SpeakerBackendV2": {
+      "description": "Speaker diarization backend selected by Rust.",
+      "oneOf": [
+        {
+          "description": "Pyannote diarization backend.",
+          "type": "string",
+          "const": "pyannote"
+        },
+        {
+          "description": "NeMo diarization backend.",
+          "type": "string",
+          "const": "nemo"
+        }
+      ]
+    },
+    "SpeakerInputV2": {
+      "description": "Current input variants for speaker diarization.",
+      "oneOf": [
+        {
+          "description": "Prepared mono PCM audio owned by Rust.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prepared_audio"
+            }
+          },
+          "$ref": "#/$defs/SpeakerPreparedAudioInputV2",
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "SpeakerPreparedAudioInputV2": {
+      "description": "Prepared-audio speaker input owned by Rust.",
+      "type": "object",
+      "properties": {
+        "audio_ref_id": {
+          "description": "Artifact id of the prepared mono PCM audio view.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        }
+      },
+      "required": [
+        "audio_ref_id"
+      ]
+    },
+    "WorkerArtifactIdV2": {
+      "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IndexedWordTimingResultV2",
+  "description": "Forced-alignment indexed response.",
+  "type": "object",
+  "properties": {
+    "indexed_timings": {
+      "description": "Indexed timing results aligned to the request words.",
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IndexedWordTimingV2"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "indexed_timings"
+  ],
+  "$defs": {
+    "DurationMs": {
+      "description": "Duration or audio position measured in milliseconds.\n\nUsed for audio timestamps (`start_ms`, `end_ms`) and durations\n(`max_group_ms`, `tight_buffer_ms`) throughout the FA, ASR, and\nspeaker pipelines. All ML worker IPC timing fields use this type.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "IndexedWordTimingV2": {
+      "description": "One word-level timing result.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Optional model confidence.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "end_ms": {
+          "description": "End time in milliseconds.",
+          "$ref": "#/$defs/DurationMs"
+        },
+        "start_ms": {
+          "description": "Start time in milliseconds.",
+          "$ref": "#/$defs/DurationMs"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms"
+      ]
+    }
+  }
+}

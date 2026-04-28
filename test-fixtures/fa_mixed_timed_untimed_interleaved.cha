@@ -1,0 +1,13 @@
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	CHI Target_Child
+@ID:	eng|test|CHI||female|||Target_Child|||
+@Media:	test, audio
+*CHI:	the cat is here . 10000_15000
+*CHI:	she is looking outside .
+*CHI:	there is a path . 20000_25000
+*CHI:	I do not know .
+*CHI:	but there is a building .
+*CHI:	okay so now . 40000_45000
+@End

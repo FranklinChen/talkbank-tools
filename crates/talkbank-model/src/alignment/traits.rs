@@ -203,12 +203,8 @@ pub fn positional_align<T: AlignableTier>(main: &MainTier, tier: &T) -> Position
         let main_items = collect_tier_items(&main.content.content, T::DOMAIN);
         let target_items = tier.extract_target_items();
 
-        let detailed_message = format_positional_mismatch(
-            "Main tier",
-            tier.tier_name(),
-            &main_items,
-            &target_items,
-        );
+        let detailed_message =
+            format_positional_mismatch("Main tier", tier.tier_name(), &main_items, &target_items);
 
         let (code, suggestion) = if alignable_count > target_count {
             (tier.error_code_too_few(), tier.suggestion_too_few())

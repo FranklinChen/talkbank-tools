@@ -1,0 +1,22 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 43dd625adca5b3deabcc002ae19b2a1f4faa9b48a55f716e533bbe200cbba7b1 # shrinks to payload = ['a'], reference = ['b'], mode = Exact
+cc f256189303563ff3d8343ed061de7e9b68313b701ac797c9f6ca4ec1d547dd7a # shrinks to payload = ['a', 'e'], reference = ['e']
+cc 0404300d4cbc773774593dd653d02a3c7c50e98ea89aa31249c08656b3ad8d51 # shrinks to payload = ["on"], reference = ["mat", "on"]
+cc f2560b4068e9997e93d4397f358acc113efb015ca7f4eaf251c3b13718aa2b67 # shrinks to payload = ["big"], reference = ["a", "big"], mode = Exact
+cc fbf7efe3ee4b7eb85161c02cec27fa8353bcf8ced5af0ecff8df4cf2234cdc93 # shrinks to payload = ["sat"], reference = ["on", "sat"], mode = Exact
+cc 3c5208102c35b8c45a9350374d9ae88bb984f84baa285fcc246fa6a0f616037f # shrinks to payload = ["a"], reference = ["the", "a"], mode = Exact
+cc cc52a2ff19c8e65044188ee3db5b214bc3580d709677a518b052b1605f838b0b # shrinks to payload = ["mat", "on", "sat"], reference = ["on", "sat"], mode = Exact
+cc db0e4c572a18be346719baf02614225b85e23f369e6db1532d7d1b581dfec0eb # shrinks to payload = ['a', 'e', 'e'], reference = ['b', 'e', 'e']
+cc 2ebab3d93d7b722441d626a7d24032bd4d03ddd65ba30277900f07d1d4e74150 # shrinks to payload = ["mat", "a"], reference = ["the", "mat", "a"], mode = Exact
+cc 956a712ec3f707a2b4fd986c9db7bb785130cc3bddbbefdb40249130a644e28a # shrinks to payload = ["big", "sat"], reference = ["the", "big", "sat"], mode = Exact
+cc 584aa35aba7a2582d64afef79bb6ed641bf5b811d713b2a7277bfecd9a9406f5 # shrinks to payload = ["a", "a"], reference = ["the", "a", "a"], mode = Exact
+cc ae8abea1ec8fc5f3dc4499d8c6e2ee34b87bacb655e5ed789bafd897b4a4f121 # shrinks to payload = ['a', 'a'], reference = [], mode = Exact
+cc 7d8ae14a30edabd6b01b479b95a8b1f9a7b959c707d87d8f9308a9f80a65e316 # shrinks to payload = ["the", "the"], reference = []
+cc c364a339e16f1173dc844a0fb5f1a928f7e9f5245757bd319982fe45f28ed56e # shrinks to payload = [], reference = ['a', 'a'], mode = Exact
+cc 108055a99d0df41ed9fffa323717f591342649d4b12745e2053b3a6b127f0e03 # shrinks to payload = [], reference = ['a', 'a']
+cc 2492607881b4788c1bdabd704f3e8a4cf237d57a7399bb5a2fd8355ca97c1d19 # shrinks to payload = [], reference = ["the", "the"]

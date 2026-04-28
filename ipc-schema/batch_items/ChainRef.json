@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChainRef",
+  "description": "A single coreference chain reference on a word.\n\nRepresents one chain that a word participates in. A word can\nsimultaneously start one chain and end another.\n\n# Bracket notation mapping\n\n| is_start | is_end | notation |\n|----------|--------|----------|\n| true     | false  | `(N`     |\n| false    | true   | `N)`     |\n| true     | true   | `(N)`    |\n| false    | false  | `N`      |",
+  "type": "object",
+  "properties": {
+    "chain_id": {
+      "description": "Chain identifier (0-based, assigned by Stanza).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "is_end": {
+      "description": "Whether this word ends a mention in this chain.",
+      "type": "boolean"
+    },
+    "is_start": {
+      "description": "Whether this word starts a mention in this chain.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "chain_id",
+    "is_start",
+    "is_end"
+  ]
+}

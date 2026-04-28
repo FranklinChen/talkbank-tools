@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AsrElementKindV2",
+  "description": "Stable vocabulary for one monologue element returned by an ASR provider.",
+  "oneOf": [
+    {
+      "description": "Lexical content that should become transcript tokens.",
+      "type": "string",
+      "const": "text"
+    },
+    {
+      "description": "Punctuation emitted by the provider.",
+      "type": "string",
+      "const": "punctuation"
+    }
+  ]
+}

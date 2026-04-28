@@ -2,6 +2,11 @@
 resolver = "2"
 members = [
     "xtask",
+    "crates/batchalign-types",
+    "crates/batchalign-revai",
+    "crates/batchalign-chat-ops",
+    "crates/batchalign-app",
+    "crates/batchalign-cli",
     "crates/talkbank-model",
     "crates/talkbank-parser-tests",
     "crates/talkbank-derive",
@@ -16,6 +21,7 @@ members = [
 ]
 exclude = [
     "spec/tools",  # Independent workspace
+    "pyo3",        # Standalone PyO3 crate imported from batchalign3
     "fuzz",        # cargo-fuzz uses its own nightly toolchain with sanitizer flags
 ]
 
@@ -71,15 +77,18 @@ categories = ["parser-implementations", "text-processing"]
 rust-version = "1.89.0"
 
 [workspace.dependencies]
+aho-corasick = "1.1"
 anyhow = "1.0"
+async-trait = "0.1"
 assert_cmd = "2.2"
 atty = "0.2"
+axum = { version = "0.8", features = ["ws"] }
 blake3 = "1.8"
 cc = "1.2"
 chrono = "0.4"
 
 # CLI and tools
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 comrak = "0.52.0"
 
 # Concurrency
@@ -87,15 +96,20 @@ crossbeam-channel = "0.5"
 crossterm = "0.29"
 ctrlc = "3.5"
 dashmap = "6.1"
+csv = "1"
+futures = "0.3"
+futures-util = "0.3"
 
 # Utilities
 dirs = "6.0"
 divan = "0.1"
+fs2 = "0.4"
+include_dir = "0.7"
 indexmap = { version = "2.14", features = ["serde"] }
 indicatif = "0.18"
 
 # Testing
-insta = { version = "1.47", features = ["yaml"] }
+insta = { version = "1.47", features = ["json", "yaml"] }
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 miette = { version = "7.6.0", features = ["derive"] }
 notify = "8.2"
@@ -117,8 +131,16 @@ reqwest = { version = "0.13", features = ["multipart", "json", "blocking"] }
 rstest = "0.26.1"
 schemars = { version = "1.2", features = ["indexmap2", "smol_str03"] }
 send2clan-sys = { path = "crates/send2clan-sys", version = "0.2.0" }
+serde_yaml = "0.9"
 
 # Core dependencies (shared across crates)
+batchalign-app = { path = "crates/batchalign-app" }
+batchalign-chat-ops = { path = "crates/batchalign-chat-ops" }
+batchalign-cli = { path = "crates/batchalign-cli" }
+batchalign-revai = { path = "crates/batchalign-revai" }
+batchalign-types = { path = "crates/batchalign-types" }
+libc = "0.2"
+moka = { version = "0.12", features = ["future"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 shellexpand = "3.1"
@@ -126,6 +148,7 @@ similar = "3.1"
 smallvec = { version = "1.15", features = ["serde", "union", "const_generics"] }
 smol_str = { version = "0.3", features = ["serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+strsim = "0.11.1"
 syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 talkbank-clan = { path = "crates/talkbank-clan", version = "0.2.0" }
 talkbank-cli = { path = "crates/talkbank-cli", version = "0.2.0" }
@@ -144,9 +167,27 @@ phf_codegen = "0.13"
 tempfile = "3.27"
 text-size = "1.1"
 thiserror = "^2.0.18"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1.52", features = ["full"] }
+tokio-util = "0.7"
 toml = "^1.1.2"
+tracing-appender = "0.2"
+tracing-opentelemetry = "0.32"
+tower-http = { version = "0.6", features = ["cors", "fs", "limit", "trace", "compression-gzip", "compression-br", "catch-panic", "timeout"] }
 tower-lsp = "0.20"
+opentelemetry = { version = "0.31", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+temporalio-client = "0.3"
+temporalio-common = "0.3"
+temporalio-macros = "0.3"
+temporalio-sdk = "0.3"
+temporalio-sdk-core = "0.3"
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+whatlang = "0.18"
+sysinfo = "0.38"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Logging and tracing
 tracing = "0.1"
@@ -156,6 +197,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tree-sitter = "0.26"
 tree-sitter-highlight = "0.26"
 tree-sitter-talkbank = { path = "grammar", version = "0.2.0" }
+zhconv = "0.4.1"
 
 trybuild = "1.0"
 unicode-width = "0.2"
