@@ -38,7 +38,9 @@ pub fn evaluate_drift_assertion(
         FixtureAssertion::NoFaGroupInvalidAudioWindow => {
             check_no_fa_group_invalid_audio_window(parsed)
         }
-        FixtureAssertion::NoMonotonicityRescueEmitted => check_no_monotonicity_rescue_emitted(parsed),
+        FixtureAssertion::NoMonotonicityRescueEmitted => {
+            check_no_monotonicity_rescue_emitted(parsed)
+        }
         FixtureAssertion::UtteranceBulletMonotonicityPreserved => {
             check_utterance_bullet_monotonicity_preserved(parsed)
         }
