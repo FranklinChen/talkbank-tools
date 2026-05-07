@@ -50,12 +50,25 @@ pub(crate) struct MorphosyntaxPipelineContext<'a> {
     pub chat_file: Option<ChatFile>,
     /// Structured parse errors from lenient parse; drives the L0 pre-validation gate.
     pub parse_errors: Vec<crate::chat_ops::ParseError>,
-    /// Whether the file is a Conversation Analysis transcript (`@Options: CA`).
-    /// Mirrors `is_no_align` in the align pipeline: CA files are pass-through
-    /// for morphosyntax — no clear, no infer, no inject, no provenance.
+    /// Whether the file carries `@Options: CA` (Conversation Analysis
+    /// transcript). `@Options: CA` literally means "morphotag is not
+    /// to be run on this file." CA files are pass-through for
+    /// morphosyntax — no clear, no infer, no inject, no provenance.
     pub is_ca: bool,
-    /// Whether the file opted out of alignment-style processing via
-    /// `@Options: NoAlign`.
+    /// Whether the file carries `@Options: NoAlign`. **Informational
+    /// only** for morphotag — NoAlign literally means "the `align`
+    /// command in batchalign3 is not to run on this file." It is
+    /// scoped to the FA (forced-alignment) command, which uses audio
+    /// bullets to attach word-level timing. Morphotag is a text-tier
+    /// transform with no relationship to audio timing or to the
+    /// `align` command, so it MUST run on NoAlign files. The
+    /// pre-2026-05-07 behavior treated NoAlign as a global "don't do
+    /// anything" flag (a copy-paste from the FA pipeline, where it's
+    /// appropriate), silently leaving 297 corpus files with stale
+    /// `%mor`/`%gra` from prior morphotag runs and no path to fix
+    /// them via rerun. Kept as a field for diagnostics; NOT
+    /// consulted by `should_skip_inference` or by any other
+    /// morphotag stage.
     pub is_no_align: bool,
     /// Non-fatal reason this file should bypass morphotag inference and be
     /// returned unchanged.
@@ -119,7 +132,8 @@ impl<'a> MorphosyntaxPipelineContext<'a> {
     /// (parse + serialize round-trip only). Set by `stage_parse` based on
     /// `@Options: CA`, `@Options: NoAlign`, or an unsupported primary language.
     fn should_skip_inference(&self) -> bool {
-        self.is_ca || self.is_no_align || self.skip_reason.is_some()
+        // `is_no_align` is intentionally NOT consulted; see `is_no_align` field doc.
+        self.is_ca || self.skip_reason.is_some()
     }
 }
 
@@ -257,9 +271,11 @@ fn stage_parse<'a, 'ctx>(ctx: &'a mut MorphosyntaxPipelineContext<'ctx>) -> Stag
         }
         ctx.parse_errors = parse_errors;
         ctx.is_ca = is_ca(&chat_file);
+        // Recorded for diagnostics; morphotag does not act on NoAlign.
+        // See field doc.
         ctx.is_no_align = is_no_align(&chat_file);
 
-        if !ctx.is_ca && !ctx.is_no_align {
+        if !ctx.is_ca {
             ctx.skip_reason = unsupported_primary_language_reason(&chat_file);
             if let Some(reason) = &ctx.skip_reason {
                 warn!(reason = %reason, "Morphotag pass-through");
@@ -433,11 +449,10 @@ fn stage_postvalidate<'a, 'ctx>(ctx: &'a mut MorphosyntaxPipelineContext<'ctx>) 
 
 fn stage_serialize<'a, 'ctx>(ctx: &'a mut MorphosyntaxPipelineContext<'ctx>) -> StageFuture<'a> {
     Box::pin(async move {
-        // CA / NoAlign / unsupported-language pass-through: serialize the
-        // parsed file as-is, no provenance, no placeholder sweep. Mirrors the
-        // NoAlign branch in `fa/mod.rs` (`if is_no_align(&chat_file) { return
-        // ... to_chat_string ... }`).
-        if ctx.is_ca || ctx.is_no_align || ctx.skip_reason.is_some() {
+        // CA / unsupported-language pass-through: serialize as-is, no
+        // provenance, no placeholder sweep. `is_no_align` is intentionally
+        // NOT consulted; see `is_no_align` field doc.
+        if ctx.is_ca || ctx.skip_reason.is_some() {
             let chat_file = ctx.chat_file.as_mut().ok_or_else(|| {
                 ServerError::Validation("Parsed chat missing before morphotag serialize".into())
             })?;
@@ -688,7 +703,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn noalign_round_trips_without_provenance() {
+    async fn noalign_files_get_morphotagged_with_provenance() {
+        // Pin the post-2026-05-07 inversion: NoAlign no longer skips
+        // morphotag. Background in `is_no_align` field doc and the
+        // postmortem at `docs/postmortems/2026-05-07-noalign-morphotag-skip.md`.
         let chat = "@UTF8\n\
                     @PID:\t11312/c-test\n\
                     @Begin\n\
@@ -698,7 +716,6 @@ mod tests {
                     @Options:\tNoAlign\n\
                     *CHI:\thello .\n\
                     @End\n";
-        let expected = to_chat_string(&parse(chat));
         let tempdir = tempfile::tempdir().expect("tempdir");
         let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
             .await
@@ -717,12 +734,19 @@ mod tests {
             true,
         )
         .await
-        .expect("NoAlign file should pass through");
+        .expect("NoAlign file should be processed (no longer skipped)");
 
-        assert_eq!(output, expected, "NoAlign must round-trip unchanged");
         assert!(
-            !output.contains("[ba3 morphotag |"),
-            "NoAlign must not inject morphotag provenance"
+            output.contains("[ba3 morphotag |"),
+            "NoAlign file must receive morphotag provenance — the \
+             pipeline is no longer pass-through for NoAlign. Output: {output}"
+        );
+        // The @Options: NoAlign line itself is preserved (we don't
+        // strip it; the directive remains for the `align` command
+        // which is what it was always for).
+        assert!(
+            output.contains("@Options:\tNoAlign"),
+            "NoAlign directive must be preserved verbatim",
         );
     }
 }

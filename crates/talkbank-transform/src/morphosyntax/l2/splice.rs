@@ -196,30 +196,36 @@ fn validate_or_rollback_splice(
     SpliceValidationResult::RolledBack
 }
 
-fn root_rewrites_for_merged(
-    merged: &MergedL2Morphology,
+/// Slice-based version: collect 0-indexed positions in `gras` whose
+/// relation is the strict splice-contract root, offset by
+/// `local_chunk_offset`. Used by both the splice loop (post-repair,
+/// where we have the gras slice but not a `MergedL2Morphology`) and
+/// by [`root_offsets_for_merged`].
+fn root_offsets_in_gras(
+    gras: &[talkbank_model::model::dependent_tier::GrammaticalRelation],
     local_chunk_offset: usize,
-) -> Vec<(usize, crate::morphosyntax::l2::deprel::UdDeprel)> {
-    let Some(rewrite) = merged.attachment.external_root_deprel().cloned() else {
-        return Vec::new();
-    };
-
-    merged
-        .gras
-        .iter()
-        .enumerate()
-        .filter(|(_, rel)| rel.head == 0 && rel.relation.eq_ignore_ascii_case("ROOT"))
-        .map(|(idx, _)| (local_chunk_offset + idx, rewrite.clone()))
-        .collect()
-}
-
-fn root_offsets_for_merged(merged: &MergedL2Morphology, local_chunk_offset: usize) -> Vec<usize> {
-    merged
-        .gras
-        .iter()
+) -> Vec<usize> {
+    gras.iter()
         .enumerate()
         .filter(|(_, rel)| rel.head == 0 && rel.relation.eq_ignore_ascii_case("ROOT"))
         .map(|(idx, _)| local_chunk_offset + idx)
+        .collect()
+}
+
+/// Slice-based version: pair each strict-root position in `gras`
+/// with the deprel `apply_safe_root_rewrites` should write at that
+/// position. Empty when `attachment` is not [`L2Attachment::ExternalRoot`].
+fn root_rewrites_for_attachment(
+    gras: &[talkbank_model::model::dependent_tier::GrammaticalRelation],
+    attachment: &L2Attachment,
+    local_chunk_offset: usize,
+) -> Vec<(usize, crate::morphosyntax::l2::deprel::UdDeprel)> {
+    let Some(rewrite) = attachment.external_root_deprel().cloned() else {
+        return Vec::new();
+    };
+    root_offsets_in_gras(gras, local_chunk_offset)
+        .into_iter()
+        .map(|idx| (idx, rewrite.clone()))
         .collect()
 }
 
@@ -453,15 +459,11 @@ pub fn splice_l2_into_chat(
             Vec::with_capacity(span_size);
         let mut new_gras: Vec<talkbank_model::model::dependent_tier::GrammaticalRelation> =
             Vec::new();
-        let mut root_rewrites = Vec::new();
-        let mut root_offsets = Vec::new();
         let mut any_corrected_deprel = false;
         let mut local_chunk_offset = 0usize;
         for k in span_indices.clone() {
             let merged = merged_results[k].as_ref().expect("all_present checked");
             new_mors.push(merged.mor.clone());
-            root_rewrites.extend(root_rewrites_for_merged(merged, local_chunk_offset));
-            root_offsets.extend(root_offsets_for_merged(merged, local_chunk_offset));
             new_gras.extend(merged.gras.iter().cloned());
             if merged.corrected_deprel.is_some() {
                 any_corrected_deprel = true;
@@ -481,6 +483,32 @@ pub fn splice_l2_into_chat(
                 .iter()
                 .map(|m| m.count_chunks())
                 .sum();
+            // Constructive repair on aggregated span-level gras. The
+            // bounds for OOB clamp are span-total chunks
+            // (`local_chunk_offset` after the per-position loop above);
+            // cross-position head references like `head=2` for chunk 1
+            // pointing at chunk 2 of the span are valid here, not OOB.
+            // See `repair_secondary_gras` in merge.rs and the §6
+            // walkthrough in `docs/architecture/l2-morphotag-redesign-2026-05-07.md`.
+            let span_attachment = merged_results[span_indices.start]
+                .as_ref()
+                .map(|m| m.attachment.clone())
+                .unwrap_or(L2Attachment::InternalRoot);
+            let root_offsets = crate::morphosyntax::l2::merge::repair_secondary_gras(
+                &mut new_gras,
+                &span_attachment,
+            );
+            // Post-repair root-rewrites for `apply_safe_root_rewrites`
+            // below: at-most-one strict root times the span
+            // attachment's deprel (empty when InternalRoot).
+            let root_rewrites: Vec<(usize, crate::morphosyntax::l2::deprel::UdDeprel)> =
+                match span_attachment.external_root_deprel() {
+                    Some(deprel) => root_offsets
+                        .iter()
+                        .map(|&idx| (idx, deprel.clone()))
+                        .collect(),
+                    None => Vec::new(),
+                };
             let safe_anchor = safe_root_anchor_override(
                 gra,
                 chunk_offset,
@@ -612,7 +640,15 @@ fn splice_one_position(
                 .map(|m| m.count_chunks())
                 .sum();
             let old_chunks = mor.items()[def.word_idx].count_chunks();
-            let root_offsets = root_offsets_for_merged(merged, 0);
+            // Constructive repair: a single-position span IS its own
+            // span; gras.len() bounds head indices and the
+            // attachment dictates whether one head=0/ROOT must exist.
+            // See `repair_secondary_gras` in merge.rs.
+            let mut repaired_gras = merged.gras.clone();
+            let root_offsets = crate::morphosyntax::l2::merge::repair_secondary_gras(
+                &mut repaired_gras,
+                &merged.attachment,
+            );
             let safe_anchor = safe_root_anchor_override(
                 gra,
                 chunk_offset,
@@ -640,12 +676,13 @@ fn splice_one_position(
                     gra,
                     def.word_idx,
                     merged.mor.clone(),
-                    merged.gras.clone(),
+                    repaired_gras.clone(),
                     safe_anchor,
                 )
                 .is_ok()
             {
-                let root_rewrites = root_rewrites_for_merged(merged, 0);
+                let root_rewrites =
+                    root_rewrites_for_attachment(&repaired_gras, &merged.attachment, 0);
                 apply_safe_root_rewrites(gra, chunk_offset, &root_rewrites);
 
                 let word_indices = [def.word_idx];
@@ -654,7 +691,7 @@ fn splice_one_position(
                     gra,
                     mor_snapshot,
                     gra_snapshot,
-                    || vec![join_relations(&merged.gras)],
+                    || vec![join_relations(&repaired_gras)],
                     SpliceFallbackContext {
                         line_idx: def.line_idx,
                         target_lang: &def.target_lang,
@@ -2152,6 +2189,303 @@ mod cardinality_tests {
 
         splice_l2_into_chat(&mut chat_file, &deferred, &merged);
         assert_post_splice_gra_valid(&mut chat_file, "C5 — multi-position adversarial sweep");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // L2 redesign 2026-05-07 — constructive merge tests.
+    //
+    // These four tests pin the dominant rollback variants observed in the
+    // wild (net captured-tracing run 8b461fee-df9, 750 sample files):
+    //
+    //   secondary_no_root        40.4%  → constructed away (Tests 1, 5)
+    //   secondary_multi_root     38.5%  → constructed away (Test 2)
+    //   secondary_head_oob       11.0%  → constructed away (Test 3)
+    //   secondary_cycle          10.1%  → genuine fallback (Test 4)
+    //
+    // Each test fixture is grounded in a real warn-line shape from
+    // a captured-tracing morphotag run's `server.log`. Root-cause
+    // walk-through is in the private workspace.
+    //
+    // PRE-FIX: tests 1-3 fail (rollback, fallback==1). Test 4 passes
+    // (cycle is irreducible; rollback is the right answer).
+    // POST-FIX: tests 1-3 pass (splice succeeds; tree invariants
+    // maintained by construction). Test 4 still passes (regression pin).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Test 1 (no_root): single-position L2 span where the L2 word IS the
+    /// host root, and secondary's per-position relation has NO `head=0,
+    /// ROOT`. Real-world shape from the warn log: host `4|0|ROOT` at the
+    /// L2 position; secondary returns `1|2|NMOD`; current splice replaces
+    /// `4|0|ROOT` with `4|5|NMOD`, killing the only root. After fix:
+    /// merge ensures the L2 position becomes `head=0, ROOT` because the
+    /// `InternalRoot` attachment promises this position owns the host's
+    /// root.
+    #[test]
+    fn merge_constructs_root_when_l2_span_owns_host_root() {
+        // Host: `voici yellow@s .` — `yellow` is at word_idx=1 and is the
+        // host's primary root (matches the 2026-05-07 warn-line family
+        // where the L2 word at word_idx=N IS at host root position).
+        let chat_text = "@UTF8\n\
+                         @Begin\n\
+                         @Languages:\tfra, ara\n\
+                         @Participants:\tPAR Participant\n\
+                         @ID:\tfra|test|PAR|||||Participant|||\n\
+                         *PAR:\tvoici yellow@s .\n\
+                         %mor:\tintj|voici L2|xxx .\n\
+                         %gra:\t1|2|DISCOURSE 2|0|ROOT 3|2|PUNCT\n\
+                         @End\n";
+        let parser = TreeSitterParser::new().unwrap();
+        let (mut chat_file, _errors) = parse_lenient(&parser, chat_text);
+        let line_idx = chat_file
+            .lines
+            .iter()
+            .position(|l| matches!(l, talkbank_model::model::Line::Utterance(_)))
+            .unwrap();
+
+        let deferred = vec![deferred_position(line_idx, 1, "ara", "root", 0)];
+        // Secondary's relation lacks head=0/ROOT — head=2 mimics the
+        // wild warn-line `secondary_gras=["1|2|NMOD"]`. Single-chunk
+        // merged Mor (one gra entry).
+        let merged = vec![Some(MergedL2Morphology {
+            mor: Mor::new(MorWord::new(
+                PosCategory::new("noun"),
+                MorStem::new("yellow"),
+            )),
+            gras: vec![GrammaticalRelation::new(1, 2, "NMOD")],
+            corrected_deprel: None,
+            attachment: L2Attachment::InternalRoot,
+        })];
+
+        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        assert_eq!(
+            outcome.spliced, 1,
+            "InternalRoot span must splice successfully; merge must \
+             ensure the position carries head=0/ROOT regardless of \
+             secondary's relation. Got fallback={}, spliced={}.",
+            outcome.fallback, outcome.spliced
+        );
+        assert_eq!(outcome.fallback, 0);
+        assert_post_splice_gra_valid(
+            &mut chat_file,
+            "Test 1 — InternalRoot, no head=0/ROOT in secondary",
+        );
+        // Stronger: assert the L2 position is the post-splice root.
+        let utt = match &chat_file.lines[line_idx] {
+            talkbank_model::model::Line::Utterance(u) => u,
+            _ => unreachable!(),
+        };
+        let gra = utt
+            .dependent_tiers
+            .iter()
+            .find_map(|t| match t {
+                talkbank_model::model::DependentTier::Gra(g) => Some(g),
+                _ => None,
+            })
+            .expect("post-splice gra present");
+        let roots: Vec<_> = gra
+            .relations()
+            .iter()
+            .filter(|r| r.head == 0 && r.relation.eq_ignore_ascii_case("ROOT"))
+            .collect();
+        assert_eq!(
+            roots.len(),
+            1,
+            "post-splice gra must have exactly one ROOT; got {} ({:?})",
+            roots.len(),
+            gra.relations()
+        );
+    }
+
+    /// Test 2 (multi_root): L2 word is NOT the host root, and secondary
+    /// returned `1|0|ROOT` for the L2 word (parsed it as its local root).
+    /// Splice must rewrite secondary's `head=0/ROOT` to attach to the
+    /// host anchor with the host's deprel — not preserve a second root.
+    /// Real-world shape from warn log: host_pre had `16|0|ROOT, 18|...`;
+    /// L2 at host pos 18; secondary returned `1|0|ROOT`; current splice
+    /// produces both `16|0|ROOT` and `18|0|ROOT`.
+    #[test]
+    fn merge_does_not_double_root_when_secondary_returns_local_root() {
+        // Host: `voici yellow@s .` — `voici` is host root; `yellow` is OBJ.
+        let chat_text = "@UTF8\n\
+                         @Begin\n\
+                         @Languages:\tfra, ara\n\
+                         @Participants:\tPAR Participant\n\
+                         @ID:\tfra|test|PAR|||||Participant|||\n\
+                         *PAR:\tvoici yellow@s .\n\
+                         %mor:\tintj|voici L2|xxx .\n\
+                         %gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n\
+                         @End\n";
+        let parser = TreeSitterParser::new().unwrap();
+        let (mut chat_file, _errors) = parse_lenient(&parser, chat_text);
+        let line_idx = chat_file
+            .lines
+            .iter()
+            .position(|l| matches!(l, talkbank_model::model::Line::Utterance(_)))
+            .unwrap();
+
+        let deferred = vec![deferred_position(line_idx, 1, "ara", "obj", 1)];
+        let merged = vec![Some(MergedL2Morphology {
+            mor: Mor::new(MorWord::new(
+                PosCategory::new("noun"),
+                MorStem::new("yellow"),
+            )),
+            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            corrected_deprel: None,
+            attachment: host_attachment(0, "obj"),
+        })];
+
+        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        assert_eq!(
+            outcome.spliced, 1,
+            "ExternalRoot span must splice; secondary's `1|0|ROOT` must \
+             be rewritten to attach to host anchor. \
+             fallback={}, spliced={}",
+            outcome.fallback, outcome.spliced
+        );
+        assert_eq!(outcome.fallback, 0);
+        assert_post_splice_gra_valid(
+            &mut chat_file,
+            "Test 2 — ExternalRoot, secondary returns head=0/ROOT",
+        );
+        let utt = match &chat_file.lines[line_idx] {
+            talkbank_model::model::Line::Utterance(u) => u,
+            _ => unreachable!(),
+        };
+        let gra = utt
+            .dependent_tiers
+            .iter()
+            .find_map(|t| match t {
+                talkbank_model::model::DependentTier::Gra(g) => Some(g),
+                _ => None,
+            })
+            .expect("post-splice gra present");
+        let roots: Vec<_> = gra
+            .relations()
+            .iter()
+            .filter(|r| r.head == 0 && r.relation.eq_ignore_ascii_case("ROOT"))
+            .collect();
+        assert_eq!(
+            roots.len(),
+            1,
+            "post-splice gra must have exactly one ROOT (the host's \
+             original root, not a duplicate from secondary); got {} ({:?})",
+            roots.len(),
+            gra.relations()
+        );
+    }
+
+    /// Test 3 (head_oob): single-position L2 with secondary's head index
+    /// way out of bounds. Real-world shape: secondary returned
+    /// `1|11|NMOD` when the host has only 10 positions; current splice's
+    /// `splice_coordinated` translation produces `9|11|NMOD` and the
+    /// validator rejects it. After fix: merge clamps OOB heads to attach
+    /// at the host anchor (or treats them as external attachments).
+    #[test]
+    fn merge_clamps_secondary_head_to_anchor_when_local_index_oob() {
+        // Host: `voici yellow@s .` — `voici` is host root; `yellow` is OBJ.
+        let chat_text = "@UTF8\n\
+                         @Begin\n\
+                         @Languages:\tfra, ara\n\
+                         @Participants:\tPAR Participant\n\
+                         @ID:\tfra|test|PAR|||||Participant|||\n\
+                         *PAR:\tvoici yellow@s .\n\
+                         %mor:\tintj|voici L2|xxx .\n\
+                         %gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n\
+                         @End\n";
+        let parser = TreeSitterParser::new().unwrap();
+        let (mut chat_file, _errors) = parse_lenient(&parser, chat_text);
+        let line_idx = chat_file
+            .lines
+            .iter()
+            .position(|l| matches!(l, talkbank_model::model::Line::Utterance(_)))
+            .unwrap();
+
+        let deferred = vec![deferred_position(line_idx, 1, "ara", "obj", 1)];
+        // Secondary returns `1|99|NMOD` — head=99 has no host preimage.
+        // Today: splice_coordinated maps 99 to a host index out of bounds
+        // → secondary_head_oob. After fix: head clamped to anchor (host
+        // pos 1, the verb), relation rewritten to host's `obj`.
+        let merged = vec![Some(MergedL2Morphology {
+            mor: Mor::new(MorWord::new(
+                PosCategory::new("noun"),
+                MorStem::new("yellow"),
+            )),
+            gras: vec![GrammaticalRelation::new(1, 99, "NMOD")],
+            corrected_deprel: None,
+            attachment: host_attachment(0, "obj"),
+        })];
+
+        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        assert_eq!(
+            outcome.spliced, 1,
+            "OOB-head span must splice with head clamped to anchor. \
+             fallback={}, spliced={}",
+            outcome.fallback, outcome.spliced
+        );
+        assert_eq!(outcome.fallback, 0);
+        assert_post_splice_gra_valid(&mut chat_file, "Test 3 — ExternalRoot, secondary head OOB");
+    }
+
+    /// Test 4 (cycle, REPAIRED): two-position L2 span where the
+    /// per-position secondary relations form a cycle within the span.
+    ///
+    /// **Originally drafted as a regression pin for "cycles are
+    /// irreducible".** After implementing the constructive merge, it
+    /// turns out cycles ARE repairable: pass 4 of `repair_secondary_gras`
+    /// detects a cycle by walking head chains and breaks it by
+    /// re-rooting one of the cycle members. The result is a valid tree
+    /// (with one position deterministically picked as the root) rather
+    /// than a rollback to L2|xxx.
+    ///
+    /// This is strictly better than rollback: morphology (POS, lemma,
+    /// features) is preserved at every position; only the structural
+    /// arc that participated in the cycle gets adjusted. The "wrong
+    /// attachment within span" cost is bounded to one edge per cycle.
+    ///
+    /// What stays the same: Test 4 still pins the cycle code path —
+    /// it now pins that the cycle gets *repaired* rather than that it
+    /// rolls back. The regression class this defends against is "the
+    /// cycle-detection pass silently regresses to letting the cyclic
+    /// gras through to splice, where it fails the post-splice
+    /// validator".
+    #[test]
+    fn merge_falls_back_only_on_genuine_secondary_cycle() {
+        let (mut chat_file, line_idx) = build_l2_fixture("eng, fra", "x y", 2);
+
+        let deferred = vec![
+            deferred_position(line_idx, 0, "fra", "dep", 0),
+            deferred_position(line_idx, 1, "fra", "dep", 0),
+        ];
+        // Each position's secondary parse points at the OTHER position
+        // (in span-local indexing): pos 0's relation says head=2 (= span
+        // pos 1), pos 1's relation says head=1 (= span pos 0). Cycle.
+        let merged = vec![
+            Some(MergedL2Morphology {
+                mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("x"))),
+                gras: vec![GrammaticalRelation::new(1, 2, "DEP")],
+                corrected_deprel: None,
+                attachment: L2Attachment::InternalRoot,
+            }),
+            Some(MergedL2Morphology {
+                mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("y"))),
+                gras: vec![GrammaticalRelation::new(1, 1, "DEP")],
+                corrected_deprel: None,
+                attachment: L2Attachment::InternalRoot,
+            }),
+        ];
+
+        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        assert_eq!(
+            outcome.spliced, 2,
+            "cycle must be repaired into a valid tree; \
+             fallback={}, spliced={}",
+            outcome.fallback, outcome.spliced
+        );
+        assert_eq!(outcome.fallback, 0);
+        assert_post_splice_gra_valid(
+            &mut chat_file,
+            "Test 4 — cycle in secondary, repaired via cycle-detection pass",
+        );
     }
 }
 

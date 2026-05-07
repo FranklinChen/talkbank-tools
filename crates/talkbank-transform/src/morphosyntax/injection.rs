@@ -88,6 +88,101 @@ pub struct RetokenizationInfo {
 // Result injection (from NLP callback)
 // ---------------------------------------------------------------------------
 
+/// If every word in the utterance is a special-form (FormType) or a
+/// code-switch (resolved language), synthesize the morphology
+/// directly from FormType and write a star-shaped %gra (first chunk
+/// = head=0/ROOT; rest depend on it; terminator = head=1/PUNCT).
+/// Returns `true` if synthesis was performed (caller should skip
+/// the Stanza-derived path); `false` if the utterance doesn't qualify.
+///
+/// Stanza's analysis is bypassed here because:
+/// - For all-placeholder input (`xbxxx .`), Stanza may return empty
+///   (no parseable sentence).
+/// - For all-placeholder input, Stanza may tokenize `xbxxx` into
+///   multiple sub-tokens (e.g. `xb`+`xxx`), producing a mor count
+///   that doesn't align with the utterance's word count, which trips
+///   `inject_morphosyntax`'s `word_count == mor_count` check and
+///   leaves the utterance untouched.
+/// - In all cases, the morphology of these words is fully determined
+///   by FormType; whatever Stanza says about them is irrelevant.
+fn synthesize_all_special_form_utterance(
+    chat_file: &mut talkbank_model::model::ChatFile,
+    line_idx: usize,
+    item: &super::payload::MorphosyntaxBatchItem,
+    words: &[crate::extract::ExtractedWord],
+    root_label: &str,
+    dep_label: &str,
+    punct_label: &str,
+    decisions: &mut Vec<DecisionRecord>,
+) -> bool {
+    use super::synthesis::synthesize_special_form_mor;
+    use talkbank_model::model::dependent_tier::GrammaticalRelation;
+    use talkbank_model::model::dependent_tier::mor::{Mor, MorWord};
+
+    let all_synthesizable = !item.special_forms.is_empty()
+        && item
+            .special_forms
+            .iter()
+            .all(|(form_type, resolved_lang)| form_type.is_some() || resolved_lang.is_some());
+    if !all_synthesizable {
+        return false;
+    }
+
+    let synth_mors: Vec<Mor> = item
+        .special_forms
+        .iter()
+        .zip(words.iter())
+        .map(|((form_type, resolved_lang), word)| {
+            // Code-switched first: an `@s` word can carry both a
+            // form_type and a resolved_lang in theory, and the L2
+            // splice path (which fills in the placeholder later)
+            // wins by precedent.
+            if resolved_lang.is_some() {
+                Mor::new(MorWord::l2_placeholder())
+            } else if let Some(ft) = form_type {
+                synthesize_special_form_mor(ft, word.text.as_str())
+            } else {
+                unreachable!(
+                    "all_synthesizable invariant violated: word has \
+                     neither form_type nor resolved_lang"
+                )
+            }
+        })
+        .collect();
+
+    let chunk_count: usize = synth_mors.iter().map(Mor::count_chunks).sum();
+    let mut synth_gras: Vec<GrammaticalRelation> = Vec::with_capacity(chunk_count + 1);
+    for chunk_idx in 1..=chunk_count {
+        let (head, label) = if chunk_idx == 1 {
+            (0_usize, root_label)
+        } else {
+            (1_usize, dep_label)
+        };
+        synth_gras.push(GrammaticalRelation::new(chunk_idx, head, label));
+    }
+    synth_gras.push(GrammaticalRelation::new(chunk_count + 1, 1, punct_label));
+
+    let utt = match &mut chat_file.lines[line_idx] {
+        Line::Utterance(u) => u,
+        _ => return false,
+    };
+    if let Err(diag) =
+        crate::inject::inject_morphosyntax(utt, synth_mors, item.terminator.clone(), synth_gras)
+    {
+        let enriched = enrich_diagnostic(diag, &[], RetokenizationContext::Preserve);
+        let outcome = MorOutcome {
+            line_idx,
+            speaker: SpeakerCode::new(utt.main.speaker.as_str()),
+            kind: MorOutcomeKind::MisalignmentBug(enriched),
+        };
+        if let Some(record) = outcome.to_decision_record() {
+            record.trace();
+            decisions.push(record);
+        }
+    }
+    true
+}
+
 /// Inject UD NLP results back into utterances.
 ///
 /// Applies special form overrides (@c -> c|, @s -> L2|xxx) and
@@ -123,11 +218,39 @@ pub fn inject_results(
     /// produced 3,378 wild E722 occurrences across the corpus on
     /// 2026-05-06.
     const ROOT_RELATION_LABEL: &str = "ROOT";
+    /// Deprel label written for the terminator's relation in synthetic
+    /// (no-Stanza) gras. Same string CHAT validation expects for the
+    /// terminator's punct relation.
+    const PUNCT_RELATION_LABEL: &str = "PUNCT";
 
     let mut retokenization_traces: Vec<RetokenizationInfo> = Vec::new();
     let mut decisions: Vec<DecisionRecord> = Vec::new();
 
     for (ud_resp, (line_idx, utt_ordinal, item, words)) in responses.into_iter().zip(batch_items) {
+        // Pre-flight: utterances whose every word is a special-form
+        // or code-switch placeholder don't need Stanza. Stanza's
+        // analysis of `xbxxx`-only input is fundamentally untrustworthy
+        // — its English tokenizer may split `xbxxx` into `xb`+`xxx`,
+        // which then trips the count-mismatch check in
+        // `inject_morphosyntax` and leaves the utterance with no
+        // tiers (preserving any pre-existing buggy %gra). Per the
+        // 2026-05-07 reproducer in
+        // `synthesis_stanza_tokenizes_xbxxx_into_two_at_q_root_keeps_root_deprel`,
+        // the morphology is fully determined by FormType — synthesize
+        // it directly and skip the Stanza-derived path entirely.
+        if synthesize_all_special_form_utterance(
+            chat_file,
+            line_idx,
+            &item,
+            &words,
+            ROOT_RELATION_LABEL,
+            DEP_RELATION_LABEL,
+            PUNCT_RELATION_LABEL,
+            &mut decisions,
+        ) {
+            continue;
+        }
+
         if let Some(ud_sentence) = ud_resp.sentences.first() {
             let utt = match &mut chat_file.lines[line_idx] {
                 Line::Utterance(u) => u,
@@ -369,16 +492,19 @@ pub fn inject_results(
                 }
                 continue;
             }
-        } else {
-            if let Line::Utterance(utt) = &chat_file.lines[line_idx] {
-                decisions.push(DecisionRecord::new_and_trace(
-                    line_idx,
-                    utt.main.speaker.as_str().to_string(),
-                    DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::NlpNoSentences),
-                    "stanza_returned_empty_response".into(),
-                    true,
-                ));
-            }
+        } else if let Line::Utterance(utt) = &chat_file.lines[line_idx] {
+            // Stanza returned empty for an utterance that's NOT
+            // all-synthesizable (the all-synthesizable case was
+            // handled at the top of the iteration). This is a
+            // genuine "Stanza had nothing to say" — record the
+            // decision and leave the utterance untouched.
+            decisions.push(DecisionRecord::new_and_trace(
+                line_idx,
+                utt.main.speaker.as_str().to_string(),
+                DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::NlpNoSentences),
+                "stanza_returned_empty_response".into(),
+                true,
+            ));
         }
     }
 

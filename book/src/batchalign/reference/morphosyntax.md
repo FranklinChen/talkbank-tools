@@ -1,7 +1,7 @@
 # Morphosyntax Pipeline
 
 **Status:** Current
-**Last updated:** 2026-05-06 20:33 EDT
+**Last updated:** 2026-05-07 18:30 EDT
 
 ## 1. Overview
 
@@ -9,6 +9,24 @@ The batchalign morphosyntax pipeline (`morphotag` command) adds %mor and %gra ti
 CHAT transcripts.  Rust owns CHAT parsing, word extraction, UD-to-CHAT mapping, AST
 injection, and serialization.  Python's only role is ML inference — calling Stanza for
 POS/lemma/dependency analysis.
+
+### Per-file scoping via `@Options`
+
+`morphotag` reads two CHAT-level directives, both with narrow,
+command-specific semantics:
+
+- **`@Options: CA`** — "the morphotag command is not to be run on
+  this file." CA transcripts are pass-through: existing %mor /
+  %gra is preserved unchanged, no Stanza inference, no provenance
+  comment.
+- **`@Options: NoAlign`** — scoped to the `align` command, NOT
+  morphotag. NoAlign files run morphotag normally. (Pre-2026-05-07
+  the pipeline incorrectly conflated NoAlign with a global skip,
+  leaving NoAlign files with stale morphotag and no rerun path;
+  fixed.)
+
+Full semantics + worked examples: [`@Options` and Per-File Command
+Scoping](./chat-options.md).
 
 ## 2. Architecture
 

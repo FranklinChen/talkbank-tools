@@ -39,7 +39,7 @@ use super::{
     Bullet, LanguageCode, Linker, Postcode, SpeakerCode, Terminator, TierContent, UtteranceContent,
     WriteChat,
 };
-use crate::alignment::helpers::{TierDomain, WordItem, walk_words};
+use crate::alignment::helpers::{WordItem, walk_words};
 use crate::model::content::word::Word;
 use crate::model::dependent_tier::{WorItem, WorTier};
 use crate::model::{BracketedContent, BracketedItem, ReplacedWord};

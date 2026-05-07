@@ -252,6 +252,132 @@ pub fn merge_primary_secondary(
     )
 }
 
+/// Whether the entry at `start` reaches a `head=0` row by following
+/// head pointers within `chunk_count + 1` hops. Returns false on
+/// cycles and self-loops — the conditions
+/// [`repair_secondary_gras`]'s pass 4 needs to detect.
+fn entry_reaches_root_via_heads(
+    gras: &[GrammaticalRelation],
+    start: usize,
+    chunk_count: usize,
+) -> bool {
+    let mut current = start;
+    for _ in 0..=chunk_count {
+        let head = gras[current].head;
+        if head == 0 {
+            return true;
+        }
+        let next = head - 1; // 1-indexed → 0-indexed
+        if next == current {
+            return false; // self-loop
+        }
+        current = next;
+    }
+    false
+}
+
+/// Strict splice-contract root predicate. Distinct from
+/// [`GrammaticalRelation::is_root`], which also accepts self-loops
+/// and `INCROOT` — neither admissible at the splice boundary.
+fn is_strict_root(rel: &GrammaticalRelation) -> bool {
+    rel.head == 0 && rel.relation.eq_ignore_ascii_case("ROOT")
+}
+
+/// 0-indexed gras position carrying `head=0, ROOT`. Returned from
+/// [`repair_secondary_gras`] so callers don't re-scan to drive
+/// `apply_safe_root_rewrites`.
+pub(super) type RootOffset = usize;
+
+/// Repair a span-aggregated secondary gras slice so the merged
+/// result satisfies the splice invariants by construction. Returns
+/// post-repair root offsets.
+///
+/// **Why repair runs at the splice layer, not per position in
+/// [`merge_primary_secondary_with_attachment`].** Per-position gras
+/// may carry span-relative head indices (e.g. position 1's gras
+/// has `head=2` referencing the second position in the span);
+/// `chunk_count = position's chunks` would falsely flag those as
+/// OOB. Repair runs once per span, where `chunk_count = total span
+/// chunks`, so cross-position references stay valid.
+///
+/// Four passes:
+/// 1. Clamp OOB (`head > chunk_count` → `head=0, ROOT`).
+///    Catches `secondary_head_oob`.
+/// 2. Demote multi-roots to attach the survivor; deterministic by
+///    position. Catches `secondary_multi_root`.
+/// 3. Force `head=0, ROOT` on the first row when the attachment
+///    is [`L2Attachment::InternalRoot`] and no root exists. No-op
+///    for `ExternalRoot` (`apply_safe_root_rewrites` handles that).
+///    Catches `secondary_no_root`.
+/// 4. Break residual cycles by re-attaching cycle members to the
+///    existing root, or promoting one if none exists. Catches
+///    `secondary_cycle`.
+pub(super) fn repair_secondary_gras(
+    gras: &mut [GrammaticalRelation],
+    attachment: &L2Attachment,
+) -> Vec<RootOffset> {
+    if gras.is_empty() {
+        return Vec::new();
+    }
+    let chunk_count = gras.len();
+
+    // Pass 1.
+    for rel in gras.iter_mut() {
+        if rel.head > chunk_count {
+            rel.head = 0;
+            rel.relation = "ROOT".into();
+        }
+    }
+
+    // Pass 2.
+    let mut root_indices: Vec<RootOffset> = gras
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| is_strict_root(r))
+        .map(|(i, _)| i)
+        .collect();
+    if root_indices.len() > 1 {
+        let primary_root_head = root_indices[0] + 1; // 1-indexed
+        for &idx in root_indices.iter().skip(1) {
+            gras[idx].head = primary_root_head;
+            gras[idx].relation = "DEP".into();
+        }
+        root_indices.truncate(1);
+    }
+
+    // Pass 3.
+    if root_indices.is_empty()
+        && let L2Attachment::InternalRoot = attachment
+    {
+        gras[0].head = 0;
+        gras[0].relation = "ROOT".into();
+        root_indices.push(0);
+    }
+
+    // Pass 4.
+    let existing_root = root_indices.first().copied();
+    for i in 0..gras.len() {
+        if gras[i].head == 0 || entry_reaches_root_via_heads(gras, i, chunk_count) {
+            continue;
+        }
+        match existing_root {
+            Some(root_idx) if root_idx != i => {
+                gras[i].head = root_idx + 1;
+                gras[i].relation = "DEP".into();
+            }
+            _ => {
+                gras[i].head = 0;
+                gras[i].relation = "ROOT".into();
+                if existing_root.is_none() {
+                    root_indices.push(i);
+                }
+            }
+        }
+    }
+
+    root_indices
+}
+
 fn merge_primary_secondary_with_attachment(
     primary: &PrimaryStructuralInfo,
     mut secondary_mor: Mor,
@@ -266,6 +392,14 @@ fn merge_primary_secondary_with_attachment(
     let resolved_pos = resolve_merged_pos_with_context(primary, secondary_upos, secondary_context);
     secondary_mor.main.pos = PosCategory::new(resolved_pos.to_chat_pos_name());
 
+    // NOTE: per-position gras repair is NOT called here. The
+    // per-position gras may carry span-relative head indices (e.g.
+    // for a multi-position L2 span, position 1's gras may have
+    // head=2 referencing the second position in the span). Calling
+    // `repair_secondary_gras` here with chunk_count = position's
+    // chunks would falsely flag those as OOB. Repair runs at the
+    // splice layer (`splice_l2_into_chat` and `splice_one_position`)
+    // where the span context is known.
     let mut gras = secondary_gras;
     if let Some(ctx) = secondary_context
         && ctx.is_phrasal_verb_particle()

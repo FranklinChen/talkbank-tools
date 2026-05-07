@@ -100,6 +100,7 @@
 # Batchalign3 — Technical Reference
 
 - [CHAT Format](batchalign/reference/chat-format.md)
+- [`@Options` and Per-File Command Scoping](batchalign/reference/chat-options.md)
 - [Morphosyntax Pipeline](batchalign/reference/morphosyntax.md)
 - [%gra Format Conventions](batchalign/reference/gra-format.md)
 - [Forced Alignment](batchalign/reference/forced-alignment.md)
