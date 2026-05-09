@@ -265,12 +265,13 @@ function uniqueSourceDir(label) {
 
 // morphotag is a per-file text-NLP command: language is resolved from
 // each file's @Languages: header, and job-level `lang` sentinels are
-// banned by the server (see the 2026-05-03 morphotag incident). Send
-// the wire-format LanguageSpec::PerFile sentinel.
+// banned by the server (see the 2026-05-03 morphotag incident). The
+// LanguageSpec wire format is kebab-case — `"per-file"`, not the
+// `"PerFile"` shown in the OpenAPI schema.
 async function submitMorphotagJob(request, baseUrl, { files, sourceDir }) {
   const payload = {
     command: "morphotag",
-    lang: "PerFile",
+    lang: "per-file",
     num_speakers: 1,
     files,
     media_files: [],
