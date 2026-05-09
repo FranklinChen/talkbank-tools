@@ -158,7 +158,6 @@ async function startRealServer() {
       "host: 127.0.0.1",
       `port: ${port}`,
       "warmup_commands: []",
-      "max_concurrent_jobs: 2",
     ].join("\n"),
     "utf8"
   );

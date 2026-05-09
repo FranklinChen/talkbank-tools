@@ -10,10 +10,26 @@ the parent conftest in morphosyntax/.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+_HERE = Path(__file__).parent.resolve()
 
 
 def pytest_collection_modifyitems(items):
-    """Mark all tests in this directory as Cantonese integration tests."""
+    """Mark tests in this directory as Cantonese integration tests.
+
+    Pytest invokes every conftest's ``pytest_collection_modifyitems`` with
+    the same global items list, so this hook must filter to its own
+    directory itself — otherwise every collected test in the session
+    would be marked ``cantonese_integration`` and the addopts filter
+    ``-m "not cantonese_integration"`` would deselect the entire suite.
+    """
     for item in items:
-        item.add_marker(pytest.mark.cantonese_integration)
+        try:
+            item_path = Path(item.path).resolve()
+        except (OSError, AttributeError):
+            continue
+        if _HERE == item_path or _HERE in item_path.parents:
+            item.add_marker(pytest.mark.cantonese_integration)

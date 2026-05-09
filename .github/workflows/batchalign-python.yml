@@ -143,6 +143,10 @@ jobs:
         with:
           name: wheel-3.12
           path: dist/
+      - uses: actions/download-artifact@v6
+        with:
+          name: dashboard-dist
+          path: frontend/dist/
       - name: Install from pre-built wheel
         run: |
           uv sync --group dev --no-install-project
