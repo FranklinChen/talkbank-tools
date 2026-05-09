@@ -171,9 +171,10 @@ jobs:
     name: Generated Artifacts
     runs-on: ubuntu-latest
     # API-drift verification runs `make batchalign-dashboard-api-check`,
-    # which only needs Node + npm + the OpenAPI script. No cargo invocation
-    # — rust-toolchain and rust-cache are deliberately omitted to keep
-    # this a fast-feedback gate.
+    # which transitively invokes cargo to regenerate openapi.json from
+    # the Rust server, then diffs the result. Needs the pinned
+    # toolchain + protoc; rust-cache is intentionally omitted to keep
+    # the gate's startup cheap.
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -181,6 +182,9 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install frontend deps
         working-directory: frontend
         run: npm ci

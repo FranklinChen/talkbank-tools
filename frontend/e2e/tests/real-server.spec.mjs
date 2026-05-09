@@ -234,15 +234,15 @@ async function waitForJobStatus(request, baseUrl, jobId, predicate, timeoutMs = 
   throw new Error(`timed out waiting for job ${jobId}; last status=${lastStatus}`);
 }
 
-function makeChatFile(filename, utterance) {
+function makeChatFile(filename, utterance, { language = "eng" } = {}) {
   return {
     filename,
     content: [
       "@UTF8",
       "@Begin",
-      "@Languages:\teng",
+      `@Languages:\t${language}`,
       "@Participants:\tPAR Participant",
-      "@ID:\teng|test|PAR|||||Participant|||",
+      `@ID:\t${language}|test|PAR|||||Participant|||`,
       `*PAR:\t${utterance} .`,
       "@End",
       "",
@@ -263,10 +263,14 @@ function uniqueSourceDir(label) {
   return `/tmp/react-e2e-${label}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-async function submitMorphotagJob(request, baseUrl, { files, lang = "eng", sourceDir }) {
+// morphotag is a per-file text-NLP command: language is resolved from
+// each file's @Languages: header, and job-level `lang` sentinels are
+// banned by the server (see the 2026-05-03 morphotag incident). Send
+// the wire-format LanguageSpec::PerFile sentinel.
+async function submitMorphotagJob(request, baseUrl, { files, sourceDir }) {
   const payload = {
     command: "morphotag",
-    lang,
+    lang: "PerFile",
     num_speakers: 1,
     files,
     media_files: [],
@@ -429,10 +433,17 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     request,
   }) => {
     test.setTimeout(360_000);
-    const files = [makeChatFile("real-failure.cha", "this job should fail cleanly")];
+    // morphotag resolves language per-file from @Languages:; embed an
+    // unsupported language code there to provoke a worker-bootstrap
+    // failure, mirroring what the old job-level `lang: "zzz"` did
+    // before the LanguageSpec::PerFile contract.
+    const files = [
+      makeChatFile("real-failure.cha", "this job should fail cleanly", {
+        language: "zzz",
+      }),
+    ];
     const submitted = await submitMorphotagJob(request, harness.baseUrl, {
       files,
-      lang: "zzz",
       sourceDir: uniqueSourceDir("failure"),
     });
     const jobId = submitted.job_id;
