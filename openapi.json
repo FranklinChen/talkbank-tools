@@ -25,7 +25,7 @@
         "type": "string"
       },
       "CallerPid": {
-        "description": "Process identifier of the caller that issued a cancel.\n\nUnix PIDs fit in u32 on every platform we support. Persisted in\n`cancellations.pid` for forensics across multi-machine setups\n(helps distinguish a Brian-laptop cancel from a fleet-internal one).",
+        "description": "Process identifier of the caller that issued a cancel.\n\nUnix PIDs fit in u32 on every platform we support. Persisted in\n`cancellations.pid` for forensics across multi-machine setups\n(helps distinguish an operator-laptop cancel from a fleet-internal one).",
         "format": "int32",
         "minimum": 0,
         "type": "integer"
@@ -220,6 +220,7 @@
           "worker_crash",
           "worker_timeout",
           "worker_protocol",
+          "worker_bootstrap",
           "provider_transient",
           "provider_terminal",
           "memory_pressure",
@@ -1161,7 +1162,7 @@
         "type": "object"
       },
       "LanguageSpec": {
-        "description": "Language specification from the CLI or job submission.\n\n`Auto` means the ASR engine should detect the language. This variant must\nbe resolved to a concrete [`LanguageCode3`] before any CHAT construction\nor NLP dispatch that requires a known language.",
+        "description": "Language specification from the CLI or job submission.\n\n`Auto` means the ASR engine should detect the language. This variant must\nbe resolved to a concrete [`LanguageCode3`] before any CHAT construction\nor NLP dispatch that requires a known language.\n\n`PerFile` means the command has no job-level language at all: each input\nfile's processing language is read from its `@Languages:` header at the\nstart of the per-file pipeline. This is distinct from `Auto`: `Auto` is an\nASR-engine signal asking the model to detect the spoken language;\n`PerFile` is a routing signal for text-NLP commands (morphotag, translate,\ncoref) whose language source is the CHAT file itself, not the job\nsubmission. The 2026-05-03 morphotag incident happened because these\ncommands were forced to carry a placeholder `Resolved(eng)` value that\nthen leaked into the job record, the dashboard, and the Stanza\npre-warming key. `PerFile` makes the absence of a job-level language a\nfirst-class state in the type system.",
         "oneOf": [
           {
             "description": "Let the ASR engine auto-detect the language.",
@@ -1182,6 +1183,13 @@
               "Resolved"
             ],
             "type": "object"
+          },
+          {
+            "description": "No job-level language; resolve per-file from each CHAT file's\n`@Languages:` header. Used by morphotag, translate, and coref —\nnone of which take a `--lang` CLI flag.",
+            "enum": [
+              "PerFile"
+            ],
+            "type": "string"
           }
         ]
       },
@@ -1362,7 +1370,7 @@
     }
   },
   "info": {
-    "description": "batchalign3 application: types, server, worker pool, cache",
+    "description": "batchalign3: command-line interface, application, server, worker pool, cache",
     "license": {
       "identifier": "BSD-3-Clause",
       "name": "BSD-3-Clause"

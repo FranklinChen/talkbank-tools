@@ -307,7 +307,7 @@ export interface components {
          *
          *     Unix PIDs fit in u32 on every platform we support. Persisted in
          *     `cancellations.pid` for forensics across multi-machine setups
-         *     (helps distinguish a Brian-laptop cancel from a fleet-internal one).
+         *     (helps distinguish an operator-laptop cancel from a fleet-internal one).
          */
         CallerPid: number;
         /**
@@ -445,7 +445,7 @@ export interface components {
          *     error strings.
          * @enum {string}
          */
-        FailureCategory: "validation" | "parse_error" | "input_missing" | "worker_crash" | "worker_timeout" | "worker_protocol" | "provider_transient" | "provider_terminal" | "memory_pressure" | "cancelled" | "system";
+        FailureCategory: "validation" | "parse_error" | "input_missing" | "worker_crash" | "worker_timeout" | "worker_protocol" | "worker_bootstrap" | "provider_transient" | "provider_terminal" | "memory_pressure" | "cancelled" | "system";
         /** @description A single CHAT file submitted by the client. */
         FilePayload: {
             /** @description Full CHAT file text. */
@@ -987,11 +987,23 @@ export interface components {
          *     `Auto` means the ASR engine should detect the language. This variant must
          *     be resolved to a concrete [`LanguageCode3`] before any CHAT construction
          *     or NLP dispatch that requires a known language.
+         *
+         *     `PerFile` means the command has no job-level language at all: each input
+         *     file's processing language is read from its `@Languages:` header at the
+         *     start of the per-file pipeline. This is distinct from `Auto`: `Auto` is an
+         *     ASR-engine signal asking the model to detect the spoken language;
+         *     `PerFile` is a routing signal for text-NLP commands (morphotag, translate,
+         *     coref) whose language source is the CHAT file itself, not the job
+         *     submission. The 2026-05-03 morphotag incident happened because these
+         *     commands were forced to carry a placeholder `Resolved(eng)` value that
+         *     then leaked into the job record, the dashboard, and the Stanza
+         *     pre-warming key. `PerFile` makes the absence of a job-level language a
+         *     first-class state in the type system.
          */
         LanguageSpec: "Auto" | {
             /** @description A concrete ISO 639-3 language code. */
             Resolved: components["schemas"]["LanguageCode3"];
-        };
+        } | "PerFile";
         /**
          * @description Lease metadata for a claimed schedulable unit.
          *
