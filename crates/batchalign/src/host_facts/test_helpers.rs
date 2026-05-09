@@ -43,6 +43,36 @@ pub fn apple_silicon_64gb() -> HostFacts {
     }
 }
 
+/// Canonical "16 GB consumer laptop / GHA runner" fact set.
+///
+/// Sized to match the Small memory tier (< 24 GB) and shaped after
+/// the GitHub Actions ubuntu-latest runner the Dashboard E2E test
+/// runs on (16 GB physical, ~14 GB available after kernel/agent
+/// overhead). Used by host-facts validator tests that pin the
+/// "must work on Houjun's laptop" UX contract — a default
+/// `uv tool install batchalign3` install on this host must not
+/// be refused startup just because the capability surface
+/// hypothetically includes GPU-class workloads the user has no
+/// intention of running.
+pub fn laptop_16gb() -> HostFacts {
+    HostFacts {
+        os: OperatingSystem::Linux,
+        arch: CpuArch::X86_64,
+        cpu_logical_count: 4,
+        cpu_physical_count: 2,
+        // GHA ubuntu-latest reports `MemTotal: 16370072 kB` ≈ 15_988 MB.
+        // We use the round 15_989 to mirror the value Dashboard E2E
+        // surfaced in CI.
+        ram_total_mb: 15_989,
+        ram_available_mb: 14_000,
+        gpu: GpuPresence::None,
+        disk_free_mb_for_cache: Some(50_000),
+        hostname: "test-laptop".to_owned(),
+        detection_timestamp: UnixTimestamp::from(1_700_000_000.0),
+        detection_warnings: Vec::new(),
+    }
+}
+
 /// Canonical "Linux + 1× NVIDIA CUDA 24 GB" fact set, sized to
 /// resemble a single-A10G/L4 fleet host. Exists alongside the
 /// Apple Silicon fixture so tests can exercise both branches of

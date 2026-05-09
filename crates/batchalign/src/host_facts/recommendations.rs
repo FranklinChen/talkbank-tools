@@ -19,6 +19,8 @@
 
 use super::HostFacts;
 use crate::api::ReleasedCommand;
+use crate::types::runtime;
+use batchalign_types::domain::MemoryMb;
 
 /// Bundle of recommended values produced by [`recommend`].
 ///
@@ -311,19 +313,34 @@ pub(super) fn recommend_max_workers_per_job(facts: &HostFacts, command: &Release
 const PEAK_RAM_PER_GPU_WORKER_MB: u64 = 16_000;
 const PEAK_RAM_PER_STANZA_WORKER_MB: u64 = 12_000;
 
-/// Worst-case peak RAM in MB any single concurrent job might
-/// consume. Used by `validate()` to detect deterministically-OOM
-/// configurations (`max_concurrent_jobs * worst_case > ram_total`).
+/// Worst-case startup reservation in MB any single concurrent job
+/// might claim, given the host's memory tier. Used by `validate()`
+/// to detect deterministically-OOM configurations
+/// (`max_concurrent_jobs * worst_case > ram_total`).
 ///
-/// "Worst case" = the heaviest worker profile. GPU workers
-/// (Whisper + Wave2Vec FA + speaker pipeline) peak at ~16 GB
-/// resident; everything else (Stanza, IO) is lighter. A jobset
-/// where every job is the heaviest profile is the worst-case
-/// scheduling outcome; if that wouldn't fit in physical RAM, the
-/// configuration is unsafe regardless of what jobs the operator
-/// actually runs.
-pub fn worst_case_per_job_peak_ram_mb() -> u64 {
-    PEAK_RAM_PER_GPU_WORKER_MB
+/// **What changed (rearch follow-up).** Earlier this function returned
+/// a hardcoded 16 GB GPU peak regardless of host tier or installed
+/// capabilities. That blocked startup on 16 GB laptops doing
+/// morphotag-only work, exactly the "must run on Houjun's laptop"
+/// scenario the rearch was meant to support. The runtime gates
+/// (memory_gate.rs admission, idle_eviction.rs eviction, RSS observer
+/// Mode B) are tier-aware via [`MemoryTier`]'s
+/// `{gpu,stanza,io}_startup_mb` fields; this function now consults the
+/// same source of truth. The boot-time gate's job is to refuse
+/// configurations that cannot satisfy startup reservations on this
+/// tier, NOT to model long-tail peak RSS — that's the runtime gates'
+/// job, and they have observed-RSS data this layer cannot.
+///
+/// "Worst case" = the heaviest startup reservation across worker
+/// profiles for the detected tier. On Small (< 24 GB), GPU is 6 GB,
+/// Stanza 3 GB, IO 2 GB → returns 6 GB. On Large/Fleet (≥ 48 GB),
+/// returns 16 GB (the eager-load GPU profile). The runtime gates
+/// still refuse actual at-spawn OOM via observed RSS.
+pub fn worst_case_per_job_peak_ram_mb(tier: &runtime::MemoryTier) -> u64 {
+    let MemoryMb(gpu) = tier.gpu_startup_mb;
+    let MemoryMb(stanza) = tier.stanza_startup_mb;
+    let MemoryMb(io) = tier.io_startup_mb;
+    gpu.max(stanza).max(io)
 }
 
 /// Recommend per-profile worker-process counts for `max_workers_per_key`.

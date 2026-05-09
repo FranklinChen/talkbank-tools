@@ -201,7 +201,11 @@ impl fmt::Display for ConfigError {
                  {ram_total_mb}. Drop `max_concurrent_jobs` from \
                  server.yaml (the host-facts recommendation is by \
                  construction safe) or set a value such that \
-                 max_concurrent_jobs × {per_job_peak_mb} <= {ram_total_mb}.",
+                 max_concurrent_jobs × {per_job_peak_mb} <= {ram_total_mb}. \
+                 To run a single job locally without the daemon's memory \
+                 gate at all, invoke `batchalign3 <command> --sequential` \
+                 — `--sequential` runs the command in-process with no \
+                 daemon, no concurrent-job admission, and no memory gate.",
                 u64::from(*configured) * per_job_peak_mb,
             ),
         }
@@ -259,7 +263,8 @@ pub fn validate(cfg: &ServerConfig, facts: &HostFacts) -> ConfigValidation {
         // (refuses startup) rather than a warning because the
         // operator has no scheduling option that fits — the
         // configured cap is incorrect by construction.
-        let per_job_peak_mb = worst_case_per_job_peak_ram_mb();
+        let tier = crate::types::runtime::MemoryTier::from_total_mb(facts.ram_total_mb);
+        let per_job_peak_mb = worst_case_per_job_peak_ram_mb(&tier);
         if u64::from(configured) * per_job_peak_mb > facts.ram_total_mb {
             errors.push(ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
                 configured,
@@ -857,5 +862,102 @@ mod tests {
             }],
         };
         assert!(populated.has_errors());
+    }
+
+    // ---------------------------------------------------------------
+    // 16 GB laptop / GHA-runner UX contract.
+    //
+    // The 2026-05-08 rearch ("memory-gate-landed", "idle-eviction-pre-
+    // pass-landed", "cpu-loadavg-gate-landed", "cap-at-4-retired") was
+    // supposed to make memory gating dynamic — observe actual RSS,
+    // gate at admission, evict under pressure. The runtime gates land
+    // that contract, but the boot-time host-facts validator was left
+    // command-agnostic: it compares `max_concurrent_jobs × 16000 MB`
+    // (a hardcoded GPU-worker peak) against `ram_total_mb`, regardless
+    // of which commands the operator will actually run.
+    //
+    // On a 16 GB laptop running a default `uv tool install batchalign3`
+    // for morphotag, that gate refuses startup: `1 × 16000 > 15989`.
+    // The user sees no signal that `--sequential` would let them run
+    // the same job locally. Tests below pin both halves of the fix:
+    //
+    // 1. The default 16 GB laptop must accept startup (no operator
+    //    `max_concurrent_jobs` override); the recommendation by
+    //    construction must be safe.
+    // 2. Whenever the gate DOES refuse startup (legitimate
+    //    over-subscription on any tier), the error must point the
+    //    operator at the `--sequential` workaround.
+    // ---------------------------------------------------------------
+
+    use super::super::test_helpers::laptop_16gb;
+
+    #[test]
+    fn laptop_16gb_with_default_config_accepts_startup() {
+        let cfg = ServerConfig::default();
+        let facts = laptop_16gb();
+        let result = validate(&cfg, &facts);
+        assert!(
+            result.errors.is_empty(),
+            "default startup on a 16 GB laptop must not be refused; \
+             the host-facts gate has to be capability-aware so a \
+             non-GPU install isn't blocked by hypothetical GPU peak. \
+             errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn laptop_16gb_with_explicit_max_concurrent_one_accepts_startup() {
+        let cfg = ServerConfig {
+            max_concurrent_jobs: Some(1),
+            ..Default::default()
+        };
+        let facts = laptop_16gb();
+        let result = validate(&cfg, &facts);
+        assert!(
+            result.errors.is_empty(),
+            "max_concurrent_jobs=1 on a 16 GB laptop must be accepted \
+             — the runtime gates are responsible for refusing actual \
+             OOM via observation, not the boot gate. errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn laptop_16gb_with_oversubscribed_max_concurrent_jobs_still_refuses() {
+        // Legitimate over-subscription: even with a generous worst-case,
+        // 8 jobs cannot fit on a 16 GB laptop. The gate must still catch
+        // this — relaxing the laptop case must not turn off the gate
+        // entirely.
+        let cfg = ServerConfig {
+            max_concurrent_jobs: Some(8),
+            ..Default::default()
+        };
+        let facts = laptop_16gb();
+        let result = validate(&cfg, &facts);
+        assert!(
+            result.has_errors(),
+            "max_concurrent_jobs=8 on a 16 GB laptop is genuinely \
+             unsafe and must still be refused"
+        );
+    }
+
+    #[test]
+    fn deterministically_oom_error_message_suggests_sequential_workaround() {
+        // Operator UX: when the gate refuses startup for resource
+        // reasons, the error must name the `--sequential` flag as the
+        // recovery path. A user who hits this error needs to be told
+        // they can still run a single job locally without the daemon's
+        // memory gate.
+        let err = ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
+            configured: 8,
+            ram_total_mb: 32_000,
+            per_job_peak_mb: 16_000,
+        };
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("--sequential"),
+            "resource-refusal error must point at --sequential. rendered: {rendered}"
+        );
     }
 }
