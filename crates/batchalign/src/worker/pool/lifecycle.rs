@@ -224,7 +224,11 @@ impl WorkerPool {
         // exactly — Mode B is strictly an improvement, never worse.
         //
         // No env var, no PoolConfig field, no operator override.
-        let mem_threshold = memory_gate::host_min_free_mb_threshold();
+        // Tier-scaled floor — the 2048 MB hardcode the rearch shipped
+        // was right for Medium workstations and wrong on every other
+        // tier. See `host_min_free_mb_threshold_for_tier`.
+        let mem_threshold =
+            memory_gate::host_min_free_mb_threshold_for_tier(&self.config.runtime.memory_tier);
         let reservation_mb = group
             .profile
             .startup_reservation_mb_for_tier(&self.config.runtime.memory_tier)
@@ -234,7 +238,20 @@ impl WorkerPool {
                 Some(observed) => (observed, rss_observer::EstimateSource::ObservedAvgIdle),
                 None => (reservation_mb, rss_observer::EstimateSource::Reservation),
             };
-        if let Err(constrained) = memory_gate::check_memory_saturation(mem_threshold, estimate_mb) {
+        // Cold-start vs warm: if no worker exists for this group's
+        // (profile, lang, engine) class, the admission gate must
+        // admit — back-pressure semantics don't apply when there's
+        // nothing to push back against. Refusing the first spawn
+        // leaves the pool dead-on-arrival on memory-tight hosts;
+        // memory_guard handles actual at-spawn OOM.
+        let pool_state = if group.total.load(Ordering::Relaxed) == 0 {
+            memory_gate::PoolGateState::ColdStart
+        } else {
+            memory_gate::PoolGateState::Warm
+        };
+        if let Err(constrained) =
+            memory_gate::check_memory_saturation_with_state(pool_state, mem_threshold, estimate_mb)
+        {
             let count = self
                 .memory_constrained_rejections_total
                 .fetch_add(1, Ordering::Relaxed)
