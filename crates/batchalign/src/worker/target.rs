@@ -5,11 +5,14 @@
 //! as `infer:asr` so one small machine does not speculatively hold unrelated
 //! models in memory.
 
-use crate::api::{MemoryMb, ReleasedCommand};
+use crate::api::ReleasedCommand;
 use crate::commands::command_workflow_descriptor;
-use crate::runtime;
 
 use super::InferTask;
+
+// Re-export WorkerProfile from batchalign-types so all existing
+// `crate::worker::WorkerProfile` import paths continue to resolve.
+pub use batchalign_types::worker_profile::WorkerProfile;
 
 /// How one local Python worker should bootstrap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -29,138 +32,19 @@ pub enum WorkerBootstrapMode {
     Task,
 }
 
-// ---------------------------------------------------------------------------
-// WorkerProfile
-// ---------------------------------------------------------------------------
-
-/// Worker profile grouping related [`InferTask`]s into fewer processes.
+/// Whether this profile uses concurrent request handling inside one process.
 ///
-/// Instead of spawning one worker per `InferTask`, profiles group related tasks
-/// so that loaded models are shared within a single process:
+/// GPU workers always use concurrent serving.  Stanza workers are concurrent
+/// only on free-threaded Python 3.14t.  IO workers are never concurrent.
 ///
-/// - **Gpu**: ASR, FA, Speaker — GPU-bound models, concurrent via Python
-///   `ThreadPoolExecutor` (PyTorch releases the GIL during CUDA kernels).
-///   Max 1 process per (lang, engine_overrides) key.
-/// - **Stanza**: Morphosyntax, Utseg, Coref — Stanza NLP processors, sequential
-///   per process. Multiple processes for CPU parallelism (auto-tuned).
-/// - **Io**: Translate, OpenSMILE, AVQI — lightweight API/library calls.
-///   Max 1 process per key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerProfile {
-    /// GPU-bound models (ASR, FA, Speaker). Concurrent via threads inside one process.
-    Gpu,
-    /// Stanza NLP processors (Morphosyntax, Utseg, Coref). Multi-process for CPU parallelism.
-    Stanza,
-    /// Lightweight API/library calls (Translate, OpenSMILE, AVQI).
-    Io,
-}
-
-impl WorkerProfile {
-    /// Map one [`InferTask`] to its profile.
-    pub fn for_task(task: InferTask) -> Self {
-        match task {
-            InferTask::Asr | InferTask::Fa | InferTask::Speaker => Self::Gpu,
-            InferTask::Morphosyntax | InferTask::Utseg | InferTask::Coref => Self::Stanza,
-            InferTask::Translate | InferTask::Opensmile | InferTask::Avqi => Self::Io,
-        }
-    }
-
-    /// The string label used in logs and worker keys.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Gpu => "profile:gpu",
-            Self::Stanza => "profile:stanza",
-            Self::Io => "profile:io",
-        }
-    }
-
-    /// The profile name used in the ``--profile`` CLI arg sent to Python.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Gpu => "gpu",
-            Self::Stanza => "stanza",
-            Self::Io => "io",
-        }
-    }
-
-    /// Parse a profile name from a CLI argument or registry entry.
-    ///
-    /// Returns `None` for unrecognized names.
-    pub fn try_from_name(name: &str) -> Option<Self> {
-        match name {
-            "gpu" => Some(Self::Gpu),
-            "stanza" => Some(Self::Stanza),
-            "io" => Some(Self::Io),
-            _ => None,
-        }
-    }
-
-    /// Whether this profile uses concurrent request handling inside one process.
-    ///
-    /// GPU workers always use concurrent serving (PyTorch releases the GIL during
-    /// CUDA kernels). Stanza workers use concurrent serving only when running on
-    /// free-threaded Python 3.14t, where OS threads share one model instance
-    /// instead of each process holding a full private copy.
-    pub fn is_concurrent(&self) -> bool {
-        self.is_concurrent_for_runtime(crate::types::runtime::is_free_threaded_runtime())
-    }
-
-    /// Like `is_concurrent`, but takes an explicit free-threaded flag.
-    ///
-    /// Use this in tests or contexts where the runtime flag is supplied externally.
-    pub fn is_concurrent_for_runtime(&self, free_threaded: bool) -> bool {
-        match self {
-            Self::Gpu => true,
-            // Stanza workers share one model via ThreadPoolExecutor on 3.14t,
-            // giving the same throughput as separate processes with 77% less
-            // memory (see python-versioning.md benchmarks, 2026-02-19).
-            Self::Stanza => free_threaded,
-            Self::Io => false,
-        }
-    }
-
-    /// Conservative host-wide startup reservation (MB) for spawning one worker
-    /// of this profile.
-    ///
-    /// This is intentionally explicit and profile-shaped rather than derived
-    /// from the smaller per-command execution budgets. The startup reservation
-    /// protects the model-loading window where multiple local batchalign3
-    /// processes could otherwise overcommit host RAM before the OS snapshot
-    /// catches up.
-    pub fn startup_reservation_mb(&self) -> MemoryMb {
-        let tier = runtime::MemoryTier::detect();
-        self.startup_reservation_mb_for_tier(&tier)
-    }
-
-    /// Startup reservation for a specific memory tier.
-    ///
-    /// Use this variant in tests and when the tier is already known.
-    pub fn startup_reservation_mb_for_tier(&self, tier: &runtime::MemoryTier) -> MemoryMb {
-        match self {
-            Self::Gpu => tier.gpu_startup_mb,
-            Self::Stanza => tier.stanza_startup_mb,
-            Self::Io => tier.io_startup_mb,
-        }
-    }
-
-    /// Default maximum worker processes per ``(profile, lang, engine_overrides)`` key.
-    ///
-    /// GPU: 1 process (concurrent via threads).
-    /// Stanza: `auto_tune` (multiple processes for CPU parallelism).
-    /// IO: 1 process (lightweight).
-    pub fn default_max_workers(&self, auto_tune: usize) -> usize {
-        match self {
-            Self::Gpu => 1,
-            Self::Stanza => auto_tune,
-            Self::Io => 1,
-        }
-    }
-
-    /// Map a command name to the profile needed for that command's infer-task worker.
-    pub fn for_command(command: ReleasedCommand) -> Option<Self> {
-        command_workflow_descriptor(command).map(|descriptor| Self::for_task(descriptor.infer_task))
-    }
+/// This wraps [`WorkerProfile::is_concurrent_for_runtime`] with the live
+/// runtime detection from [`crate::types::runtime::is_free_threaded_runtime`].
+/// Lives here (not as a method on `WorkerProfile` in `batchalign-types`)
+/// because the runtime detection function lives in `batchalign` and reaching
+/// across crates would create a circular dep. This is a permanent scaffold,
+/// not a Phase β transitional scaffold.
+pub fn worker_profile_is_concurrent(profile: WorkerProfile) -> bool {
+    profile.is_concurrent_for_runtime(crate::types::runtime::is_free_threaded_runtime())
 }
 
 /// Bootstrap target for one Python worker process.
@@ -223,7 +107,7 @@ impl WorkerTarget {
 
     /// Whether the target uses concurrent dispatch inside one process.
     pub fn is_concurrent(&self) -> bool {
-        self.profile_kind().is_concurrent()
+        worker_profile_is_concurrent(self.profile_kind())
     }
 
     /// Return the infer-task worker target used for one released command.

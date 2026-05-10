@@ -758,15 +758,60 @@ fn resolved_tier_override_small() {
 #[test]
 fn resolved_tier_individual_startup_overrides() {
     let cfg = ServerConfig {
-        stanza_startup_mb: 5_000,
-        gpu_startup_mb: 8_000,
+        stanza_startup_mb: Some(crate::api::MemoryMb(5_000)),
+        gpu_startup_mb: Some(crate::api::MemoryMb(8_000)),
         ..Default::default()
     };
     let tier = cfg.resolved_memory_tier();
     assert_eq!(tier.stanza_startup_mb.0, 5_000);
     assert_eq!(tier.gpu_startup_mb.0, 8_000);
-    // IO should be unchanged (0 = use tier default)
+    // IO should be unchanged (None falls through to tier default)
     assert!(tier.io_startup_mb.0 > 0);
+}
+
+/// Regression gate for the 2026-05-10 sentinel-elimination change.
+///
+/// `RuntimeOverridesConfig.{gpu,stanza,io}_startup_mb` is `Option<MemoryMb>`;
+/// `None` falls through to the resolved tier's default, `Some(value)`
+/// overrides unconditionally. There is no in-code `0`-sentinel — that
+/// pattern was banned per `~/.claude/CLAUDE.md` "no sentinel values".
+///
+/// The `zero_as_none` deserializer preserves wire-format compat for
+/// operators with `gpu_startup_mb: 0` in pre-migration `server.yaml`
+/// files; that path is exercised by `resolved_tier_yaml_with_overrides`.
+#[test]
+fn startup_mb_overrides_are_optional_not_sentinel() {
+    use crate::api::MemoryMb;
+    use crate::types::runtime::MemoryTierKind;
+
+    // Programmatic None → tier default for ALL three profiles.
+    let cfg_none = ServerConfig {
+        memory_tier: Some(MemoryTierKind::Small),
+        gpu_startup_mb: None,
+        stanza_startup_mb: None,
+        io_startup_mb: None,
+        ..Default::default()
+    };
+    let tier_none = cfg_none.resolved_memory_tier();
+    assert_eq!(tier_none.gpu_startup_mb.0, 6_000, "Small-tier GPU default");
+    assert_eq!(
+        tier_none.stanza_startup_mb.0, 3_000,
+        "Small-tier Stanza default"
+    );
+    assert_eq!(tier_none.io_startup_mb.0, 2_000, "Small-tier IO default");
+
+    // Programmatic Some(value) → override applied to every profile.
+    let cfg_some = ServerConfig {
+        memory_tier: Some(MemoryTierKind::Small),
+        gpu_startup_mb: Some(MemoryMb(7_777)),
+        stanza_startup_mb: Some(MemoryMb(8_888)),
+        io_startup_mb: Some(MemoryMb(9_999)),
+        ..Default::default()
+    };
+    let tier_some = cfg_some.resolved_memory_tier();
+    assert_eq!(tier_some.gpu_startup_mb.0, 7_777);
+    assert_eq!(tier_some.stanza_startup_mb.0, 8_888);
+    assert_eq!(tier_some.io_startup_mb.0, 9_999);
 }
 
 #[test]

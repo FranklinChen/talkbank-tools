@@ -1,7 +1,7 @@
 # Memory Safety: Preventing Kernel OOM Crashes
 
 **Status:** Current
-**Last updated:** 2026-05-08 18:35 EDT
+**Last updated:** 2026-05-10 08:31 EDT
 
 ## The Problem
 
@@ -43,16 +43,45 @@ admission predicates. They run inside `try_claim_spawn_slot` before
 any permit acquisition or lease reservation, so a saturated host
 doesn't burn through the global-permit semaphore on doomed spawns.
 
-| Gate | Predicate | Source |
+The gates run two distinct policies, named explicitly per
+`PoolGateState` (derived in `worker/pool/lifecycle.rs`):
+
+- **ColdStart** — first worker for a `(profile, lang, engine)`
+  class. Both gates **bypass** unconditionally: back-pressure has
+  nothing to push against on an empty pool, and refusing here
+  leaves the pool dead-on-arrival on memory-tight hosts (the
+  Houjun's-laptop failure mode that motivated the split).
+- **Warm** — N+1 worker for a class with existing workers. Both
+  gates run their projection.
+
+| Gate | Warm predicate | Source |
 |---|---|---|
 | CPU loadavg | `getloadavg(3).one < available_parallelism()` | `cpu_gate.rs` |
-| Memory floor + projection | `available_mb − new_worker_estimate_mb > MIN_FREE_MEMORY_MB` | `memory_gate.rs` |
+| Memory floor + projection | `available_mb − new_worker_estimate_mb > host_min_free_mb_threshold_for_tier(tier)` | `memory_gate.rs` |
 
-`MIN_FREE_MEMORY_MB` is hardcoded at 2048 MB — a single absolute
-OS-protection floor with no env var, no config field, no operator
-override. The `new_worker_estimate_mb` is the average RSS of
-same-profile idle peers (Mode B, `rss_observer.rs`) when peers exist;
-otherwise the per-tier `startup_reservation_mb` (Mode A fallback).
+The Warm-gate floor is **tier-scaled**: 1024 MB Small / 2048 MB
+Medium / 4096 MB Large / 4096 MB Fleet. The historical fixed
+`MIN_FREE_MEMORY_MB = 2048` constant is now the Medium-tier value
+and the JobStore-level gate's default; it is no longer the single
+admission floor.
+
+The `new_worker_estimate_mb` is the average RSS of same-profile
+idle peers (Mode B, `rss_observer.rs`) when peers exist; otherwise
+falls back to the canonical per-tier `MemoryTier::*_startup_mb`
+(Mode A fallback) — `tier.gpu_startup_mb`, `tier.stanza_startup_mb`,
+`tier.io_startup_mb`. Per the spec at
+`<workspace>/docs/architecture/2026-05-10-tier-aware-memory-consolidation.md`
+(Principle 1), `MemoryTier` is the sole canonical source of these
+values; an architectural-invariant test in `types/runtime.rs`
+prevents reintroduction of parallel constants.
+
+Admission is back-pressure, not safety (Principle 5). The
+correctness floor is `worker/memory_guard.rs` (per-spawn host-memory
+reservation + RSS observation + kill on overrun) plus the OS OOM
+killer. An over-permissive admission means a worker may die at
+spawn — bounded cost. An over-strict admission means the host
+can't run at all — unbounded cost (jobs queue forever). The bias
+is toward over-permissive; ColdStart bypass implements the bias.
 
 The eviction-side counterpart: `worker/pool/idle_eviction.rs` runs as
 a pre-pass in `run_health_check` and evicts idle workers
@@ -86,12 +115,14 @@ The coordinator tracks three lease types:
 
 The reserve/headroom policy comes from `ServerConfig.memory_gate_mb`, which now
 means "keep at least this much RAM free after reservations" rather than a
-standalone job gate. The default is the hardcoded
-`worker::pool::memory_gate::MIN_FREE_MEMORY_MB = 2048`. The previous
-tier-derived per-host default (Small=2 GB, Medium=4 GB, Large/Fleet=8 GB)
-was retired on 2026-05-08; OS-protection headroom is one absolute number
-on every host, and workload-sized headroom comes from the Layer 0
-per-process RSS observation, not from `memory_gate_mb`.
+standalone job gate. The default is `MIN_FREE_MEMORY_MB = 2048` (the
+JobStore-gate constant). The previous tier-derived per-host default
+(Small=2 GB, Medium=4 GB, Large/Fleet=8 GB) was retired on 2026-05-08
+for this knob; workload-sized headroom now comes from Layer 0's
+per-process RSS observation. Note: this is independent of the
+Layer-0 Warm-gate floor `host_min_free_mb_threshold_for_tier`, which
+**is** tier-scaled (1024/2048/4096/4096) and protects the per-spawn
+admission decision rather than the per-job admission decision.
 
 ### Layer 2: Spawn semaphore (prevents in-process TOCTOU race)
 
@@ -134,17 +165,23 @@ sequenceDiagram
 Worker startup budgets are now **tier-adaptive**, scaled by a `MemoryTier`
 derived from total system RAM:
 
-| Tier | Total RAM | GPU Startup | Stanza Startup | IO Startup |
-|------|-----------|-------------|----------------|------------|
-| Small | ≤16 GB | tier-scaled | tier-scaled | tier-scaled |
-| Medium | 17–63 GB | tier-scaled | tier-scaled | tier-scaled |
-| Large | 64–127 GB | tier-scaled | tier-scaled | tier-scaled |
-| Fleet | ≥128 GB | tier-scaled | tier-scaled | tier-scaled |
+| Tier | Total RAM | GPU Startup | Stanza Startup | IO Startup | Headroom |
+|------|-----------|-------------|----------------|------------|----------|
+| Small | < 24 GB | 6 GB | 3 GB | 2 GB | 2 GB |
+| Medium | 24–48 GB | 3 GB (LazyProfile) | 6 GB | 3 GB | 4 GB |
+| Large | 48–128 GB | 16 GB | 12 GB | 4 GB | 8 GB |
+| Fleet | ≥ 128 GB | 16 GB | 12 GB | 4 GB | 8 GB |
 
-The base budgets come from `runtime_constants.toml` and are adjusted by the
-tier system. These are intentionally more conservative than the per-command
-execution budgets. They protect the model-loading spike where Whisper, Stanza,
-or related engines can temporarily consume far more memory than steady-state
+These values are defined exactly once in
+`MemoryTier::from_total_mb()` in `crates/batchalign/src/types/runtime.rs`
+— the sole canonical source per Principle 1. Operator overrides
+flow in via `RuntimeOverridesConfig.{gpu,stanza,io}_startup_mb`,
+which override the tier-derived values. The Medium tier uses
+**LazyProfile** for GPU: the worker starts with only process
+overhead and loads model weights on demand. They are intentionally
+more conservative than the per-command execution budgets. They
+protect the model-loading spike where Whisper, Stanza, or related
+engines can temporarily consume far more memory than steady-state
 request handling.
 
 **Note:** On macOS, `sysinfo::available_memory()` undercounts because it only
@@ -287,7 +324,7 @@ cargo nextest run -p batchalign
 | File | What |
 |------|------|
 | `crates/batchalign/src/worker/pool/cpu_gate.rs` | Layer 0 admission: `getloadavg(3)` vs `available_parallelism()` |
-| `crates/batchalign/src/worker/pool/memory_gate.rs` | Layer 0 admission: `available − reservation > MIN_FREE_MEMORY_MB`; `MIN_FREE_MEMORY_MB = 2048` is the single floor constant |
+| `crates/batchalign/src/worker/pool/memory_gate.rs` | Layer 0 admission: `available − reservation > host_min_free_mb_threshold_for_tier(tier)` (Warm); ColdStart bypasses. Tier-scaled floor: 1024/2048/4096/4096 by tier |
 | `crates/batchalign/src/worker/pool/rss_observer.rs` | Per-process RSS sampling for the Mode B admission estimate |
 | `crates/batchalign/src/worker/pool/idle_eviction.rs` | Pressure-driven idle-worker eviction (largest-RSS first when `available <= 4096 MB`) |
 | `crates/batchalign/src/host_memory.rs` | Host-wide ledger, startup leases, job execution leases, ML test lock; TTL-cached `system_memory_snapshot` shared by every memory poll |

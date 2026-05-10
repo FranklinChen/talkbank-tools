@@ -551,9 +551,30 @@ impl HostMemoryCoordinator {
         requested_workers: NumWorkers,
         label: &str,
     ) -> Result<JobExecutionPlan, HostMemoryError> {
-        let per_worker_budget = runtime::command_execution_budget_mb(command.as_ref());
         with_locked_ledger(&self.config.coordinator_path, |ledger| {
             let system = system_memory_snapshot();
+            // Tier-aware envelope: clamp the fleet-conservative
+            // worst-case to this host's per-profile startup
+            // reservation. Without the clamp, a 16 GB host that
+            // asks for one morphotag worker reserves a 12 GB
+            // envelope, the worker-startup lease check refuses
+            // every spawn, and the pool stays dead-on-arrival.
+            // memory_gate.rs admission and memory_guard.rs
+            // in-spawn remain the safety net for actual at-spawn
+            // OOM. See `batchalign_types::command_spec::CommandSpec`
+            // and `batchalign_types::memory::estimate_per_worker_peak_mb_with_profile`.
+            let tier = runtime::MemoryTier::from_total_mb(system.total_mb.0);
+            let spec = batchalign_types::command_spec::command_spec_for(command);
+            let runtime_is_free_threaded = runtime::is_free_threaded_runtime();
+            let base = spec.base_mb_for_runtime(runtime_is_free_threaded);
+            let worst_case_mb = (base.0 as f64 * spec.loading_overhead.0) as u64;
+            let worst_case = batchalign_types::api::MemoryMb(worst_case_mb);
+            let per_worker_budget =
+                batchalign_types::memory::estimate_per_worker_peak_mb_with_profile(
+                    worst_case,
+                    spec.profile,
+                    &tier,
+                );
             let pending_reserved_mb = effective_reserved_mb(&ledger.leases);
             let Some((granted_workers, reserved_mb)) = plan_job_reservation(
                 requested_workers.0,

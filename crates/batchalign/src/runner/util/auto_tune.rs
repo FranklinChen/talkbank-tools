@@ -41,9 +41,8 @@ pub(in crate::runner) fn compute_job_workers(
         return NumWorkers(1);
     }
 
-    let is_gpu_heavy = runtime::gpu_heavy_commands()
-        .iter()
-        .any(|c| c == command.as_ref());
+    let is_gpu_heavy = batchalign_types::command_spec::command_spec_for(command).profile
+        == batchalign_types::worker_profile::WorkerProfile::Gpu;
 
     let by_cpu = std::thread::available_parallelism()
         .map(|p| p.get())

@@ -1,7 +1,7 @@
 # batchalign-app — HTTP Server, Job Store, and NLP Orchestration
 
 **Status:** Current
-**Last modified:** 2026-05-08 18:40 EDT
+**Last modified:** 2026-05-10 08:31 EDT
 
 ## Overview
 
@@ -175,20 +175,38 @@ Domain newtypes are defined in `batchalign-types` using `string_id!` and `numeri
 
 ## Admission and Eviction Gates
 
-The worker pool admits and evicts on three live signals, in this
-order, all hardcoded with no operator override:
+Three admission contexts, each with its own explicit policy
+(`worker/pool/lifecycle.rs` derives `PoolGateState` per spawn
+attempt). Per the spec at
+`<workspace>/docs/architecture/2026-05-10-tier-aware-memory-consolidation.md`
+(Principle 4), each context is named at the call site rather than
+inferred:
 
-| Layer | Gate | File | Predicate |
-|---|---|---|---|
-| 0 (admission) | CPU loadavg | `worker/pool/cpu_gate.rs` | `getloadavg(3).one < available_parallelism()` |
-| 0.5 (admission) | Memory floor + projection | `worker/pool/memory_gate.rs` | `available_mb − new_worker_estimate > MIN_FREE_MEMORY_MB (= 2048)` |
-| Pre-pass (eviction) | Memory pressure | `worker/pool/idle_eviction.rs` | When `available_mb ≤ EVICTION_PRESSURE_THRESHOLD_MB (= 4096)`, evict idle workers largest-RSS first |
+| Context | Where | Policy |
+|---|---|---|
+| **Boot** | `host_facts/validation.rs` | Validates `max_concurrent_jobs × worst_case_per_job_peak_ram_mb(tier) ≤ ram_total_mb`. On refusal, the error suggests `--sequential`. |
+| **ColdStart** | `worker/pool/{cpu_gate,memory_gate}.rs` | First worker for a `(profile, lang, engine)` class. Admits unconditionally — back-pressure has nothing to push against on an empty pool, and refusing here leaves the pool dead-on-arrival on memory-tight hosts. |
+| **Warm** | `worker/pool/{cpu_gate,memory_gate}.rs` | N+1 worker for a class with existing workers. Runs the projection: `available_mb − new_worker_estimate > host_min_free_mb_threshold_for_tier(tier)`. The CPU gate runs the analogous `getloadavg(3).one < available_parallelism()` check. |
+| Pre-pass (eviction) | `worker/pool/idle_eviction.rs` | When `available_mb ≤ EVICTION_PRESSURE_THRESHOLD_MB (= 4096)`, evict idle workers largest-RSS first. |
+
+The Warm-gate floor `host_min_free_mb_threshold_for_tier` is
+tier-scaled (1024 MB Small / 2048 MB Medium / 4096 MB Large+Fleet),
+not the fixed `MIN_FREE_MEMORY_MB = 2048` used historically. The
+constant still exists as the Medium-tier floor and the default for
+the JobStore-level gate (see below).
 
 The new-worker estimate prefers the observed average RSS of
 same-profile idle peers (`worker/pool/rss_observer.rs`) when peers
-exist; otherwise falls back to per-tier
-`startup_reservation_mb_for_tier`. There is no `idle_timeout_s` —
-eviction is purely pressure-driven.
+exist; otherwise falls back to per-tier `MemoryTier::*_startup_mb`
+(the canonical source per Principle 1; `tier.gpu_startup_mb`,
+`tier.stanza_startup_mb`, `tier.io_startup_mb`).
+
+Admission is back-pressure, not safety (Principle 5). The
+correctness floor is `worker/memory_guard.rs` plus the OS OOM
+killer; admission heuristics can be over-permissive without
+compromising correctness — a doomed worker dies at spawn with
+bounded cost. ColdStart bypass implements the over-permissive
+bias.
 
 The host-memory snapshot is shared across every poll
 (`host_memory::system_memory_snapshot`, 1 s TTL) so admission gates,

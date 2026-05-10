@@ -281,9 +281,8 @@ pub fn recommend_max_total_workers(facts: &HostFacts) -> u32 {
 pub(super) fn recommend_max_workers_per_job(facts: &HostFacts, command: &ReleasedCommand) -> u32 {
     let tier = crate::runtime::MemoryTier::from_total_mb(facts.ram_total_mb);
     let by_cpu: usize = usize::try_from(facts.cpu_logical_count.max(1)).unwrap_or(usize::MAX);
-    let is_gpu_heavy = crate::runtime::gpu_heavy_commands()
-        .iter()
-        .any(|c| c.as_str() == command.as_ref());
+    let is_gpu_heavy = batchalign_types::command_spec::command_spec_for(*command).profile
+        == batchalign_types::worker_profile::WorkerProfile::Gpu;
     let recommended_thread_pool: usize =
         usize::try_from(recommend_gpu_thread_pool_size(facts)).unwrap_or(usize::MAX);
     let category_cap = if is_gpu_heavy {

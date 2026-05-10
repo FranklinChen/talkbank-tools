@@ -290,17 +290,26 @@ pub struct ServerConfig {
     #[serde(default)]
     pub memory_tier: Option<crate::types::runtime::MemoryTierKind>,
 
-    /// Override GPU worker startup reservation (MB). 0 = use tier default.
-    #[serde(default)]
-    pub gpu_startup_mb: u64,
+    /// Override GPU worker startup reservation (MB).
+    ///
+    /// `None` (or YAML `0`, via the `zero_as_none` shim) → use the
+    /// resolved tier's default. `Some(value)` overrides unconditionally.
+    /// The shim preserves wire-format compatibility with operators who
+    /// have `gpu_startup_mb: 0` in `server.yaml` from before the type
+    /// migration; the `0`-sentinel pattern is no longer expressible
+    /// in-code (per `~/.claude/CLAUDE.md` "no sentinel values").
+    #[serde(default, deserialize_with = "zero_as_none")]
+    pub gpu_startup_mb: Option<MemoryMb>,
 
-    /// Override Stanza worker startup reservation (MB). 0 = use tier default.
-    #[serde(default)]
-    pub stanza_startup_mb: u64,
+    /// Override Stanza worker startup reservation (MB). See
+    /// [`Self::gpu_startup_mb`] for the `None`/`Some` semantics.
+    #[serde(default, deserialize_with = "zero_as_none")]
+    pub stanza_startup_mb: Option<MemoryMb>,
 
-    /// Override IO worker startup reservation (MB). 0 = use tier default.
-    #[serde(default)]
-    pub io_startup_mb: u64,
+    /// Override IO worker startup reservation (MB). See
+    /// [`Self::gpu_startup_mb`] for the `None`/`Some` semantics.
+    #[serde(default, deserialize_with = "zero_as_none")]
+    pub io_startup_mb: Option<MemoryMb>,
 
     /// Fleet server target for automatic remote execution routing.
     ///
@@ -495,9 +504,9 @@ impl Default for ServerConfig {
             ensure_task_timeout_s: 0,
             worker_registry_path: String::new(),
             memory_tier: None,
-            gpu_startup_mb: 0,
-            stanza_startup_mb: 0,
-            io_startup_mb: 0,
+            gpu_startup_mb: None,
+            stanza_startup_mb: None,
+            io_startup_mb: None,
             fleet_target: None,
         }
     }

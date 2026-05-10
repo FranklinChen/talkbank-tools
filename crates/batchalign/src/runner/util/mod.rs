@@ -182,26 +182,31 @@ mod tests {
 
     #[test]
     fn command_execution_budgets_follow_runtime_constants() {
+        use batchalign_types::api::ReleasedCommand;
+        use batchalign_types::command_spec::command_spec_for;
+
         // In test environment PYTHON_GIL is not set to "0", so the process
-        // (conservative) budget table is used by default.
-        let process_table = runtime::command_base_mb_process();
-        let overhead = runtime::loading_overhead();
+        // (conservative) budget table is used by default (not free-threaded).
+        let free_threaded = false;
+
+        let morphotag = command_spec_for(ReleasedCommand::Morphotag);
         assert_eq!(
-            runtime::command_execution_budget_mb("morphotag").0,
-            (process_table["morphotag"].0 as f64 * overhead) as u64
+            (morphotag.base_mb_for_runtime(free_threaded).0 as f64 * morphotag.loading_overhead.0)
+                as u64,
+            (8_000f64 * 1.5) as u64,
         );
+
+        let align = command_spec_for(ReleasedCommand::Align);
         assert_eq!(
-            runtime::command_execution_budget_mb("align").0,
-            (process_table["align"].0 as f64 * overhead) as u64
+            (align.base_mb_for_runtime(free_threaded).0 as f64 * align.loading_overhead.0) as u64,
+            (4_000f64 * 1.5) as u64,
         );
+
+        let opensmile = command_spec_for(ReleasedCommand::Opensmile);
         assert_eq!(
-            runtime::command_execution_budget_mb("opensmile").0,
-            (process_table["opensmile"].0 as f64 * overhead) as u64
-        );
-        // Unknown command falls back to default_base_mb.
-        assert_eq!(
-            runtime::command_execution_budget_mb("unknown_cmd").0,
-            (runtime::default_base_mb().0 as f64 * overhead) as u64
+            (opensmile.base_mb_for_runtime(free_threaded).0 as f64 * opensmile.loading_overhead.0)
+                as u64,
+            (500f64 * 1.5) as u64,
         );
     }
 

@@ -84,9 +84,9 @@ pub(crate) fn validate_infer_capability_gate(
     test_echo_mode: bool,
 ) -> Result<Vec<String>, error::ServerError> {
     if test_echo_mode {
-        let mut commands: Vec<String> = crate::runtime::cmd2task()
-            .keys()
-            .map(|command| (*command).to_string())
+        let mut commands: Vec<String> = batchalign_types::command_spec::COMMAND_SPECS
+            .iter()
+            .map(|s| s.name.as_str().to_string())
             .collect();
         commands.sort();
         commands.dedup();

@@ -1,7 +1,7 @@
 # Doctor
 
 **Status:** Current
-**Last updated:** 2026-04-25 21:54 EDT
+**Last updated:** 2026-05-10 08:31 EDT
 
 `batchalign3 doctor` is the diagnostic surface for a batchalign3
 deployment. It runs in two modes:
@@ -165,7 +165,7 @@ Today's error variants:
 
 | Variant | Triggered by |
 |---|---|
-| `MaxConcurrentJobsWouldDeterministicallyOom` | `max_concurrent_jobs * worst_case_per_job_peak_ram_mb > ram_total_mb`. Worst case = the heaviest worker profile (GPU at 16 GB). Even if every job uses the heaviest profile, no scheduling outcome fits — the server refuses to start. Drop `max_concurrent_jobs` from `server.yaml` (the host-facts recommendation is by construction safe) or set a value that satisfies `n * 16384 <= ram_total_mb`. |
+| `MaxConcurrentJobsWouldDeterministicallyOom` | `max_concurrent_jobs * worst_case_per_job_peak_ram_mb(tier) > ram_total_mb`. Worst case = the heaviest worker profile **for the detected tier**: 6 GB on Small (`< 24 GB`), 6 GB on Medium (Stanza), 16 GB on Large/Fleet. Even if every job uses the heaviest profile, no scheduling outcome fits — the server refuses to start. The error message suggests `--sequential` (which forces single-job execution and bypasses the multiplier). Alternatively: drop `max_concurrent_jobs` from `server.yaml` (the host-facts recommendation is by construction safe) or set a value that satisfies `n * worst_case_per_job_peak_ram_mb(tier) <= ram_total_mb`. |
 
 Conservative-vs-recommendation cases (operator under-eager) are
 intentionally silent. The operator knows their host better than

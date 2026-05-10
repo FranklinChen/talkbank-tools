@@ -1,7 +1,7 @@
 # Adding Inference Providers
 
 **Status:** Current
-**Last modified:** 2026-05-01 22:47 EDT
+**Last modified:** 2026-05-10 12:12 EDT
 
 Batchalign3 no longer has a public entry-point plugin system. New engines are
 added in-tree as built-in worker capabilities.
@@ -372,8 +372,10 @@ existing command), see the detailed 8-step checklist in
 
 In addition to those Rust-side changes, update these Python-side surfaces:
 
-1. **`batchalign/runtime_constants.toml`** — Add the command-to-task mapping
-   (shared by Rust and Python at compile/import time).
+1. **`crates/batchalign-types/src/command_spec.rs`** — Add a `CommandSpec` entry to
+   `COMMAND_SPECS`. Then run `cargo xtask gen-runtime-toml` to regenerate
+   `batchalign/runtime_constants.toml` (the generated file is the shared
+   Rust/Python source of truth; do not edit it directly).
 2. **`batchalign/runtime.py`** — Add the command to `COMMAND_PROBES` with the
    tuple of Python modules that must be importable for the command to appear in
    `detect_capabilities()`.

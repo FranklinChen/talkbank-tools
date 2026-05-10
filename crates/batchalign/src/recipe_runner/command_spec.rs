@@ -1,4 +1,11 @@
-//! Released-command metadata for the recipe-runner spike.
+//! `CatalogEntry` — static metadata for one entry in the
+//! `recipe_command_catalog()`.
+//!
+//! Renamed from `CommandSpec` in Phase β to free the `CommandSpec`
+//! name for the public `batchalign-types::command_spec::CommandSpec`
+//! (resource/classification spec). The two types are orthogonal,
+//! cross-referenced by `ReleasedCommand` identity. See
+//! `docs/architecture/2026-05-10-phase-beta-command-spec.md`.
 
 use crate::api::ReleasedCommand;
 use crate::worker::InferTask;
@@ -56,7 +63,7 @@ pub(crate) struct CapabilityPlan {
 
 /// Static command metadata for the recipe-runner catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CommandSpec {
+pub(crate) struct CatalogEntry {
     /// Stable released command identity.
     pub command: ReleasedCommand,
     /// High-level family for contributor understanding.

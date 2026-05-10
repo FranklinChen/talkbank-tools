@@ -1,24 +1,24 @@
-# Shared runtime constants for batchalign3.
+# GENERATED — DO NOT EDIT.
+# Source: crates/batchalign-types/src/command_spec.rs (COMMAND_SPECS)
+# Regenerate: `cargo run -p xtask -- gen-runtime-toml`
+# Drift gate: `cargo run -p xtask -- gen-runtime-toml --check`
 #
-# Single source of truth consumed by both:
-#   - Rust: batchalign-types/src/runtime.rs (include_str! at compile time)
+# Read by:
+#   - Rust: batchalign-types/src/command_spec.rs (compile-time const)
 #   - Python: batchalign/runtime.py (read at import time)
-#
-# Changing a value here automatically propagates to both runtimes.
-# No drift-check script needed — the data is literally shared.
 
 [cmd2task]
 align = "fa"
 transcribe = "asr"
 transcribe_s = "asr"
-morphotag = "morphosyntax"
-benchmark = "asr,eval"
-utseg = "utterance"
-coref = "coref"
 translate = "translate"
+morphotag = "morphosyntax"
+coref = "coref"
+utseg = "utterance"
+benchmark = "asr,eval"
 opensmile = "opensmile"
-avqi = "avqi"
 compare = "morphosyntax"
+avqi = "avqi"
 
 [worker_caps]
 max_gpu_workers = 8
@@ -30,47 +30,42 @@ default_base_mb = 4000
 mb_per_file_mb = 25
 loading_overhead = 1.5
 
-[worker_startup_mb]
-gpu = 16000
-stanza = 12000
-io = 4000
-
 [gpu_heavy_commands]
 commands = ["align", "transcribe", "transcribe_s", "benchmark"]
 
 [process_commands]
 # Non-free-threaded: CPU-bound commands needing process isolation.
-gil = ["morphotag", "utseg", "opensmile", "coref", "avqi", "compare"]
+gil = ["morphotag", "coref", "utseg", "opensmile", "compare", "avqi"]
 # Free-threaded: only native-code commands need process isolation.
-free_threaded = ["opensmile", "avqi", "compare"]
+free_threaded = ["opensmile", "compare", "avqi"]
 
 # Per-command base memory (MB) for process workers (non-free-threaded).
 [command_base_mb.process]
 align = 4000
 transcribe = 1500
 transcribe_s = 2500
+translate = 4000
 morphotag = 8000
+coref = 4000
+utseg = 6000
 benchmark = 1500
 opensmile = 500
-avqi = 1500
-utseg = 6000
-translate = 4000
-coref = 4000
 compare = 8000
+avqi = 1500
 
 # Per-command base memory (MB) for thread workers (free-threaded, shared models).
 [command_base_mb.threaded]
 align = 4000
 transcribe = 1500
 transcribe_s = 2500
+translate = 4000
 morphotag = 2000
+coref = 2000
+utseg = 2000
 benchmark = 1500
 opensmile = 500
-avqi = 1500
-utseg = 2000
-translate = 4000
-coref = 2000
 compare = 2000
+avqi = 1500
 
 [known_engine_keys]
 keys = ["asr", "batch_size", "fa", "feature_set", "utr"]

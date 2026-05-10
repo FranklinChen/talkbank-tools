@@ -1,9 +1,33 @@
-//! Doc-to-code provenance audit — `xtask audit-docs scan`.
+//! Doc-to-code provenance audit — talkbank-tools doc audit.
 //!
-//! See `docs/release-doc-audit/audit-method.md` for the workflow this
-//! catalogs into. This module is inventory + structural tracking only;
-//! claim extraction and citation recording is human/Claude work done in
-//! subsequent vetting sessions.
+//! Catalogs every markdown file in talkbank-tools into a SQLite
+//! database; the per-section `vet_state` machine tracks whether a
+//! reviewer (human or Claude-assisted) has confirmed the prose
+//! matches the actual code at HEAD.
+//!
+//! Scope: **talkbank-tools only.** The meta-repo workspace contains
+//! a lot of historical / now-stale prose and is not used as
+//! evidence; citations and references in this catalog point at
+//! talkbank-tools source exclusively.
+//!
+//! Buckets:
+//!   - **A** — must-vet: user-facing public surface (book user-guide
+//!     chapters, top-level READMEs, CLAN reference). Vetting Bucket A
+//!     to completion is the release-readiness signal.
+//!   - **B** — should-vet: dev-facing public surface (architecture,
+//!     contributing, developer chapters). Sample-vetted; not
+//!     release-blocking.
+//!   - **C** — won't-vet: internal docs (postmortems, handoffs,
+//!     contributor CLAUDE.md, etc.). One-time Status-header sweep
+//!     ensures readers know the doc is historical or reference;
+//!     no claim verification.
+//!
+//! Subcommands:
+//!   - `scan` — populate / refresh `docs` and `sections`.
+//!   - `flag-staleness` — re-run regex surface-scan into `staleness_flags`.
+//!   - `status` — print queue head + streak + Bucket A progress.
+//!   - `vet` — mark a section's verdict.
+//!   - `streak` — print the daily-cadence streak count.
 
 use std::collections::{BTreeSet, HashMap};
 use std::env;
@@ -53,22 +77,35 @@ const SKIP_DIRS: &[&str] = &[
     "site",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Repo {
-    TalkbankTools,
-    Meta,
+/// The single repo the catalog audits. Kept as a const rather than
+/// a single-variant enum because there's only one source of evidence;
+/// the column on `docs` is preserved for schema continuity but always
+/// carries this string.
+const REPO_TALKBANK_TOOLS: &str = "talkbank-tools";
+
+/// Bucket assignment — deterministic function of file path. Recomputed
+/// on every scan; never hand-edited. See classify_bucket().
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bucket {
+    /// Must-vet: user-facing public surface. Release-readiness gate.
+    A,
+    /// Should-vet: dev-facing public surface. Sample-vetted.
+    B,
+    /// Won't-vet: internal-only. Status-header sweep only.
+    C,
 }
 
-impl Repo {
+impl Bucket {
     fn as_str(self) -> &'static str {
         match self {
-            Repo::TalkbankTools => "talkbank-tools",
-            Repo::Meta => "meta",
+            Bucket::A => "A",
+            Bucket::B => "B",
+            Bucket::C => "C",
         }
     }
 }
 
-impl fmt::Display for Repo {
+impl fmt::Display for Bucket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -105,7 +142,6 @@ impl Staleness {
 pub struct Args {
     pub db: PathBuf,
     pub talkbank_tools_root: PathBuf,
-    pub meta_root: PathBuf,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -124,71 +160,65 @@ pub async fn run(args: Args) -> Result<()> {
     apply_migrations(&mut conn).await?;
 
     let scanned_at = iso_now();
-
-    let roots: [(Repo, &Path); 2] = [
-        (Repo::TalkbankTools, args.talkbank_tools_root.as_path()),
-        (Repo::Meta, args.meta_root.as_path()),
-    ];
+    let root = args.talkbank_tools_root.as_path();
 
     let mut total_docs = 0u64;
     let mut new_docs = 0u64;
     let mut total_sections = 0u64;
-    let mut ba2_vs_ba3_docs = 0u64;
+    let mut bucket_counts: std::collections::HashMap<Bucket, u64> =
+        std::collections::HashMap::new();
 
-    for (repo, root) in roots {
-        for path in walk_markdown(root) {
-            let rel = match path.strip_prefix(root) {
-                Ok(p) => p.to_path_buf(),
-                Err(_) => continue,
-            };
-            let rel_str = rel.to_string_lossy().to_string();
+    for path in walk_markdown(root) {
+        let rel = match path.strip_prefix(root) {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().to_string();
 
-            if rel_str.contains("release-doc-audit/") {
-                continue;
-            }
-
-            let content = match std::fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let doc_hash = blake3_hex(content.as_bytes());
-            let (status_label, last_modified_doc) = parse_meta_headers(&content);
-            let audience = classify_audience(repo, &rel_str);
-            let priority = classify_priority(repo, &rel_str, &content);
-            let ba2_vs_ba3 = classify_ba2_vs_ba3(&rel_str, &content);
-            let staleness = classify_staleness(last_modified_doc.as_deref());
-            if ba2_vs_ba3 {
-                ba2_vs_ba3_docs += 1;
-            }
-
-            // One transaction per doc keeps the upsert + section
-            // reconciliation atomic and amortizes the WAL fsync.
-            let mut tx = sqlx::Connection::begin(&mut conn).await?;
-            let (doc_id, outcome) = upsert_doc(
-                &mut *tx,
-                repo,
-                &rel_str,
-                &audience,
-                priority,
-                ba2_vs_ba3,
-                staleness,
-                status_label.as_deref(),
-                last_modified_doc.as_deref(),
-                &doc_hash,
-                &scanned_at,
-            )
-            .await?;
-            if outcome == UpsertOutcome::Inserted {
-                new_docs += 1;
-            }
-            total_docs += 1;
-
-            let sections = parse_sections(&content);
-            total_sections += sections.len() as u64;
-            sync_sections(&mut *tx, doc_id, &sections).await?;
-            tx.commit().await?;
+        if rel_str.contains("release-doc-audit/") {
+            continue;
         }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let doc_hash = blake3_hex(content.as_bytes());
+        let (status_label, last_modified_doc) = parse_meta_headers(&content);
+        let audience = classify_audience(&rel_str);
+        let priority = classify_priority(&rel_str, &content);
+        let ba2_vs_ba3 = classify_ba2_vs_ba3(&rel_str, &content);
+        let staleness = classify_staleness(last_modified_doc.as_deref());
+        let bucket = classify_bucket(&rel_str);
+        *bucket_counts.entry(bucket).or_insert(0) += 1;
+
+        // One transaction per doc keeps the upsert + section
+        // reconciliation atomic and amortizes the WAL fsync.
+        let mut tx = sqlx::Connection::begin(&mut conn).await?;
+        let (doc_id, outcome) = upsert_doc(
+            &mut *tx,
+            &rel_str,
+            &audience,
+            priority,
+            ba2_vs_ba3,
+            staleness,
+            bucket,
+            status_label.as_deref(),
+            last_modified_doc.as_deref(),
+            &doc_hash,
+            &scanned_at,
+        )
+        .await?;
+        if outcome == UpsertOutcome::Inserted {
+            new_docs += 1;
+        }
+        total_docs += 1;
+
+        let sections = parse_sections(&content);
+        total_sections += sections.len() as u64;
+        sync_sections(&mut *tx, doc_id, &sections).await?;
+        tx.commit().await?;
     }
 
     println!("xtask audit-docs scan complete:");
@@ -196,7 +226,12 @@ pub async fn run(args: Args) -> Result<()> {
     println!("  docs total:        {total_docs}");
     println!("  docs new:          {new_docs}");
     println!("  sections in tree:  {total_sections}");
-    println!("  BA2-vs-BA3 docs:   {ba2_vs_ba3_docs}");
+    println!(
+        "  bucket A / B / C:  {} / {} / {}",
+        bucket_counts.get(&Bucket::A).copied().unwrap_or(0),
+        bucket_counts.get(&Bucket::B).copied().unwrap_or(0),
+        bucket_counts.get(&Bucket::C).copied().unwrap_or(0),
+    );
     println!();
     print_summary(&mut conn).await?;
 
@@ -421,11 +456,8 @@ fn extract_field(line: &str, name: &str) -> Option<String> {
 // Classification heuristics
 // ---------------------------------------------------------------------------
 
-fn classify_audience(repo: Repo, rel: &str) -> String {
+fn classify_audience(rel: &str) -> String {
     if rel.ends_with("CLAUDE.md") {
-        return "dev".to_string();
-    }
-    if repo == Repo::Meta {
         return "dev".to_string();
     }
     if rel.starts_with("book/src/")
@@ -462,7 +494,7 @@ fn classify_audience(repo: Repo, rel: &str) -> String {
     "mixed".to_string()
 }
 
-fn classify_priority(repo: Repo, rel: &str, content: &str) -> i64 {
+fn classify_priority(rel: &str, content: &str) -> i64 {
     if classify_ba2_vs_ba3(rel, content) {
         return 1;
     }
@@ -484,12 +516,75 @@ fn classify_priority(repo: Repo, rel: &str, content: &str) -> i64 {
         return 3;
     }
     if rel.starts_with("docs/") {
-        if repo == Repo::Meta {
-            return 5;
-        }
         return 4;
     }
     4
+}
+
+/// Bucket assignment, deterministic from path. Recomputed every
+/// scan; never hand-edited.
+///
+/// **Bucket A — must-vet, user-facing public surface.** Every section
+/// here gets a verdict before the public release. This is the
+/// release-readiness gate.
+///
+/// **Bucket B — should-vet, dev-facing public surface.** Sample-vetted
+/// opportunistically. Not release-blocking.
+///
+/// **Bucket C — won't-vet, internal-only.** One-time Status-header
+/// sweep ensures readers know the doc is historical or reference;
+/// no claim verification.
+fn classify_bucket(rel: &str) -> Bucket {
+    // Bucket C: internal-only docs, contributor guidance, postmortems,
+    // handoffs, investigations, decision records.
+    if rel.ends_with("CLAUDE.md")
+        || rel.starts_with("docs/postmortems/")
+        || rel.starts_with("docs/handoffs/")
+        || rel.starts_with("docs/investigations/")
+        || rel.starts_with("docs/migration/")
+        || rel.starts_with("docs/decisions/")
+        || rel.starts_with("docs/internal/")
+    {
+        return Bucket::C;
+    }
+
+    // Bucket A: user-facing public surface and load-bearing top-level
+    // entry points an external reader will see.
+    if rel == "README.md"
+        || rel == "CONTRIBUTING.md"
+        || rel == "SECURITY.md"
+        || rel.ends_with("/README.md")  // per-crate READMEs visible on docs.rs / crates.io
+        || rel.starts_with("book/src/chatter/")
+        || rel.starts_with("book/src/clan-reference/")
+        || rel.starts_with("book/src/chat-format/")
+        || rel.starts_with("book/src/vscode/")
+        || (rel.starts_with("book/src/batchalign/")
+            && rel.contains("/user-guide/"))
+        || rel == "book/src/SUMMARY.md"
+        || rel == "book/src/introduction.md"
+    {
+        return Bucket::A;
+    }
+
+    // Bucket B: dev-facing public surface — visible on GitHub / mdBook
+    // but written for contributors and integrators.
+    if rel.starts_with("book/src/architecture/")
+        || rel.starts_with("book/src/contributing/")
+        || rel.starts_with("book/src/")
+            && (rel.contains("/architecture/")
+                || rel.contains("/developer/")
+                || rel.contains("/contributing/"))
+    {
+        return Bucket::B;
+    }
+
+    // Default: anything else under book/src/ that we haven't bucketed
+    // explicitly is dev-facing public surface (Bucket B); anything
+    // under docs/ that escaped the C list is internal (Bucket C).
+    if rel.starts_with("book/src/") {
+        return Bucket::B;
+    }
+    Bucket::C
 }
 
 /// Compare the doc's `Last updated:` header to the post-merge
@@ -530,12 +625,12 @@ fn classify_ba2_vs_ba3(rel: &str, content: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn upsert_doc(
     conn: &mut SqliteConnection,
-    repo: Repo,
     path: &str,
     audience: &str,
     priority: i64,
     ba2_vs_ba3: bool,
     staleness: Staleness,
+    bucket: Bucket,
     status_label: Option<&str>,
     last_modified_doc: Option<&str>,
     content_hash: &str,
@@ -546,7 +641,7 @@ async fn upsert_doc(
     // report new-vs-existing from that.
     let existing: Option<i64> =
         sqlx::query_scalar("SELECT id FROM docs WHERE repo = ? AND path = ?")
-            .bind(repo.as_str())
+            .bind(REPO_TALKBANK_TOOLS)
             .bind(path)
             .fetch_optional(&mut *conn)
             .await?;
@@ -556,25 +651,27 @@ async fn upsert_doc(
     };
     sqlx::query(
         "INSERT INTO docs
-            (repo, path, audience, priority, ba2_vs_ba3, staleness,
+            (repo, path, audience, priority, ba2_vs_ba3, staleness, bucket,
              status_label, last_modified_doc, content_hash, scanned_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(repo, path) DO UPDATE SET
             audience = excluded.audience,
             priority = excluded.priority,
             ba2_vs_ba3 = excluded.ba2_vs_ba3,
             staleness = excluded.staleness,
+            bucket = excluded.bucket,
             status_label = excluded.status_label,
             last_modified_doc = excluded.last_modified_doc,
             content_hash = excluded.content_hash,
             scanned_at = excluded.scanned_at",
     )
-    .bind(repo.as_str())
+    .bind(REPO_TALKBANK_TOOLS)
     .bind(path)
     .bind(audience)
     .bind(priority)
     .bind(i64::from(ba2_vs_ba3))
     .bind(staleness.as_str())
+    .bind(bucket.as_str())
     .bind(status_label)
     .bind(last_modified_doc)
     .bind(content_hash)
@@ -582,7 +679,7 @@ async fn upsert_doc(
     .execute(&mut *conn)
     .await?;
     let id: i64 = sqlx::query_scalar("SELECT id FROM docs WHERE repo = ? AND path = ?")
-        .bind(repo.as_str())
+        .bind(REPO_TALKBANK_TOOLS)
         .bind(path)
         .fetch_one(&mut *conn)
         .await?;
@@ -695,9 +792,66 @@ async fn sync_sections(
 ///
 /// This lets a databases created with an older version of the schema
 /// pick up newer columns without a manual migration step.
+/// Idempotent schema migration. Runs on every scan / status / vet
+/// invocation. Bootstraps a fresh DB with `CREATE TABLE IF NOT EXISTS`,
+/// upgrades older catalogs incrementally, and (Phase 0 v2 cutover)
+/// drops out-of-scope rows + retired tables.
 async fn apply_migrations(conn: &mut SqliteConnection) -> Result<()> {
+    // Bootstrap: docs and sections schemas. `IF NOT EXISTS` makes
+    // this safe on existing DBs (the table is left alone) and
+    // unblocks fresh-checkout runs (which previously hit
+    // "no such table: docs"). Indexes that reference newly-added
+    // columns (e.g. `bucket`) are created later, AFTER the
+    // incremental ALTERs below, so they can't fire on a still-
+    // missing column on a legacy catalog.
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS docs (
+            id INTEGER PRIMARY KEY,
+            repo TEXT NOT NULL,
+            path TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            ba2_vs_ba3 INTEGER NOT NULL DEFAULT 0,
+            staleness TEXT NOT NULL DEFAULT 'unknown',
+            bucket TEXT NOT NULL DEFAULT 'C',
+            status_label TEXT,
+            last_modified_doc TEXT,
+            content_hash TEXT NOT NULL,
+            scanned_at TEXT NOT NULL,
+            UNIQUE(repo, path)
+         );
+         CREATE TABLE IF NOT EXISTS sections (
+            id INTEGER PRIMARY KEY,
+            doc_id INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+            level INTEGER NOT NULL,
+            heading TEXT NOT NULL,
+            anchor TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            line_start INTEGER NOT NULL,
+            line_end INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            vet_state TEXT NOT NULL DEFAULT 'unvetted',
+            fix_commit_hash TEXT,
+            reviewer TEXT,
+            reviewed_at TEXT,
+            notes TEXT,
+            UNIQUE(doc_id, anchor)
+         );",
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    // Incremental column adds for catalogs that pre-date these
+    // columns. column_exists() returns false for missing tables
+    // too, but the CREATE TABLE IF NOT EXISTS above guarantees the
+    // tables exist by the time we get here.
     if !column_exists(conn, "docs", "staleness").await? {
         sqlx::raw_sql("ALTER TABLE docs ADD COLUMN staleness TEXT NOT NULL DEFAULT 'unknown';")
+            .execute(&mut *conn)
+            .await?;
+    }
+    if !column_exists(conn, "docs", "bucket").await? {
+        sqlx::raw_sql("ALTER TABLE docs ADD COLUMN bucket TEXT NOT NULL DEFAULT 'C';")
             .execute(&mut *conn)
             .await?;
     }
@@ -706,6 +860,35 @@ async fn apply_migrations(conn: &mut SqliteConnection) -> Result<()> {
             .execute(&mut *conn)
             .await?;
     }
+    if !column_exists(conn, "sections", "notes").await? {
+        sqlx::raw_sql("ALTER TABLE sections ADD COLUMN notes TEXT;")
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    // Phase 0 v2 cutover: scope catalog to talkbank-tools only.
+    // Meta-repo docs are no longer evidence (too much historical
+    // staleness); the prior catalog may carry rows where
+    // `repo = 'meta'`. Drop them; cascade deletes flow through
+    // sections + claims + citations + staleness_flags.
+    sqlx::raw_sql("DELETE FROM docs WHERE repo != 'talkbank-tools';")
+        .execute(&mut *conn)
+        .await?;
+
+    // Phase 0 v2 cutover: retire claims/citations tables. The
+    // section-level `vet_state` is the new unit of work (lighter
+    // discipline; reviewer judgment, not commit-hash-pinned
+    // citation chains). DROP IF EXISTS is safe on catalogs that
+    // never had them.
+    sqlx::raw_sql(
+        "DROP TABLE IF EXISTS citations;
+         DROP TABLE IF EXISTS claims;",
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    // staleness_flags table: idempotent, retained for surface-scan
+    // regex hits.
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS staleness_flags (
             id INTEGER PRIMARY KEY,
@@ -715,7 +898,20 @@ async fn apply_migrations(conn: &mut SqliteConnection) -> Result<()> {
             match_line INTEGER,
             match_excerpt TEXT,
             flagged_at TEXT NOT NULL
-         );
+         );",
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    // Indexes go LAST: created after every column they reference is
+    // guaranteed to exist (either by the CREATE TABLE bootstrap above
+    // or by an incremental ALTER ADD COLUMN). On a legacy catalog
+    // missing `bucket`, building idx_docs_bucket inside the bootstrap
+    // block would error before the ALTER had a chance to fire.
+    sqlx::raw_sql(
+        "CREATE INDEX IF NOT EXISTS idx_sections_doc ON sections(doc_id);
+         CREATE INDEX IF NOT EXISTS idx_docs_priority ON docs(priority, ba2_vs_ba3 DESC);
+         CREATE INDEX IF NOT EXISTS idx_docs_bucket ON docs(bucket);
          CREATE INDEX IF NOT EXISTS idx_staleness_flags_section
             ON staleness_flags(section_id);
          CREATE INDEX IF NOT EXISTS idx_staleness_flags_pattern
@@ -727,12 +923,20 @@ async fn apply_migrations(conn: &mut SqliteConnection) -> Result<()> {
 }
 
 async fn column_exists(conn: &mut SqliteConnection, table: &str, column: &str) -> Result<bool> {
-    let exists: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM pragma_table_info(?) WHERE name = ?")
-            .bind(table)
-            .bind(column)
-            .fetch_optional(&mut *conn)
-            .await?;
+    // pragma_table_info is a SQLite table-valued function that does not
+    // accept normal parameter binding — sqlx 0.8.x's prepared-statement
+    // pipeline returns spurious matches when the table-name is bound
+    // via `?`. Inline the table name (validated against an allowlist
+    // by the caller's flow — apply_migrations only passes literals)
+    // and bind only the column name.
+    if !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!("column_exists: refusing non-identifier table name '{table}'").into());
+    }
+    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?");
+    let exists: Option<i64> = sqlx::query_scalar(&sql)
+        .bind(column)
+        .fetch_optional(&mut *conn)
+        .await?;
     Ok(exists.is_some())
 }
 
@@ -836,28 +1040,25 @@ pub async fn run_flag_staleness(args: Args) -> Result<()> {
         .await?;
 
     // Walk every section, re-read its source file, scan body lines.
+    // Catalog is talkbank-tools-only since the v2 cutover, so the
+    // root is the single talkbank-tools clone passed in args.
     let now = iso_now();
-    let rows: Vec<(i64, i64, i64, String, String)> = sqlx::query_as(
-        "SELECT s.id, s.line_start, s.line_end, d.repo, d.path
+    let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        "SELECT s.id, s.line_start, s.line_end, d.path
          FROM sections s JOIN docs d ON d.id = s.doc_id",
     )
     .fetch_all(&mut conn)
     .await?;
 
-    // Cache file contents per (repo, path) so we don't re-read for
-    // every section in the same file.
-    let mut file_cache: HashMap<(String, String), Option<Vec<String>>> = HashMap::new();
+    // Cache file contents per path so we don't re-read for every
+    // section in the same file.
+    let mut file_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
 
     let mut tx = sqlx::Connection::begin(&mut conn).await?;
     let mut total_flags = 0u64;
-    for (section_id, line_start, line_end, repo, rel_path) in rows {
-        let key = (repo.clone(), rel_path.clone());
-        let lines = file_cache.entry(key).or_insert_with(|| {
-            let root: &Path = match repo.as_str() {
-                "talkbank-tools" => args.talkbank_tools_root.as_path(),
-                "meta" => args.meta_root.as_path(),
-                _ => return None,
-            };
+    for (section_id, line_start, line_end, rel_path) in rows {
+        let lines = file_cache.entry(rel_path.clone()).or_insert_with(|| {
+            let root: &Path = args.talkbank_tools_root.as_path();
             std::fs::read_to_string(root.join(&rel_path))
                 .ok()
                 .map(|s| s.lines().map(str::to_owned).collect())
@@ -1017,29 +1218,252 @@ fn iso_now() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Daily-cadence subcommands: status / streak / vet
+// ---------------------------------------------------------------------------
+
+// Terminal vet_state values are: 'no-claims', 'vetted-accurate',
+// 'fixed'. The other states ('unvetted', 'in-review', 'needs-fix')
+// keep the section in the active queue. This list lives in the SQL
+// queries below as a literal `IN (...)` clause; centralizing it here
+// would require dynamic SQL building, which adds more complexity than
+// it removes for this catalog.
+
+/// Print the queue head + Bucket A progress + streak. The single
+/// command an operator runs at the start of every audit session:
+/// answers "where am I, what's next, am I keeping the streak."
+async fn run_status(db: &Path) -> Result<()> {
+    let mut conn = open_catalog(db).await?;
+    apply_migrations(&mut conn).await?;
+
+    // Bucket A progress: how much of the must-vet surface is done?
+    let bucket_a_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sections s
+         JOIN docs d ON d.id = s.doc_id
+         WHERE d.bucket = 'A'",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    let bucket_a_terminal: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sections s
+         JOIN docs d ON d.id = s.doc_id
+         WHERE d.bucket = 'A'
+           AND s.vet_state IN ('no-claims', 'vetted-accurate', 'fixed')",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    let bucket_a_pct = if bucket_a_total > 0 {
+        (bucket_a_terminal as f64) * 100.0 / (bucket_a_total as f64)
+    } else {
+        0.0
+    };
+
+    let needs_fix_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sections WHERE vet_state = 'needs-fix'")
+            .fetch_one(&mut conn)
+            .await?;
+
+    println!("audit-docs status");
+    println!("─────────────────");
+    println!(
+        "Bucket A: {bucket_a_terminal} / {bucket_a_total} sections vetted ({bucket_a_pct:.1}%)"
+    );
+    if needs_fix_count > 0 {
+        println!("needs-fix outstanding: {needs_fix_count}");
+    }
+
+    // Streak: consecutive days with at least one vet (any verdict that
+    // moves vet_state out of 'unvetted'). Approximate by counting
+    // distinct DATE(reviewed_at) values working backward from today.
+    let streak = compute_streak(&mut conn).await?;
+    println!("Streak: {streak} day(s)");
+    println!();
+
+    // Top 5 unvetted Bucket A sections, sorted by priority + flag count.
+    println!("Top 5 unvetted Bucket A sections (next from queue):");
+    let queue: Vec<(i64, String, String, i64)> = sqlx::query_as(
+        "SELECT s.id, d.path, s.heading,
+                (SELECT COUNT(*) FROM staleness_flags WHERE section_id = s.id) AS flags
+         FROM sections s
+         JOIN docs d ON d.id = s.doc_id
+         WHERE d.bucket = 'A'
+           AND s.vet_state IN ('unvetted', 'in-review')
+         ORDER BY d.priority, flags DESC, d.path, s.ordinal
+         LIMIT 5",
+    )
+    .fetch_all(&mut conn)
+    .await?;
+    if queue.is_empty() {
+        println!("  (none — Bucket A is empty; release-readiness gate is open)");
+    } else {
+        for (id, path, heading, flags) in queue {
+            let flag_marker = if flags > 0 {
+                format!(" [{flags} flags]")
+            } else {
+                String::new()
+            };
+            println!("  §{id:>5}{flag_marker}  {path} :: {heading}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Print just the streak count. Useful for shell prompts / status-line
+/// integrations that don't want the full status output.
+async fn run_streak(db: &Path) -> Result<()> {
+    let mut conn = open_catalog(db).await?;
+    apply_migrations(&mut conn).await?;
+    let streak = compute_streak(&mut conn).await?;
+    println!("{streak}");
+    Ok(())
+}
+
+/// Mark a section's vet_state. Records reviewer + reviewed_at; for
+/// `fixed`, also records the fix commit hash. Verifies the verdict
+/// is a known value before writing.
+async fn run_vet(
+    db: &Path,
+    section_id: i64,
+    verdict: &str,
+    reviewer: Option<&str>,
+    notes: Option<&str>,
+    fix_commit: Option<&str>,
+) -> Result<()> {
+    const VALID_VERDICTS: &[&str] = &[
+        "unvetted",
+        "in-review",
+        "no-claims",
+        "vetted-accurate",
+        "needs-fix",
+        "fixed",
+    ];
+    if !VALID_VERDICTS.contains(&verdict) {
+        return Err(format!(
+            "invalid verdict '{verdict}'; expected one of: {}",
+            VALID_VERDICTS.join(", ")
+        )
+        .into());
+    }
+    if verdict == "fixed" && fix_commit.is_none() {
+        return Err("verdict 'fixed' requires --fix-commit".into());
+    }
+
+    let mut conn = open_catalog(db).await?;
+    apply_migrations(&mut conn).await?;
+
+    // Confirm the section exists; surface a clear error rather than
+    // silently UPDATE-zero-rows.
+    let exists: Option<(String, String)> = sqlx::query_as(
+        "SELECT d.path, s.heading
+         FROM sections s JOIN docs d ON d.id = s.doc_id
+         WHERE s.id = ?",
+    )
+    .bind(section_id)
+    .fetch_optional(&mut conn)
+    .await?;
+    let (path, heading) = exists.ok_or_else(|| format!("section §{section_id} not found"))?;
+
+    let now = iso_now();
+    sqlx::query(
+        "UPDATE sections
+         SET vet_state = ?,
+             reviewer = COALESCE(?, reviewer),
+             reviewed_at = ?,
+             notes = COALESCE(?, notes),
+             fix_commit_hash = COALESCE(?, fix_commit_hash)
+         WHERE id = ?",
+    )
+    .bind(verdict)
+    .bind(reviewer)
+    .bind(&now)
+    .bind(notes)
+    .bind(fix_commit)
+    .bind(section_id)
+    .execute(&mut conn)
+    .await?;
+
+    println!("§{section_id} {path} :: {heading}");
+    println!("  → {verdict} (at {now})");
+    Ok(())
+}
+
+/// Count consecutive days with ≥1 vet (transition out of 'unvetted'
+/// recorded in `reviewed_at`). Walks backward from today; stops at
+/// the first day with no vet activity. Today counts whether or not
+/// the day already has a vet — a fresh morning still has the prior
+/// day's streak intact, encouraging "do today's section now."
+async fn compute_streak(conn: &mut SqliteConnection) -> Result<i64> {
+    let dates: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT DATE(reviewed_at) AS d FROM sections
+         WHERE reviewed_at IS NOT NULL
+         ORDER BY d DESC",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if dates.is_empty() {
+        return Ok(0);
+    }
+
+    let today = chrono::Local::now().date_naive();
+    let mut streak = 0i64;
+    let mut cursor = today;
+    for raw in dates {
+        let parsed = match NaiveDate::parse_from_str(&raw, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => break,
+        };
+        // Allow today to be missing without breaking the streak; the
+        // operator may not have vetted yet today but yesterday's
+        // streak is still valid.
+        if parsed == cursor {
+            streak += 1;
+            cursor = cursor.pred_opt().ok_or("date arithmetic underflow")?;
+        } else if parsed == cursor.pred_opt().unwrap_or(cursor) && streak == 0 {
+            // First iteration: today missing, yesterday present.
+            streak = 1;
+            cursor = parsed
+                .pred_opt()
+                .ok_or("date arithmetic underflow on yesterday")?;
+        } else {
+            break;
+        }
+    }
+    Ok(streak)
+}
+
+// ---------------------------------------------------------------------------
 // CLI dispatch
 // ---------------------------------------------------------------------------
 
-/// Parse `audit-docs` CLI flags. Path defaults are read from environment
-/// variables — the public-bound `talkbank-tools` repo must not carry
-/// hardcoded operator-local paths in source. Required env vars:
-///   TB_AUDIT_DB         — path to the SQLite catalog
-///   TB_AUDIT_TT_ROOT    — path to the talkbank-tools clone
-///   TB_AUDIT_META_ROOT  — path to the meta-repo workspace
-/// Each can be overridden by the matching --flag on the command line.
+/// Parse `audit-docs` CLI flags. Catalog scope is talkbank-tools-only
+/// since the v2 cutover; the meta-repo workspace contains historical
+/// staleness and is no longer evidence.
+///
+/// Required env vars (each overridable by the matching `--flag`):
+///   TB_AUDIT_DB       — path to the SQLite catalog (e.g.
+///                       `<workspace>/docs/release-doc-audit/audit.db`)
+///   TB_AUDIT_TT_ROOT  — path to the talkbank-tools clone being audited
+///
+/// The `vet` and `streak` subcommands need only `TB_AUDIT_DB`;
+/// `scan` and `flag-staleness` also need `TB_AUDIT_TT_ROOT`. `status`
+/// only reads from the catalog and needs only `TB_AUDIT_DB`.
 pub fn parse_and_run(rest: Vec<String>) -> Result<()> {
-    let usage = "usage: cargo run -q -p xtask -- audit-docs <scan|flag-staleness> \
-         [--db PATH] [--talkbank-tools PATH] [--meta PATH]\n\
-         (or set TB_AUDIT_DB / TB_AUDIT_TT_ROOT / TB_AUDIT_META_ROOT)";
+    let usage = "usage: cargo run -q -p xtask -- audit-docs \
+         <scan|flag-staleness|status|streak|vet> [args...]\n\
+         common: [--db PATH] [--talkbank-tools PATH]\n\
+         vet:    --id <section_id> --verdict <unvetted|in-review|no-claims|vetted-accurate|needs-fix|fixed> \
+                 [--reviewer <name>] [--notes <text>] [--fix-commit <hash>]\n\
+         (env: TB_AUDIT_DB, TB_AUDIT_TT_ROOT)";
 
     let sub = rest.first().map(|s| s.as_str()).ok_or(usage)?;
-    if sub != "scan" && sub != "flag-staleness" {
-        return Err(usage.into());
-    }
 
     let mut db: Option<PathBuf> = env::var_os("TB_AUDIT_DB").map(PathBuf::from);
     let mut tt_root: Option<PathBuf> = env::var_os("TB_AUDIT_TT_ROOT").map(PathBuf::from);
-    let mut meta_root: Option<PathBuf> = env::var_os("TB_AUDIT_META_ROOT").map(PathBuf::from);
+    let mut vet_id: Option<i64> = None;
+    let mut vet_verdict: Option<String> = None;
+    let mut vet_reviewer: Option<String> = None;
+    let mut vet_notes: Option<String> = None;
+    let mut vet_fix_commit: Option<String> = None;
 
     let mut iter = rest.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -1052,33 +1476,70 @@ pub fn parse_and_run(rest: Vec<String>) -> Result<()> {
                     iter.next().ok_or("--talkbank-tools requires a value")?,
                 ));
             }
-            "--meta" => {
-                meta_root = Some(PathBuf::from(iter.next().ok_or("--meta requires a value")?));
+            "--id" => {
+                let raw = iter.next().ok_or("--id requires a value")?;
+                vet_id = Some(raw.parse().map_err(|e| format!("--id: {e}"))?);
+            }
+            "--verdict" => {
+                vet_verdict = Some(iter.next().ok_or("--verdict requires a value")?.clone());
+            }
+            "--reviewer" => {
+                vet_reviewer = Some(iter.next().ok_or("--reviewer requires a value")?.clone());
+            }
+            "--notes" => {
+                vet_notes = Some(iter.next().ok_or("--notes requires a value")?.clone());
+            }
+            "--fix-commit" => {
+                vet_fix_commit = Some(iter.next().ok_or("--fix-commit requires a value")?.clone());
             }
             other => return Err(format!("unknown audit-docs flag: {other}").into()),
         }
     }
 
     let db = db.ok_or("audit-docs: --db or TB_AUDIT_DB is required (no default)")?;
-    let tt_root = tt_root.ok_or("audit-docs: --talkbank-tools or TB_AUDIT_TT_ROOT is required")?;
-    let meta_root = meta_root.ok_or("audit-docs: --meta or TB_AUDIT_META_ROOT is required")?;
 
-    let args = Args {
-        db,
-        talkbank_tools_root: tt_root,
-        meta_root,
-    };
-    // The two subcommands are async-on-sqlx; rest of xtask is sync,
-    // so we spin up a small single-threaded tokio runtime just for
-    // this dispatch and block on the result.
+    // Subcommands are async-on-sqlx; rest of xtask is sync, so spin
+    // up a single-threaded tokio runtime and block on the result.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
         match sub {
-            "scan" => run(args).await,
-            "flag-staleness" => run_flag_staleness(args).await,
-            _ => unreachable!(),
+            "scan" => {
+                let tt_root = tt_root
+                    .ok_or("audit-docs scan: --talkbank-tools or TB_AUDIT_TT_ROOT required")?;
+                run(Args {
+                    db,
+                    talkbank_tools_root: tt_root,
+                })
+                .await
+            }
+            "flag-staleness" => {
+                let tt_root = tt_root.ok_or(
+                    "audit-docs flag-staleness: --talkbank-tools or TB_AUDIT_TT_ROOT required",
+                )?;
+                run_flag_staleness(Args {
+                    db,
+                    talkbank_tools_root: tt_root,
+                })
+                .await
+            }
+            "status" => run_status(&db).await,
+            "streak" => run_streak(&db).await,
+            "vet" => {
+                let id = vet_id.ok_or("audit-docs vet: --id required")?;
+                let verdict = vet_verdict.ok_or("audit-docs vet: --verdict required")?;
+                run_vet(
+                    &db,
+                    id,
+                    &verdict,
+                    vet_reviewer.as_deref(),
+                    vet_notes.as_deref(),
+                    vet_fix_commit.as_deref(),
+                )
+                .await
+            }
+            other => Err(format!("audit-docs: unknown subcommand '{other}'\n{usage}").into()),
         }
     })
 }

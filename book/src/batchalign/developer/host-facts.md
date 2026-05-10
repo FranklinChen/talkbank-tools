@@ -1,7 +1,7 @@
 # Host Facts Pipeline
 
 **Status:** Current
-**Last updated:** 2026-05-08 18:40 EDT
+**Last updated:** 2026-05-10 08:31 EDT
 
 The host-facts pipeline is the four-layer architecture that resolves
 operator overrides against detected host capabilities and warns when
@@ -132,10 +132,13 @@ Today's findings:
 - **Errors** (fatal): override would deterministically crash. Server
   refuses to start; `doctor --check` exits non-zero. Today's variant:
   - `MaxConcurrentJobsWouldDeterministicallyOom` — fires when
-    `configured * worst_case_per_job_peak_ram_mb > ram_total_mb`.
-    The "worst case" is the heaviest worker profile (GPU at 16 GB
-    today). If even that scheduling outcome exceeds physical RAM,
-    no jobset can fit; the server refuses to start.
+    `configured * worst_case_per_job_peak_ram_mb(tier) > ram_total_mb`.
+    The "worst case" is the heaviest worker profile for the
+    detected tier: 6 GB on Small (`< 24 GB`), 6 GB on Medium
+    (Stanza > LazyProfile GPU), and 16 GB on Large/Fleet. If even
+    that scheduling outcome exceeds physical RAM, no jobset can fit;
+    the server refuses to start, and the error message suggests
+    `--sequential` so the operator has a one-flag fix.
 
 Conservative-vs-recommendation cases (operator under-eager) are
 intentionally silent: the operator knows their host better than

@@ -1,7 +1,7 @@
 # Batchalign Workers
 
 **Status:** Current
-**Last updated:** 2026-05-01 17:07 EDT
+**Last updated:** 2026-05-10 12:12 EDT
 
 Per-app worker concerns specific to the Batchalign runtime: pool
 sizing, RAM-tier-aware memory budgets, model loading per worker,
@@ -10,17 +10,14 @@ shared concurrency primitives (Tokio runtime, the
 `Semaphore + RAII` pool pattern, channels, lock ordering, mutex
 policy), see [Concurrency](concurrency.md).
 
-> **Implementation note.** The "RAM-tier adaptive budgets" diagram
-> below describes the **intended** behavior. As of 2026-05-01,
-> `command_execution_budget_mb` does **not** vary by tier;
-> `runtime_constants.toml` hardcodes flat values for all hosts. A
-> 16 GB laptop with a clean memory state cannot admit a 1-worker
-> morphotag job today (Contract C-16GB test in
-> `host_memory.rs::tests` is intentionally RED). Trust the code and
-> contract tests, not this diagram, until migration item 4 of the
-> architectural review lands. See
-> `<workspace>/docs/architecture-review-2026-05-01.md` Debt 2 and
-> `<workspace>/docs/bugs/BUG-006-tier-not-scaled-16gb.md`.
+> **Implementation note.** Tier scaling is wired (b4189037).
+> `estimate_per_worker_peak_mb_with_profile` (Phase β, `batchalign-types::memory`)
+> clamps the per-job execution envelope to the detected tier's per-profile startup
+> budget, so a 16 GB laptop with a clean memory state can admit a
+> 1-worker morphotag job (Contract C-16GB is GREEN). The five
+> architectural principles that prevent the layer-by-layer
+> consolidation bug class from returning are documented in
+> `<workspace>/docs/architecture/2026-05-10-tier-aware-memory-consolidation.md`.
 
 ## Three Layers of Parallelism
 
@@ -156,9 +153,6 @@ increase via `--workers N` or `server.yaml`.
 
 ## RAM-Tier Adaptive Budgets
 
-> See implementation note at top of page. The diagram below reflects
-> intended behavior; the per-tier scaling is not yet wired up.
-
 All memory budgets are scaled automatically based on total system
 RAM. The server detects the tier once at startup and logs it. No
 user configuration — works on machines from 16 GB laptops to 256 GB
@@ -169,16 +163,22 @@ flowchart LR
     detect["sysinfo::total_memory()"]
     tier{"MemoryTier::from_total_mb()"}
     small["Small &lt; 24 GB\nheadroom: 2 GB\nstanza: 3 GB\ngpu: 6 GB\nworkers: 1"]
-    medium["Medium 24-48 GB\nheadroom: 4 GB\nstanza: 6 GB\ngpu: 10 GB\nworkers: 2"]
+    medium["Medium 24-48 GB\nheadroom: 4 GB\nstanza: 6 GB\ngpu: 3 GB (LazyProfile)\nworkers: 1"]
     large["Large 48-128 GB\nheadroom: 8 GB\nstanza: 12 GB\ngpu: 16 GB\nworkers: 4"]
-    fleet["Fleet &gt; 128 GB\nheadroom: 8 GB\nstanza: 12 GB\ngpu: 16 GB\nworkers: 8"]
+    fleet["Fleet &ge; 128 GB\nheadroom: 8 GB\nstanza: 12 GB\ngpu: 16 GB\nworkers: 8"]
 
     detect --> tier
     tier -->|"&lt; 24 GB"| small
     tier -->|"24-48 GB"| medium
     tier -->|"48-128 GB"| large
-    tier -->|"&gt; 128 GB"| fleet
+    tier -->|"&ge; 128 GB"| fleet
 ```
+
+Medium-tier GPU uses **LazyProfile** mode: the GPU worker starts
+with only process overhead (~3 GB), loading model weights on demand
+rather than at spawn. This is what lets a 32 GB workstation admit a
+GPU worker at all — eager-loading 16 GB of Whisper weights would
+fail the headroom check.
 
 The Large and Fleet tiers reproduce the original fixed constants
 from `runtime_constants.toml` exactly — fleet machines see zero
@@ -393,7 +393,7 @@ still get injected normally.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `max_workers_per_key` | 4 | Per-key cap; prevents one language from hogging |
+| `max_workers_per_key` | per-profile, RAM-derived (`recommend_max_workers_per_key`); GPU `≈ ram_total_mb / 16 GB`, Stanza `≈ ram_total_mb / 12 GB`, IO `1` | Per-key cap; prevents one language from hogging |
 | `max_total_workers` | computed from RAM (clamped 2–32) | Global cap |
 | `checkout_wait_timeout_s` | 300 | Bounded wait before saturation error |
 
@@ -461,5 +461,5 @@ forward-looking proposal under
 | `worker/pool/eviction.rs` | Idle eviction + selector |
 | `worker/pool/checkout.rs` / `dispatch.rs` | Checkout state machine |
 | `runner/util/auto_tune.rs` | `compute_job_workers()` planning |
-| `types/runtime.rs` | `MemoryTier` detection (intended; tier scaling not yet wired) |
-| `runtime_constants.toml` | Static budgets (currently flat across tiers) |
+| `types/runtime.rs` | Re-exports `MemoryTier::from_total_mb` and `estimate_per_worker_peak_mb_with_profile` from `batchalign-types::memory` (Phase β); `command_execution_budget_mb` for legacy callers. `MemoryTier` is the sole canonical source of per-tier per-profile envelopes (Principle 1); `estimate_per_worker_peak_mb_with_profile` is the tier-aware per-command estimator (Principle 2). |
+| `runtime_constants.toml` | Per-command base RAM (process and threaded variants), worker caps, command-to-task map. Generated from `batchalign-types/src/command_spec.rs` via `xtask gen-runtime-toml` (Phase β); do not edit directly. No longer holds per-profile worker startup envelopes — those live on `MemoryTier`. |

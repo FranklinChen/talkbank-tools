@@ -1,4 +1,4 @@
-.PHONY: help symbols-gen generated-check test-gen mine-candidates test test-affected test-grammar test-generated test-fragment-semantics test-legacy-fragment-parity test-parity batchalign-check batchalign-test-rust batchalign-test-integration batchalign-build-pyo3 batchalign-build-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected verify parser-guard chat-anchors-check fuzz-check hooks-check book book-serve coverage smoke check-specs ci-local ci-full install-hooks lint-affected _batchalign-test-python _batchalign-typecheck-python
+.PHONY: help symbols-gen generated-check test-gen mine-candidates test test-affected test-grammar test-generated test-fragment-semantics test-legacy-fragment-parity test-parity batchalign-check batchalign-test-rust batchalign-test-integration batchalign-build-pyo3 batchalign-build-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected verify parser-guard chat-anchors-check fuzz-check hooks-check book book-serve coverage smoke check-specs ci-local ci-full install-hooks lint-affected _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness
 
 help:
 	@echo "talkbank-tools task index"
@@ -132,6 +132,8 @@ generated-check:
 		spec/tools/src/generated/symbol_sets.rs \
 		crates/talkbank-parser-tests/tests/generated \
 		docs/errors
+	@echo "==> [Phase β] runtime_constants.toml drift check"
+	@cargo run -p xtask --quiet -- gen-runtime-toml --check
 
 # Run all tests
 test:
@@ -403,3 +405,33 @@ book:
 # Serve the documentation book locally
 book-serve:
 	mdbook serve book/
+
+# ---------------------------------------------------------------------------
+# Doc audit (talkbank-tools only)
+# ---------------------------------------------------------------------------
+#
+# The catalog DB is auditing tooling, not user content; it lives in
+# the meta-repo's release-doc-audit/ working dir. Default path assumes
+# the workspace layout `<workspace>/talkbank-tools` alongside
+# `<workspace>/docs/release-doc-audit/audit.db`. Operators with a
+# different layout override TB_AUDIT_DB.
+#
+# Daily-cadence: `make audit-status` is the session-start command —
+# prints Bucket A progress, streak, and the next 5 unvetted sections.
+# See `<workspace>/docs/release-doc-audit/audit-method.md`.
+TB_AUDIT_DB ?= ../docs/release-doc-audit/audit.db
+TB_AUDIT_TT_ROOT ?= $(CURDIR)
+
+audit-status:
+	@TB_AUDIT_DB="$(TB_AUDIT_DB)" cargo run -q -p xtask -- audit-docs status
+
+audit-streak:
+	@TB_AUDIT_DB="$(TB_AUDIT_DB)" cargo run -q -p xtask -- audit-docs streak
+
+audit-scan:
+	TB_AUDIT_DB="$(TB_AUDIT_DB)" TB_AUDIT_TT_ROOT="$(TB_AUDIT_TT_ROOT)" \
+		cargo run -q -p xtask -- audit-docs scan
+
+audit-flag-staleness:
+	TB_AUDIT_DB="$(TB_AUDIT_DB)" TB_AUDIT_TT_ROOT="$(TB_AUDIT_TT_ROOT)" \
+		cargo run -q -p xtask -- audit-docs flag-staleness

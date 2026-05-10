@@ -10,16 +10,24 @@ use serde::Deserialize;
 
 use crate::api::MemoryMb;
 
+pub use batchalign_types::memory::{
+    MemoryTier, MemoryTierKind, estimate_per_worker_peak_mb,
+    estimate_per_worker_peak_mb_with_profile,
+};
+
 /// Raw TOML content, embedded at compile time.
 const TOML_SRC: &str = include_str!("../../../../batchalign/runtime_constants.toml");
 
 /// Parsed TOML structure.
+// The gpu_heavy_commands field is retained for TOML structural validation.
+// The Rust accessor was deleted in Phase β Task 4; classification now
+// comes from COMMAND_SPECS in batchalign-types.
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct RuntimeConstants {
     cmd2task: HashMap<String, String>,
     worker_caps: WorkerCaps,
     memory: MemoryConstants,
-    worker_startup_mb: WorkerStartupMb,
     gpu_heavy_commands: GpuHeavy,
     command_base_mb: CommandBaseMb,
     known_engine_keys: KnownEngineKeys,
@@ -39,14 +47,12 @@ struct MemoryConstants {
     loading_overhead: f64,
 }
 
+// The gpu_heavy_commands TOML section is deserialized to validate the TOML at startup,
+// but the Rust accessor is gone — classification now comes from COMMAND_SPECS in
+// batchalign-types. Python still reads this section directly at import time.
+// Task 5 codegen will project it from COMMAND_SPECS so the TOML stays in sync.
 #[derive(Deserialize)]
-struct WorkerStartupMb {
-    gpu: u64,
-    stanza: u64,
-    io: u64,
-}
-
-#[derive(Deserialize)]
+#[allow(dead_code)]
 struct GpuHeavy {
     commands: Vec<String>,
 }
@@ -104,11 +110,6 @@ pub fn cmd2task() -> HashMap<&'static str, &'static str> {
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect()
-}
-
-/// GPU-bound commands where MPS/CUDA is the bottleneck.
-pub fn gpu_heavy_commands() -> &'static [String] {
-    &CONSTANTS.gpu_heavy_commands.commands
 }
 
 /// Known engine-override keys (passed via --engine-overrides).
@@ -191,137 +192,6 @@ pub fn loading_overhead() -> f64 {
     CONSTANTS.memory.loading_overhead
 }
 
-/// Conservative cross-process startup reservation (MB) for one GPU worker.
-pub fn gpu_worker_startup_mb() -> MemoryMb {
-    MemoryMb(CONSTANTS.worker_startup_mb.gpu)
-}
-
-/// Conservative cross-process startup reservation (MB) for one Stanza worker.
-pub fn stanza_worker_startup_mb() -> MemoryMb {
-    MemoryMb(CONSTANTS.worker_startup_mb.stanza)
-}
-
-/// Conservative cross-process startup reservation (MB) for one IO worker.
-pub fn io_worker_startup_mb() -> MemoryMb {
-    MemoryMb(CONSTANTS.worker_startup_mb.io)
-}
-
-// ---------------------------------------------------------------------------
-// MemoryTier — adaptive memory budgets based on total system RAM
-// ---------------------------------------------------------------------------
-
-/// RAM-tier classification for adaptive memory budgets.
-///
-/// Detected once at server startup from total system RAM. All memory guard
-/// parameters (startup reservations, host headroom, max workers) are derived
-/// from the tier rather than from fixed constants. This allows batchalign3
-/// to run on 16 GB laptops through 256 GB servers without manual tuning.
-///
-/// The Large and Fleet tiers reproduce the existing fixed constants from
-/// `runtime_constants.toml` exactly, so fleet machines see zero behavior
-/// change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryTierKind {
-    /// < 24 GB total RAM (laptops, CI runners)
-    Small,
-    /// 24–48 GB (workstations, Frodo)
-    Medium,
-    /// 48–128 GB (development servers)
-    Large,
-    /// > 128 GB (fleet servers like net)
-    Fleet,
-}
-
-impl std::str::FromStr for MemoryTierKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "small" => Ok(Self::Small),
-            "medium" => Ok(Self::Medium),
-            "large" => Ok(Self::Large),
-            "fleet" => Ok(Self::Fleet),
-            _ => Err(format!(
-                "unknown memory tier {s:?}; valid values: small, medium, large, fleet"
-            )),
-        }
-    }
-}
-
-/// Concrete memory budget parameters for a detected tier.
-///
-/// Constructed via [`MemoryTier::from_total_mb`] (pure, testable) or
-/// [`MemoryTier::detect`] (reads system RAM via sysinfo).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemoryTier {
-    /// Which tier was selected.
-    pub kind: MemoryTierKind,
-    /// Total system RAM in MB (as detected).
-    pub total_mb: u64,
-    /// Host headroom reserve — the coordinator refuses reservations that
-    /// would leave available RAM below this threshold.
-    pub headroom_mb: MemoryMb,
-    /// Startup reservation for a GPU worker (Whisper, Wave2Vec, speaker).
-    pub gpu_startup_mb: MemoryMb,
-    /// Startup reservation for a Stanza worker (morphosyntax, utseg, coref).
-    pub stanza_startup_mb: MemoryMb,
-    /// Startup reservation for an IO worker (translate, opensmile, avqi).
-    pub io_startup_mb: MemoryMb,
-    /// Suggested maximum concurrent workers across all profiles.
-    pub max_suggested_workers: usize,
-}
-
-impl MemoryTier {
-    /// Select a tier from total system RAM (in MB). Pure function — no
-    /// sysinfo dependency, fully testable with arbitrary values.
-    pub fn from_total_mb(total_mb: u64) -> Self {
-        //                  (kind, headroom, gpu, stanza, io, max_workers)
-        let (kind, headroom, gpu, stanza, io, max_workers) = if total_mb < 24_000 {
-            (MemoryTierKind::Small, 2_000, 6_000, 3_000, 2_000, 1)
-        } else if total_mb < 48_000 {
-            // Medium: LazyProfile mode — GPU worker starts empty, models loaded
-            // on demand. Startup reservation is just process overhead (3 GB),
-            // not full model weight. Max 1 worker to prevent OOM on 32 GB.
-            (MemoryTierKind::Medium, 4_000, 3_000, 6_000, 3_000, 1)
-        } else if total_mb < 128_000 {
-            // Large — matches existing TOML constants exactly
-            (MemoryTierKind::Large, 8_000, 16_000, 12_000, 4_000, 4)
-        } else {
-            // Fleet — same budgets as Large, more workers
-            (MemoryTierKind::Fleet, 8_000, 16_000, 12_000, 4_000, 8)
-        };
-        Self {
-            kind,
-            total_mb,
-            headroom_mb: MemoryMb(headroom),
-            gpu_startup_mb: MemoryMb(gpu),
-            stanza_startup_mb: MemoryMb(stanza),
-            io_startup_mb: MemoryMb(io),
-            max_suggested_workers: max_workers,
-        }
-    }
-
-    /// Detect the tier from actual system RAM via sysinfo.
-    pub fn detect() -> Self {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        let total_mb = sys.total_memory() / (1024 * 1024);
-        Self::from_total_mb(total_mb)
-    }
-}
-
-impl std::fmt::Display for MemoryTierKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Small => write!(f, "Small (<24 GB)"),
-            Self::Medium => write!(f, "Medium (24-48 GB)"),
-            Self::Large => write!(f, "Large (48-128 GB)"),
-            Self::Fleet => write!(f, "Fleet (>128 GB)"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,15 +222,25 @@ mod tests {
         assert!(default_base_mb().0 > 0);
         assert!(mb_per_file_mb().0 > 0);
         assert!(loading_overhead() > 1.0);
-        assert!(gpu_worker_startup_mb().0 > stanza_worker_startup_mb().0);
-        assert!(stanza_worker_startup_mb().0 > io_worker_startup_mb().0);
+        // Per spec Principle 1, MemoryTier is the canonical source for
+        // per-tier per-profile startup envelopes. Pin the Large-tier ordering.
+        let tier = MemoryTier::from_total_mb(64_000);
+        assert!(tier.gpu_startup_mb.0 > tier.stanza_startup_mb.0);
+        assert!(tier.stanza_startup_mb.0 > tier.io_startup_mb.0);
         // Budget uses process table on GIL=1 (default in test env).
         assert!(command_execution_budget_mb("align").0 >= command_base_mb_process()["align"].0);
     }
 
     #[test]
-    fn gpu_heavy_non_empty() {
-        assert!(!gpu_heavy_commands().is_empty());
+    fn gpu_heavy_commands_exist_in_registry() {
+        use batchalign_types::command_spec::COMMAND_SPECS;
+        use batchalign_types::worker_profile::WorkerProfile;
+        // Registry must have at least one GPU command (align, transcribe, benchmark, transcribe_s).
+        assert!(
+            COMMAND_SPECS
+                .iter()
+                .any(|s| s.profile == WorkerProfile::Gpu)
+        );
     }
 
     #[test]
@@ -417,14 +297,6 @@ mod tests {
         assert_eq!(tier.headroom_mb.0, 8_000);
         assert_eq!(tier.stanza_startup_mb.0, 12_000);
         assert_eq!(tier.max_suggested_workers, 8);
-    }
-
-    #[test]
-    fn large_tier_matches_toml_constants() {
-        let tier = MemoryTier::from_total_mb(64_000);
-        assert_eq!(tier.gpu_startup_mb, gpu_worker_startup_mb());
-        assert_eq!(tier.stanza_startup_mb, stanza_worker_startup_mb());
-        assert_eq!(tier.io_startup_mb, io_worker_startup_mb());
     }
 
     #[test]
@@ -498,5 +370,237 @@ mod tests {
             MemoryTier::from_total_mb(127_999).kind,
             MemoryTierKind::Large
         );
+    }
+
+    // -------------------------------------------------------------
+    // tier_aware_command_execution_budget_mb — Layer 3 fix.
+    //
+    // The fleet-conservative `command_execution_budget_mb` returns
+    // 12000 MB for morphotag (8000 base × 1.5 loading overhead).
+    // On a 16 GB laptop that's 75% of physical RAM — too big a
+    // single-job envelope, the host_memory coordinator refuses
+    // worker spawn before any actual work happens. The tier-aware
+    // variant clamps the worst-case to the tier's per-profile
+    // startup reservation so small hosts get realistic envelopes.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn tier_aware_budget_clamps_morphotag_to_stanza_startup_on_small() {
+        use batchalign_types::api::ReleasedCommand;
+        use batchalign_types::command_spec::command_spec_for;
+        use batchalign_types::memory::estimate_per_worker_peak_mb_with_profile;
+        let tier = MemoryTier::from_total_mb(16_000);
+        assert_eq!(tier.kind, MemoryTierKind::Small);
+        let spec = command_spec_for(ReleasedCommand::Morphotag);
+        let worst_case = batchalign_types::api::MemoryMb(
+            (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
+        );
+        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        assert!(
+            budget.0 <= tier.stanza_startup_mb.0,
+            "Small-tier morphotag budget must clamp to stanza_startup_mb \
+             ({} MB), got {} MB",
+            tier.stanza_startup_mb.0,
+            budget.0
+        );
+        assert!(
+            budget.0 < 12_000,
+            "Small-tier morphotag budget must be smaller than the \
+             fleet worst-case (12000 MB), got {} MB",
+            budget.0
+        );
+    }
+
+    #[test]
+    fn tier_aware_budget_keeps_fleet_morphotag_at_full_worst_case() {
+        use batchalign_types::api::ReleasedCommand;
+        use batchalign_types::command_spec::command_spec_for;
+        use batchalign_types::memory::estimate_per_worker_peak_mb_with_profile;
+        let tier = MemoryTier::from_total_mb(256_000);
+        assert_eq!(tier.kind, MemoryTierKind::Fleet);
+        let spec = command_spec_for(ReleasedCommand::Morphotag);
+        let worst_case = batchalign_types::api::MemoryMb(
+            (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
+        );
+        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        assert_eq!(
+            budget,
+            command_execution_budget_mb("morphotag"),
+            "Fleet-tier morphotag must equal the fleet worst-case; the \
+             clamp must not weaken fleet behavior"
+        );
+    }
+
+    #[test]
+    fn tier_aware_budget_uses_gpu_envelope_for_align_on_small() {
+        use batchalign_types::api::ReleasedCommand;
+        use batchalign_types::command_spec::command_spec_for;
+        use batchalign_types::memory::estimate_per_worker_peak_mb_with_profile;
+        let tier = MemoryTier::from_total_mb(16_000);
+        let spec = command_spec_for(ReleasedCommand::Align);
+        let worst_case = batchalign_types::api::MemoryMb(
+            (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
+        );
+        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        assert!(
+            budget.0 <= tier.gpu_startup_mb.0,
+            "Small-tier align budget must clamp to gpu_startup_mb \
+             ({} MB), got {} MB",
+            tier.gpu_startup_mb.0,
+            budget.0
+        );
+    }
+
+    /// End-to-end check: with the tier-aware budget, a 16 GB host
+    /// admits 1-worker morphotag through `plan_job_reservation`,
+    /// matching the realistic CI scenario (13902 MB available after
+    /// kernel/agent overhead, 2048 MB reserve floor).
+    #[test]
+    fn tier_aware_budget_lets_16gb_host_admit_1_worker_morphotag() {
+        use batchalign_types::api::ReleasedCommand;
+        use batchalign_types::command_spec::command_spec_for;
+        use batchalign_types::memory::estimate_per_worker_peak_mb_with_profile;
+        let tier = MemoryTier::from_total_mb(16_000);
+        let spec = command_spec_for(ReleasedCommand::Morphotag);
+        let worst_case = batchalign_types::api::MemoryMb(
+            (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
+        );
+        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        // plan_job_reservation lives in host_memory.rs; reproduce its
+        // math here so the test is self-contained without
+        // cross-module wiring. The bug we're fixing is upstream of
+        // plan_job_reservation — the BUDGET it receives.
+        let available_mb = 13_902u64;
+        let reserve_mb = 2_048u64;
+        let pending_reserved_mb = 0u64;
+        let projected_after = available_mb
+            .saturating_sub(pending_reserved_mb)
+            .saturating_sub(budget.0);
+        assert!(
+            projected_after >= reserve_mb,
+            "Tier-aware budget must let a 16 GB host admit 1-worker \
+             morphotag: budget={budget_mb} MB, available={available_mb} \
+             MB, projected_after={projected_after} MB, reserve={reserve_mb} MB",
+            budget_mb = budget.0,
+        );
+    }
+
+    /// Architectural invariant for spec Principle 1:
+    /// `MemoryTier::{gpu,stanza,io}_startup_mb` is the SOLE canonical source of
+    /// per-tier per-profile worker startup memory. No parallel constants,
+    /// functions, or struct fields holding the same concept may exist anywhere
+    /// else in the production code of the `batchalign` crate.
+    ///
+    /// This test is identifier-shape-anchored (not numeric-value-anchored)
+    /// because the canonical Large-tier values (16000, 12000, 4000) appear
+    /// in legitimate unrelated contexts (audio sample rates, byte buffers).
+    ///
+    /// Allowlisted definition sites:
+    ///   - `crates/batchalign-types/src/memory.rs` — canonical `MemoryTier` struct
+    ///     (moved from `crates/batchalign/src/types/runtime.rs` in Phase β Task 2).
+    ///   - `crates/batchalign/src/types/config/server.rs` — operator-override
+    ///     fields on `RuntimeOverridesConfig` (flow INTO `MemoryTier`, not parallel to it).
+    ///
+    /// The scan is scoped to `batchalign/src` so the canonical definition in
+    /// `batchalign-types` is never in scope; only illicit parallel copies would appear.
+    ///
+    /// On regression the test fails with a message pointing at the spec.
+    #[test]
+    fn memory_tier_is_sole_source_for_per_profile_envelopes() {
+        // (a) Pin the canonical Large-tier values. Any change here must be
+        //     accompanied by a deliberate update of the spec.
+        let tier = MemoryTier::from_total_mb(64_000);
+        assert_eq!(tier.gpu_startup_mb.0, 16_000, "Large-tier GPU envelope");
+        assert_eq!(
+            tier.stanza_startup_mb.0, 12_000,
+            "Large-tier Stanza envelope"
+        );
+        assert_eq!(tier.io_startup_mb.0, 4_000, "Large-tier IO envelope");
+
+        // (b) Scan production sources in batchalign/src for parallel definitions.
+        //
+        // Resolve paths via a workspace-marker walk rather than a fixed
+        // `../../` traversal — the latter breaks if the crate ever moves.
+        // The marker is the workspace Cargo.toml containing `[workspace]`.
+        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src_root = crate_root.join("src");
+        let workspace_root = find_workspace_root(&crate_root)
+            .expect("workspace root not found — Cargo.toml with [workspace] absent above CARGO_MANIFEST_DIR");
+
+        // Definition-shape regex: matches top-level fn/const/static or `pub` struct
+        // fields named *_startup_mb (gpu, stanza, or io). Field-access expressions
+        // like `tier.gpu_startup_mb` and doc-comment mentions are NOT matched.
+        let regex = r"^\s*(pub\s+)?(fn|const|static)\s+(gpu|stanza|io)_startup_mb\b|^\s*pub\s+(gpu|stanza|io)_startup_mb\s*:";
+
+        // Excluded file: the operator-override config whose fields flow INTO MemoryTier.
+        // The canonical MemoryTier struct is in batchalign-types/src/memory.rs and is
+        // not under src_root, so no exclude needed for it.
+        let excludes = ["--glob=!**/types/config/server.rs"];
+
+        let output = std::process::Command::new("rg")
+            .arg("--no-heading")
+            .arg("--line-number")
+            .arg("--multiline-dotall")
+            .arg("-e")
+            .arg(regex)
+            .args(excludes)
+            .arg(&src_root)
+            .output()
+            .expect("ripgrep must be installed and on PATH for this test");
+
+        // ripgrep exits 1 when there are no matches — that is the expected state.
+        // Exit 0 means matches were found, which is a regression.
+        if output.status.success() {
+            let matches = String::from_utf8_lossy(&output.stdout);
+            panic!(
+                "Architectural invariant violation (spec Principle 1):\n\
+                 found parallel definition(s) of *_startup_mb inside batchalign/src.\n\
+                 MemoryTier in batchalign-types/src/memory.rs is the SOLE canonical source.\n\
+                 Operator overrides via RuntimeOverridesConfig are the only allowed channel.\n\
+                 See docs/architecture/2026-05-10-tier-aware-memory-consolidation.md \
+                 (Phase α, Principle 1).\n\n\
+                 ripgrep matches:\n{matches}"
+            );
+        }
+
+        // (c) Also catch reintroduction of the deleted TOML section name.
+        //     The bare token `worker_startup_mb` was the key for the deleted
+        //     [worker_startup_mb] table; it must not return.
+        let toml_scan = std::process::Command::new("rg")
+            .arg("--no-heading")
+            .arg("--line-number")
+            .arg("-e")
+            .arg(r"\bworker_startup_mb\b")
+            .arg(workspace_root.join("batchalign/runtime_constants.toml"))
+            .output()
+            .expect("ripgrep must be installed and on PATH for this test");
+
+        if toml_scan.status.success() {
+            let matches = String::from_utf8_lossy(&toml_scan.stdout);
+            panic!(
+                "Architectural invariant violation (spec Principle 1):\n\
+                 the `[worker_startup_mb]` TOML section was deleted in Phase α \
+                 and must not be reintroduced. MemoryTier is the canonical source.\n\n\
+                 ripgrep matches:\n{matches}"
+            );
+        }
+    }
+
+    /// Walk up from `start` looking for the workspace `Cargo.toml`
+    /// (the one containing `[workspace]`). Returns the directory.
+    /// Used by the architectural-invariant test to anchor file
+    /// scans without baked-in `../../` traversal.
+    fn find_workspace_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+        let mut current = start;
+        loop {
+            let cargo_toml = current.join("Cargo.toml");
+            if cargo_toml.is_file() {
+                let contents = std::fs::read_to_string(&cargo_toml).ok()?;
+                if contents.contains("[workspace]") {
+                    return Some(current.to_path_buf());
+                }
+            }
+            current = current.parent()?;
+        }
     }
 }

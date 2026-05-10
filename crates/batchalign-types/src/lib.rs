@@ -13,8 +13,11 @@ pub mod api {
     pub use crate::domain::*;
 }
 
+pub mod command_spec;
 pub mod domain;
+pub mod memory;
 pub mod paths;
 pub mod scheduling;
 pub mod worker;
+pub mod worker_profile;
 pub mod worker_v2;

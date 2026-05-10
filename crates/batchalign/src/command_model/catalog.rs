@@ -6,10 +6,10 @@ use crate::commands::spec::{
 use crate::recipe_runner::catalog::recipe_command_catalog;
 use crate::worker::InferTask;
 
-use super::{CommandFamily, CommandSpec};
+use super::{CatalogEntry, CommandFamily};
 
 /// Return the authoritative command spec for one released command.
-pub(crate) fn command_spec(command: ReleasedCommand) -> &'static CommandSpec {
+pub(crate) fn command_spec(command: ReleasedCommand) -> &'static CatalogEntry {
     // Catalog invariant: every `ReleasedCommand` variant has a
     // matching `CommandSpec` in `recipe_command_catalog()`. Adding a
     // new released command without its spec is a compile-time-visible
@@ -23,7 +23,7 @@ pub(crate) fn command_spec(command: ReleasedCommand) -> &'static CommandSpec {
 }
 
 /// Return the authoritative command specs for all released commands.
-pub(crate) fn command_specs() -> &'static [CommandSpec] {
+pub(crate) fn command_specs() -> &'static [CatalogEntry] {
     recipe_command_catalog()
 }
 
@@ -53,7 +53,7 @@ pub(crate) fn legacy_command_descriptor(command: ReleasedCommand) -> CommandWork
     }
 }
 
-fn primary_infer_task(spec: &CommandSpec) -> InferTask {
+fn primary_infer_task(spec: &CatalogEntry) -> InferTask {
     // Catalog invariant: every spec carries a non-empty
     // `infer_tasks` list. Empty `infer_tasks` would mean the command
     // doesn't dispatch to any inference task, which is invalid by

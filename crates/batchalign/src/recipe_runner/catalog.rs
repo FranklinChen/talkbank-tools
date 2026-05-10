@@ -5,7 +5,7 @@ use crate::runner::util::FileStage;
 use crate::worker::InferTask;
 
 use super::command_spec::{
-    CapabilityPlan, CapabilitySurface, CommandFamily, CommandSpec, PlannerKind,
+    CapabilityPlan, CapabilitySurface, CatalogEntry, CommandFamily, PlannerKind,
 };
 use super::materialize::{FileNamingPolicy, OutputPolicy, SidecarPolicy, StemRewrite};
 use super::recipe::{
@@ -560,8 +560,8 @@ const AVQI_RECIPE: Recipe = Recipe {
     ],
 };
 
-const COMMAND_SPECS: &[CommandSpec] = &[
-    CommandSpec {
+const COMMAND_SPECS: &[CatalogEntry] = &[
+    CatalogEntry {
         command: ReleasedCommand::Compare,
         family: CommandFamily::ReferenceProjection,
         planner: PlannerKind::ComparePairs,
@@ -577,7 +577,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &COMPARE_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Benchmark,
         family: CommandFamily::Composite,
         planner: PlannerKind::BenchmarkPairs,
@@ -593,7 +593,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &BENCHMARK_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Transcribe,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
@@ -609,7 +609,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &TRANSCRIBE_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::TranscribeS,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
@@ -625,7 +625,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &TRANSCRIBE_S_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Align,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
@@ -641,7 +641,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &ALIGN_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Morphotag,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
@@ -657,7 +657,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &MORPHOTAG_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Utseg,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
@@ -673,7 +673,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &UTSEG_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Translate,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
@@ -689,7 +689,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &TRANSLATE_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Coref,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
@@ -705,7 +705,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &COREF_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Opensmile,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
@@ -725,7 +725,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         },
         recipe: &OPENSMILE_RECIPE,
     },
-    CommandSpec {
+    CatalogEntry {
         command: ReleasedCommand::Avqi,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
@@ -748,13 +748,13 @@ const COMMAND_SPECS: &[CommandSpec] = &[
 ];
 
 /// Return the static recipe-runner command catalog.
-pub(crate) fn recipe_command_catalog() -> &'static [CommandSpec] {
+pub(crate) fn recipe_command_catalog() -> &'static [CatalogEntry] {
     COMMAND_SPECS
 }
 
 /// Look up one released command in the recipe catalog.
 #[allow(dead_code, clippy::expect_used)]
-pub(crate) fn recipe_command_spec(command: ReleasedCommand) -> &'static CommandSpec {
+pub(crate) fn recipe_command_spec(command: ReleasedCommand) -> &'static CatalogEntry {
     // Catalog invariant: `COMMAND_SPECS` covers every
     // `ReleasedCommand` variant; the catalog test below
     // (`tests::every_released_command_has_a_spec`) enforces this at

@@ -1,7 +1,7 @@
 # Worker Tuning
 
 **Status:** Current
-**Last updated:** 2026-04-25 20:56 EDT
+**Last updated:** 2026-05-10 12:12 EDT
 
 This page explains how the server decides how many workers to run, how memory
 budgets work, and how to configure warmup and tuning for your hardware.
@@ -111,8 +111,8 @@ time but can run multiple processes in parallel for CPU-bound workloads.
 ## Per-command memory profiles
 
 Each command loads different ML models with different memory footprints. These
-values come from `runtime_constants.toml` (the single source of truth shared
-between Rust and Python):
+values come from `runtime_constants.toml` (generated from `crates/batchalign-types/src/command_spec.rs`
+via `xtask gen-runtime-toml`; shared between Rust and Python at compile/import time):
 
 | Command | Memory per worker (MB) | What drives it |
 |---------|----------------------|----------------|
@@ -293,7 +293,7 @@ pressure changes.
 max_workers_per_job: 0          # Coordinator-backed auto planning
 max_concurrent_jobs: 8
 max_concurrent_worker_startups: 1
-memory_gate_mb: 8000            # Tier-dependent default for Fleet (≥128 GB): 8000
+memory_gate_mb: 8000            # Operator override; the default is 2048 MB (MIN_FREE_MEMORY_MB)
 warmup_commands:
   - morphotag
   - align

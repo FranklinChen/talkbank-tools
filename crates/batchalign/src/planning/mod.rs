@@ -1,7 +1,7 @@
 //! Typed planning layer from runner snapshots to immutable job plans.
 
 use crate::api::DisplayPath;
-use crate::command_model::{self, CommandSpec, PlannedMaterializedFile};
+use crate::command_model::{self, CatalogEntry, PlannedMaterializedFile};
 use crate::recipe_runner::planner::{PlanningError, plan_work_units};
 use crate::recipe_runner::runtime::discover_inputs_for_job;
 use crate::recipe_runner::work_unit::{PlannedWorkUnit, TextWorkUnit};
@@ -29,7 +29,7 @@ pub(crate) struct PlannedArtifactSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobPlan {
     /// Authoritative command model entry for the released command.
-    pub spec: &'static CommandSpec,
+    pub spec: &'static CatalogEntry,
     /// Typed work units derived from the runner snapshot.
     pub work_units: Vec<PlannedWorkUnit>,
     /// Planned output artifacts for each work unit.

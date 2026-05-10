@@ -45,7 +45,6 @@ impl ServerConfig {
     /// Individual startup reservation overrides (`gpu_startup_mb`, etc.) are
     /// applied on top of the resolved tier.
     pub fn resolved_memory_tier(&self) -> crate::types::runtime::MemoryTier {
-        use crate::api::MemoryMb;
         use crate::types::runtime::{MemoryTier, MemoryTierKind};
 
         let mut tier = match self.memory_tier {
@@ -55,15 +54,18 @@ impl ServerConfig {
             Some(MemoryTierKind::Fleet) => MemoryTier::from_total_mb(256_000),
             None => MemoryTier::detect(),
         };
-        // Apply individual overrides (0 = use tier default).
-        if self.gpu_startup_mb > 0 {
-            tier.gpu_startup_mb = MemoryMb(self.gpu_startup_mb);
+        // Apply individual overrides. `None` falls through to the tier
+        // default; `Some(value)` overrides unconditionally. The
+        // `zero_as_none` deserializer collapses YAML `0` to `None`
+        // for wire-format compat with the pre-migration sentinel.
+        if let Some(value) = self.gpu_startup_mb {
+            tier.gpu_startup_mb = value;
         }
-        if self.stanza_startup_mb > 0 {
-            tier.stanza_startup_mb = MemoryMb(self.stanza_startup_mb);
+        if let Some(value) = self.stanza_startup_mb {
+            tier.stanza_startup_mb = value;
         }
-        if self.io_startup_mb > 0 {
-            tier.io_startup_mb = MemoryMb(self.io_startup_mb);
+        if let Some(value) = self.io_startup_mb {
+            tier.io_startup_mb = value;
         }
         tier
     }

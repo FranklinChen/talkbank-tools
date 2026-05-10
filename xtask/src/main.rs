@@ -70,6 +70,7 @@ mod audit_docs;
 mod ci_hygiene;
 mod dead_variant_audit;
 mod docs_sync;
+mod gen_runtime_toml;
 mod panic_audit;
 mod rust_scan;
 mod wide_struct_audit;
@@ -108,12 +109,16 @@ fn run_main() -> Result<()> {
             let rest: Vec<String> = args.collect();
             audit_docs::parse_and_run(rest)
         }
+        Some("gen-runtime-toml") => {
+            let check = args.any(|a| a == "--check");
+            gen_runtime_toml::run(check).map_err(|e| e.to_string().into())
+        }
         _ => Err(usage_error()),
     }
 }
 
 fn usage_error() -> DynError {
-    "usage: cargo run -q -p xtask -- {help|affected-rust {packages|check|clippy|test}|lint-wide-structs|lint-ci-hygiene|lint-docs-sync|lint-dead-variants ...|panic-audit [--json] [--crate <prefix>]|audit-docs scan [--db PATH] [--talkbank-tools PATH] [--meta PATH]}".into()
+    "usage: cargo run -q -p xtask -- {help|affected-rust {packages|check|clippy|test}|lint-wide-structs|lint-ci-hygiene|lint-docs-sync|lint-dead-variants ...|panic-audit [--json] [--crate <prefix>]|audit-docs <scan|flag-staleness|status|streak|vet> [args...]|gen-runtime-toml [--check]}".into()
 }
 
 fn print_help() {
@@ -143,9 +148,28 @@ fn print_help() {
     println!(
         "      Catalogue every panic-producing call site (.unwrap, .expect, panic!, todo!, unimplemented!, unreachable!) for the Phase B audit."
     );
-    println!("  audit-docs scan [--db PATH] [--talkbank-tools PATH] [--meta PATH]");
+    println!("  audit-docs scan [--db PATH] [--talkbank-tools PATH]");
     println!(
-        "      Walk markdown across talkbank-tools and the meta-repo; upsert per-section rows into the doc-to-code provenance audit catalog. See docs/release-doc-audit/audit-method.md."
+        "      Walk markdown across talkbank-tools; upsert per-section rows into the doc-to-code provenance audit catalog (talkbank-tools-only since v2 cutover)."
+    );
+    println!("  audit-docs flag-staleness [--db PATH] [--talkbank-tools PATH]");
+    println!(
+        "      Re-run regex surface-scan over every catalog section; populates `staleness_flags` so high-suspicion sections float to the top of the queue."
+    );
+    println!("  audit-docs status [--db PATH]");
+    println!(
+        "      Print Bucket A vetting progress + streak + the next 5 unvetted Bucket A sections. The default daily-cadence command."
+    );
+    println!("  audit-docs streak [--db PATH]");
+    println!("      Print just the streak count (consecutive days with ≥1 vet).");
+    println!(
+        "  audit-docs vet --id <section_id> --verdict <unvetted|in-review|no-claims|vetted-accurate|needs-fix|fixed> [--reviewer <name>] [--notes <text>] [--fix-commit <hash>]"
+    );
+    println!("      Mark a section's verdict. `fixed` requires --fix-commit.");
+    println!("  gen-runtime-toml [--check]");
+    println!(
+        "      Regenerate batchalign/runtime_constants.toml from COMMAND_SPECS. \
+         With --check, exit non-zero on drift (used by make generated-check)."
     );
 }
 
