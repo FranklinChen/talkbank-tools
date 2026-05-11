@@ -1,7 +1,7 @@
 # VS Code Extension
 
 **Status:** Current
-**Last updated:** 2026-05-02 02:30 EDT
+**Last updated:** 2026-05-11 18:58 EDT
 
 **Support tier:** Public preview. VSIX bundles are published on GitHub Releases, not yet available from the VS Code Marketplace.
 
@@ -11,16 +11,20 @@ A full-featured CHAT editor for VS Code built on the Rust-powered `talkbank-lsp`
 
 ## Installation
 
-The extension is located in [`vscode/`](https://github.com/TalkBank/talkbank-tools/tree/main/vscode). To build and install:
+The extension is located in [`vscode/`](https://github.com/TalkBank/talkbank-tools/tree/main/vscode). Two install paths, depending on what you want to do.
+
+**End users — install a released VSIX.** Pre-built, platform-specific VSIX bundles (each ships with the matching `talkbank-lsp` binary) are published on [GitHub Releases](https://github.com/TalkBank/talkbank-tools/releases). Download the `.vsix` for your platform, then in VS Code: Extensions sidebar → **"…"** menu → **Install from VSIX…** and pick the downloaded file.
+
+**Developers — run from source.** Open the `vscode/` folder in VS Code, install dependencies, compile, and launch the Extension Development Host:
 
 ```bash
 cd vscode
 npm install
 npm run compile
-# Then: Extensions sidebar → "..." → "Install from VSIX"
+# Then press F5 in VS Code to launch the dev host
 ```
 
-Or launch in development mode: open the `vscode/` folder in VS Code and press **F5**.
+The dev host runs the locally-compiled extension and talks to a `talkbank-lsp` binary discovered via the resolver described in the [Configuration](#configuration) and [Architecture](#architecture) sections below.
 
 ---
 
@@ -28,7 +32,7 @@ Or launch in development mode: open the `vscode/` folder in VS Code and press **
 
 ### Live Validation
 
-Errors and warnings appear inline as you type — the same error codes as `chatter validate` (currently 189; verify with `rg -c '#\[code\("[EW]' crates/talkbank-model/src/errors/codes/error_code.rs`), with source-level precision:
+Errors and warnings appear inline as you type — the same error codes as `chatter validate` (currently 191; verify with `rg -c '#\[code\("[EW]' crates/talkbank-model/src/errors/codes/error_code.rs`), with source-level precision:
 
 - Squiggly underlines on the exact error location
 - Problems panel integration with error codes and descriptions
@@ -270,7 +274,7 @@ extension binary, then on PATH, then under the extension's target
 directory.) The LSP server provides:
 
 - Incremental parsing via tree-sitter
-- Full validation (currently 189 error codes; see live count above)
+- Full validation (currently 191 error codes; see live count above)
 - Cross-tier alignment computation
 - CLAN analysis command execution
 - Document formatting and symbol extraction
