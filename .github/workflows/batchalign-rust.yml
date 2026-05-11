@@ -26,8 +26,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + ripgrep
+        # ripgrep is required by the Phase α architectural-invariant
+        # test (memory_tier_is_sole_source_for_per_profile_envelopes)
+        # which shells out to rg to scan production sources for
+        # parallel *_startup_mb definitions. Install explicitly so the
+        # test does not depend on the runner image version.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ripgrep
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
