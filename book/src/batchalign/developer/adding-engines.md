@@ -1,7 +1,7 @@
 # Adding Inference Providers
 
 **Status:** Current
-**Last modified:** 2026-05-10 12:12 EDT
+**Last updated:** 2026-05-10 12:12 EDT
 
 Batchalign3 no longer has a public entry-point plugin system. New engines are
 added in-tree as built-in worker capabilities.

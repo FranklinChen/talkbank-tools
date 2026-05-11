@@ -1,5 +1,6 @@
 # MAKEMOD -- Generate %mod Tier from Pronunciation Lexicon
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's MAKEMOD command, which looks up each countable word on main tiers in a pronunciation lexicon (CMU dictionary format) and generates a `%mod` dependent tier with the phonemic transcription. Words not found in the lexicon are marked with `???`.

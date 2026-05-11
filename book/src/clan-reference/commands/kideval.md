@@ -1,5 +1,6 @@
 # KIDEVAL -- Child Language Evaluation
 
+**Status:** Current
 ## Purpose
 
 Produces a comprehensive child language evaluation report by combining multiple analysis methods into a single per-speaker summary. KIDEVAL is designed for evaluating children's language development and aggregates results from several individual CLAN commands.

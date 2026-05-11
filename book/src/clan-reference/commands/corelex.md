@@ -1,5 +1,6 @@
 # CORELEX — Core Vocabulary
 
+**Status:** Current
 ## Purpose
 
 Identifies "core" vocabulary items that appear above a frequency threshold. Core vocabulary analysis is used in clinical assessment to evaluate whether a child's lexicon includes expected high-frequency words.

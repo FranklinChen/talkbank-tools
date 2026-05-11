@@ -14,7 +14,7 @@ be audited when adding or reviewing flags.
 
 ### Path 1: Per-Command Options (`CommandOptions`)
 
-```
+```text
 CLI args (clap) → CommandOptions (typed structs) → Dispatch extraction → Dispatch plan → Production code
       ↑                    ↑                              ↑                  ↑
   commands.rs         options.rs                    dispatch/options.rs  dispatch/plan.rs
@@ -40,7 +40,7 @@ those extracted parameters through a typed seam instead of re-reading
 
 ### Path 2: Job-Level Options (`Job` fields)
 
-```
+```text
 CLI args (clap) → dispatch/paths.rs resolution → JobSubmission → Job struct → Dispatch reads Job directly
       ↑                                                ↑                            ↑
   CommonOpts                                       api.rs                    fa_pipeline.rs (job.lang, etc.)

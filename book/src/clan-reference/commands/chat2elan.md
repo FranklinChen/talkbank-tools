@@ -1,5 +1,6 @@
 # CHAT2ELAN -- CHAT to ELAN XML Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts CHAT files into ELAN annotation format (`.eaf`). The output is a valid ELAN XML file with time-aligned tiers and annotations derived from CHAT main tiers and their timing bullets.

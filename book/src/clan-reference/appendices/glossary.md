@@ -1,5 +1,6 @@
 # Glossary
 
+**Status:** Current
 ## CHAT Format Terms
 
 **CHAT** (Codes for the Human Analysis of Transcripts)

@@ -1,5 +1,6 @@
 # LSP Connection
 
+**Status:** Current
 **Last updated:** 2026-04-16 13:37 EDT
 
 The TalkBank extension is powered by a Rust language server (`talkbank-lsp`) that communicates with VS Code over stdio. If the language server fails to start or crashes, most extension features will not work. This chapter covers how to diagnose and fix LSP connection issues.

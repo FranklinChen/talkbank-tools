@@ -44,7 +44,7 @@ and **transcribe** (ASR → build CHAT → utseg → morphosyntax) pipelines.
 
 Full directory layout for all artifact types:
 
-```
+```text
 debug-dir/
   # ── Transcribe pipeline artifacts ──
   sample_asr_response.json       # Raw ASR tokens + timestamps

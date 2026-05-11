@@ -86,7 +86,7 @@ The `Retrace` struct wraps the retraced content in a `BracketedContent`
 container, which can hold any combination of words, replaced words, and
 other content items:
 
-```rust
+```rust,ignore
 // crates/talkbank-model/src/model/content/retrace.rs
 pub struct Retrace {
     pub content: BracketedContent,          // the retraced words
@@ -207,7 +207,7 @@ Exact corpus-shaped contrast:
 
 Counting: `count_alignable_item()` in `alignment/helpers/count.rs`:
 
-```rust
+```rust,ignore
 UtteranceContent::Retrace(retrace) => {
     if domain == TierDomain::Mor {
         0  // excluded from morphological alignment
@@ -219,7 +219,7 @@ UtteranceContent::Retrace(retrace) => {
 
 Walking: `walk_words()` in `alignment/helpers/walk/mod.rs`:
 
-```rust
+```rust,ignore
 UtteranceContent::Retrace(retrace) => {
     if !matches!(domain, Some(TierDomain::Mor)) {
         walk_bracketed_content(&retrace.content.content, domain, f);

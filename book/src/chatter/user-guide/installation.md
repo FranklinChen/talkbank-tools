@@ -66,7 +66,7 @@ See the [Makefile targets](../../contributing/setup.md) for additional commands.
 
 Everything lives in a single repository:
 
-```
+```text
 ~/talkbank/
 └── talkbank-tools/         # This repo (grammar, crates, CLI, LSP, VS Code, CLAN, Batchalign)
     ├── grammar/            # Tree-sitter grammar

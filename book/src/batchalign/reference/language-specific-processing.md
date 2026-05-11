@@ -1,5 +1,6 @@
 # Language-Specific Processing Overview
 
+**Status:** Current
 This page is the single entry point for understanding how batchalign3 handles
 non-English languages. It maps every stage of the processing pipeline to the
 language-specific behavior at that stage.

@@ -43,7 +43,7 @@ These share the same inputs (CHAT file + audio + ASR tokens), produce the
 same outputs (timing injected into the CHAT file), and need to be compared
 head-to-head on the same corpus.  A trait makes this clean:
 
-```rust
+```rust,ignore
 /// Strategy for recovering utterance timing from ASR output.
 ///
 /// Implementations own the full UTR pass: reference extraction,
@@ -70,7 +70,7 @@ UTR to work around the trait boundary.
 **Selection** is now via a visible CLI flag for the validated overlap-aware UTR
 surface:
 
-```rust
+```rust,ignore
 /// UTR strategy selection.
 ///
 /// Visible from --help. Default is auto.
@@ -127,7 +127,7 @@ model, not in Rust logic.
 
 Current mechanism: enum match in the dispatch layer.
 
-```rust
+```rust,ignore
 match backend {
     AsrBackendV2::LocalWhisper => build_whisper_request(...),
     AsrBackendV2::Revai => build_revai_request(...),
@@ -153,7 +153,7 @@ their scale:
 
 **1. Single conditional (ASR post-processing)**
 
-```rust
+```text
 // asr_postprocess/mod.rs — one branch for Cantonese
 if lang == "yue" {
     words = normalize_cantonese_words(words);
@@ -167,7 +167,7 @@ and a dynamic dispatch call — all to replace a one-line conditional.
 
 **2. Per-language modules (morphosyntax)**
 
-```
+```text
 nlp/lang_en.rs  — 271 lines, English irregular verbs
 nlp/lang_fr.rs  — 262 lines, French-specific rules
 nlp/lang_ja.rs  — 460 lines, Japanese verb form patterns
@@ -181,7 +181,7 @@ interface but wouldn't reduce code or improve safety.
 
 **3. Table-driven lookup (number expansion)**
 
-```rust
+```text
 // num2text.rs — 12 languages in a static lookup table
 static NUM2LANG: LazyLock<HashMap<&str, LangTable>> = ...;
 ```
@@ -244,7 +244,7 @@ Before introducing a new trait:
 
 Use clap's `hide = true` for experimental strategy flags:
 
-```rust
+```text
 #[arg(long, hide = true, default_value = "global")]
 pub utr_strategy: UtrStrategyChoice,
 ```

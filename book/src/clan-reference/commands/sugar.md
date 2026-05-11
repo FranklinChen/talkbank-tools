@@ -1,5 +1,6 @@
 # SUGAR -- Sampling Utterances and Grammatical Analysis Revised
 
+**Status:** Current
 ## Purpose
 
 Computes language sample analysis metrics from `%mor` and `%gra` tiers, providing a quick clinical assessment of grammatical complexity. SUGAR is designed as a time-efficient alternative to more detailed scoring systems like DSS or IPSYN.

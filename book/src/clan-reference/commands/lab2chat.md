@@ -1,5 +1,6 @@
 # LAB2CHAT -- LAB Timing Labels to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts LAB (label) timing files into CHAT format. LAB files contain time-aligned word or segment labels commonly used in speech research tools (e.g., HTK, Kaldi).

@@ -52,7 +52,7 @@ PAAL, NIFAL, PIEL, PUAL, HIFIL, HUFAL, HITPAEL.
 Stanza's Hebrew model outputs the `HebBinyan` feature on verbs. batchalign3
 converts it to a lowercase suffix in %mor:
 
-```
+```text
 UD features: HebBinyan=PAAL|Number=Sing|Person=3|Tense=Past|VerbForm=Fin
 %mor suffix: -paal&3S&PAST
 ```
@@ -64,7 +64,7 @@ The binyan is lowercased in the suffix: `PAAL` → `paal`, `HIFIL` → `hifil`.
 The Hebrew existential (יש/אין — "there is"/"there isn't") gets a special
 feature in Stanza:
 
-```
+```text
 UD features: HebExistential=True|VerbForm=Fin
 %mor suffix: -true
 ```
@@ -75,7 +75,7 @@ The value is lowercased: `True` → `true`.
 
 The full verb suffix format (shared across all languages):
 
-```
+```text
 -VerbForm-Aspect-Mood-Tense-Polarity-Polite-HebBinyan-HebExistential-NumberPerson-irr
 ```
 
@@ -90,7 +90,7 @@ in `features.rs` checks for `HebBinyan` and `HebExistential` in any
 language's feature set, but only Stanza's Hebrew model actually produces
 these features:
 
-```rust
+```rust,ignore
 // batchalign/src/nlp/features.rs
 if let Some(v) = feats.get("HebBinyan") {
     parts.push(v.to_lowercase());

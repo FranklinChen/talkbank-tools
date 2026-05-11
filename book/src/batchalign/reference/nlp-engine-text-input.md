@@ -141,7 +141,7 @@ sentences separated by `\n\n`.
 
 **What Stanza receives:**
 
-```
+```text
 cleaned_word1 cleaned_word2 cleaned_word3\n\ncleaned_word4 cleaned_word5
 ```
 

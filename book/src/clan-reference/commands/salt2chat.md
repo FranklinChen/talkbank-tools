@@ -1,5 +1,6 @@
 # SALT2CHAT -- SALT Transcription to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts SALT (Systematic Analysis of Language Transcripts) transcription files into CHAT format. SALT is a widely used clinical transcription system with its own conventions for speaker codes, morpheme annotations, and error marking.

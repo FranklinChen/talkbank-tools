@@ -47,7 +47,7 @@ the tracing event and the record creation in one call.
 
 **Source:** `crates/batchalign/src/decisions.rs`
 
-```rust
+```rust,ignore
 pub struct DecisionRecord {
     pub line_idx: usize,           // which utterance
     pub speaker: String,           // speaker code
@@ -74,14 +74,14 @@ pub struct DecisionRecord {
 
 `%xalign` content is: `module:strategy reason_string`
 
-```
+```text
 *CHI:   hello world . ⌈15⌉1000_5000⌈15⌉
 %xalign:	monotonicity:end_clamped overlap=1200ms prev_end=6200 next_start=5000
 ```
 
 When `needs_review` is true, a `%xrev: [?]` tier is also added:
 
-```
+```text
 *CHI:   hello world .
 %xalign:	monotonicity:timing_stripped non_monotonic start_ms=2000 previous_start_ms=5000
 %xrev:	[?]

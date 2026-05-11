@@ -1,5 +1,6 @@
 # Profiling Commands
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Profiling commands measure structural properties of a speaker's language:

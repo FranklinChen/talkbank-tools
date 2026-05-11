@@ -1,5 +1,6 @@
 # FLO -- Simplified Fluent Output
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's `flo` command, which generates a `%flo:` dependent tier containing a simplified, "fluent" version of each utterance's main line.

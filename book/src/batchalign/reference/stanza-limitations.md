@@ -52,7 +52,7 @@ observed behavior.
 
 ### Input examples
 
-```
+```text
 and the sink's overflowing .
 the lady's washing dishes .
 ```
@@ -305,7 +305,7 @@ This entry is listed for completeness; it belongs in the same registry.
 
 Minimum trigger (no domain knowledge of Finnish needed):
 
-```
+```text
 a tollei b
 ```
 
@@ -313,13 +313,13 @@ Larger real-corpus example (from
 `childes-other-data/Finno-Ugric/Finnish/Kirjavainen-MPI/1-08-01.cha`
 line 2222):
 
-```
+```text
 *MOT:  kato se on tommonen (.) tollei se menee xxx .
 ```
 
 ### Stanza's output
 
-```
+```text
 token.text='a'      word.text='a'        lemma='a'        upos=NOUN
 token.text='tollei' word.text='<SOS>tos' lemma='<SOS>tos' upos=SYM   ← LEAK
                     word.text='ei'       lemma='ei'       upos=VERB
@@ -332,7 +332,7 @@ but the first expansion word has ``<SOS>`` prepended on both its
 
 ### Correct output
 
-```
+```text
 word.text='tos'  lemma='tos'  upos=SCONJ
 word.text='ei'   lemma='ei'   upos=VERB
 ```
@@ -535,7 +535,7 @@ of its OR).
 Hebrew prepositional+definite contractions and definite-article
 fusion correctly:
 
-```
+```text
 בבית   → ב + בית         "in the house" — prep ב + noun (definite ה absorbed)
 מהילד  → מ + ה + ילד      "from the boy" — prep מ + def ה + noun
 לאישה  → ל + אישה         "to the woman" — prep ל + noun
@@ -550,7 +550,7 @@ justification.
 **Greek (now gets MWT, was being suppressed).** Stanza splits the
 preposition+article contractions correctly:
 
-```
+```text
 στο    → σ + το           "in the (n.acc)" — prep σε + def το
 στον   → σ + τον          "in the (m.acc)" — prep σε + def τον
 στις   → σ + τις          "at the (f.pl.acc)" — prep σε + def τις
@@ -699,7 +699,7 @@ is wrong.
 
 ### Correct output (illustrative)
 
-```
+```text
 parla     → verb|parlare-Imp-S2        (2sg imperative of parlare)
 arancione → adj|arancione OR noun|arancione
 seggiola  → noun|seggiola-Fem-Sing     (little chair)
@@ -902,7 +902,7 @@ evidence can extend it case-by-case.
 
 ### Input and observed end-to-end `%mor` output
 
-```
+```text
 *CHI:	la storia parla di un bambino .
 %mor:	det|il-Masc-Def-Art-Sing~det|il-Masc-Def-Art-Plur noun|storia-Fem
         verb|parlare-Fin-Ind-Pres-S3 adp|di det|uno-Masc-Ind-Art-Sing
@@ -919,7 +919,7 @@ analysis — unrelated to Defect 6).
 
 ### Correct output
 
-```
+```text
 *CHI:	la storia parla di un bambino .
 %mor:	det|la-Fem-Def-Art-Sing noun|storia-Fem verb|parlare-Fin-Ind-Pres-S3
         adp|di det|uno-Masc-Ind-Art-Sing noun|bambino-Masc .
@@ -1024,7 +1024,7 @@ the decomposed `verb|dare~pron|me~pron|la`.
 
 ### Input and observed output
 
-```
+```text
 Stanza input: ["per", "favore", "dammela"]
 Stanza UD output (mid-sentence): [
     (per, ADP, lemma=per),

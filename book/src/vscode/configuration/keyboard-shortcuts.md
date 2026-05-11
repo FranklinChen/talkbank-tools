@@ -1,5 +1,6 @@
 # Keyboard Shortcuts
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 This chapter lists all keyboard shortcuts provided by the TalkBank CHAT extension, grouped by feature area. All shortcuts are active only when a `.cha` file is open in the editor (`editorLangId == chat`), unless otherwise noted.

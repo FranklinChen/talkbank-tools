@@ -1,5 +1,6 @@
 # PRAAT2CHAT -- Praat TextGrid Bidirectional Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts between Praat TextGrid files and CHAT format. TextGrid files contain time-aligned interval tiers widely used in phonetic research.

@@ -1,5 +1,6 @@
 # Flag Translation Guide
 
+**Status:** Current
 Complete mapping between legacy CLAN `+flag`/`-flag` syntax and modern `--flag` equivalents. Both styles are accepted by `chatter clan`.
 
 ## Speaker and tier filters

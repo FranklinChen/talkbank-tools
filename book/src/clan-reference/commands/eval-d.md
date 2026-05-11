@@ -1,5 +1,6 @@
 # EVAL-D -- Language Sample Evaluation (DementiaBank)
 
+**Status:** Current
 ## Purpose
 
 EVAL-D is a variant of [EVAL](eval.md) used for data collected with the DementiaBank protocol. The analysis logic is identical -- only the normative comparison database differs.

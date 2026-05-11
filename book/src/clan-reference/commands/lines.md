@@ -1,5 +1,6 @@
 # LINES -- Add or Remove Sequential Line Numbers
 
+**Status:** Current
 ## Purpose
 
 Adds or removes line numbers for display. The legacy manual describes `LINES` as inserting line numbers based on CLAN's "Show Line Numbers" display and using `+n` to remove them.

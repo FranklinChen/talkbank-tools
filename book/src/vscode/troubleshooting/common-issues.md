@@ -1,5 +1,6 @@
 # Common Issues
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 This chapter covers the most frequently encountered problems and their solutions.

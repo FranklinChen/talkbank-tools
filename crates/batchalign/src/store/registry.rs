@@ -58,7 +58,22 @@ pub(crate) struct JobCompletionSnapshot {
     /// Whether the job's cancellation token has been triggered.
     pub cancelled: bool,
     /// Whether every terminal file currently recorded is an error.
+    ///
+    /// Strict all-or-nothing test. Useful for diagnostics. The
+    /// `run_hosted_job` finalizer uses [`Self::any_failed`] for the
+    /// `Completed` vs `Failed` decision — see the 2026-05-11
+    /// regression in `runner/execution.rs`.
     pub all_failed: bool,
+    /// Whether at least one terminal file currently recorded is an
+    /// error.
+    ///
+    /// This is the predicate that drives `JobStatus::Failed`
+    /// vs `Completed` for a job that has reached its terminal point.
+    /// The `JobStatus` enum docstring at `types/status.rs:27-31`
+    /// defines `Completed` as "all files processed successfully" and
+    /// `Failed` as "one or more files encountered an unrecoverable
+    /// error" — `any_failed` is the boundary between those two states.
+    pub any_failed: bool,
 }
 
 /// One file update projected into the WebSocket/dashboard shape.
@@ -465,6 +480,7 @@ impl JobRegistry {
         self.project_job(job_id.clone(), |job| JobCompletionSnapshot {
             cancelled: job.is_cancelled(),
             all_failed: job.all_terminal_files_failed(),
+            any_failed: job.any_terminal_files_failed(),
         })
         .await
     }

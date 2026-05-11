@@ -525,7 +525,7 @@ flowchart TD
 
 The `WARN` log line for a successful fallback:
 
-```
+```text
 WARN fa_transport: Wave2Vec FA hit recoverable target constraint; retrying group with Whisper FA
      group=24 start_ms=379515 end_ms=381395 reason="targets length is too long for CTC"
 ```
@@ -551,7 +551,7 @@ and treats this as a **worker capability gap**, not a data error.  The group's
 words are left unaligned (same treatment as an empty audio segment) and the
 server logs:
 
-```
+```text
 WARN fa_transport: Whisper FA unavailable (worker has no Whisper model loaded);
      leaving group words unaligned
      group=24 start_ms=379515 end_ms=381395
@@ -602,7 +602,7 @@ a `ProtocolErrorCodeV2::RuntimeFailure` response. It does not appear in
    warning message.
 
 **Log lines:**
-```
+```text
 WARN fa_transport: FA group failed with model RuntimeFailure (data-driven);
      leaving words unaligned
      group=0 start_ms=0 end_ms=10970 error="..."
@@ -638,7 +638,7 @@ have **different severity and different `%xrev` behavior**:
 | `end_clamped` | Utterance N's end overlapped N+1's start by a few ms — trimmed to avoid CLAN player seek regression | **No** | No — routine housekeeping, BA2 made these silently |
 | `start_stripped` | Utterance start precedes previous accepted start — full timing removed | **Yes** | Review utterance; may indicate transcript/audio reordering |
 
-```
+```text
 WARN monotonicity: strategy="end_clamped" speaker=PAR line_idx=59
      reason="end_truncated_by=2160ms original_end=138165 clamped_to=136005
              cause=utr_token_range_overlap"
@@ -1024,7 +1024,7 @@ This is especially useful for confirming:
 
 **Symptom if the empty-segment check is absent:** One or more files fail alignment with:
 
-```
+```text
 FA processing failed: validation error: failed to parse worker protocol V2 FA
 response for group N (Xms..Yms): worker protocol V2 forced-alignment request
 failed with RuntimeFailure: RuntimeError: Calculated padded input size per
@@ -1049,7 +1049,7 @@ and returns `PreparedArtifactErrorV2::EmptyAudioSegment` instead of a 0-frame
 descriptor.  The transport layer (`infer_groups_v2`) catches this before
 dispatching to the worker, skips the group with all-`None` timings, and logs:
 
-```
+```text
 WARN fa_transport: FA group has no audio (segment past end of file); leaving words unaligned
      group=N start_ms=X end_ms=Y path=<audio file>
 ```
@@ -1193,7 +1193,7 @@ from the audio's temporal order.
 The most common cause is **overlapping speech** annotated with `&*` markers.
 CHAT convention embeds one speaker's words inside another's utterance:
 
-```
+```text
 *PAR:  I'm hoping to play here &*INV:yeah in a month or two .
 ```
 

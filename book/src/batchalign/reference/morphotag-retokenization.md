@@ -1,7 +1,7 @@
 # Morphotag Retokenization
 
 **Status:** Current
-**Last modified:** 2026-05-02 09:10 EDT
+**Last updated:** 2026-05-02 09:10 EDT
 
 ## Purpose and audience
 

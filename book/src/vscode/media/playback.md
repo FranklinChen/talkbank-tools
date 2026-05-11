@@ -1,5 +1,6 @@
 # Media Playback
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Play audio or video files linked via `@Media:` headers directly inside VS Code.

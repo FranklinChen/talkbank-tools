@@ -134,7 +134,7 @@ chunk. `MorTier::chunks()` is the canonical iterator over this sequence;
 `MorTier::chunk_at(idx)` indexes directly into it; `MorTier::item_index_of_chunk(idx)`
 projects a chunk back to its host item for main↔`%mor` lookups.
 
-```rust
+```rust,ignore
 // talkbank-model
 pub enum MorChunk<'a> {
     Main(&'a Mor),
@@ -205,7 +205,7 @@ The user-facing behavior is described in
 
 The validation pipeline is the most critical path in the server:
 
-```
+```rust,ignore
 validate_and_publish(resources, uri, text, old_text?)
   1. Parse text with TreeSitterParser -> ChatFile + Vec<ParseError> + Tree
   2. Run model validation (ChatFile::validate()) -> Vec<ParseError>

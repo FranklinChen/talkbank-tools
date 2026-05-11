@@ -1,5 +1,6 @@
 # ROLES — Rename Speakers
 
+**Status:** Current
 ## Purpose
 
 Renames speaker codes throughout a CHAT file: in `@Participants`, `@ID` headers, and all main-tier speaker prefixes. Used to standardize speaker codes across a corpus.

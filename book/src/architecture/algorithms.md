@@ -43,7 +43,7 @@ are `Box`ed to keep the enum's stack size bounded.
 
 Closure-based recursive traversal centralizing the walk over all 24+22 variants:
 
-```rust
+```rust,ignore
 pub fn for_each_leaf<'a>(
     content: &'a [UtteranceContent],
     domain: Option<AlignmentDomain>,

@@ -9,7 +9,7 @@ All domain logic — text normalization, alignment, result injection, and error 
 
 Python receives structured payloads (lists of words, audio paths, language codes) and returns structured results (POS tags, timestamps, parse trees). It never sees CHAT text, never parses tiers, and never makes alignment decisions.
 
-```
+```text
 Rust: CHAT AST → extract words → clean text → build payload
                                                     │
 Python: load model → run inference → return structured output
@@ -152,7 +152,7 @@ Why each hook lives where it does:
 
 When Stanza tokenizes differently than CHAT, the retokenizer (`retokenize/`) bridges the gap:
 
-```
+```text
 CHAT words:     ["don't",    "wanna"]
 Stanza tokens:  ["do", "n't", "wan", "na"]
 ```

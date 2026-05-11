@@ -1,5 +1,6 @@
 # Filtering
 
+**Status:** Current
 The framework provides a unified filtering system shared by all commands. Filters restrict which utterances, speakers, tiers, and words are processed.
 
 Multiple filters can be combined — they are applied as an AND (all must match for an utterance to be included).

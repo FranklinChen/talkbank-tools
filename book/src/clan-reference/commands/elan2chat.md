@@ -1,5 +1,6 @@
 # ELAN2CHAT -- ELAN XML to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts ELAN annotation files (`.eaf`) into CHAT format. ELAN uses a time-aligned annotation format stored as XML, with time slots referenced by alignable annotations within tiers.

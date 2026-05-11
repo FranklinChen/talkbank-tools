@@ -1,7 +1,7 @@
 # Web Dashboard
 
 **Status:** Current
-**Last updated:** 2026-03-19
+**Last updated:** 2026-05-11 10:55 EDT
 
 The batchalign3 web dashboard is a real-time monitoring interface for watching
 job progress, inspecting worker state, and tracking system resource usage.
@@ -12,7 +12,7 @@ It opens automatically in your browser when you submit a job (unless you pass
 
 When the batchalign3 server is running, the dashboard is available at:
 
-```
+```text
 http://localhost:8000/dashboard
 ```
 
@@ -36,7 +36,7 @@ batchalign3 --no-open-dashboard transcribe corpus/ -o output/ --lang eng
 
 The main dashboard page (`/dashboard`) uses a two-column layout:
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  batchalign   Dashboard   Visualizations       2 active  ●  │
 ├─────────────────────────────────────┬────────────────────────┤
@@ -132,13 +132,13 @@ Shows the three worker profiles and their current state:
 - Shared ASR + Forced Alignment + Speaker models in one process
 - When active: "1 process" with language tags (e.g., `eng shared`)
 - Key callout: "Models shared — align + transcribe reuse one process"
-- Commands served: align, transcribe, benchmark
+- Commands served: align, transcribe, transcribe_s, benchmark
 
 ### Stanza Profile (indigo)
 - NLP processors (POS tagging, dependency parse, coreference)
 - Multiple processes for CPU parallelism (e.g., "2 processes")
 - Shows idle/total per language: `eng 1/2 idle`
-- Commands served: morphotag, utseg, coref
+- Commands served: morphotag, utseg, coref, compare
 
 ### IO Profile (emerald)
 - Lightweight API/library calls (translation, audio analysis)

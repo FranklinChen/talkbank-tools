@@ -1,5 +1,6 @@
 # CHAINS -- Clause Chain Analysis
 
+**Status:** Current
 ## Purpose
 
 Analyzes sequences of interactional codes on a single specified coding tier. In the legacy manual, `CHAINS` is described as tracking hand-entered codes on one coding tier, with `%cod`, `%spa`, and `%sit` given as examples, and with dependent-tier periods used to mark correspondence to `[^c]` clause units on the main tier.

@@ -1,7 +1,7 @@
 # morphotag
 
 **Status:** Current
-**Last updated:** 2026-05-06 20:33 EDT
+**Last updated:** 2026-05-11 11:24 EDT
 
 Add morphosyntactic analysis (`%mor` POS/lemma tiers and `%gra` dependency
 tiers) to existing CHAT transcripts. Text-only — no audio involved.
@@ -52,7 +52,10 @@ many languages.
 ## Pipeline
 
 All files are batched together through the batched-text-infer pool
-(`crates/batchalign/src/runner/dispatch/infer_batched.rs::ReleasedCommand::Morphotag`).
+(`crates/batchalign/src/runner/dispatch/infer_batched.rs` handles the
+recipe-driven dispatch family; `ReleasedCommand::Morphotag` is the
+discriminant used by the planner at
+`crates/batchalign/src/runner/dispatch/plan.rs`).
 Utterances are pooled across all files, grouped by language, and
 dispatched to a Stanza worker per language group with semaphore-bounded
 concurrency. Repeated `morphotag` runs on the same input run the full
@@ -252,7 +255,7 @@ calling Stanza.
 
 **Example.** German-English code-switching:
 
-```
+```text
 *EVA:   was ich jetzt machen möchte ist film@s studies@s .
 %mor:   ... noun|film noun|study-Plur .     ← default (L2 dispatch on)
 %mor:   ... L2|xxx L2|xxx .                 ← with --no-l2-morphotag

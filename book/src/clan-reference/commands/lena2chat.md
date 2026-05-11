@@ -1,5 +1,6 @@
 # LENA2CHAT -- LENA Device XML to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts LENA (Language Environment Analysis) device output files (`.its` format) into CHAT format. LENA XML contains segment-level annotations with speaker types and timing information but no actual transcribed words.

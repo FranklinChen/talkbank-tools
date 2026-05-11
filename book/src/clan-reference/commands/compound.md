@@ -1,5 +1,6 @@
 # COMPOUND -- Normalize Compound Word Formatting
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's COMPOUND command, which normalizes compound word notation in CHAT files. In CHAT, compound words are joined with `+` (e.g., `ice+cream`). This command converts dash-joined compounds to the canonical plus notation.

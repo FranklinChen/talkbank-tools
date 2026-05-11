@@ -171,7 +171,7 @@ words in Mor domain because they have `%mor` items (`cm|cm`,
 `crates/talkbank-transform/src/retokenize/` maps original CHAT words to
 Stanza token indices after Stanza may have split or merged words.
 
-```rust
+```text
 struct WordTokenMapping {
     inner: Vec<SmallVec<[usize; 4]>>,  // word_idx → [token_idx...]
 }
@@ -243,7 +243,7 @@ Optimizations:
 - **Scratch buffer reuse** — `row_costs()` reuses two `Vec<usize>`
   buffers across DP rows via `std::mem::swap`.
 
-```rust
+```text
 enum AlignResult {
     Match { key, payload_idx, reference_idx },
     ExtraPayload { key, payload_idx },
@@ -281,7 +281,7 @@ CA overlap markers (⌈⌉⌊⌋) appear at three content levels —
 Visits every `OverlapPoint` in document order with word-position
 context. Analogous to `walk_words` but for overlap markers:
 
-```rust
+```text
 walk_overlap_points(&utterance.main.content.content.0, &mut |visit| {
     // visit.point: &OverlapPoint (kind + optional index)
     // visit.word_position: usize (alignable words seen so far)

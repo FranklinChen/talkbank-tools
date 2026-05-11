@@ -1,6 +1,7 @@
 # Quick Start
 
-**Last modified:** 2026-05-01 22:47 EDT
+**Status:** Current
+**Last updated:** 2026-05-11 11:42 EDT
 
 This chapter covers the most common `batchalign3` workflows from the terminal.
 The examples assume the `batchalign3` binary is installed and that local

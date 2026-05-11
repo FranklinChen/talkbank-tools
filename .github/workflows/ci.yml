@@ -139,6 +139,24 @@ jobs:
       - name: Regenerate and verify generated artifacts
         run: make generated-check
 
+  prose-references:
+    name: Prose References (Layer 1 doc-audit gate)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Audit prose references against deleted-crate / moved-path patterns
+        run: make audit-prose-references
+
   chat-manual-anchor-check:
     name: CHAT Manual Anchor Links
     runs-on: ubuntu-latest

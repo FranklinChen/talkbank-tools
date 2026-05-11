@@ -1,5 +1,6 @@
 # MODREP — Model/Replica Comparison
 
+**Status:** Current
 ## Purpose
 
 Compares the model (target) pronunciation on the `%mod` tier with the actual (replica) pronunciation on the `%pho` tier, tracking word-by-word mappings between model forms and replica forms. This is used in phonological analysis to assess how closely a speaker's productions match the adult target forms.

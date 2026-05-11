@@ -63,7 +63,7 @@ Two macros generate domain-typed string wrappers:
 - **`interned_newtype!`** — wraps <code>Arc&lt;str&gt;</code> with automatic interning. Used for
   domain symbols.
 
-```rust
+```text
 // SmolStr-backed: no interning, inline small strings
 string_newtype!(PostcodeText);
 
@@ -148,7 +148,7 @@ No `LinkedList`, `BinaryHeap`, or custom allocators.
 
 Tree-sitter parsing is zero-copy for CST traversal:
 
-```rust
+```rust,ignore
 // Node<'a> borrows from Tree — no allocation per node
 fn process_node<'a>(node: Node<'a>, source: &str) -> ParseResult<...> {
     for i in 0..node.child_count() {
@@ -166,7 +166,7 @@ code constructs owned model types from CST nodes.
 
 The validation cache uses SQLite with memory-mapped I/O for fast random access:
 
-```rust
+```rust,ignore
 SqliteConnectOptions::new()
     .journal_mode(SqliteJournalMode::Wal)       // Concurrent reads during writes
     .pragma("cache_size", "-8000")               // 8 MB page cache

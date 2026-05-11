@@ -1,5 +1,6 @@
 # CLAN Command Divergences & Improvements
 
+**Status:** Current
 This document tracks every divergence between the original CLAN commands and
 the Rust `chatter analyze` reimplementation. It covers CLI interface, output
 format, counting semantics, error handling, and intentional improvements.

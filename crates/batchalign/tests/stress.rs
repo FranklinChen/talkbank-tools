@@ -197,7 +197,12 @@ const MINIMAL_CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
 fn morphotag_submission(filename: &str) -> JobSubmission {
     JobSubmission {
         command: ReleasedCommand::Morphotag,
-        lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+        // Morphotag/translate/coref require LanguageSpec::PerFile per
+        // `validate_lang_command_pairing` in
+        // `crates/batchalign/src/types/request.rs` (2026-05-03
+        // morphotag incident). MINIMAL_CHAT carries `@Languages: eng`
+        // so per-file resolution succeeds.
+        lang: LanguageSpec::PerFile,
         num_speakers: NumSpeakers(1),
         files: vec![FilePayload {
             filename: filename.into(),

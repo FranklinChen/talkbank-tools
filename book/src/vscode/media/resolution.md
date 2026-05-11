@@ -1,5 +1,6 @@
 # Media Resolution
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 This chapter explains how the extension locates media files referenced by CHAT
@@ -11,7 +12,7 @@ or when organizing corpus files on disk.
 Every `.cha` file that uses media features must include an `@Media:` header
 specifying the base filename and the media type:
 
-```
+```text
 @Media: interview, audio
 @Media: session03, video
 ```
@@ -43,7 +44,7 @@ declared media type. The first match wins.
 Given a file at `/corpus/English/Brown/Adam/adam01.cha` with header
 `@Media: adam01, audio`, the resolver searches:
 
-```
+```text
 /corpus/English/Brown/Adam/adam01.mp3
 /corpus/English/Brown/Adam/adam01.wav
 /corpus/English/Brown/Adam/adam01.m4a

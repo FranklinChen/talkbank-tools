@@ -97,12 +97,12 @@ a Stanza retrain, or swapping Stanza for CLAN's Italian MOR.
 ### Defect 7 — sentence-initial article `la` gets junk `il + i` MWT expansion
 
 **Input:**
-```
+```text
 *CHI:	la storia parla di un bambino .
 ```
 
 **Current `%mor`:**
-```
+```text
 %mor:	det|il-Masc-Def-Art-Sing~det|il-Masc-Def-Art-Plur noun|storia-Fem
         verb|parlare-Fin-Ind-Pres-S3 adp|di det|uno-Masc-Ind-Art-Sing
         noun|bambino-Masc .
@@ -127,12 +127,12 @@ Documented, not mitigated. Same content-quality gate shape as Defect
 ### Defect 8 (candidate) — mid-sentence `dammela` tagged as ADJ, lemma normalized to `dammelo`
 
 **Input:**
-```
+```text
 *CHI:	per favore dammela .
 ```
 
 **Current `%mor`:**
-```
+```text
 %mor:	adp|per noun|favore-Masc adj|dammelo-S1 .
 ```
 
@@ -152,12 +152,12 @@ it warrants its own entry.
 ### Defect 9 — Range-expansion with wrong head POS (dative `-glie-` stack)
 
 **Input:**
-```
+```text
 *CHI:	per favore dagliela .
 ```
 
 **Before Defect 9 reconciler:**
-```
+```text
 %mor:	adp|per noun|favore-Masc adp|da~pron|gli-Prs-S3~pron|la-Prs-S3 .
 ```
 
@@ -186,12 +186,12 @@ Pinned observation-only case in the probe matrix:
 ### Defect 10 — head-lemma-only rewrite for genuine imperative+clitic MWTs
 
 **Input:**
-```
+```text
 *CHI:	posala .
 ```
 
 **Before Defect 10 reconciler:**
-```
+```text
 %mor:	verb|posa~pron|la-Prs-S3 .
 ```
 

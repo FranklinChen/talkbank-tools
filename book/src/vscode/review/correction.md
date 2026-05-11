@@ -1,5 +1,6 @@
 # Interactive Bullet Correction
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 > **Status:** This feature is planned but not yet implemented. This chapter
@@ -32,7 +33,7 @@ correct bullet boundary.
 When you correct a bullet, the `%xalign` tier is updated with both the
 machine's original timing and your correction:
 
-```
+```text
 %xalign:	boundary_averaged overlap=155ms machine=12095_12335 corrected=12295_12335 delta_start=+200ms
 %xrev:	[corrected]
 ```
@@ -52,7 +53,7 @@ Mode:
 3. Press F4 again at the end to stamp the end time
 4. The `%xrev` tier is set to `[stamped]`
 
-```
+```text
 %xalign:	lis_removal same_speaker_non_monotonic machine=none stamped=11940_27820
 %xrev:	[stamped] timing was actually correct
 ```

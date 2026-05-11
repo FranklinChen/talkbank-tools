@@ -1,7 +1,7 @@
-# batchalign-app — HTTP Server, Job Store, and NLP Orchestration
+# batchalign — HTTP Server, Job Store, and NLP Orchestration
 
 **Status:** Current
-**Last modified:** 2026-05-10 08:31 EDT
+**Last modified:** 2026-05-11 08:29 EDT
 
 ## Overview
 

@@ -1,7 +1,7 @@
 # Typed Path Provenance
 
 **Status:** Current
-**Last modified:** 2026-03-28 17:55 EDT
+**Last updated:** 2026-03-28 17:55 EDT
 
 Paths in batchalign3 cross machine boundaries: a client submits paths from
 their filesystem, the server resolves media on its own filesystem (potentially
@@ -84,7 +84,7 @@ This means passing a `ClientPath` to `tokio::fs::read_to_string()` or
 
 The **only** sanctioned conversion to `ServerPath` is:
 
-```rust
+```rust,ignore
 pub fn assume_shared_filesystem(&self) -> ServerPath
 ```
 
@@ -108,7 +108,7 @@ These are pure string operations that never touch the filesystem.
 A path on the server's filesystem, safe for I/O. Implements `AsRef<Path>`
 so it can be passed directly to filesystem operations:
 
-```rust
+```rust,ignore
 let server_path: ServerPath = /* ... */;
 let contents = tokio::fs::read_to_string(&server_path).await?;
 ```
@@ -128,7 +128,7 @@ repository cloned.
 
 Must be combined with a `ServerPath` root to produce an absolute server path:
 
-```rust
+```rust,ignore
 let root = ServerPath::new("/srv/talkbank/slabank");
 let rel = RepoRelativePath::new("French/Newcastle/Photos/13");
 let abs = rel.resolve_on_server(&root);
@@ -192,7 +192,7 @@ When no explicit `media_mapping` key is provided, the server auto-infers the
 mapping from the client's source directory path. This is the function in
 `crates/batchalign-types/src/paths.rs`:
 
-```rust
+```rust,ignore
 pub fn infer_media_mapping<'a>(
     client_dir: &ClientPath,
     mappings: impl IntoIterator<Item = (&'a MediaMappingKey, &'a ServerPath)>,

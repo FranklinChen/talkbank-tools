@@ -1,5 +1,6 @@
 # MORTABLE -- Morphological Category Cross-Tabulation
 
+**Status:** Current
 ## Purpose
 
 Produces a per-speaker frequency table of morphosyntactic categories by matching POS tags from the `%mor` tier against patterns defined in a language-specific script file.

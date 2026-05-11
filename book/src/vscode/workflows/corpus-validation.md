@@ -1,5 +1,6 @@
 # Corpus Validation
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 The Validation Explorer provides corpus-scale validation of `.cha` files directly within VS Code. Unlike CLAN, which validates one file at a time, the extension can check entire directory trees and display all errors in a navigable tree view.

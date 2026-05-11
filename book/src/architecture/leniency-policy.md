@@ -224,7 +224,7 @@ Each proposes a new error code and priority.
 
 Builder-pattern configuration for per-error-code severity overrides.
 
-```rust
+```rust,ignore
 let config = ValidationConfig::new()
     .downgrade(ErrorCode::IllegalUntranscribed, Severity::Warning)
     .disable(ErrorCode::InvalidOverlapIndex)
@@ -250,7 +250,7 @@ let config = ValidationConfig::new()
 Wrapper that intercepts errors and applies `ValidationConfig` before forwarding
 to an inner `ErrorSink`.
 
-```rust
+```rust,ignore
 let inner = ErrorCollector::new();
 let sink = ConfigurableErrorSink::new(&inner, config);
 // Pass `sink` to parser/validator — disabled errors are filtered,

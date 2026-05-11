@@ -14,7 +14,7 @@ refuse to let you leave a capability half-wired.
 Edit `crates/talkbank-lsp/src/backend/capabilities.rs` and add the
 provider to `build_initialize_result()`:
 
-```rust
+```text
 // Example: adding rename support
 rename_provider: Some(OneOf::Left(true)),
 ```
@@ -26,7 +26,7 @@ Without this, VS Code never sends requests for the feature.
 Add a new file in `crates/talkbank-lsp/src/backend/features/`
 (e.g. `rename.rs`). Handlers are pure functions over backend state:
 
-```rust
+```rust,ignore
 use tower_lsp::lsp_types::*;
 use crate::backend::LspBackendError;
 use crate::backend::chat_file_cache::load_chat_file;
@@ -63,7 +63,7 @@ Two invariants:
 Edit the appropriate request-handler module under
 `crates/talkbank-lsp/src/backend/requests/`:
 
-```rust
+```rust,ignore
 async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
     Ok(features::rename::handle_rename(&self.backend, params)
         .map_err(stringify_for_lsp)
@@ -80,7 +80,7 @@ boundary. Everything before that point stays typed.
 
 Add the new module to `backend/features/mod.rs`:
 
-```rust
+```rust,ignore
 pub(crate) mod rename;
 ```
 

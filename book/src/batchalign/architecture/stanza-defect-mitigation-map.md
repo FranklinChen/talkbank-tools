@@ -1,7 +1,7 @@
 # Stanza Defect Mitigation Map
 
 **Status:** Current
-**Last modified:** 2026-05-02 09:32 EDT
+**Last updated:** 2026-05-02 09:32 EDT
 
 Stanza is a third-party NLP library whose defects surface at different
 pipeline stages depending on the root cause. batchalign3's mitigation

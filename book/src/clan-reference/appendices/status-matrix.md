@@ -1,5 +1,6 @@
 # Command Status Matrix
 
+**Status:** Current
 Status of all CLAN commands in the Rust reimplementation.
 
 **Coverage: 70/70 CLAN binaries** (100%). Every CLAN binary in `OSX-CLAN/src/unix/bin/` has a corresponding module. The 6 NLP commands (MOR, POST, MEGRASP, etc.) are deliberately not implemented but produce clear error messages. Additionally, 7 implemented commands are outside that local binary inventory: COMPLEXITY, CORELEX, WDSIZE, LAB2CHAT, RTF2CHAT, ROLES, and TRIM.

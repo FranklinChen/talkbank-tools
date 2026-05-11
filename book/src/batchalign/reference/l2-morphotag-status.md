@@ -23,7 +23,7 @@ rate (zero L2|xxx remaining when flag is on).
 
 ### Architecture
 
-```
+```text
 morphosyntax/l2/
 ├── deprel.rs   — UdDeprel newtype, deprel→POS constraint mapping
 ├── plan.rs     — contiguous span planning + host attachment planning
@@ -117,7 +117,7 @@ nouns. No Python changes, no cache-key changes.
 **Evidence.** Running the pre-fix vs post-fix binary on a German-English
 fixture:
 
-```
+```text
 Before: die kinder give@s up@s immer  →  adv|give-Fin-Imp-S adp|up
 After:  die kinder give@s up@s immer  →  verb|give-Fin-Imp-S part|up
 ```

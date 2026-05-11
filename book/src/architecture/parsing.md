@@ -33,7 +33,7 @@ flowchart LR
     chat --> grammar --> cst --> walker --> ast
 ```
 
-```
+```text
 Source text
     ↓ tree-sitter parse
 Concrete Syntax Tree (CST) — green tree with all tokens
@@ -78,7 +78,7 @@ instance and pass `&TreeSitterParser` to all parsing call sites. There is
 no trait abstraction — `TreeSitterParser` is a concrete type in the
 `talkbank-parser` crate.
 
-```rust
+```rust,ignore
 use talkbank_parser::TreeSitterParser;
 
 let parser = TreeSitterParser::new()?;

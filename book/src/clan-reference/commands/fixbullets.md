@@ -1,5 +1,6 @@
 # FIXBULLETS -- Fix Timing Bullet Consistency
 
+**Status:** Current
 ## Purpose
 
 Repairs timing bullets that link CHAT to audio or video. The legacy manual describes `FIXBULLETS` more broadly: converting old-format bullets to new format, inserting `@Media`, merging multiple bullets, adding language tags, and shifting global timing offsets.

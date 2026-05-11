@@ -1,5 +1,6 @@
 # RETRACE -- Add %ret Dependent Tier with Verbatim Main-Tier Copy
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's `retrace` command, which adds a `%ret:` dependent tier to each utterance containing a verbatim serialized copy of the main-tier content (including retrace markers, pauses, events, etc.). This serves as a reference tier preserving the original utterance text before other transforms modify it.

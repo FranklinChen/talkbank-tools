@@ -89,7 +89,7 @@ avoid per-call construction overhead.
 
 The validation cache opens connections with:
 
-```
+```text
 synchronous = NORMAL
 cache_size  = -8000  (8 MB)
 busy_timeout = 5000

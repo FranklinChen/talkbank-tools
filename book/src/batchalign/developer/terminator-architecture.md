@@ -18,7 +18,7 @@ the intonation contour.
 
 In standard CHAT, every main-tier utterance **must** end with a terminator:
 
-```
+```text
 *CHI: I want a cookie .           ← Period (declarative)
 *MOT: do you want a cookie ?      ← Question (interrogative)
 *CHI: give me cookie !             ← Exclamation
@@ -28,7 +28,7 @@ In standard CHAT, every main-tier utterance **must** end with a terminator:
 utterances have no terminator at all, and others use CA-specific intonation
 markers instead of standard punctuation:
 
-```
+```text
 *KE: I like LA the best , LA's quiet -->
 *CO: yeah
 *KE: I'm gonna make a little tiny
@@ -72,7 +72,7 @@ variant.
 
 **Source:** `talkbank-model/src/model/content/tier_content.rs`
 
-```rust
+```rust,ignore
 pub struct TierContent {
     pub linkers: Linkers,
     pub language_code: Option<LanguageCode>,
@@ -124,7 +124,7 @@ terminators in the grammar.** The `terminator` rule lists 16 variants but
 excludes the arrows. The arrows are in the `ca_intonation` rule inside
 `separator`, which is consumed by the greedy `contents` rule.
 
-```
+```text
 Grammar:
   terminator = choice(PERIOD, QUESTION, EXCLAMATION, ..., CA_NO_BREAK, CA_TECHNICAL_BREAK)
                                                           ← CA arrows MISSING here
@@ -138,7 +138,7 @@ Grammar:
 
 **Result for a CA line with two bullets:**
 
-```
+```text
 Input:  *KE: words --> [bullet1] [bullet2]
 
 Grammar parse:
@@ -187,7 +187,7 @@ and their linker forms are mapped.
 When `retokenize()` flushes remaining words without explicit punctuation, it
 unconditionally appends a period:
 
-```rust
+```rust,ignore
 buf.push(AsrWord::new(".", None, None));  // HARDCODED PERIOD
 ```
 
@@ -200,7 +200,7 @@ created from ASR will have periods that should not exist.
 
 When splitting an utterance into multiple, every split gets a hardcoded Period:
 
-```rust
+```rust,ignore
 Terminator::Period { span: Span::DUMMY }
 ```
 
@@ -213,7 +213,7 @@ terminator-less structure.
 
 Infers terminator from the last word text. Default is Period:
 
-```rust
+```rust,ignore
 _ => Terminator::Period { span: Span::DUMMY }
 ```
 
@@ -225,7 +225,7 @@ _ => Terminator::Period { span: Span::DUMMY }
 
 **File:** `batchalign/src/morphosyntax/payloads.rs` (line 120)
 
-```rust
+```text
 .unwrap_or_else(|| ".".to_string())
 ```
 
@@ -246,7 +246,7 @@ is `None`, the MOR tier gets an empty string.
 
 **File:** `batchalign/src/validate.rs` (line 105)
 
-```rust
+```rust,ignore
 let is_ca = file.options.iter().any(|f| matches!(f, ChatOptionFlag::Ca));
 if !is_ca && utt.main.content.terminator.is_none() { /* error */ }
 ```
@@ -257,7 +257,7 @@ Correctly exempts CA files from the missing-terminator check.
 
 **File:** `batchalign/src/validate.rs` (line 155)
 
-```rust
+```text
 if utt.main.content.terminator.is_none() { /* warning */ }
 ```
 
@@ -272,7 +272,7 @@ terminator, but post-validation doesn't know that.
 The MOR/GRA coordination code assumes every utterance has a terminator that
 maps to a PUNCT relation in GRA:
 
-```rust
+```rust,ignore
 let terminator_idx = mors.iter().map(|m| m.count_chunks()).sum::<usize>() + 1;
 ```
 

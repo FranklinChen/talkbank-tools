@@ -21,7 +21,7 @@ TextGrid files allow researchers to:
 
 A TextGrid consists of **tiers** (one per speaker or annotation layer), where each tier contains **intervals**:
 
-```
+```text
 Interval {
     xmin: 1.000     # Start time (seconds)
     xmax: 1.200     # End time (seconds)
@@ -31,7 +31,7 @@ Interval {
 
 Example TextGrid with two speakers:
 
-```
+```text
 File type = "ooTextFile"
 Object class = "TextGrid"
 

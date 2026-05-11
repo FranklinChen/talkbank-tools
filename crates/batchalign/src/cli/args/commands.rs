@@ -29,8 +29,13 @@ pub enum UtrEngine {
 /// utterance timing recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum UtrOverlapStrategy {
-    /// Automatically select: two-pass when `+<` utterances are present,
-    /// global otherwise.
+    /// Currently equivalent to `global` — the language/content-aware
+    /// gate was disabled 2026-03-30 because the two-pass algorithm had
+    /// not been validated on operator-reported regression files. See
+    /// `runner/dispatch/utr.rs::resolve_strategy()` for the inline
+    /// rationale and the book chapter on align for the historical
+    /// context. Pass `two-pass` explicitly to opt into the
+    /// experimental TwoPassOverlapUtr path.
     #[default]
     Auto,
     /// Single global DP pass (original algorithm). All utterances

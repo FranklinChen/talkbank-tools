@@ -296,7 +296,7 @@ preserve behavior on already-debugged paths.
 user-facing message router, and the persistence layer all consume. Eleven
 variants:
 
-```
+```text
 Validation, ParseError, InputMissing, WorkerCrash, WorkerTimeout,
 WorkerProtocol, WorkerBootstrap, ProviderTransient, ProviderTerminal,
 MemoryPressure, Cancelled, System
@@ -304,7 +304,7 @@ MemoryPressure, Cancelled, System
 
 Retry decision in `is_retryable_worker_failure`:
 
-```rust
+```rust,ignore
 matches!(
     category,
     FailureCategory::WorkerCrash
@@ -353,7 +353,7 @@ this helper.
 
 ### One specialization: `ensure_task` errors are forced bootstrap
 
-```rust
+```rust,ignore
 WorkerResponse::Error { error, kind } => {
     // ``ensure_task`` is the on-demand model-loading IPC; any error
     // here is by definition a bootstrap-class failure regardless
@@ -396,7 +396,7 @@ dashboard, CLI, TUI, and desktop app. Two design constraints shape it:
 
 The `WorkerBootstrap` arm:
 
-```rust
+```rust,ignore
 FailureCategory::WorkerBootstrap => {
     let detail = truncate_tail(raw_error, 1000);
     format!("{command_label} failed for {filename}: {detail}")
@@ -405,7 +405,7 @@ FailureCategory::WorkerBootstrap => {
 
 Compare with the `WorkerCrash` arm:
 
-```rust
+```rust,ignore
 FailureCategory::WorkerCrash => {
     let detail = truncate_tail(raw_error, 500);
     format!(
@@ -422,7 +422,7 @@ inclusion is what makes the difference.
 
 Source: `crates/batchalign/src/infer_retry.rs`.
 
-```rust
+```rust,ignore
 for attempt_number in 1..=retry_policy.max_attempts {
     match pool.dispatch_execute_v2_with_progress(lang, request, progress_tx).await {
         Ok(response) => return Ok(response),

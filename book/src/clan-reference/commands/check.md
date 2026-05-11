@@ -1,5 +1,6 @@
 # CHECK — CHAT File Validation
 
+**Status:** Current
 CHECK validates CHAT files for structural correctness, checking headers, tier
 formatting, bracket matching, bullet consistency, speaker declarations, and more.
 
@@ -36,7 +37,7 @@ chatter clan check +u file.cha           # Check UD features on %mor
 
 CHECK output matches CLAN's format:
 
-```
+```text
 *** File "sample.cha": line 12.
 *CHI:	doggy wanna play .
 [E501] Illegal word character in 'wanna' (47)
@@ -47,7 +48,7 @@ error message with CHECK's numbered error code in parentheses.
 
 Errors that don't map to a CHECK number show our internal code in brackets instead:
 
-```
+```text
 *** File "sample.cha": line 5.
 @Participants:	CHI Child
 Missing role for CHI — expected format: CODE Name Role [E312]

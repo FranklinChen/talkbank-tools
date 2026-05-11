@@ -124,8 +124,18 @@ fn command_matrix_common_io_modes_reach_offline_dispatch() {
 
     let translate_out = tmp.path().join("translate-out");
     let compare_out = tmp.path().join("compare-out");
+    let align_out = tmp.path().join("align-out");
     let utseg_out = tmp.path().join("utseg-out");
 
+    // `--before` migrated from `CompareArgs` to the shared
+    // `IncrementalOpts` mixin, which is now flattened only into
+    // align and morphotag (see `crates/batchalign/src/cli/args/tests.rs`:
+    // `parse_align_with_before_and_output` /
+    // `parse_morphotag_with_before` /
+    // `unsupported_commands_reject_before_flag`). Compare/transcribe/
+    // translate/coref/utseg/benchmark all explicitly reject the flag.
+    // The matrix therefore exercises `--before` against align and
+    // exercises compare on its current (simpler) input+output shape.
     let cases = vec![
         CommandExpectation {
             name: "translate file-list output",
@@ -152,18 +162,30 @@ fn command_matrix_common_io_modes_reach_offline_dispatch() {
             output_dir: None,
         },
         CommandExpectation {
-            name: "compare before output",
+            name: "compare input output",
             args: vec![
                 "compare".into(),
                 corpus_file.display().to_string(),
                 "-o".into(),
                 compare_out.display().to_string(),
+            ],
+            status: 0,
+            stderr: "no server available",
+            output_dir: Some(compare_out),
+        },
+        CommandExpectation {
+            name: "align before output",
+            args: vec![
+                "align".into(),
+                corpus_file.display().to_string(),
+                "-o".into(),
+                align_out.display().to_string(),
                 "--before".into(),
                 before_file.display().to_string(),
             ],
             status: 0,
             stderr: "no server available",
-            output_dir: Some(compare_out),
+            output_dir: Some(align_out),
         },
         CommandExpectation {
             name: "utseg file-list lang speakers",

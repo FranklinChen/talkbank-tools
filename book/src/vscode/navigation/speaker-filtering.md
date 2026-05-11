@@ -1,5 +1,6 @@
 # Speaker Filtering
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 In multi-party conversations, it is often useful to focus on a single speaker's contributions. The speaker filtering feature creates a read-only filtered view of the transcript showing only the utterances from selected speakers.

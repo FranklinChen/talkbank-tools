@@ -1,5 +1,6 @@
 # CLAN Manual Audit
 
+**Status:** Current
 This appendix tracks how the
 [CLAN manual](https://talkbank.org/0info/manuals/CLAN.html) covers the
 commands currently implemented in `talkbank-clan`.

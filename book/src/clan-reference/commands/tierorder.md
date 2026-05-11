@@ -1,5 +1,6 @@
 # TIERORDER -- Reorder Dependent Tiers to Canonical Order
 
+**Status:** Current
 ## Purpose
 
 Reorders dependent tiers into a consistent order. The legacy manual describes `TIERORDER` as putting dependent tiers into a consistent alphabetical order, with `/lib/fixes/tierorder.cut` able to control the order.

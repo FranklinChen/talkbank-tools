@@ -1,5 +1,6 @@
 # MLT -- Mean Length of Turn
 
+**Status:** Current
 ## Purpose
 
 Calculates mean length of turn in utterances and words. A "turn" is a maximal consecutive sequence of utterances by the same speaker; the turn boundary is detected when a different speaker produces the next utterance.
@@ -46,7 +47,7 @@ chatter clan mlt --format json corpus/
 
 A turn boundary occurs when a different speaker produces the next utterance. For example:
 
-```
+```text
 *CHI: I want a cookie .          <- turn 1 (CHI)
 *CHI: please .                   <- still turn 1 (CHI)
 *MOT: here you go .              <- turn 2 (MOT)
@@ -57,7 +58,7 @@ CHI has 2 turns (3 utterances), MOT has 1 turn (1 utterance).
 
 ## Output
 
-```
+```text
 Speaker: CHI
   Turns: 15
   Utterances: 42

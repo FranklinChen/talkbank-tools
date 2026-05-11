@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last modified:** 2026-04-07 06:29 EDT
+**Last updated:** 2026-04-07 06:29 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -36,7 +36,7 @@ the dev fallback.
 
 The expected directory layout:
 
-```
+```text
 parent/
 ├── talkbank-tools/    # CHAT grammar, parser, model, transform crates
 └── batchalign3/       # This repo (Rust CLI + server + Python ML workers)

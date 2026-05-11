@@ -1,5 +1,6 @@
 # Output Formats
 
+**Status:** Current
 Every analysis command produces a typed result that can be rendered in multiple formats.
 
 ## Text (default)

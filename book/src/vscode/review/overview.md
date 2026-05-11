@@ -1,5 +1,6 @@
 # Review Mode
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Review Mode helps you evaluate and correct alignment quality in CHAT files
@@ -39,14 +40,14 @@ listen and answer: **does this bullet point to the right place?**
 **`%xalign`** is machine-generated metadata. It records what the alignment
 pipeline did and why. **Never edit this tier** — it's the algorithm's log.
 
-```
+```text
 %xalign:	boundary_averaged overlap=155ms machine=12095_12335 adjacent=UEL:3
 ```
 
 **`%xrev`** is your review. It starts as `[?]` (unreviewed). You change it
 to your rating. You can also add notes after the rating.
 
-```
+```text
 %xrev:	[?]           ← before review
 %xrev:	[ok]          ← after review (sounds right)
 %xrev:	[early] about 200ms before speech starts  ← with a note

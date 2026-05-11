@@ -1,5 +1,6 @@
 # Framework
 
+**Status:** Current
 The framework (`src/framework/`) provides shared infrastructure for all commands.
 
 ## Runner
@@ -35,7 +36,7 @@ flowchart TD
 
 ### `AnalysisCommand`
 
-```rust
+```rust,ignore
 trait AnalysisCommand {
     type Config;
     type State: Default;
@@ -78,7 +79,7 @@ Transform commands receive a mutable `ChatFile` and modify it in place.
 
 ### `CommandOutput`
 
-```rust
+```rust,ignore
 trait CommandOutput {
     fn render_text(&self) -> String;
     fn render_clan(&self) -> String;  // CLAN-parity output

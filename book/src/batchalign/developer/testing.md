@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last modified:** 2026-05-01 22:47 EDT
+**Last updated:** 2026-05-01 22:47 EDT
 
 ## Philosophy
 

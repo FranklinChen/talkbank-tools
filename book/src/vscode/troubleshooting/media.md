@@ -1,5 +1,6 @@
 # Media Not Found
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 This chapter covers issues with media playback -- audio or video files not found, unsupported formats, and remote connection limitations.
@@ -10,7 +11,7 @@ This chapter covers issues with media playback -- audio or video files not found
 
 **Fix:** The `.cha` file must have an `@Media:` header that references the audio or video file:
 
-```
+```text
 @Media:	interview, audio
 ```
 

@@ -15,7 +15,7 @@ clients. This is useful for teams where:
 
 ## Architecture
 
-```
+```text
 ┌───────────────────────────────────────┐
 │  Server machine (GPU, lots of RAM)    │
 │                                       │
@@ -169,7 +169,7 @@ batchalign3 --server http://coordinator:8001 morphotag corpus/ -o output/
 
 Temporal includes a web UI for monitoring workflows:
 
-```
+```text
 http://coordinator:8233
 ```
 

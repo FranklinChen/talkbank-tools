@@ -1,7 +1,7 @@
 # Architecture Overview
 
 **Status:** Current
-**Last updated:** 2026-05-01 15:57 EDT
+**Last updated:** 2026-05-11 08:29 EDT
 
 The `talkbank-tools` repository holds the entire TalkBank toolchain: the
 CHAT specification, tree-sitter grammar, parsing/model/validation/transform
@@ -13,7 +13,7 @@ in one repository under one root Cargo workspace.
 
 Specification is the source of truth. Code is generated downstream from it.
 
-```
+```text
 spec/           Source of truth (CHAT specification)
     ↓
 grammar.js      Tree-sitter grammar (in grammar/)
@@ -59,9 +59,8 @@ flowchart TD
     tests["talkbank-parser-tests\nEquivalence tests"]
 
     batchalign_types["batchalign-types\nWire types (V2 protocol)"]
-    batchalign_app["batchalign-app\nServer, runner, dispatch, workers"]
-    batchalign_pyo3["batchalign-pyo3\nPython↔Rust bridge"]
-    batchalign_cli["batchalign-cli\nbatchalign3 CLI"]
+    batchalign["batchalign\nbatchalign3: server, runner, dispatch, workers, CLI binary"]
+    batchalign_pyo3["batchalign-pyo3\nPython↔Rust worker runtime (.so, cdylib+rlib)"]
 
     derive --> model
     model --> parser & re2c
@@ -72,15 +71,15 @@ flowchart TD
     parser --> tests
     re2c --> tests
 
-    transform --> batchalign_app
-    batchalign_types --> batchalign_app & batchalign_pyo3
-    batchalign_app --> batchalign_cli
-    batchalign_pyo3 -.->|"PyO3 bridge"| batchalign_app
+    model --> batchalign
+    parser --> batchalign
+    transform --> batchalign & batchalign_pyo3
+    batchalign_types --> batchalign & batchalign_pyo3
 ```
 
 ## Repository Layout
 
-```
+```text
 talkbank-tools/
 ├── grammar/                Tree-sitter grammar
 ├── spec/                   CHAT specification (source of truth)

@@ -14,7 +14,7 @@ Construct specs define valid CHAT patterns with expected parse trees.
 
 Create a new markdown file in the appropriate `spec/constructs/` subdirectory:
 
-```
+```text
 spec/constructs/
 ├── header/         # Header-related constructs
 ├── main_tier/      # Main tier patterns
@@ -80,7 +80,7 @@ Error specs define invalid CHAT patterns with expected error codes.
 
 Error specs live in `spec/errors/`, named by error code:
 
-```
+```text
 spec/errors/E301_missing_participants.md
 ```
 

@@ -14,7 +14,7 @@ Word Error Rate measures how many words the ASR system got wrong compared
 to a human-verified reference transcript. Lower is better — 0% means
 perfect, 100% means every word was wrong or missing.
 
-```
+```text
 WER = (insertions + deletions) / total_gold_words
 Accuracy = 1.0 − WER  (clamped to [0, 1])
 ```
@@ -73,7 +73,7 @@ The gold `.cha` file must be parseable by batchalign3's tree-sitter grammar.
 Files with parse errors (tree-sitter ERROR nodes) will fail at the
 morphotag pre-validation gate with:
 
-```
+```text
 morphotag pre-validation failed: [L0] File has N parse error(s); input may be malformed
 ```
 
@@ -111,7 +111,7 @@ A full CHAT transcript with ASR results plus `%xsrep` / `%xsmor` comparison
 tiers. Each utterance gets a `%xsrep` dependent tier showing the word
 alignment and a matching `%xsmor` tier showing the POS alignment:
 
-```
+```text
 *PAR:   hello big world today .
 %xsrep: hello [+ main]big world [- gold]today .
 %xsmor: INTJ  +ADJ      NOUN  -?            PUNCT

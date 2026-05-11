@@ -1,5 +1,6 @@
 # Dependent Tier Semantics Matrix
 
+**Status:** Current
 Classification of the 28 `DependentTier` variants by structural complexity and how commands access them.
 
 ## Fully Structured (7 tiers)
@@ -59,7 +60,7 @@ These tiers contain plain text without timing bullets. They have minimal structu
 ## Command Access Patterns
 
 ### Correct: Typed access
-```rust
+```rust,ignore
 // EVAL, KIDEVAL — iterate typed MorTier items
 if let Some(mor_tier) = mor::extract_mor_tier(utterance) {
     for item in mor_tier.items.iter() {
@@ -69,7 +70,7 @@ if let Some(mor_tier) = mor::extract_mor_tier(utterance) {
 ```
 
 ### Correct: Generic fallback for untyped tiers
-```rust
+```rust,ignore
 // RELY, KEYMAP — split_whitespace() on tiers without typed representation
 codes.extend(
     dependent_tier_content_text(dep)
@@ -80,7 +81,7 @@ codes.extend(
 ```
 
 ### Incorrect: Serializing typed tier then re-tokenizing
-```rust
+```rust,ignore
 // DO NOT: serialize %mor then split_whitespace()
 let text = dependent_tier_content_text(dep);
 for token in text.split_whitespace() { ... }

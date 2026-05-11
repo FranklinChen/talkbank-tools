@@ -1,5 +1,6 @@
 # DATES -- Age Computation from Birth and Date Headers
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's `dates` command, which computes the age of each participant at the time of transcription by subtracting `@Birth` dates from the file-level `@Date` header. Computed ages are inserted as `@Comment: Age of CHI is Y;M.D` headers after the `@ID`/`@Birth` block.

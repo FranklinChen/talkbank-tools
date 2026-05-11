@@ -1,5 +1,6 @@
 # RELY — Inter-Rater Reliability (Cohen's Kappa)
 
+**Status:** Current
 ## Purpose
 
 Compares two parallel CHAT files for coder agreement. The legacy manual gives `RELY` five functions: coder agreement, Cohen's kappa, student-vs-master evaluation, rough transcript overlap on the main line, and selective dependent-tier merging.

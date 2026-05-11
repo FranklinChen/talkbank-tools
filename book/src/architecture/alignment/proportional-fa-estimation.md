@@ -14,7 +14,7 @@ real timing, instead of skipping untimed utterances entirely.
 
 For each untimed utterance:
 
-```
+```text
 estimated_start = (words_before / total_words) * total_audio_ms
 estimated_end   = (words_before + this_utt_words) / total_words * total_audio_ms
 ```
@@ -22,7 +22,7 @@ estimated_end   = (words_before + this_utt_words) / total_words * total_audio_ms
 A 2-second buffer is added on each side, clamped to
 `[0, total_audio_ms]`:
 
-```rust
+```rust,ignore
 let buffer_ms = 2000;
 let start = estimated_start.saturating_sub(buffer_ms);
 let end = (estimated_end + buffer_ms).min(total_audio_ms);

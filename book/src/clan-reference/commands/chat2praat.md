@@ -1,5 +1,6 @@
 # CHAT2PRAAT -- CHAT to Praat TextGrid
 
+**Status:** Current
 ## Purpose
 
 Converts CHAT files to Praat TextGrid format for acoustic/phonetic analysis. Each speaker becomes a separate interval tier, with timed utterances mapped to intervals.
@@ -26,7 +27,7 @@ chatter clan chat2praat file.cha -o output.TextGrid
 
 Produces standard Praat TextGrid long format:
 
-```
+```text
 File type = "ooTextFile"
 Object class = "TextGrid"
 

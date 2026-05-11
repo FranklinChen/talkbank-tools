@@ -1,5 +1,6 @@
 # Transcription Mode
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Create new CHAT transcripts from audio by typing utterance text while the audio
@@ -13,7 +14,7 @@ The `.cha` file must contain an `@Media:` header pointing to an audio or video
 file. The media file must be findable by the extension's resolver (see
 [Media Resolution](resolution.md)). A minimal starting file looks like:
 
-```
+```text
 @UTF8
 @Begin
 @Languages: eng

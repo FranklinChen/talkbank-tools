@@ -1,7 +1,7 @@
 # Rust Contributor Onboarding
 
 **Status:** Current
-**Last modified:** 2026-03-21 07:16 EDT
+**Last updated:** 2026-03-21 07:16 EDT
 
 This page is the shortest path to productive work on the Rust side of Batchalign3.
 

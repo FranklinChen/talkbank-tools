@@ -1,5 +1,6 @@
 # FREQPOS — Word Frequency by Position
 
+**Status:** Current
 ## Purpose
 
 Counts how often each word appears in initial, final, other (middle), or one-word positions within utterances. FREQPOS is part of the FREQ family of commands and is useful for studying positional word preferences -- for example, whether a child tends to place certain words at the beginning or end of utterances.

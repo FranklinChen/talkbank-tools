@@ -1,5 +1,6 @@
 # Running Commands
 
+**Status:** Current
 ## Basic invocation
 
 ```bash

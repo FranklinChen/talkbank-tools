@@ -1,5 +1,6 @@
 # WDLEN -- Word Length Distribution
 
+**Status:** Current
 ## Purpose
 
 Computes six distribution tables matching CLAN's output format. WDLEN provides detailed histograms of word and utterance lengths, useful for studying vocabulary complexity and utterance structure development.

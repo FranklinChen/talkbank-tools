@@ -1,5 +1,6 @@
 # REPEAT -- Mark Utterances Containing Revisions
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's `repeat` command, which adds a `[+ rep]` postcode to utterances from a target speaker that contain revision markers. Only utterances that do not already have `[+ rep]` are modified.

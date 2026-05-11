@@ -51,7 +51,7 @@ that mutates the document.
 
 If you are starting from scratch, create a new `.cha` file with this template (available via the `chatheader` snippet):
 
-```
+```text
 @UTF8
 @Begin
 @Languages:	eng

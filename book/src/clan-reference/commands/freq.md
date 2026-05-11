@@ -1,5 +1,6 @@
 # FREQ -- Word Frequency
 
+**Status:** Current
 ## Purpose
 
 Counts word tokens and types and computes type-token ratio (TTR). The legacy manual describes `FREQ` as one of CLAN's most powerful and easiest-to-use programs, producing word-frequency counts and lexical-diversity measures over selected files and speakers.
@@ -58,7 +59,7 @@ Per-speaker frequency tables with:
 
 ### Example output (text)
 
-```
+```text
 Speaker: CHI
   the       12
   I         8

@@ -83,7 +83,7 @@ shared `Mutex<BufWriter<File>>`.
 
 ### Cancellation
 
-```
+```rust,ignore
 First Ctrl+C  → send to cancel channel → workers check every 1-10 files
 Second Ctrl+C → std::process::exit(130) (immediate, no cleanup)
 ```
@@ -97,7 +97,7 @@ Validation workers are `std::thread`, but the validation cache uses
 async sqlx. `CachePool` embeds a single-threaded tokio runtime to
 bridge:
 
-```rust
+```rust,ignore
 pub struct CachePool {
     pool: SqlitePool,              // Async pool
     rt: tokio::runtime::Runtime,   // Single-threaded, embedded
@@ -173,7 +173,7 @@ Used at three levels:
 - **Worker pool** — cancels background health-check tasks.
 - **Server** — wired to SIGINT/SIGTERM for graceful shutdown.
 
-```rust
+```text
 if job.cancel_token.is_cancelled() {
     return Ok(());
 }
@@ -250,7 +250,7 @@ hold is the job semaphore (intentional backpressure, not a mutex).
 
 ### Server (Batchalign)
 
-```rust
+```rust,ignore
 tokio::select! {
     () = signal::ctrl_c() => info!("SIGINT, shutting down"),
     () = sigterm_future   => info!("SIGTERM, shutting down"),
@@ -268,7 +268,7 @@ channel; second press: `std::process::exit(130)` (immediate).
 `ArcSwapOption` (from `arc-swap`) for lock-free storage of the
 cancel sender:
 
-```rust
+```rust,ignore
 pub struct ValidationState {
     cancel_tx: ArcSwapOption<Sender<()>>,
 }

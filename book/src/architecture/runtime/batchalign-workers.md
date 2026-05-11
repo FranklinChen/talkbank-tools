@@ -345,7 +345,7 @@ Invariants:
 with idle-eviction, a language group can still fail dispatch. The
 orchestrator must not silently continue with an empty `UdResponse`.
 
-```rust
+```rust,ignore
 pub(super) struct LanguageGroupOutcome {
     pub lang3: String,
     pub global_indices: Vec<usize>,

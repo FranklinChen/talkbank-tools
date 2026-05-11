@@ -423,7 +423,7 @@ differ in what crosses the HTTP boundary and what the server reads from disk.
 
 ### Selection rule
 
-```
+```text
 paths_mode = allow_paths_mode
           && released_command_supports_paths_mode(command)
           && is_local_server(server_url)

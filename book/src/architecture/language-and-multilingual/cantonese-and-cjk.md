@@ -111,7 +111,7 @@ in Python.
 `process_raw_asr()` runs normalization as stage 4b, after number expansion
 and before long-turn splitting:
 
-```
+```text
 1.  Compound merging
 2.  Timed word extraction (seconds → ms)
 3.  Multi-word splitting (timestamp interpolation)
@@ -126,7 +126,7 @@ and before long-turn splitting:
 `batchalign/src/asr_postprocess/mod.rs` uses `char_indices()` for proper
 UTF-8 handling — byte slicing would panic on multi-byte CJK characters:
 
-```rust
+```rust,ignore
 let last_char_boundary = text.text.char_indices()
     .next_back()
     .map(|(i, _)| i)
@@ -271,7 +271,7 @@ that handles POS and depparse jointly.
 
 ### Rust
 
-```
+```text
 crates/batchalign/src/asr_postprocess/
 ├── mod.rs          — Pipeline: process_raw_asr() with Cantonese stage 4b
 ├── cantonese.rs    — normalize_cantonese(), cantonese_char_tokens()
@@ -288,7 +288,7 @@ crates/batchalign-types/src/worker_v2/requests.rs  — MorphosyntaxRequestV2.ret
 
 ### Python
 
-```
+```text
 batchalign/inference/languages/cantonese/
 ├── __init__.py         — Engine registration
 ├── _common.py          — normalize_cantonese_text() (delegates to Rust),

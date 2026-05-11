@@ -7,7 +7,7 @@ The CHAT validator produces diagnostics at two severity levels: **errors** (must
 
 ## Reading Error Output
 
-```
+```text
 corpus/sample.cha:15:3: error[E304]: missing speaker code on main tier line
 corpus/sample.cha:20:1: error[E308]: speaker MOT not declared in @Participants
 ```
@@ -37,7 +37,7 @@ Each line contains:
 
 A main tier line must have a speaker code after the `*`:
 
-```
+```text
 *CHI:	hello world .
 ```
 
@@ -47,7 +47,7 @@ An empty speaker code (`*:	hello .`) triggers E304.
 
 Every `*SPEAKER:` code must be listed in `@Participants`. Add the missing speaker to the header:
 
-```
+```text
 @Participants:	CHI Target_Child, MOT Mother
 ```
 
@@ -55,7 +55,7 @@ Every `*SPEAKER:` code must be listed in `@Participants`. Add the missing speake
 
 Check that pipe-separated fields are correct and the speaker code matches `@Participants`:
 
-```
+```text
 @ID:	eng|corpus|CHI|2;6.||||Target_Child|||
 ```
 
@@ -63,7 +63,7 @@ Check that pipe-separated fields are correct and the speaker code matches `@Part
 
 The number of `%mor` items must match the number of alignable words on the main tier. Retraces, pauses, and events are not counted. The validator shows a columnar diff:
 
-```
+```text
   Main tier       %mor tier
   ──────────────  ──────────────
   I               pro|I

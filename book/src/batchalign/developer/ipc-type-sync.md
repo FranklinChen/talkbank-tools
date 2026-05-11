@@ -73,13 +73,13 @@ hand-written ones by adding validators as thin subclass overlays.
 When you add a Rust type that will cross the Python boundary:
 
 1. **Derive `schemars::JsonSchema`** on the Rust struct/enum:
-   ```rust
+   ```rust,ignore
    #[derive(Serialize, Deserialize, schemars::JsonSchema)]
    pub struct MyNewPayloadV2 { ... }
    ```
 
 2. **Register it** in `crates/batchalign/src/ipc_schema.rs`:
-   ```rust
+   ```text
    register!(v2, MyNewPayloadV2);
    ```
 
@@ -106,7 +106,7 @@ Types from `talkbank-model` (e.g., `FormType`, `LanguageResolution`) don't
 derive `JsonSchema` because schemars isn't a dependency of talkbank-tools.
 Use `#[schemars(with = "...")]` to override the schema with the wire format:
 
-```rust
+```rust,ignore
 #[schemars(with = "String")]
 pub lang: talkbank_model::model::LanguageCode,
 
@@ -120,7 +120,7 @@ When a field has `#[serde(serialize_with = "...")]`, the schemars derive
 won't know the wire format. Always pair it with `#[schemars(with = "...")]`
 to describe the JSON shape:
 
-```rust
+```text
 #[serde(serialize_with = "serialize_special_forms")]
 #[schemars(with = "Vec<(Option<String>, Option<String>)>")]
 pub special_forms: ...

@@ -1,5 +1,6 @@
 # Non-English Language Workarounds
 
+**Status:** Current
 This document catalogs every language-specific workaround in batchalign3's
 morphosyntax pipeline (morphotag) and related commands. Each entry describes
 what the workaround does, why it exists, whether the underlying issue is

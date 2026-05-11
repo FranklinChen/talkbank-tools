@@ -1,5 +1,6 @@
 # Coder Mode Overview
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Coder Mode is a structured annotation workflow for coding CHAT transcripts with a predefined coding scheme. It is the VS Code equivalent of CLAN's coder mode (implemented in `ced_codes.cpp`), adapted to work with VS Code's QuickPick interface and the LSP-backed document model.
@@ -10,7 +11,7 @@ In language research, "coding" means annotating each utterance in a transcript w
 
 Codes are stored on dependent tiers, one per utterance:
 
-```
+```text
 *CHI:	I want that one .
 %cod:	$PRA:request
 *MOT:	which one ?

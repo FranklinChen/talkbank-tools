@@ -1,5 +1,6 @@
 # Codes Files (.cut)
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Codes files (`.cut`) define the hierarchical coding scheme used by Coder Mode. Each file describes the valid codes for a particular research task -- speech act annotation, error coding, conversational strategy labeling, and so on.
@@ -16,7 +17,7 @@ A `.cut` file is a plain text file with the following structure:
 
 The file begins with CLAN-specific metadata that the VS Code extension ignores:
 
-```
+```text
 lXs Special Text file saves all fonts LxS
 @Font:	CAfont:13:0
 @UTF8
@@ -36,7 +37,7 @@ A line like `%spa:` or `%err:` declares the dependent tier that will receive the
 
 Codes are organized in an indented tree. Each level of indentation represents a level in the hierarchy. Codes typically follow the pattern `$CATEGORY:subcategory`:
 
-```
+```text
 %spa:
  " $POS
   :QUE
@@ -63,7 +64,7 @@ The `"` prefix marks speaker scope boundaries (e.g., `" $MOT` means the followin
 
 The simplest standard code file, `codes-basic.cut`, defines a basic speech act scheme for mother-child interaction:
 
-```
+```text
 %spa:
  " $MOT
   :POS
@@ -81,7 +82,7 @@ This creates a hierarchy where:
 
 The error coding file defines categories for lexical errors on the `%err` tier:
 
-```
+```text
 %err:
  " $LEX
   :INC     incomplete
@@ -116,7 +117,7 @@ To create a custom coding scheme:
 
 2. **Minimal structure:**
 
-   ```
+   ```text
    @UTF8
    %cod:
     " $TOP

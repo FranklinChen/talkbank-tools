@@ -7,7 +7,7 @@ The `%mor` (morphological) dependent tier provides word-by-word morphosyntactic 
 
 ## Format Overview
 
-```
+```text
 *CHI:	I want cookies .
 %mor:	pron|I-Prs-Nom-S1 verb|want-Fin-Ind-Pres-S1 noun|cookie-Plur .
 ```
@@ -31,7 +31,7 @@ The UD MOR format was introduced via batchalign's Stanza-based morphosyntax pipe
 
 Every morphological word is flat — a single POS tag, a single lemma, and a linear chain of features:
 
-```
+```text
 POS|lemma[-Feature1][-Feature2][-Feature3]...
 ```
 
@@ -52,7 +52,7 @@ There are no compounds, prefixes, subcategories, or nested structures in the UD 
 
 English contractions and similar multi-word tokens (MWTs) are represented using the **tilde (`~`) separator** for post-clitics:
 
-```
+```text
 *CHI:	it's red .
 %mor:	pron|it~aux|be-Fin-Ind-Pres-S3 adj|red .
 ```
@@ -65,7 +65,7 @@ Each clitic counts as its own **chunk** for `%gra` alignment — `pron|it~aux|be
 
 The `%mor` tier ends with a terminator that matches the main tier's utterance terminator:
 
-```
+```text
 *CHI:	what is that ?
 %mor:	pron|what aux|be-Fin-Ind-Pres-S3 det|that ?
 ```
@@ -114,7 +114,7 @@ This is the most significant divergence from UD, because:
 
 UD encodes multi-value features with commas: `PronType=Int,Rel` (the word is *both* interrogative and relative). In CHAT `%mor`, the comma is **preserved within the feature value**:
 
-```
+```text
 -Int,Rel
 ```
 
@@ -188,7 +188,7 @@ Stanza uses underscores in lemmas to represent multi-word expressions across man
 
 UD encodes multi-value features with commas: `PronType=Int,Rel` means a word is *both* interrogative and relative. These commas appear in the CHAT `%mor` feature suffix and are **preserved as-is**:
 
-```
+```text
 pron|wat-Int,Rel
 ```
 
@@ -206,7 +206,7 @@ The Rust data model in `talkbank-model` represents `%mor` tiers with these types
 
 The top-level tier container:
 
-```rust
+```rust,ignore
 pub struct MorTier {
     pub tier_type: MorTierType,  // MorTierType::Mor
     pub items: MorItems,         // Vec<Mor> wrapper
@@ -219,7 +219,7 @@ pub struct MorTier {
 
 One item aligned with one main-tier word:
 
-```rust
+```rust,ignore
 pub struct Mor {
     pub main: MorWord,                        // required main word
     pub post_clitics: SmallVec<[MorWord; 2]>, // optional ~clitics
@@ -230,7 +230,7 @@ pub struct Mor {
 
 A single morphological word (POS + lemma + features):
 
-```rust
+```rust,ignore
 pub struct MorWord {
     pub pos: PosCategory,                    // e.g., "noun"
     pub lemma: MorStem,                      // e.g., "dog"
@@ -242,7 +242,7 @@ pub struct MorWord {
 
 A morphological feature with optional key:
 
-```rust
+```rust,ignore
 pub struct MorFeature {
     key: Option<Arc<str>>,  // e.g., Some("Number") or None
     value: Arc<str>,        // e.g., "Plur"
@@ -251,7 +251,7 @@ pub struct MorFeature {
 
 Construction examples:
 
-```rust
+```rust,ignore
 // Flat feature (current convention)
 MorFeature::new("Plur")         // key=None, value="Plur"
 MorFeature::new("S3")           // key=None, value="S3"
@@ -272,7 +272,7 @@ MorFeature::with_key_value("Number", "Plur")
 
 Both are interned `Arc<str>` newtypes for memory efficiency:
 
-```rust
+```rust,ignore
 pub struct PosCategory(pub Arc<str>);  // interned via pos_interner()
 pub struct MorStem(pub Arc<str>);      // interned via stem_interner()
 ```
@@ -293,7 +293,7 @@ For a typical 30-word utterance with `%mor`, the model allocates approximately 3
 
 The tree-sitter grammar for `%mor` is defined in `grammar.js`. The relevant rules:
 
-```
+```text
 mor_content → mor_word (mor_post_clitic)*
 mor_post_clitic → tilde mor_word
 mor_word → mor_pos pipe mor_lemma (mor_feature)*
@@ -380,7 +380,7 @@ The JSON schema for `MorFeature` is `"type": "string"` regardless of whether key
 
 The traditional CHAT MOR format (CLAN-era) used a complex, hierarchically structured notation:
 
-```
+```text
 %mor:	pro:sub|I v|want n|cookie-PL .
 ```
 

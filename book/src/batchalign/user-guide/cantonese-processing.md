@@ -1,7 +1,7 @@
 # Cantonese Engines
 
 **Status:** Current
-**Last updated:** 2026-05-01 09:47 EDT
+**Last updated:** 2026-05-11 11:12 EDT
 
 Batchalign includes alternative ASR and forced alignment engines for Cantonese.
 These are built-in modules activated via `--engine-overrides` and shipped in
@@ -24,8 +24,9 @@ The standard install already includes these engines:
 uv tool install batchalign3
 ```
 
-For a source checkout, `make sync` provisions the same built-in engine surface.
-No separate Cantonese-specific extras are required.
+For a source checkout, the standard build (`cargo build -p batchalign`
+plus `uv run maturin develop` for the PyO3 bridge) already includes
+these engines. There are no Cantonese-specific extras to install.
 
 ## Usage
 
@@ -130,5 +131,5 @@ dependencies (like OpenCC) are required.
 
 ## See Also
 
-- [Cantonese and CJK — Architecture](../../architecture/language-and-multilingual/cantonese-and-cjk.md) — engine architecture, normalization pipeline, segmenter selection
+- [Cantonese and CJK — Architecture](../../../architecture/language-and-multilingual/cantonese-and-cjk.md) — engine architecture, normalization pipeline, segmenter selection
 - [Adding Inference Providers](../developer/adding-engines.md) — how to add new built-in engines

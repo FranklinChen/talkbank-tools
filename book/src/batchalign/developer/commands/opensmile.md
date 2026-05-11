@@ -38,7 +38,7 @@ format change. The feature names and values are identical.
 
 ## Worker IPC: opensmile task (V2 protocol)
 
-```
+```text
 execute_v2 request:
 {
   "task": "opensmile",

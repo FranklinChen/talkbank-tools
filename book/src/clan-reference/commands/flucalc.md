@@ -1,5 +1,6 @@
 # FLUCALC -- Fluency Calculation
 
+**Status:** Current
 ## Purpose
 
 Detects and quantifies disfluencies in speech transcripts, producing per-speaker counts of stuttering-like disfluencies (SLD) and typical disfluencies (TD). FLUCALC is the standard tool in CLAN for analyzing fluency in stuttering research.

@@ -127,14 +127,14 @@ file's `@Languages: yue` header — there is no morphotag `--lang` flag.
 
 **Before** (per-character):
 
-```
+```text
 *CHI:	故 事 係 好 .
 %mor:	n|故 n|事 v|係 adj|好 .
 ```
 
 **After** (`--retokenize`):
 
-```
+```text
 *CHI:	故事 係 好 .
 %mor:	n|故事 v|係 adj|好 .
 ```
@@ -142,7 +142,7 @@ file's `@Languages: yue` header — there is no morphotag `--lang` flag.
 Without `--retokenize`, tokenization is preserved unchanged. A diagnostic
 warning is emitted when Cantonese input appears per-character:
 
-```
+```text
 warn: Cantonese input appears to be per-character tokens (42/50 single-CJK words).
       Consider --retokenize for word-level analysis.
 ```

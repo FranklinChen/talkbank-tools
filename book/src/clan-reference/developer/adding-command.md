@@ -1,5 +1,6 @@
 # Adding a Command
 
+**Status:** Current
 ## Steps
 
 1. **Create the module** — `src/commands/<name>.rs` with four types:
@@ -22,7 +23,7 @@
 
 ## Skeleton
 
-```rust
+```rust,ignore
 //! # NAME — Brief description
 //!
 //! What the command does and when to use it.

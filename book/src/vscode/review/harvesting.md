@@ -1,5 +1,6 @@
 # Harvesting Review Results
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 After reviewers have rated utterances in aligned CHAT files, the ratings

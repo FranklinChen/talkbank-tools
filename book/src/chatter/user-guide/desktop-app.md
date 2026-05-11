@@ -1,7 +1,7 @@
 # Chatter Desktop (Experimental)
 
 **Status:** Current
-**Last updated:** 2026-05-02 02:30 EDT
+**Last updated:** 2026-05-11 10:55 EDT
 
 **⚠️ IMPORTANT: Chatter Desktop is an experimental in-repo evaluation app, NOT a supported end-user surface.** Use the `chatter` CLI for production CHAT validation, or use the VS Code extension for interactive editing with live validation. 
 
@@ -60,7 +60,7 @@ When idle, if you've previously validated a target, the drop zone shows
 
 The main window has three areas:
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  [Choose File] [Choose Folder] or drag here  [System|Light|Dark] │
 ├──────────────────┬───────────────────────────────────────────┤
@@ -201,14 +201,16 @@ cargo tauri build
 
 The desktop app lives in `apps/chatter-desktop/` as a sibling to `vscode/`:
 
-```
+```text
 apps/chatter-desktop/
   src-tauri/          Rust backend (Tauri v2)
     src/
+      main.rs         Bin entry — calls chatter_desktop_lib::run()
+      lib.rs          Tauri app setup (Builder + module wiring)
       protocol.rs     Shared command/event names + request types
       commands.rs     validate, cancel, open_in_clan, export, reveal, install_cli
       events.rs       ValidationEvent → frontend event bridge
-      lib.rs          Tauri entry point
+      validation.rs   Desktop validation orchestration for one target
   src/                React + TypeScript frontend
     components/       DropZone, FileTree, ErrorPanel, ProgressBar, OnboardingOverlay
     hooks/            useValidation, validationState, useTheme

@@ -1,5 +1,6 @@
 # Framework-Level Divergences
 
+**Status:** Current
 These differences apply across all commands, not to specific ones.
 
 ## CLI syntax

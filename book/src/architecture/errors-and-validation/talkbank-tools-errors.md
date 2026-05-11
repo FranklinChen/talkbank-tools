@@ -20,7 +20,7 @@ For the diagnostic UX standard that applies workspace-wide, see
 
 Every diagnostic is a `ParseError`:
 
-```rust
+```rust,ignore
 pub struct ParseError {
     pub code: ErrorCode,
     pub severity: Severity,
@@ -88,7 +88,7 @@ pub struct Span { pub start: usize, pub end: usize }
 
 Carries the source fragment around the error location:
 
-```rust
+```rust,ignore
 pub struct ErrorContext {
     pub source_fragment: String,
     pub byte_range: Range<usize>,
@@ -115,7 +115,7 @@ flowchart LR
     sink --> vec & chan & asyncchan & cfg & null
 ```
 
-```rust
+```rust,ignore
 pub trait ErrorSink {
     fn report(&self, error: ParseError);
 }

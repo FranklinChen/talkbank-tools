@@ -262,7 +262,7 @@ Validation should happen at **job submission time** (`POST /jobs`), before
 any audio processing or model loading. The diagnostic should name the
 engine, the unsupported language, and suggest alternatives:
 
-```
+```text
 Error: Language 'hak' (Hakka) is not supported by Rev.AI ASR.
   Supported alternatives:
   - Use --asr-engine whisper for Hakka (Whisper supports all languages)
@@ -290,7 +290,7 @@ maintain our own validation tables.
   fails and BA3 submits true Rev auto, later downstream stages may still
   resolve the transcript to English, but the provider request was different.
 - **Example validation:**
-  ```rust
+  ```text
   if try_revai_language_hint(&lang).is_none() {
       warn!("Language {lang} not in Rev.AI supported set; using auto-detection");
   }

@@ -40,7 +40,7 @@ else; new test modules **must not redefine their own `parse_chat` or
 how production and test code construct CHAT inputs, which has caused
 real bugs to slip through in the past.
 
-```rust
+```rust,ignore
 use crate::test_fixtures::{parse_chat, parse_chat_with_alignments, parse_tree};
 ```
 

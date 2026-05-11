@@ -14,7 +14,7 @@ apply only to the Batchalign runtime layer.
 
 ## Server Owns the CHAT Lifecycle
 
-```
+```text
 Server → parses CHAT → extracts payloads → checks cache →
          worker.execute_v2(task, prepared_batch) → Python runs model only →
          Server injects results → validates → serializes → CHAT text
@@ -257,7 +257,7 @@ and the `expand_numbers` V2 IPC are not used.
 
 `crates/batchalign-pyo3/src/` (~3,250 lines):
 
-```
+```text
 lib.rs                  module registration (~80 lines)
 worker_protocol.rs      IPC message dispatch
 worker_asr_exec.rs      ASR execution (Whisper, Cantonese providers)

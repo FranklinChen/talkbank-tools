@@ -36,7 +36,7 @@ alignment and UTR ASR do cache, because those operations are expensive per-file.
 
 ## Worker IPC: utseg task
 
-```
+```text
 batch_infer request:
 {
   "task": "utseg",

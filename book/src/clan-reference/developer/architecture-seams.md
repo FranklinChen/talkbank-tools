@@ -1,5 +1,6 @@
 # Current Architecture Seams
 
+**Status:** Current
 This page documents the current internal seams that contributors should preserve when adding or restructuring CLAN-related functionality.
 
 ## CLI command registration

@@ -16,14 +16,14 @@ chatter validate transcript.cha
 
 If the file is valid:
 
-```
+```text
 ✓ transcript.cha is valid
 ```
 
 If there are problems, you'll see rich diagnostics with the exact location
 and a stable error code:
 
-```
+```text
   × error[E304]: missing speaker code on main tier line
 
    ╭─[transcript.cha:6:1]

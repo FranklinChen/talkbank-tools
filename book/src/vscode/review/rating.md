@@ -1,5 +1,6 @@
 # Rating Utterances
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 ## Rating values
@@ -45,7 +46,7 @@ text at all. This typically happens when the alignment algorithm lost sync.
 After pressing a rating key, the `%xrev` tier updates automatically. If
 you want to add a note, edit the line directly in the editor:
 
-```
+```text
 %xrev:	[early] starts about 200ms before speech, consistent with other INV lines
 ```
 

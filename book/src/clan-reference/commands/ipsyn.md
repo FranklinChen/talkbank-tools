@@ -1,5 +1,6 @@
 # IPSYN -- Index of Productive Syntax
 
+**Status:** Current
 ## Purpose
 
 Computes a syntactic complexity score by awarding points for distinct syntactic structures observed in a child's utterances. Each structure type (rule) can earn at most 2 points -- one per distinct utterance in which the structure appears. The total across all rules yields the IPSyn score.

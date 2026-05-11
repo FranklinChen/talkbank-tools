@@ -99,3 +99,25 @@ pub(crate) fn running_job_fixture() -> Job {
         execution_plan: None,
     }
 }
+
+/// Build a `Job` with three named files in the `file_statuses` map,
+/// all still `Queued`. Mirrors the 2026-05-11 morphotag job
+/// (`150c824a-48e`) shape: 3 files submitted, none completed yet.
+/// Tests then transition individual files via the standard
+/// `mark_file_done` / `mark_file_error` methods.
+pub(crate) fn three_file_job_fixture() -> Job {
+    let mut job = running_job_fixture();
+    let names = ["65-3.cha", "60home-3.cha", "65home-3.cha"];
+    job.execution.file_statuses.clear();
+    job.filesystem.filenames.clear();
+    job.filesystem.has_chat.clear();
+    for name in names {
+        let path = DisplayPath::from(name);
+        job.execution
+            .file_statuses
+            .insert(String::from(path.clone()), FileStatus::new(path.clone()));
+        job.filesystem.filenames.push(path);
+        job.filesystem.has_chat.push(true);
+    }
+    job
+}

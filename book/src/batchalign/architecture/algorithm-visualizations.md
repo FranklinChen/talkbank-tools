@@ -20,7 +20,7 @@ visualization supports two modes:
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────┐
 │ React Dashboard (frontend/)         │
 │                                     │
@@ -66,7 +66,7 @@ persist based on the job's `debug_traces` flag.
 
 Returned by `process_fa()` in `crates/batchalign/src/fa/`:
 
-```rust
+```rust,ignore
 pub struct FaResult {
     pub chat_text: String,
     pub groups: Vec<FaGroupTrace>,
@@ -84,7 +84,7 @@ stores it via `TraceStore::upsert_file()`.
 
 Returned by `process_morphosyntax()` (single-file path):
 
-```rust
+```rust,ignore
 pub struct MorphosyntaxResult {
     pub chat_text: String,
     pub retokenizations: Vec<RetokenizationInfo>,
@@ -139,7 +139,7 @@ POST /jobs  { "command": "align", "debug_traces": true, ... }
 
 ### REST Endpoint
 
-```
+```text
 GET /jobs/{job_id}/traces
   → 200: JobTraces JSON
   → 404: job not found
@@ -154,7 +154,7 @@ GET /jobs/{job_id}/traces/{file_index}
 
 All trace types live in `crates/batchalign/src/types/traces.rs`.
 
-```
+```text
 JobTraces
   └── files: BTreeMap<usize, FileTraces>
         ├── filename: String

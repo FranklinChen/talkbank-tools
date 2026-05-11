@@ -1,5 +1,6 @@
 # Batch Processing
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 This chapter covers workflows that operate on multiple files at once -- directory-level analysis, corpus-scale validation, and integration with the `chatter` CLI and batchalign3 for bulk operations.

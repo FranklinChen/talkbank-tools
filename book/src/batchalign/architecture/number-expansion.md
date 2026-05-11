@@ -293,7 +293,7 @@ above. Layers 2 and 3 are still proposed.
 
 Replace the dual-pass dispatch with a single typed registry:
 
-```rust
+```rust,ignore
 /// Where a language's number-expansion implementation lives.
 /// Exactly one variant per language; routing is explicit.
 pub enum NumberExpander {
@@ -327,7 +327,7 @@ static NUMBER_EXPANDERS: LazyLock<HashMap<LanguageCode3, NumberExpander>> =
 
 The dispatcher becomes:
 
-```rust
+```rust,ignore
 async fn expand_word(word: &mut AsrWord, lang: LanguageCode3, py: &PyClient) {
     match NUMBER_EXPANDERS.get(&lang) {
         Some(NumberExpander::RustTable(t))      => apply_table(word, t),
@@ -372,7 +372,7 @@ orchestration. ~1 day with TDD.
 Replace the scattered detect/try/try cascade with a single parse
 function returning a typed enum:
 
-```rust
+```rust,ignore
 pub enum NumberToken<'a> {
     BareDigits(i64),
     Decade(i64),                                  // "1950s"
@@ -389,7 +389,7 @@ pub fn parse_number_token(s: &str) -> NumberToken<'_>;
 
 Each `NumberExpander` then exposes a method per token variant:
 
-```rust
+```rust,ignore
 trait Expand {
     fn cardinal(&self, n: i64) -> Cow<'_, str>;
     fn decade(&self, n: i64) -> Cow<'_, str>;
@@ -431,7 +431,7 @@ one method; currency words, percent words, ordinal forms, year
 conventions, decade forms, language-specific punctuation are
 sibling methods.
 
-```rust
+```rust,ignore
 pub trait LinguisticNormalizer: Send + Sync {
     fn lang(&self) -> LanguageCode3;
     fn expand_number(&self, token: NumberToken<'_>) -> Cow<'_, str>;

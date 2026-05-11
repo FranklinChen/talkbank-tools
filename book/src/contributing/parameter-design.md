@@ -19,7 +19,7 @@ are acceptable.
 
 A pre-refactoring FA function signature looked like this:
 
-```rust
+```rust,ignore
 pub async fn process_fa(
     chat_text: &str,
     audio_path: &str,
@@ -68,7 +68,7 @@ impl CachePolicy {
 
 Call sites read naturally:
 
-```rust
+```text
 // Before
 if override_media_cache { /* skip */ } else { /* use */ }
 
@@ -100,7 +100,7 @@ impl WorTierPolicy {
 Both enums implement `From<bool>` for the boundary where options are
 deserialized from CLI flags or JSON:
 
-```rust
+```rust,ignore
 impl From<bool> for CachePolicy {
     fn from(override_media_cache: bool) -> Self {
         if override_media_cache { Self::SkipCache } else { Self::UseCache }
@@ -117,7 +117,7 @@ bare booleans.
 
 Infrastructure references needed by every orchestrator.
 
-```rust
+```text
 #[derive(Clone, Copy)]
 pub(crate) struct PipelineServices<'a> {
     pub pool: &'a WorkerPool,
@@ -134,7 +134,7 @@ and threaded through the orchestrator chain. Note that `engine_version` is
 
 Groups the five parameters specific to morphosyntax processing:
 
-```rust
+```rust,ignore
 pub struct MorphosyntaxParams<'a> {
     pub lang: &'a LanguageCode3,
     pub tokenization_mode: TokenizationMode,
@@ -152,7 +152,7 @@ points where a raw string is needed (e.g., passing to `LanguageCode::new()`).
 
 Groups the five FA-specific processing parameters:
 
-```rust
+```rust,ignore
 #[derive(Debug, Clone, Copy)]
 pub struct FaParams {
     pub timing_mode: FaTimingMode,
@@ -170,7 +170,7 @@ layer from `CommandOptions::Align`.
 
 Groups the three audio-related values always passed together:
 
-```rust
+```rust,ignore
 pub struct AudioContext<'a> {
     pub audio_path: &'a Path,
     pub audio_identity: &'a AudioIdentity,
@@ -219,7 +219,7 @@ control-plane code.
 
 ## Layered Conversion
 
-```
+```rust,ignore
 CLI flags / JSON body           ← bool, String, numbers
     │
     ▼

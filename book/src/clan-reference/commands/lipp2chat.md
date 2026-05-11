@@ -1,5 +1,6 @@
 # LIPP2CHAT -- LIPP Phonetic Profile to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts LIPP (Logical International Phonetics Programs) phonetic profile data into CHAT format. Each entry becomes an utterance, and phonetic transcriptions are placed on `%pho` dependent tiers.

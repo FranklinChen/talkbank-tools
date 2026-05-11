@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last modified:** 2026-05-03 08:50 EDT
+**Last updated:** 2026-05-03 08:50 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.

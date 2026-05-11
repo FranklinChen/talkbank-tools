@@ -1,5 +1,6 @@
 # WDSIZE — Word Size Distribution
 
+**Status:** Current
 Character-length histogram for word stems from the `%mor` tier.
 
 ## Usage

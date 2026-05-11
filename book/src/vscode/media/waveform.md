@@ -1,5 +1,6 @@
 # Waveform Visualization
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Visualize the audio waveform of the linked media file with timed utterance overlays.

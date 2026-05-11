@@ -1,5 +1,6 @@
 # KEYMAP — Contingency Tables for Coded Data
 
+**Status:** Current
 ## Purpose
 
 Builds contingency tables for coded interactional data. The legacy manual describes `KEYMAP` as choosing initiating or beginning codes on a specific coding tier, then examining all codes on that same tier in the next utterance.

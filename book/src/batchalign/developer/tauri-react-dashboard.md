@@ -387,7 +387,7 @@ in `frontend/src/utils.ts`.
 `WorkerProfilePanel` parses the `live_worker_keys` strings from the health
 endpoint. The format is:
 
-```
+```text
 profile:<gpu|stanza|io>:<lang>[:<engine_overrides>] (<N> total, <M> idle|shared)
 ```
 

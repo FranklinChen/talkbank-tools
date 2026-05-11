@@ -1,5 +1,6 @@
 # KWAL -- Keyword And Line
 
+**Status:** Current
 ## Purpose
 
 Searches for clusters containing specified keywords and displays the matching lines with context. The legacy manual gives `KWAL` a dedicated section and describes it as operating on "clusters": the main tier plus the selected dependent tiers associated with that line.

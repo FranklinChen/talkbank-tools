@@ -1,7 +1,7 @@
 # Server Dispatch Architecture
 
 **Status:** Current
-**Last updated:** 2026-05-02 08:50 EDT
+**Last updated:** 2026-05-11 14:36 EDT
 
 This page describes the implemented `batchalign3` runtime:
 
@@ -345,7 +345,7 @@ batchalign2. Speaker diarization remains a worker capability used to support
 
 For lightweight real-time progress monitoring (alternative to WebSocket):
 
-```
+```text
 GET /jobs/{job_id}/stream
 ```
 
@@ -481,12 +481,12 @@ stateDiagram-v2
     Queued --> Running: dispatched
     Queued --> Cancelled: user cancel
     Running --> Completed: all files done
-    Running --> Failed: unrecoverable error
+    Running --> Failed: any file errored
     Running --> Cancelled: user cancel
     Running --> Interrupted: server shutdown
     Interrupted --> Queued: recovery (resumable files)
     Interrupted --> Completed: recovery (all files done)
-    Interrupted --> Failed: recovery (all files errored)
+    Interrupted --> Failed: recovery (any file errored)
 ```
 
 Two things distinguish this from a flat "every terminal looks the same"

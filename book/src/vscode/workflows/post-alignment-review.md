@@ -1,5 +1,6 @@
 # Post-Alignment Review
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 After running automatic alignment with batchalign3, timing bullets may not be perfectly placed. Review Mode provides a structured workflow for a human reviewer to step through flagged utterances, rate alignment quality, correct errors, and produce a final validated transcript.

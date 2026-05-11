@@ -219,7 +219,7 @@ Before building the UTR reference sequence, strip all `&*`-embedded segments
 from each utterance.  The stripped words are recorded for later interpolation
 but excluded from the DP alignment.
 
-```
+```text
 Original utterance:
 *PAR:  I'm hoping to play here &*INV:yeah in a month or two .
 
@@ -305,7 +305,7 @@ not modified.
 
 Interpolation for stripped segments:
 
-```
+```text
 start = backbone_word[i].end_ms
 end   = backbone_word[i+1].start_ms
 ```

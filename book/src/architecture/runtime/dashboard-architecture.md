@@ -10,7 +10,7 @@ canonical dashboard contract source.
 
 ## Two delivery surfaces, one UI
 
-```
+```text
 ┌──────────────────────────────────────┐
 │  Same React codebase (one UI)        │
 └──────────────────────────────────────┘

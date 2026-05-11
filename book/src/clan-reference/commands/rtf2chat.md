@@ -1,5 +1,6 @@
 # RTF2CHAT -- Rich Text Format to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts Rich Text Format (RTF) files into CHAT format by stripping RTF formatting commands and extracting plain text content.

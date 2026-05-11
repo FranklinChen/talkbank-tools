@@ -1,7 +1,7 @@
 # Job State Machine
 
 **Status:** Current
-**Last modified:** 2026-04-08 17:57 EDT
+**Last updated:** 2026-05-11 14:36 EDT
 
 ## Overview
 
@@ -23,7 +23,7 @@ stateDiagram-v2
 
     Queued --> Running: worker available\nmark_running()
     Running --> Completed: all files done\nfinalize()
-    Running --> Failed: dispatch error\nfail()
+    Running --> Failed: any file errored\nor dispatch error\nfinalize()
     Running --> Cancelled: user cancel\nrequest_cancellation()
     Running --> Queued: memory gate\nrequeue_after_memory_gate()
 
@@ -37,7 +37,7 @@ stateDiagram-v2
     Running --> Interrupted: server crash\n(detected at recovery)
 
     Interrupted --> Queued: reconcile (resumable)
-    Interrupted --> Failed: reconcile (all errored)
+    Interrupted --> Failed: reconcile (any errored)
     Interrupted --> Completed: reconcile (all done)
 
     Completed --> [*]

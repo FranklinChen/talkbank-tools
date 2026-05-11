@@ -1,5 +1,6 @@
 # DATACLEAN -- Fix Common CHAT Formatting Errors
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's DataCleanUp command, which fixes spacing and formatting issues in CHAT files. Because these are text-level formatting concerns that operate below the AST level, the AST transform is a no-op; the actual logic operates on serialized CHAT text via `clean_chat_text()` and the end-to-end `run_dataclean()` function.

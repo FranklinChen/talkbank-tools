@@ -1,5 +1,6 @@
 # Pipelines and Scripting
 
+**Status:** Current
 ## JSON for Scripting
 
 For programmatic consumption, use `--format json` and pipe to `jq`:

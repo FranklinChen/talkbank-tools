@@ -1,5 +1,6 @@
 # TIMEDUR -- Time Duration
 
+**Status:** Current
 ## Purpose
 
 Computes time duration statistics from media timestamp bullets attached to utterances. Utterances without bullet timing are silently skipped.

@@ -1,5 +1,6 @@
 # QUOTES -- Extract Quoted Text to Separate Utterances
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's QUOTES command.

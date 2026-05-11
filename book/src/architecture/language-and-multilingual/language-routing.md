@@ -100,7 +100,7 @@ serves only as a fallback when a file has no `@Languages` header.
 
 In a bilingual English/French file:
 
-```
+```text
 @Languages: eng, fra
 *INV: how are you today ? 0_3000
 *PAR: [- fra] je suis bien merci . 3000_6000
@@ -278,7 +278,7 @@ Language ID (audio-based) is preferred for primary detection.
 
 For a Spanish-primary bilingual file:
 
-```
+```text
 @Languages:	spa, eng
 @Participants:	PAR Participant Participant, INV Investigator Investigator
 @ID:	spa|corpus_name|PAR|||||Participant|||

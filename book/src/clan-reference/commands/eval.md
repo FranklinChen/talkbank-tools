@@ -1,5 +1,6 @@
 # EVAL -- Language Sample Evaluation
 
+**Status:** Current
 ## Purpose
 
 Comprehensive morphosyntactic analysis computing lexical diversity, grammatical category counts, error rates, and MLU. EVAL was originally designed for clinical evaluation of adult aphasic speech samples (Saffran, Berndt & Schwartz, 1989) and produces a detailed profile of morphosyntactic abilities.

@@ -42,7 +42,7 @@ Platform and support status now depend on the surface. `chatter` ships release b
 
 ## Repository Layout
 
-```
+```text
 grammar/        Tree-sitter grammar (~380 rules, ~410 node types)
 spec/           Source of truth: CHAT specification + error specs
 crates/         13 Rust crates: 9 talkbank-* (parsers, model, validation, CLAN, CLI, LSP) + 3 batchalign-* (runtime, types, PyO3 bridge) + send2clan-sys

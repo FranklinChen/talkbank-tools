@@ -1,5 +1,6 @@
 # Special Characters
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 CHAT transcription uses many Unicode symbols that are not available on a standard keyboard -- overlap markers, prosody arrows, IPA-adjacent characters, and specialized punctuation. The extension provides a compose-key system for inserting these characters without memorizing Unicode codepoints or relying on system input methods.

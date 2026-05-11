@@ -1,5 +1,6 @@
 # GEMLIST — List Gem Segments
 
+**Status:** Current
 ## Purpose
 
 Lists all gem segments (`@Bg`/`@Eg` bracketed regions) found in CHAT files, reporting the label, utterance count, and participating speakers for each gem.

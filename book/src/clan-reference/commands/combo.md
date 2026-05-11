@@ -1,5 +1,6 @@
 # COMBO -- Boolean Keyword Search
 
+**Status:** Current
 ## Purpose
 
 Searches for utterances matching boolean combinations of keywords. Supports AND (`+`) and OR (`,`) logic with case-insensitive substring matching. This is the primary search tool for finding utterances containing specific words or word combinations.

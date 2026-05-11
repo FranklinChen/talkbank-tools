@@ -1,5 +1,6 @@
 # CHSTRING -- String Replacement Using a Changes File
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's `chstring` command, which reads a changes file containing find/replace pairs (alternating lines) and applies text substitutions to main-tier words. Replacements are applied to all word nodes, including words inside annotated groups, replacement forms, and bracketed groups.

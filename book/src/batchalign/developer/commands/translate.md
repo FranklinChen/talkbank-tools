@@ -37,7 +37,7 @@ Translation cache keys (BLAKE3 hash of):
 
 ## Worker IPC: translate task
 
-```
+```text
 batch_infer request:
 {
   "task": "translate",

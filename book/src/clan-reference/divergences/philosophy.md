@@ -1,5 +1,6 @@
 # Why We Diverge
 
+**Status:** Current
 ## The parity goal
 
 The primary goal is **exact output parity** with legacy CLAN wherever possible. We match CLAN's output format, counting rules, and even its quirks (like reverse speaker ordering from C linked-list prepend patterns). Every implemented command has golden tests that compare our output character-by-character against the original CLAN C binary.

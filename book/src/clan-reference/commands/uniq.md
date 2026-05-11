@@ -1,5 +1,6 @@
 # UNIQ -- Report Repeated Lines
 
+**Status:** Current
 ## Purpose
 
 Identifies and counts duplicate lines (both `@header` and `*speaker` utterance lines, lowercased) across all input files. Matches CLAN behavior of including all line types in the frequency table.

@@ -13,7 +13,7 @@ order, providing word-level audio timestamps. Unlike the main tier, %wor
 never contains groups, annotations, replacements, events, pauses, or any
 nested structure.
 
-```
+```text
 *CHI:    I want cookies .
 %wor:    I 1000_1200 want 1200_1400 cookies 1400_1800 .
 ```
@@ -103,7 +103,7 @@ For words with replacement annotations (`original [: replacement]`):
 **The ORIGINAL spoken word appears in %wor**, not the replacement. The
 replacement does not create a new `%wor` slot or replace the spoken one.
 
-```
+```text
 *CHI:    what's is dis [: this] ?
 %wor:    what's 1000_1200 is 1200_1400 dis 1400_1600 ?
 ```
@@ -117,7 +117,7 @@ Fragments and nonwords are excluded from `%wor` even when they carry a
 replacement. The replacement matters for `%mor`, but the original token
 category (fragment or nonword) governs `%wor` membership:
 
-```
+```text
 *CHI:    &+fr [: friend] is here .
 %wor:    is 1200_1400 here 1400_1800 .
          (fragment excluded regardless of replacement)
@@ -126,7 +126,7 @@ category (fragment or nonword) governs `%wor` membership:
 Untranscribed placeholders (`xxx`, `yyy`, `www`) are similarly excluded from
 `%wor` even when they carry a replacement:
 
-```
+```text
 *CHI:    xxx [: something] is here .
 %wor:    is 1200_1400 here 1400_1800 .
          (xxx excluded — no phoneme sequence regardless of replacement)
@@ -137,7 +137,7 @@ Untranscribed placeholders (`xxx`, `yyy`, `www`) are similarly excluded from
 If an omission (`0word`) has a replacement, the omission is still excluded
 (the replacement does not rescue it):
 
-```
+```text
 *CHI:    0gonna [: going+to] eat .
          (omission — not in %wor regardless of replacement)
 ```
@@ -157,7 +157,7 @@ inside and outside retrace.
   produced and occupy audio time, but they do not receive any special token
   class promotion or demotion
 
-```
+```text
 *CHI:    <I want> [/] I need cookie .
 %wor:    I 100_200 want 200_400 I 500_600 need 600_800 cookie 800_1200 .
 ```
@@ -169,7 +169,7 @@ content and then apply the same `%wor` word-membership rules to the leaves.
 
 Each word may optionally have a timing bullet:
 
-```
+```text
 word \u0015start_ms_end_ms\u0015
 ```
 
@@ -180,7 +180,7 @@ Where:
 - Words without timing simply appear without a following bullet
 
 Example raw encoding:
-```
+```text
 %wor:    hello \u00150_500\u0015 world \u0015500_1000\u0015 .
 ```
 
@@ -190,7 +190,7 @@ Words CAN lack timing bullets — this means timing is unknown, NOT an error.
 
 A complete %wor tier has:
 
-```
+```text
 %wor:\t[- lang_code] word1 [bullet1] word2 [bullet2] ... terminator [utterance_bullet]
 ```
 

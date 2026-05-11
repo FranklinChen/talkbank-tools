@@ -1,5 +1,6 @@
 # MAXWD -- Longest Words
 
+**Status:** Current
 ## Purpose
 
 Finds the longest words used by each speaker, reporting a ranked table of unique words sorted by character length descending. Word length is measured in characters after normalization (lowercasing, stripping `+` compound markers and `'` apostrophes for CLAN compatibility).

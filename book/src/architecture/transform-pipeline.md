@@ -11,7 +11,7 @@ The `talkbank-transform` crate provides high-level pipelines that compose parsin
 
 The most common pipeline: parse a CHAT file and validate it.
 
-```rust
+```rust,ignore
 use talkbank_transform::parse_and_validate;
 
 let result = parse_and_validate(source, &parser, &error_collector);
@@ -26,7 +26,7 @@ This:
 
 Convert a CHAT file to its JSON representation:
 
-```rust
+```rust,ignore
 use talkbank_transform::chat_to_json;
 
 let json = chat_to_json(source, &parser)?;
@@ -38,7 +38,7 @@ The JSON follows the schema at `schema/chat-file.schema.json`.
 
 Convert JSON back to CHAT format:
 
-```rust
+```rust,ignore
 use talkbank_transform::json_to_chat;
 
 let chat = json_to_chat(json_str)?;
@@ -50,7 +50,7 @@ The roundtrip is lossless for well-formed input.
 
 Parse and reserialize to normalize formatting:
 
-```rust
+```rust,ignore
 use talkbank_transform::normalize;
 
 let normalized = normalize(source, &parser)?;

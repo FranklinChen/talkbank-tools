@@ -1,5 +1,6 @@
 # Installation
 
+**Status:** Current
 CLAN commands are part of the `chatter` CLI tool.
 
 ## From source

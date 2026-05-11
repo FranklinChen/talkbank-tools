@@ -27,7 +27,7 @@ a precise per-utterance change classification.
 
 ## Architecture
 
-```
+```text
 Before CHAT (with %mor/%gra/%wor/bullets)
    │
    ├── parse_lenient() → ChatFile₁
@@ -81,7 +81,7 @@ and `after_text`, runs the diff, and selectively reprocesses.
 
 #### Morphosyntax (`process_morphosyntax_incremental`)
 
-```
+```text
 1. Parse before and after
 2. diff_chat(before, after) → deltas
 3. For Unchanged/SpeakerChanged/TimingOnly:
@@ -101,7 +101,7 @@ FA operates on groups (time windows containing multiple utterances), but the
 incremental path now preserves stable utterance-level timing before it decides
 which groups need worker or cache work:
 
-```
+```text
 1. Parse before and after
 2. diff_chat(before, after) → deltas
 3. For Unchanged / SpeakerChanged / TimingOnly utterances:
@@ -132,7 +132,7 @@ the file contains edits elsewhere.
 The dispatch layer reads optional `before_paths` from the job and routes to
 incremental variants when a "before" file is available:
 
-```rust
+```rust,ignore
 let fa_result = if let Some(ref bt) = before_text {
     process_fa_incremental(bt, &chat_text, &audio, services, fa_params, progress).await
 } else {
@@ -142,7 +142,7 @@ let fa_result = if let Some(ref bt) = before_text {
 
 For morphosyntax, the batched dispatch similarly checks `before_texts`:
 
-```rust
+```text
 if !before_texts.is_empty() {
     // Per-file incremental path
     process_morphosyntax_incremental(before, after, services, &params).await
@@ -154,7 +154,7 @@ if !before_texts.is_empty() {
 
 ## `UtteranceDelta` Type
 
-```rust
+```rust,ignore
 pub enum UtteranceDelta {
     Unchanged     { before_idx, after_idx },
     WordsChanged  { before_idx, after_idx, timing_changed: bool },
@@ -181,7 +181,7 @@ a "before" utterance to an "after" utterance using the existing
 `replace_or_add_tier()` injection function. It's idempotent — safe to call
 multiple times.
 
-```rust
+```rust,ignore
 copy_dependent_tiers(
     &before_file, before_idx,
     &mut after_file, after_idx,

@@ -212,7 +212,7 @@ payloads and return raw model output.
 
 `transcribe` chains multiple steps:
 
-```
+```text
 ASR inference → post-processing → CHAT assembly → utseg → morphosyntax
 ```
 
@@ -263,7 +263,7 @@ released command metadata. Replaces per-command macro files
 | `legacy_command_definition(command)` | Derive a `CommandDefinition` for backward compatibility |
 | `legacy_command_descriptor(command)` | Derive a `CommandWorkflowDescriptor` for backward compatibility |
 
-```rust
+```rust,ignore
 pub struct CommandSpec {
     pub command: ReleasedCommand,
     pub family: CommandFamily,        // TextInfer, Audio, MediaAnalysis, Composite
@@ -293,7 +293,7 @@ planning, and I/O mode resolution.
 | `PlannedWorkUnit` | One input file with its resolved paths |
 | `PlannedArtifactSet` | Output artifacts for one source file |
 
-```rust
+```rust,ignore
 pub fn build_job_plan(snapshot: RunnerJobSnapshot) -> Result<JobPlan, PlanError>
 ```
 
@@ -306,7 +306,7 @@ work-unit enumeration to `recipe_runner::planner`.
 functions with a pluggable stage executor that walks recipe stages in
 order.
 
-```rust
+```rust,ignore
 pub struct ExecutionKernel<E: StageExecutor> { ... }
 
 pub trait StageExecutor {
@@ -342,7 +342,7 @@ Module map:
 
 ### Compare — first migrated command
 
-```rust
+```rust,ignore
 pub fn dispatch_compare_job(job, plan: JobPlan) -> Result<...> {
     let kernel = ExecutionKernel::new(CompareStageExecutor::new(...));
     kernel.run(plan).await

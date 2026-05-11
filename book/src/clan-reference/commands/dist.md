@@ -1,5 +1,6 @@
 # DIST -- Word Distribution Across Turns
 
+**Status:** Current
 ## Purpose
 
 Counts turns and tracks for each word the first and last turn in which it appears. DIST is part of the FREQ family of commands and is useful for studying when words first appear and how their usage is distributed across a conversation.

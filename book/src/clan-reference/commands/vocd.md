@@ -51,7 +51,7 @@ VOCD fits empirical type-token data to a theoretical curve, finding the D parame
 
 ### Theoretical TTR Curve
 
-```
+```text
 TTR(N) = (D/N) * [sqrt(1 + 2*N/D) - 1]
 ```
 
@@ -72,7 +72,7 @@ This models the expected type-token ratio for a sample of size N given a lexical
 
 Per-speaker D statistic with per-trial breakdown tables:
 
-```
+```text
 Speaker: CHI
   Trial 1:
     N    samples  TTR     std_dev   D

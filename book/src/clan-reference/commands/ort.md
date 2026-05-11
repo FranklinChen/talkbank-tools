@@ -1,5 +1,6 @@
 # ORT -- Orthographic Conversion via Dictionary Lookup
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's CONVORT command, which applies orthographic conversion rules from a dictionary file to main-tier words. When a word is modified, the original main-tier text is preserved on a `%ort:` dependent tier for reference.

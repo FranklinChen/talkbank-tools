@@ -20,7 +20,7 @@ Rust crossings emit `BatchalignBoundaryError`, defined in
 Python exception subclass and carries the structured fields that
 subclass needs:
 
-```rust
+```rust,ignore
 #[derive(Debug, thiserror::Error)]
 pub enum BatchalignBoundaryError {
     /// CHAT validation produced a structured error list.
@@ -76,7 +76,7 @@ work in `crates/batchalign/src/error.rs` (the
 
 ## `From` impl: typed exception construction
 
-```rust
+```rust,ignore
 impl From<BatchalignBoundaryError> for PyErr {
     fn from(error: BatchalignBoundaryError) -> Self {
         Python::with_gil(|py| {
@@ -134,7 +134,7 @@ that expands to repeated `set_item` calls followed by
 
 The PyO3 module declares the exceptions:
 
-```rust
+```rust,ignore
 use pyo3::create_exception;
 
 create_exception!(batchalign_core, BatchalignError, PyException);

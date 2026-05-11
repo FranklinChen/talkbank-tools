@@ -1,5 +1,6 @@
 # CHAT2TEXT — CHAT to Plain Text
 
+**Status:** Current
 ## Purpose
 
 Converts CHAT files into plain text lines suitable for downstream text analysis. The legacy manual describes `CHAT2TEXT` as converting a CHAT file to text lines for concordance programs such as AntConc, and says it is implemented as an alias of `FLO` with `+cr +t*`.

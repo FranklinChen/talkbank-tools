@@ -18,7 +18,7 @@ outer limit was generous.
 Defined in `crates/batchalign/src/routes/mod.rs` as the outermost
 body-aware middleware:
 
-```rust
+```rust,ignore
 let max_body_bytes = state.environment.config.max_body_bytes_mb.0 as usize * 1024 * 1024;
 // ...
 .layer(RequestBodyLimitLayer::new(max_body_bytes))
@@ -49,7 +49,7 @@ gives no indication which limit was hit.
 The job router in `crates/batchalign/src/routes/jobs/mod.rs` applies
 `DefaultBodyLimit::disable()` to all job routes:
 
-```rust
+```rust,ignore
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/jobs", post(submit_job))
@@ -98,7 +98,7 @@ a small-payload endpoint where 512 MB is wasteful and a tight cap would
 detect abuse early), the route's `Router` can wrap a per-route
 `RequestBodyLimitLayer` *inside* the global one:
 
-```rust
+```rust,ignore
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/some-tight-endpoint", post(handler))

@@ -36,7 +36,7 @@ The `align` command has the most complex media handling. Here is the
 complete pipeline, from CLI invocation to output CHAT, showing where
 media resolution and conversion fit in.
 
-```
+```text
 batchalign3 [--server http://net:8001] align input/ output/ --lang eng
   │
   ├─ CLI: discover .cha files in input/ (sorted largest-first)
@@ -168,7 +168,7 @@ resolution and **before** the audio path is passed to Python workers:
 
 If conversion fails, the file is marked with a clear error:
 
-```
+```text
 Media conversion failed for ACWT01a.cha: ffmpeg not found in PATH.
 Hint: install ffmpeg (https://ffmpeg.org/download.html) or convert
 your input audio to .wav beforehand.
@@ -176,7 +176,7 @@ your input audio to .wav beforehand.
 
 or:
 
-```
+```text
 Media conversion failed for example.cha: ffmpeg conversion failed
 for /path/to/media/example.mp4: [stderr]
 ```
@@ -194,7 +194,7 @@ Resolution depends on the dispatch mode:
 Audio files sit alongside the `.cha` files in the input directory. The
 server looks for a file with the same stem and a known media extension:
 
-```
+```text
 input/ACWT01a.cha  →  input/ACWT01a.mp4  (or .wav, .mp3, etc.)
 ```
 

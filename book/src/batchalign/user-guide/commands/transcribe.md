@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-05-05 08:21 EDT
+**Last updated:** 2026-05-11 10:25 EDT
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -62,7 +62,7 @@ flowchart TD
     engine_check{--asr-engine?}
     engine_check -->|whisper| whisper[Whisper local ASR]
     engine_check -->|whisper_hub| whisper_hub["HF Whisper fine-tune\n(per-language model_id)"]
-    engine_check -->|rev| rev_preflight["Rev.AI preflight\nPre-submit audio in parallel\nskip_postprocessing=true for en/fr"]
+    engine_check -->|rev| rev_preflight["Rev.AI preflight\nPre-submit audio in parallel\nskip_postprocessing=true for en/es"]
     engine_check -->|whisperx| whisperx[WhisperX ASR]
     engine_check -->|whisper_oai| whisper_oai[OpenAI Whisper ASR]
 
@@ -227,9 +227,9 @@ resolves audio paths on its own filesystem. Paths valid on your machine must
 also be reachable from the server, or you must use a shared media mount.
 
 **Memory on developer machines.** Each Whisper model instance uses 2–15 GB.
-For large corpus runs (>5 files or >1 GB audio), use `net` (256 GB M3 Ultra)
-rather than a developer machine. Always pass `--workers 1` for local smoke
-tests.
+For large corpus runs (more than a handful of files or >1 GB audio total),
+prefer a dedicated server with substantial RAM (via `--server`) over a
+developer laptop, and always pass `--workers 1` for local smoke tests.
 
 ---
 

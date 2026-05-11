@@ -1,5 +1,6 @@
 # GEM -- Extract Gem Segments
 
+**Status:** Current
 ## Purpose
 
 Extracts material within gem boundaries. The legacy manual gives `GEM` a dedicated section; in `talkbank-clan`, it extracts utterances and their dependent tiers that fall within `@Bg`/`@Eg` gem boundaries, producing a new CHAT file containing only the gem-scoped content.

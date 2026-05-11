@@ -1,7 +1,7 @@
 # Doctor
 
 **Status:** Current
-**Last updated:** 2026-05-10 08:31 EDT
+**Last updated:** 2026-05-11 11:30 EDT
 
 `batchalign3 doctor` is the diagnostic surface for a batchalign3
 deployment. It runs in two modes:
@@ -30,7 +30,7 @@ validation is clean, non-zero if any error fires.
 
 Sample output on a clean Apple Silicon host:
 
-```
+```text
 Host facts (snapshot at startup):
   os/arch:           MacOs/Arm64 (12 logical cores, 8 physical)
   ram:               65536 MB total, 32768 MB available
@@ -173,8 +173,8 @@ intentionally silent. The operator knows their host better than
 
 ## Exit codes
 
-`batchalign3 doctor` follows the standard CLI exit codes documented in
-`exit-codes.md`:
+`batchalign3 doctor` follows the standard CLI exit codes documented
+in [CLI Reference: Exit codes](cli-reference.md#exit-codes):
 
 | Code | Meaning |
 |---|---|

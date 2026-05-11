@@ -1,5 +1,6 @@
 # DSS -- Developmental Sentence Scoring
 
+**Status:** Current
 ## Purpose
 
 Assigns point values to utterances based on grammatical complexity, using a configurable rule file that defines pattern-matching rules for morphosyntactic categories. DSS is a clinical tool developed by Laura Lee and Susan Canter for evaluating children's grammatical development by scoring complete sentences on eight grammatical categories.

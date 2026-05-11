@@ -1,5 +1,6 @@
 # INDENT -- Align CA Overlap Markers
 
+**Status:** Current
 ## Purpose
 
 Aligns overlap markers in Conversation Analysis (CA) transcripts. The legacy manual describes `INDENT` simply as a program for realigning overlap marks in CA files, and notes that the files must use a fixed-width font such as CAFont.
@@ -25,13 +26,13 @@ chatter clan indent file.cha -o aligned.cha
 ## Example
 
 Before:
-```
+```text
 *CHI:	I want ⌈ cookies ⌉ .
 *MOT:	⌊ yeah ⌋ okay .
 ```
 
 After:
-```
+```text
 *CHI:	I want ⌈ cookies ⌉ .
 *MOT:	       ⌊ yeah ⌋ okay .
 ```

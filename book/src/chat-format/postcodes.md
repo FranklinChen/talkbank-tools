@@ -157,7 +157,7 @@ This validator is opt-in via `enable_quotation_validation` on
 
 Postcodes are stored on `MainTierContent` as a typed list:
 
-```rust
+```rust,ignore
 pub struct MainTierContent {
     pub content: Vec<UtteranceContent>,         // word-level content
     pub terminator: Terminator,                 // ., ?, ! etc.

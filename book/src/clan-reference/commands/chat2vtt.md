@@ -51,7 +51,7 @@ and cleaned text content (no CHAT markers, annotations, or speaker
 codes). The output begins with the `WEBVTT` header line that the
 WebVTT specification requires.
 
-```
+```rust,ignore
 WEBVTT
 
 1

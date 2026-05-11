@@ -1,5 +1,6 @@
 # LONGTIER -- Remove Line Continuation Wrapping
 
+**Status:** Current
 ## Purpose
 
 Removes physical continuation-line wrapping so each logical tier occupies one line in the output file. The legacy manual describes `LONGTIER` as removing line wraps on continuation lines so that each main tier and each dependent tier is on one long line.

@@ -13,7 +13,7 @@ encounter word-level bugs. This chapter exists so you can understand them.
 **Whitespace delimits words.** Contiguous non-whitespace characters form
 one word token. This applies everywhere on the main tier.
 
-```
+```text
 *CHI:   hello world .
         ^^^^^              word: "hello"
               ^^^^^        word: "world"
@@ -162,7 +162,7 @@ non-initial positions is valid: `200`, `h0me`, `abc0` all parse correctly.
 The `Word` struct (`crates/talkbank-model/src/model/content/word/word_type.rs`)
 is the canonical typed representation:
 
-```rust
+```rust,ignore
 pub struct Word {
     pub span: Span,
     pub word_id: Option<SmolStr>,
@@ -216,7 +216,7 @@ maps directly to a grammar node.
 `Word::cleaned_text()` derives NLP-ready text from `content` by
 concatenating only `Text` and `Shortening` variants:
 
-```rust
+```rust,ignore
 pub fn compute_cleaned_text(&self) -> String {
     let mut result = String::new();
     for item in &self.content {
@@ -315,7 +315,7 @@ What follows is a summary for orientation.
 Adjacent to text = part of the word. Space-separated = standalone
 `overlap_point`.
 
-```
+```text
 Yeah⌋⌈2 hey      ONE word: "Yeah⌋⌈2"
 Yeah ⌋ ⌈2 hey    three tokens: "Yeah", ⌋, ⌈2
 ```
@@ -328,7 +328,7 @@ space-separated on both sides.
 
 Adjacent to word body = omission prefix. Space-separated = action marker.
 
-```
+```text
 0die              ONE word: standalone_word(zero, word_body("die"))
 0 die             TWO tokens: nonword(zero), word("die")
 ```
@@ -346,7 +346,7 @@ In CA mode (`@Options: CA`), a fully parenthesized word `(word)` is an
 uncertain/omitted word (`CAOmission`), semantically equivalent to `0word`.
 Partially parenthesized `hel(lo)` is always a shortening.
 
-```
+```text
 @Options: CA
 *CHI:   (ja) .            CAOmission: uncertain "ja"
 *CHI:   hel(lo) .         Shortening: "(lo)" is the shortened part
@@ -361,7 +361,7 @@ cannot determine CA mode -- they need a `FragmentSemanticContext`.
 
 Inside a word (after text): prosodic lengthening. Standalone: separator.
 
-```
+```text
 no::              ONE word: Text("no") + Lengthening(2)
 hello : world     separator(colon)
 ```
@@ -376,7 +376,7 @@ the "constrain the parser, not the DFA" pattern.
 Inside a word: compound marker. At line end: terminator prefix. At line
 start: linker prefix.
 
-```
+```text
 ice+cream         ONE word with compound marker
 and then +...     terminator: trailing_off (prec 10 beats prec 5)
 +< but I +/.      linker: lazy_overlap, terminator: interruption

@@ -1,7 +1,7 @@
 # Server Mode
 
 **Status:** Current
-**Last updated:** 2026-05-02 00:30 EDT
+**Last updated:** 2026-05-11 11:54 EDT
 
 Batchalign includes a built-in HTTP server managed by `batchalign3 serve ...`.
 Ordinary local processing commands can still run inline, but the CLI no longer
@@ -78,7 +78,7 @@ The selection logic lives in `ServerConfig::temporal_backend()`
 (`crates/batchalign/src/types/config/resolve.rs:26`); there is **no**
 `--backend` CLI flag. The `backend:` YAML key is accepted for backward
 compatibility with older `server.yaml` files (`backend_compat` in
-`types/config/server.rs:81-84`) but is not read at runtime.
+`types/config/server.rs:89`) but is not read at runtime.
 
 The fleet's pyinfra renderer
 (`automation/.../batchalign_render.py::_temporal_server_url_for`) emits
@@ -259,9 +259,6 @@ Important keys:
 OTLP tracing can be enabled by setting `BATCHALIGN_OTLP_ENDPOINT`
 (or `OTEL_EXPORTER_OTLP_ENDPOINT`) in the server environment.
 
-Reference example files live in `examples/server.yaml` and
-`examples/launchd.plist`.
-
 `server.yaml` uses a strict schema. Unknown keys are rejected at startup
 instead of being silently ignored, so stale config like `warmup: false` must
 be updated to the current `warmup_commands: []` form.
@@ -302,6 +299,10 @@ required package. See
 
 ## launchd example (macOS)
 
-For always-on macOS hosts, use `examples/launchd.plist` as a template and
-update the binary path, username, and log paths before installing it as a
-LaunchDaemon.
+For always-on macOS hosts, write a LaunchDaemon plist that runs
+`batchalign3 serve start --foreground` with your operator user and a
+known log path. Standard `KeepAlive` + `RunAtLoad` semantics apply;
+the binary path comes from the `uv tool install` location (typically
+`~/.local/bin/batchalign3` or the venv-managed path). Install with
+`sudo launchctl bootstrap system /Library/LaunchDaemons/<plist>` and
+verify with `launchctl print system/<label>`.

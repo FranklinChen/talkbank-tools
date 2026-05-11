@@ -1,5 +1,6 @@
 # Walker Mode
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Step through utterances one segment at a time, playing each segment's audio

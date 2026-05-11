@@ -1,7 +1,7 @@
 # Tracing and Debugging
 
 **Status:** Current
-**Last modified:** 2026-03-29 11:32 EDT
+**Last updated:** 2026-03-29 11:32 EDT
 
 This document describes the tracing and debugging strategy across the
 batchalign3 stack: Rust (batchalign-core PyO3 bridge), Rust (CLI and server
@@ -60,7 +60,7 @@ Python logging across the entire stack.
 
 ### How verbosity propagates
 
-```
+```rust,ignore
 CLI (main.rs)
   │
   ├─ init_tracing(verbose)          ← sets Rust filter level
@@ -160,7 +160,7 @@ Before injecting MOR/GRA tiers into an utterance, the code now validates that
 the number of MOR items matches the number of alignable words extracted from
 the AST. A mismatch is a bug — it means the extraction or NLP mapping is wrong.
 
-```rust
+```rust,ignore
 // inject.rs — count alignment check
 let word_count = extracted.len();
 let mor_count = mors.len();
@@ -285,7 +285,7 @@ flowchart TB
 
 For a transcribe job on `sample.wav` with `--debug-dir /tmp/debug`:
 
-```
+```text
 /tmp/debug/
   # Transcribe pipeline artifacts
   sample_asr_response.json       # Raw ASR tokens + timestamps from Whisper/Rev.AI

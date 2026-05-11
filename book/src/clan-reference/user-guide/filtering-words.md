@@ -1,5 +1,6 @@
 # Word Filtering
 
+**Status:** Current
 Word filters restrict analysis to utterances containing (or not containing) specific words. Primarily useful with KWAL (keyword search) and COMBO (boolean search), but available on all commands.
 
 ## Include words

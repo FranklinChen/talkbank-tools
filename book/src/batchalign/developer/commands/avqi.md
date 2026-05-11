@@ -38,7 +38,7 @@ fragment; the extension can differ between the two files of a pair.
 
 ## Worker IPC: avqi task (V2 protocol)
 
-```
+```text
 execute_v2 request:
 {
   "task": "avqi",

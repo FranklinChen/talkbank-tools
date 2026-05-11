@@ -1,5 +1,6 @@
 # CHAT2SRT -- CHAT to Subtitle Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts CHAT files to subtitle format for captioned video. The legacy manual describes `CHAT2SRT` as converting a CHAT file to SRT for video captioning and then walks through a GUI workflow using external subtitle software.
@@ -35,7 +36,7 @@ Numbered subtitle blocks with timestamps derived from CHAT timing bullets and cl
 
 Example SRT output:
 
-```
+```rust,ignore
 1
 00:00:01,000 --> 00:00:03,500
 hello world

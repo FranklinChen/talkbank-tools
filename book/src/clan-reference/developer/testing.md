@@ -1,5 +1,6 @@
 # Testing Strategy
 
+**Status:** Current
 ## Unit tests
 
 Each command module includes `#[cfg(test)]` unit tests that verify counting logic, edge cases, and output formatting against known inputs.

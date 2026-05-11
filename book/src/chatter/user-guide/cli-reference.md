@@ -59,7 +59,7 @@ Use `chatter --help` or `chatter <command> --help` for the exact live surface.
 
 Validate CHAT file(s) or directory tree(s). Accepts multiple paths.
 
-```
+```text
 Usage: chatter validate [OPTIONS] <PATH>...
 ```
 

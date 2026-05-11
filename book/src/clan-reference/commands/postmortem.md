@@ -1,5 +1,6 @@
 # POSTMORTEM -- Pattern-Matching Rules for %mor Post-Processing
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's POSTMORTEM command, which applies pattern-matching and replacement rules to dependent tiers (typically `%mor:`). Rules are applied sequentially, and wildcard tokens (`*`) match any single token. The replacement side uses `$-` to copy the matched wildcard text.

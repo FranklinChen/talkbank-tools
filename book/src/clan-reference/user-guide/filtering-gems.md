@@ -1,5 +1,6 @@
 # Gem Filtering
 
+**Status:** Current
 Gem filters restrict analysis to utterances within `@Bg` / `@Eg` (Begin Gem / End Gem) boundaries. Gems are used to mark segments of a transcript — for example, a story retelling, a conversation about a specific topic, or a test activity.
 
 ## Include gems
@@ -27,7 +28,7 @@ CLAN equivalent: `-g"warmup"`
 
 Gem boundaries are marked with header lines:
 
-```
+```text
 @Bg:	story
 *CHI:	once upon a time .
 *CHI:	there was a frog .

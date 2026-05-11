@@ -67,6 +67,7 @@ fn main() {
 }
 
 mod audit_docs;
+mod audit_prose_references;
 mod ci_hygiene;
 mod dead_variant_audit;
 mod docs_sync;
@@ -109,6 +110,12 @@ fn run_main() -> Result<()> {
             let rest: Vec<String> = args.collect();
             audit_docs::parse_and_run(rest)
         }
+        Some("audit-prose-references") => {
+            if args.next().is_some() {
+                return Err(usage_error());
+            }
+            audit_prose_references::run(repo_root())
+        }
         Some("gen-runtime-toml") => {
             let check = args.any(|a| a == "--check");
             gen_runtime_toml::run(check).map_err(|e| e.to_string().into())
@@ -118,7 +125,7 @@ fn run_main() -> Result<()> {
 }
 
 fn usage_error() -> DynError {
-    "usage: cargo run -q -p xtask -- {help|affected-rust {packages|check|clippy|test}|lint-wide-structs|lint-ci-hygiene|lint-docs-sync|lint-dead-variants ...|panic-audit [--json] [--crate <prefix>]|audit-docs <scan|flag-staleness|status|streak|vet> [args...]|gen-runtime-toml [--check]}".into()
+    "usage: cargo run -q -p xtask -- {help|affected-rust {packages|check|clippy|test}|lint-wide-structs|lint-ci-hygiene|lint-docs-sync|lint-dead-variants ...|panic-audit [--json] [--crate <prefix>]|audit-docs <scan|flag-staleness|status|streak|vet> [args...]|audit-prose-references|gen-runtime-toml [--check]}".into()
 }
 
 fn print_help() {
@@ -166,6 +173,13 @@ fn print_help() {
         "  audit-docs vet --id <section_id> --verdict <unvetted|in-review|no-claims|vetted-accurate|needs-fix|fixed> [--reviewer <name>] [--notes <text>] [--fix-commit <hash>]"
     );
     println!("      Mark a section's verdict. `fixed` requires --fix-commit.");
+    println!("  audit-prose-references");
+    println!(
+        "      Layer 1 CI gate. Walk all markdown under the repo, apply \
+         high-severity prose-reference patterns (deleted crates, moved book \
+         paths), exit non-zero on any non-allow-listed hit. \
+         Catalog-independent — does not require audit.db."
+    );
     println!("  gen-runtime-toml [--check]");
     println!(
         "      Regenerate batchalign/runtime_constants.toml from COMMAND_SPECS. \

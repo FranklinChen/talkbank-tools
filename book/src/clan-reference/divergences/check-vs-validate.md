@@ -1,5 +1,6 @@
 # CHECK vs `chatter validate`
 
+**Status:** Current
 The `chatter` CLI has two validation tools with different purposes:
 
 | | `chatter clan check` | `chatter validate` |
@@ -19,7 +20,7 @@ The `chatter` CLI has two validation tools with different purposes:
 
 Both tools run the same underlying `parse_and_validate_streaming` pipeline from `talkbank-transform`. They catch the same errors — the difference is how errors are *presented*.
 
-```
+```text
                     ┌──────────────────────────────┐
                     │  talkbank-transform           │
                     │  parse_and_validate_streaming  │
@@ -53,14 +54,14 @@ Both tools run the same underlying `parse_and_validate_streaming` pipeline from 
 The same error looks different in each tool:
 
 **`chatter clan check sample.cha`**:
-```
+```text
 *** File "sample.cha": line 3.
 @Participants:	CHI Target_Child, MOT Mother
 MISSING @ID TIER FOR SPEAKER MOT.(99)
 ```
 
 **`chatter validate sample.cha`**:
-```
+```rust,ignore
 error[E305]: missing @ID header for speaker MOT
   --> sample.cha:3:1
    |

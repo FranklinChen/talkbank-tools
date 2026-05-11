@@ -1,5 +1,6 @@
 # COOCCUR — Word Co-occurrence (Bigram) Counting
 
+**Status:** Current
 ## Purpose
 
 Counts adjacent word pairs (bigrams) across utterances. For each utterance, every pair of consecutive countable words is recorded as a directed bigram. Pairs are directional: ("put", "the") and ("the", "put") are counted separately.

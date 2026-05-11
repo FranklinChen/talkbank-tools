@@ -1,5 +1,6 @@
 # Tier Filtering
 
+**Status:** Current
 Tier filters control which dependent tiers are included in command output. This primarily affects commands like KWAL and COMBO that echo matching utterances with their dependent tiers.
 
 ## Include tiers

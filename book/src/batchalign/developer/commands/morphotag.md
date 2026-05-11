@@ -62,7 +62,7 @@ the current invocation.
 
 ## Worker IPC: morphosyntax task
 
-```
+```text
 batch_infer request:
 {
   "task": "morphosyntax",

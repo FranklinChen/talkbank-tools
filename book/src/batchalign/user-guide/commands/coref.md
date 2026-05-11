@@ -1,7 +1,7 @@
 # coref
 
 **Status:** Current
-**Last updated:** 2026-05-02 02:30 EDT
+**Last updated:** 2026-05-11 11:18 EDT
 
 Add sparse coreference annotation tiers (`%xcoref`) to CHAT transcripts.
 English-only. Uses full document context — all utterances in the file are
@@ -70,8 +70,11 @@ flowchart TD
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--lang CODE` | from `@Languages` | 3-letter ISO language code. Overrides `@Languages` when set |
-| `--merge-abbrev` | off | Merge abbreviations in the output |
+| `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the output |
+
+Source language is read from each file's `@Languages` header.
+Non-English files pass through unchanged (Stanza's coreference model
+is English-only).
 
 ---
 

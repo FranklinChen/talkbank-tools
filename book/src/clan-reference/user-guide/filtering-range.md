@@ -1,5 +1,6 @@
 # Utterance Range Filtering
 
+**Status:** Current
 Range filters restrict analysis to a numbered subset of utterances, useful for analyzing specific portions of a transcript without splitting the file.
 
 ## Usage

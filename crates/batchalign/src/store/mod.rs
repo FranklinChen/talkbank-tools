@@ -22,6 +22,7 @@ pub(crate) use queries::LeaseRenewalOutcome;
 pub(crate) use queries::{
     AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate, PersistedJobUpdate,
 };
+pub(crate) use registry::JobCompletionSnapshot;
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

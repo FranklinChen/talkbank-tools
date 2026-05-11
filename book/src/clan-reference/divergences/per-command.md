@@ -1,5 +1,6 @@
 # Per-Command Divergences
 
+**Status:** Current
 This page documents every known divergence between the Rust `chatter clan` commands and the original CLAN C binaries. Divergences are verified through golden tests that compare output character-by-character.
 
 **Overall parity: 95% (113/118) -- 5 accepted divergences across 2 commands.**

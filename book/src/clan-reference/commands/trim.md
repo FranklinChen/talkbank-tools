@@ -1,5 +1,6 @@
 # TRIM — Remove Dependent Tiers
 
+**Status:** Current
 ## Purpose
 
 Removes selected dependent tiers from a CHAT file while preserving headers,

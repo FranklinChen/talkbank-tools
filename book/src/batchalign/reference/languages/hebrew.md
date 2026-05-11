@@ -52,7 +52,7 @@ Hebrew verbs belong to one of seven binyanim: PAAL, NIFAL, PIEL, PUAL,
 HIFIL, HUFAL, HITPAEL. Stanza outputs this as the `HebBinyan` UD feature.
 batchalign3 converts to lowercase %mor suffix:
 
-```
+```text
 UD: HebBinyan=PAAL|Number=Sing|Person=3|Tense=Past|VerbForm=Fin
 %mor: -paal&3S&PAST
 ```

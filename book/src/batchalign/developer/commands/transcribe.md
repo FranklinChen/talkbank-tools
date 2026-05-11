@@ -87,7 +87,7 @@ For **eng, cmn, zho, yue**, a BERT-based utterance segmentation model runs **aft
 
 ## Worker IPC: ASR task (V2 protocol)
 
-```
+```text
 execute_v2 request:
 {
   "task": "asr",
@@ -113,7 +113,7 @@ The speaker field is optional — Rev.AI always provides it; Whisper omits it.
 
 When `--diarization enabled` is set, a second worker call runs after ASR:
 
-```
+```text
 execute_v2 request:
 {
   "task": "speaker",

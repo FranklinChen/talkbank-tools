@@ -38,7 +38,7 @@ The module provides:
 
 ### Comment Format
 
-```
+```text
 [ba3 <command> | key=val ; key=val | ISO-8601-timestamp]
 ```
 
@@ -66,7 +66,7 @@ The provenance module needs `Header`, `BulletContent`, and `Span` from
 `talkbank-model` directly, these types are re-exported through
 `batchalign`:
 
-```
+```rust,ignore
 talkbank-model::header::Header      →  batchalign::Header
 talkbank-model::model::BulletContent →  batchalign::BulletContent
 talkbank-model::Span                →  batchalign::Span
@@ -137,7 +137,7 @@ one command.
 ## Legacy
 
 The old transcribe comment format:
-```
+```text
 @Comment:	Batchalign 0.1.0, ASR Engine rev. Unchecked output of ASR model.
 ```
 

@@ -1,5 +1,6 @@
 # CHIP -- Child/Parent Interaction Profile
 
+**Status:** Current
 ## Purpose
 
 Analyzes interaction patterns between a child speaker and their conversational partners. Categorizes successive utterance pairs to measure imitation, repetition, and overlap. CHIP is commonly used in child language research to quantify how much a child imitates or echoes their interlocutor.

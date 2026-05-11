@@ -72,7 +72,7 @@ The function uses a global pair (`check_SNDBeg`, `check_SNDEnd`) to hold the
 "current" bullet timing, and saves the previous values into local variables
 (`tBegTime`, `tEndTime`) at the start of each call. The comparison flow is:
 
-```
+```text
 1. Save previous: tBegTime = check_SNDBeg, tEndTime = check_SNDEnd
 2. Parse new bullet into check_SNDBeg, check_SNDEnd
 3. Check error 83: check_SNDBeg < tBegTime?           (cross-speaker comparison)
@@ -104,7 +104,7 @@ CLAN fires error 83 by comparing the current utterance's start time against the
 *previous utterance's* start time, regardless of speaker. In a multi-party
 conversation:
 
-```
+```text
 *PIL: something . •100000_102000•
 *UEL: response .  •99500_101000•      ← Error 83: 99500 < 100000
 ```
@@ -124,7 +124,7 @@ suppressing downstream error-133 reports when error 83 fires.
 Consider a classroom recording with a teacher (PIL) and seven children. The
 teacher asks a question, and three children answer simultaneously:
 
-```
+```text
 *PIL: qué es esto ?        •50000_52000•
 *UEL: un coche .           •51200_52500•   ← started during PIL's question
 *MAR: coches .             •51000_51800•   ← started even earlier
@@ -202,7 +202,7 @@ as part of the analytic notation.
 
 The following table summarizes the behavioral differences:
 
-```
+```text
 ┌────────────────────────────┬──────────────┬─────────────────┐
 │ Behavior                   │ CLAN CHECK   │ chatter validate│
 ├────────────────────────────┼──────────────┼─────────────────┤

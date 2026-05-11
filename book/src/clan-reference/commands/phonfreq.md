@@ -1,5 +1,6 @@
 # PHONFREQ — Phonological Frequency Analysis
 
+**Status:** Current
 ## Purpose
 
 Counts individual phone (character) occurrences from `%pho` tier content, tracking positional distribution within each phonological word: initial (first character), final (last character), and other (middle positions). Only lowercase ASCII letters are counted, matching CLAN's behavior.

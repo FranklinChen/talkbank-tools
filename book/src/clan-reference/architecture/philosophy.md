@@ -1,12 +1,13 @@
 # Design Philosophy
 
+**Status:** Current
 ## Semantic AST processing
 
 The original CLAN processes CHAT files as text, using string-prefix checks like `starts_with('&')` or `== "xxx"` to identify word types. The Rust reimplementation works on a parsed AST where every word has typed fields (`.category`, `.untranscribed()`, `.replaced()`). This eliminates entire classes of bugs where string patterns match unintended content.
 
 ## Two-layer architecture
 
-```
+```text
 framework/     Shared infrastructure (runner, filters, output, word utilities)
 commands/      Individual command implementations
 transforms/    File-modifying commands

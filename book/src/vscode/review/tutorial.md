@@ -1,5 +1,6 @@
 # Tutorial: Reviewing Aligned Files
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 This tutorial walks through reviewing a CHAT file that was aligned by
@@ -61,20 +62,20 @@ For each flagged utterance:
 If you want to explain your rating, edit the `%xrev` line directly.
 Add text after the rating marker:
 
-```
+```text
 %xrev:	[early] starts about 200ms before the actual speech
 ```
 
 Or:
 
-```
+```text
 %xrev:	[wrong] this is a different speaker's audio entirely
 ```
 
 Notes are especially valuable when they describe **patterns** rather than
 individual utterances:
 
-```
+```text
 %xrev:	[early] all backchannels from INV seem to be early by ~200ms
 ```
 

@@ -30,7 +30,7 @@ bytes. Compare derives `FILE.gold.cha` first and falls back to
 
 The central typed model. Produced by `compare()` in `talkbank_transform::compare`:
 
-```rust
+```rust,ignore
 pub struct ComparisonBundle {
     pub main_utterances: Vec<UtteranceComparison>,  // per-utterance main-side comparisons
     pub gold_utterances: Vec<UtteranceComparison>,  // per-utterance gold-side comparisons
@@ -81,7 +81,7 @@ This handles cases where words are reordered, inserted, or deleted. The projecte
 
 ## CSV output model
 
-```rust
+```rust,ignore
 pub struct CompareMetricsRow {
     pub label:       MetricLabel,    // "aggregate" or POS string
     pub wer:         f64,

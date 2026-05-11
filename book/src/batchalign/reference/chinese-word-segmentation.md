@@ -9,7 +9,7 @@ CJK ASR engines (FunASR/SenseVoice for Cantonese, Paraformer for Mandarin)
 output character-level tokens without word boundaries. Each Chinese character
 becomes a separate word on the main tier:
 
-```
+```text
 *CHI:	故 事 係 好 .
 ```
 
@@ -39,13 +39,13 @@ batchalign3 morphotag --retokenize corpus/ -o output/
 ```
 
 Before (per-character):
-```
+```text
 *CHI:	故 事 係 好 .
 %mor:	n|故 n|事 v|係 adj|好 .
 ```
 
 After retokenize (word-level):
-```
+```text
 *CHI:	故事 係 好 .
 %mor:	n|故事 v|係 adj|好 .
 ```
@@ -67,7 +67,7 @@ silently changes word boundaries. This is consistent across all languages.
 When Cantonese input appears to be per-character tokens (>80% single-CJK-character
 words), a warning is emitted:
 
-```
+```text
 warn: Cantonese input appears to be per-character tokens (42/50 single-CJK words).
       Consider --retokenize for word-level analysis.
 ```

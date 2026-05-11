@@ -1,5 +1,6 @@
 # PLAY2CHAT -- PLAY Annotation to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts PLAY (Phonological and Lexical Acquisition in Young children) annotation files into CHAT format.

@@ -1,5 +1,6 @@
 # Arena Allocators (Evaluation — Not Used)
 
+**Status:** Current
 > **Status: Evaluated and rejected (2026).** We evaluated `bumpalo` arenas at
 > several allocation hot spots and concluded the simpler patterns below
 > (scratch buffers, flat tables, dense Vecs) provide equivalent savings with
@@ -21,7 +22,7 @@
 
 Pre-allocate and reuse buffers instead of allocating fresh each iteration:
 
-```rust
+```rust,ignore
 let mut prev: Vec<usize> = (0..=pay_len).collect();
 let mut cur = Vec::with_capacity(pay_len + 1);
 
@@ -36,7 +37,7 @@ Used in `dp_align.rs` (Hirschberg alignment).
 
 ### Flat Table Instead of Vec-of-Vec
 
-```rust
+```rust,ignore
 // 1 allocation instead of rows + 1
 let mut dp = vec![(0usize, Action::Start, 0, 0); rows * cols];
 let idx = |r: usize, c: usize| r * cols + c;
@@ -46,7 +47,7 @@ let idx = |r: usize, c: usize| r * cols + c;
 
 When keys are dense integers `0..N`, a `Vec` is faster than a `HashMap`:
 
-```rust
+```rust,ignore
 let mut mapping: Vec<SmallVec<[usize; 4]>> = vec![SmallVec::new(); num_words];
 mapping[word_idx].push(token_idx);
 ```

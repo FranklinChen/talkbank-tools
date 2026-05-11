@@ -48,7 +48,7 @@ existing annotations.
 
 ## Worker IPC: coref task
 
-```
+```text
 batch_infer request:
 {
   "task": "coref",

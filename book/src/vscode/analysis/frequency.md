@@ -1,5 +1,6 @@
 # Frequency & Distribution
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Frequency and distribution commands count words, morphemes, and

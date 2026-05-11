@@ -16,7 +16,7 @@ inference — Whisper, Stanza, wav2vec, translation models.
 
 CHAT processing follows the same pattern on both runtime paths:
 
-```
+```text
 CHAT text (.cha file)
   │
   ▼

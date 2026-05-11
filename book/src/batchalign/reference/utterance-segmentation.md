@@ -115,7 +115,7 @@ punctuation in Rust (`crates/talkbank-transform/src/asr_postprocess/mod.rs`).
 
 ### CHAT-Legal Sentence Terminators
 
-```
+```text
 .  ?  !  +...  +/.  +//.  +/?  +!?  +"/.  +".  +//?  +..?  +.  ...  (.)
 ```
 

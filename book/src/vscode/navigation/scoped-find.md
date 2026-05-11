@@ -1,5 +1,6 @@
 # Scoped Find
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 VS Code's built-in Find (`Cmd+F`) searches the entire file as raw text. Scoped Find adds CHAT-aware filtering: search within specific tiers, specific speakers, or both. This replaces the tedious workflow of visually scanning tier lines or using fragile regex patterns that try to match CHAT structure.

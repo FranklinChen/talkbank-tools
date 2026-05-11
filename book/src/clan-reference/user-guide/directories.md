@@ -1,5 +1,6 @@
 # Working with Directories
 
+**Status:** Current
 Pass a directory path to process all `.cha` files recursively:
 
 ```bash

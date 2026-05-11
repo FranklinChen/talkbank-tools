@@ -461,7 +461,7 @@ in `~/.batchalign3/server.yaml` and run via `batchalign3 serve`.)
 
 You may see lines in `~/.batchalign3/server.log` like:
 
-```
+```text
 WARN Stripped 2 Stanza control-token leak(s) from fin item 15
      (stanza defect registry: Defect 4). Leaks: [...]
 ```

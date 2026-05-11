@@ -1,5 +1,6 @@
 # Settings Reference
 
+**Status:** Current
 **Last updated:** 2026-04-16 13:37 EDT
 
 All extension settings are accessible via **File > Preferences > Settings** (`Cmd+,` on macOS, `Ctrl+,` on Windows/Linux) and searching for "talkbank". Settings can also be edited directly in `settings.json`.

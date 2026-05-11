@@ -100,7 +100,7 @@ Rust: `crates/batchalign/src/morphosyntax/batch.rs` — `run_morphosyntax_batch_
   │     → sweep serialize-time empty %mor/%gra slots
   │
   └── Serialize → CHAT (now with %mor/%gra, L2 morphology, POS hints)
-```
+```text
 
 ### Module Inventory
 
@@ -271,7 +271,7 @@ Absorbed from the former `mor-gra-generation.md`.  The mapping lives in
 
 ### Pipeline
 
-```
+```text
 Main tier words
     ↓
 Stanza NLP (Python worker, `worker/_infer_hosts.py` → `inference/morphosyntax.py`)
@@ -315,7 +315,7 @@ flowchart LR
 item per CHAT word. MWT Range tokens are merged into a single clitic MOR
 via `assemble_mors()`:
 
-```
+```text
 "I'll" → Range(1,2): ["I", "'ll"]
   is_clitic("I", en) → false → main_idx = 0
   Post-clitics: ["'ll"]
@@ -326,7 +326,7 @@ via `assemble_mors()`:
 per component word. Range parent tokens are skipped; each component gets
 its own MOR via `map_ud_word_to_mor()`:
 
-```
+```text
 "gonna" → Range(1,2): ["gon", "na"]
   gon → verb|go-Part-Pres-S (1 MOR)
   na  → part|to             (1 MOR)
@@ -347,7 +347,7 @@ Each %mor chunk (including clitics) needs its own %gra relation.  The GRA builde
 1. **Builds a chunk-based index mapping** (`ud_to_chunk_idx`).  Each UD word ID maps
    to a sequential chunk index.  For MWT ranges, each component gets its own index:
 
-   ```
+   ```text
    Range(1,2) "I'll": ID 1 → chunk 1, ID 2 → chunk 2
    Single(3) "give":  ID 3 → chunk 3
    Single(4) "you":   ID 4 → chunk 4
@@ -356,7 +356,7 @@ Each %mor chunk (including clitics) needs its own %gra relation.  The GRA builde
 2. **Emits one GRA relation per component** (not one per MWT).  Each component's
    UD head and deprel are used directly:
 
-   ```
+   ```text
    I:    head=3 (give), deprel=nsubj → 1|3|NSUBJ
    'll:  head=3 (give), deprel=aux   → 2|3|AUX
    give: head=0 (root)               → 3|0|ROOT
@@ -432,7 +432,7 @@ array indexing — which was the root cause of Python's circular dependency bug.
 
 The critical guard added after the MWT/GRA bug:
 
-```rust
+```rust,ignore
 let mor_chunk_count = mors.iter().map(|m| m.count_chunks()).sum::<usize>() + 1;
 if gras.len() != mor_chunk_count {
     return Err(MappingError::ChunkCountMismatch { ... });

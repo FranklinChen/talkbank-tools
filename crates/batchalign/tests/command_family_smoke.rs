@@ -61,13 +61,34 @@ async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -
 }
 
 fn minimal_chat() -> String {
-    "@UTF8\n@Begin\n*CHI:\thello world .\n@End\n".into()
+    // Include `@Languages: eng` so commands using `LanguageSpec::PerFile`
+    // (morphotag, translate, coref) can resolve a language from the
+    // CHAT header. Without this, the per-file resolver fails with a
+    // missing-header error and the smoke test never reaches dispatch.
+    "@UTF8\n@Languages:\teng\n@Begin\n*CHI:\thello world .\n@End\n".into()
+}
+
+/// Pick the legal `LanguageSpec` for each command — morphotag,
+/// translate, and coref require `PerFile` (per the submission validator
+/// at `crates/batchalign/src/types/request.rs::validate_lang_command_pairing`,
+/// codified after the 2026-05-03 morphotag incident); every other
+/// command requires `Auto` or `Resolved`. The smoke tests previously
+/// hardcoded `Resolved(eng())` for all commands, which made the three
+/// per-file-lang tests fail at the validation boundary before dispatch
+/// ever ran.
+fn lang_for_command(command: ReleasedCommand) -> LanguageSpec {
+    match command {
+        ReleasedCommand::Morphotag | ReleasedCommand::Translate | ReleasedCommand::Coref => {
+            LanguageSpec::PerFile
+        }
+        _ => LanguageSpec::Resolved(LanguageCode3::eng()),
+    }
 }
 
 fn make_submission(command: ReleasedCommand, options: CommandOptions) -> JobSubmission {
     JobSubmission {
         command,
-        lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+        lang: lang_for_command(command),
         num_speakers: NumSpeakers(1),
         files: vec![FilePayload {
             filename: "smoke.cha".into(),

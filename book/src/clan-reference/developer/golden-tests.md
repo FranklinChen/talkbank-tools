@@ -1,5 +1,6 @@
 # Golden Tests
 
+**Status:** Current
 Golden tests in `tests/clan_golden.rs` and `tests/transform_golden.rs` compare `chatter clan` output against the legacy CLAN C binaries character-by-character.
 
 ## How they work

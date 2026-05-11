@@ -1,7 +1,7 @@
 # Stanza Capability Registry
 
 **Status:** Current
-**Last modified:** 2026-05-06 21:30 EDT
+**Last updated:** 2026-05-06 21:30 EDT
 
 The Stanza capability registry replaces 7 scattered hardcoded language tables
 with a single runtime-authoritative data structure built from Stanza's own

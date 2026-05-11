@@ -382,7 +382,7 @@ No CHAT contract applies.
 Each command declares its minimum validity level. Before dispatching to the
 orchestrator, the runner validates the parsed CHAT file to that level:
 
-```
+```text
 Runner receives file
   → parse_lenient() (always, for error recovery diagnostics)
   → check parse errors (Level 0)

@@ -1,7 +1,7 @@
 # Progress and Feedback
 
 **Status:** Current
-**Last updated:** 2026-05-01 22:47 EDT
+**Last updated:** 2026-05-11 10:31 EDT
 
 Batchalign reports real-time progress during processing. This page explains what
 to expect for each command, what the progress indicators mean, and when to worry
@@ -160,7 +160,7 @@ format:
 - **Auto-collapse** for completed groups: non-focused groups where all files
   are done or errored show a condensed title.
 - **Error codes** in the error panel, extracted from the server's structured
-  error codes (e.g. `[E362] morph lookup failed`).
+  error codes (e.g. `[E362] Bullet timestamps must be monotonic`).
 
 **Keybinds:** `q` quit · `c` cancel · `↑↓` scroll · `tab` group · `e` errors · `m` metrics
 

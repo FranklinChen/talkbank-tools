@@ -1,5 +1,6 @@
 # MLU -- Mean Length of Utterance
 
+**Status:** Current
 ## Purpose
 
 Calculates mean length of utterance in morphemes from the `%mor` tier. When no `%mor` tier is available and `--words` was not passed, reports "utterances = 0, morphemes = 0" (matching CLAN behavior -- no fallback to word counting).
@@ -78,7 +79,7 @@ Given `%mor: pro|I v|want-PAST det|a n|cookie-PL`:
 
 ## Output
 
-```
+```text
 Speaker: CHI
   Utterances: 42
   Morphemes: 168

@@ -1,5 +1,6 @@
 # FIXIT -- Normalize CHAT Formatting
 
+**Status:** Current
 ## Purpose
 
 Normalizes CHAT file formatting by re-serializing through the parser. Fixes inconsistent spacing, malformed tier prefixes, and other formatting issues.

@@ -11,7 +11,7 @@ cdylib linking). No other features exist — the extension is always slim.
 
 ## Dependency Graph
 
-```
+```text
 batchalign-pyo3 (the .so, ~2,730 lines, 9 files)
   |
   +-- batchalign-types          (newtypes, worker IPC types)

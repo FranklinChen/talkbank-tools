@@ -1,5 +1,6 @@
 # SRT2CHAT -- SRT Subtitle to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Parses SRT (SubRip) subtitle files and converts them to CHAT format, mapping each subtitle block to an utterance with timing bullets derived from the SRT timestamps.

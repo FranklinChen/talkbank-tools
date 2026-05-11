@@ -1,5 +1,6 @@
 # COMPLEXITY — Syntactic Complexity Ratio
 
+**Status:** Current
 Computes syntactic complexity by counting subordinating dependency relations in the `%gra` tier.
 
 ## Usage

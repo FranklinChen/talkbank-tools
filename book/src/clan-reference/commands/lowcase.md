@@ -1,5 +1,6 @@
 # LOWCASE -- Lowercase All Words on Main Tiers
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's `lowcase` command, which converts all words on main tiers to lowercase. Speaker codes, headers, and dependent tiers are preserved unchanged. The transformation recurses into annotated words, replaced words, groups, and annotated groups.

@@ -25,7 +25,7 @@ Declares the **primary**, **secondary**, and optionally **tertiary** languages u
 
 ### Syntax
 
-```
+```text
 @Languages:   eng, spa, fra
               ^^^  ^^^  ^^^
               1°   2°   3°
@@ -38,7 +38,7 @@ Declares the **primary**, **secondary**, and optionally **tertiary** languages u
 ### Data Model
 
 **Header enum**:
-```rust
+```rust,ignore
 pub enum Header {
     Languages { codes: LanguageCodes },
     // ...
@@ -48,7 +48,7 @@ pub struct LanguageCodes(pub Vec<LanguageCode>);
 ```
 
 **Extraction** (from ChatFile):
-```rust
+```rust,ignore
 let declared_languages: Vec<LanguageCode> = chat_file
     .headers()
     .find_map(|h| {
@@ -86,7 +86,7 @@ let declared_languages: Vec<LanguageCode> = chat_file
 
 ### Syntax
 
-```
+```text
 *MOT: hola cómo estás [- spa] ?
       ^^^^^^^^^^^^^^^
       Entire utterance is Spanish
@@ -97,7 +97,7 @@ The directive applies to **the entire tier** (all words in the utterance).
 ### Data Model
 
 **MainTierContent struct**:
-```rust
+```rust,ignore
 pub struct MainTierContent {
     pub content: Vec<UtteranceContent>,
     pub terminator: Option<Terminator>,
@@ -113,7 +113,7 @@ pub struct MainTierContent {
 
 When Rust builds batch payloads for Stanza, it includes the tier language:
 
-```rust
+```rust,ignore
 let utterance_lang = utt.main.content.language_code
     .clone()
     .unwrap_or_else(|| primary_lang.clone());
@@ -134,7 +134,7 @@ Python then routes the entire utterance to the Spanish Stanza model.
 - `true`: Skip utterances with `[- lang]` directive (only process primary language)
 - `false` (default): Process utterances in their declared language
 
-```rust
+```rust,ignore
 let skip = skipmultilang
     && utt.main.content.language_code.is_some()
     && utt.main.content.language_code.as_ref() != Some(&primary_lang);
@@ -164,7 +164,7 @@ Marks **individual code-switched words** within an utterance.
 ### Data Model: CHAT Syntax Layer
 
 **Word struct**:
-```rust
+```rust,ignore
 pub struct Word {
     // ...
     pub lang: Option<WordLanguageMarker>,
@@ -192,7 +192,7 @@ This is the **CHAT syntax representation** - it preserves the exact marker as wr
 ### Data Model: Semantic Resolution Layer
 
 **LanguageResolution enum** (from `resolve_word_language()`):
-```rust
+```rust,ignore
 pub enum LanguageResolution {
     /// Single definite language (after resolving @s shortcut)
     Single(LanguageCode),
@@ -211,7 +211,7 @@ This is the **semantic representation** - it resolves shortcuts and produces act
 
 **`resolve_word_language()` function**:
 
-```rust
+```rust,ignore
 pub fn resolve_word_language(
     word: &Word,
     tier_language: Option<&LanguageCode>,
@@ -236,7 +236,7 @@ pub fn resolve_word_language(
 ### Example Resolution
 
 **Input CHAT**:
-```
+```text
 @Languages:   eng, spa, fra
 
 *CHI: I want biberon@s and croissant@s:fra please .
@@ -261,7 +261,7 @@ When building morphosyntax batch payloads, Rust:
 2. Sends **semantic resolution**, not CHAT syntax
 
 **Batch payload struct**:
-```rust
+```rust,ignore
 #[derive(serde::Serialize, serde::Deserialize)]
 struct MorphosyntaxBatchItem {
     words: Vec<String>,                          // Word texts
@@ -398,7 +398,7 @@ Current boundary:
 ### Tertiary Languages Need Explicit Markers
 
 **Valid**:
-```
+```text
 @Languages:   eng, spa, fra
 
 *CHI: I want croissant@s:fra .
@@ -407,7 +407,7 @@ Current boundary:
 ```
 
 **Invalid** (error E244):
-```
+```text
 @Languages:   eng, spa, fra
 *CHI: [- fra] je veux croissant@s .
                           ^^^^^^^
@@ -419,14 +419,14 @@ Current boundary:
 ### Multiple/Ambiguous Languages
 
 **Multiple** (`+`): Word is valid in ALL listed languages
-```
+```text
 *CHI: I want cafe@s:eng+fra .
              ^^^^
              English "café" or French "café" - both valid
 ```
 
 **Ambiguous** (`&`): Unclear which language the word belongs to
-```
+```text
 *CHI: no@s:eng&spa quiero .
       ^^
       English "no" or Spanish "no"? Ambiguous.
@@ -456,7 +456,7 @@ If `@Languages` is missing:
 
 ### Validation Context
 
-```rust
+```text
 let (resolved, errors) = resolve_word_language(
     &word,
     tier_language,

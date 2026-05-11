@@ -1,5 +1,6 @@
 # SCRIPT — Compare Utterances to a Template
 
+**Status:** Current
 ## Purpose
 
 Compares subject CHAT data against an ideal template file to compute accuracy metrics: words produced vs. expected, correct matches, omissions (in template but not produced), and additions (produced but not in template). Useful for evaluating scripted language samples such as picture descriptions or story retells.

@@ -8,7 +8,7 @@ This document covers the testing strategy for the Chatter desktop app
 
 ## Testing Tiers
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │  Tier 3: E2E (WebdriverIO + tauri-driver)               │
 │  Real app, real DOM, real IPC. Slow (~5-10s/test).       │

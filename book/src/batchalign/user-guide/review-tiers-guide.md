@@ -1,7 +1,7 @@
 # Review Tiers: `%xalign` and `%xrev`
 
 **Status:** Current
-**Last modified:** 2026-05-02 01:30 EDT
+**Last updated:** 2026-05-11 11:48 EDT
 
 When batchalign3 makes a decision that could be wrong — clamping a timestamp,
 filling a gap between utterances, stripping non-monotonic timing, failing to
@@ -88,7 +88,7 @@ stage raised the decision. All decisions currently land in a single unified
 | `fa:` | Forced alignment (`align`) | Live | `gap_filled`, `boundary_averaged`, `lis_removal`, `words_timing_dropped` |
 | `monotonicity:` | Timing sanity (`align`) | Live | `end_clamped`, `timing_stripped` |
 | `utr:` | Utterance timing recovery (`align` pre-pass) | Live | `unmatched`, `zero_duration_skipped` |
-| `morphosyntax:` | Stanza mapping (`morphotag`) | **Infrastructure only** — strategy enum exists at `crates/talkbank-transform/src/decisions.rs::MorphosyntaxStrategy` and `DecisionRecord`s are constructed at `morphosyntax/injection.rs`, but the morphotag dispatch path does not currently call any tier-emission function, so no `morphosyntax:` `%xalign` lines actually land in output today. | `mapping_failed`, `retokenization_failed`, `injection_failed`, `nlp_no_sentences` |
+| `morphosyntax:` | Stanza mapping (`morphotag`) | **Infrastructure only** — strategy enum exists at `crates/talkbank-transform/src/decisions.rs::MorphosyntaxStrategy`, but the morphotag dispatch path does not currently call any tier-emission function, and no constructor sites are wired up yet. When morphotag eventually emits decision tiers, the construction code will live alongside the dispatch path under `crates/batchalign/src/chat_ops/morphosyntax_ops/`. No `morphosyntax:` `%xalign` lines actually land in output today. | `mapping_failed`, `retokenization_failed`, `injection_failed`, `nlp_no_sentences` |
 
 The live `fa:`, `monotonicity:`, and `utr:` decisions are emitted by the
 FA pipeline via `inject_review_tiers` in
@@ -107,7 +107,7 @@ turn the `morphosyntax:` row above from "infrastructure only" to
 ## Controlling emission: `--review-level`
 
 The `align` command accepts `--review-level` (the field
-`AlignArgs.review_level` at `crates/batchalign/src/cli/args/commands.rs:179`).
+`AlignArgs.review_level` at `crates/batchalign/src/cli/args/commands.rs:188`).
 Since `morphotag` does not currently emit these tiers, it does not
 accept the flag — the table row in §"Decision modules" notes that the
 `morphosyntax:` infrastructure exists but is not wired up.

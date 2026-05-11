@@ -1,5 +1,6 @@
 # Assessment Tools
 
+**Status:** Current
 **Last updated:** 2026-03-30 16:35 EDT
 
 The assessment tools — KidEval, Eval, and Eval-D — compare a
@@ -41,7 +42,7 @@ selection needed.
 Below the dropdowns, an **availability grid** shows all language ×
 activity combinations at a glance. Click any cell to select it:
 
-```
+```text
               Narrative    Toyplay
 English (NA)   ● 375       ● 3503
 English (UK)   ● 540       ● 3459

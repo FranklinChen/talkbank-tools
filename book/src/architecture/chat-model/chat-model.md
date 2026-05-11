@@ -13,7 +13,7 @@ extract → infer → inject pattern that all NLP tasks follow.
 
 The root type is `ChatFile`, representing a complete CHAT transcript:
 
-```rust
+```rust,ignore
 pub struct ChatFile {
     pub lines: Vec<Line>,
     pub participants: IndexMap<SpeakerCode, Participant>,
@@ -61,7 +61,7 @@ Phon-project (`Modsyl`/`Phosyl`/`Phoaln`), and `UserDefined` /
 CHAT main-tier content is a tree with three nesting levels. Every
 content traversal must understand all three.
 
-```
+```rust,ignore
 ChatFile
 └── Line::Utterance
     └── MainTier
@@ -144,7 +144,7 @@ looking for overlap markers must check all three levels.
 Adds scoped annotations (`[/]`, `[* m]`, `[= explanation]`, etc.) to any
 annotatable inner type:
 
-```rust
+```rust,ignore
 pub struct Annotated<T> {
     pub inner: T,
     pub annotations: Vec<ContentAnnotation>,
@@ -161,7 +161,7 @@ At Level 1: `AnnotatedWord(Box<Annotated<Word>>)`,
 
 Represents `word [: replacement]` — a surface form with a replacement:
 
-```rust
+```rust,ignore
 pub struct ReplacedWord {
     pub word: Word,
     pub replacement: Replacement,
@@ -200,7 +200,7 @@ domain-aware gating, `None` to recurse everything unconditionally.
 - `walk_words` / `walk_words_mut` — filtered to words / replaced words
   / separators, with domain-aware gating. The primary primitive.
 
-```rust
+```rust,ignore
 use talkbank_model::alignment::helpers::{
     walk_words, walk_words_mut,
     WordItem, WordItemMut,
@@ -247,7 +247,7 @@ pattern.
 
 ### `walk_overlap_points` — overlap marker iterator
 
-```rust
+```text
 walk_overlap_points(content, &mut |visit| {
     // visit.point.kind, visit.point.index, visit.word_position
 });
@@ -266,7 +266,7 @@ and the validator (pairing checks). For region-level analysis (pairing
 
 Every NLP task follows the same pattern:
 
-```
+```text
 ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
 │  Parse  │────▶│ Extract  │────▶│  Infer   │────▶│  Inject  │
 │  CHAT   │     │  Words   │     │ (Python) │     │ Results  │

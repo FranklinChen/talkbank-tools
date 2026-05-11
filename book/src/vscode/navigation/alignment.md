@@ -13,7 +13,7 @@ Hover over any word or tier item to see how it aligns with elements on other tie
 
 Place your cursor over a word on a main tier line (e.g., `*CHI: I want cookie .`). A tooltip appears showing every tier item aligned to that word:
 
-```
+```rust,ignore
 Main Tier Word: "cookie"
 
 - %mor tier
@@ -37,7 +37,7 @@ Alignment computed by talkbank-model
 
 Hover over a morphological analysis item to see its full breakdown, including POS subcategory, stem, and any prefixes, suffixes, clitics, or translations:
 
-```
+```text
 Morphology Element: "pro:sub|I"
 
 POS: pro:sub (subject pronoun)
@@ -55,7 +55,7 @@ Compound morphology (`n|+n|pine+n|apple`), fusional items, and clitic chains are
 
 Hover over a grammatical relation to see the dependency it encodes, with back-links to both the `%mor` tier and the main tier:
 
-```
+```text
 Grammar Relation: "3|2|OBJ"
 
 Source: cookie (word 3)
@@ -123,7 +123,7 @@ and the dependency graph all "just work" on real transcripts.
 
 Consider this line:
 
-```
+```text
 *CHI:   it's cookies .
 %mor:   pron|it~aux|be noun|cookie .
 %gra:   1|2|SUBJ 2|0|ROOT 3|2|OBJ 4|2|PUNCT

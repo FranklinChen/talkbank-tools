@@ -1,5 +1,6 @@
 # Syntax Highlighting
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 The extension provides two layers of syntax highlighting for CHAT files: a TextMate grammar for immediate fallback coloring, and LSP semantic tokens for context-aware precision. Together they make CHAT transcripts readable at a glance, with distinct colors for headers, speaker codes, annotations, morphology, and other structural elements.

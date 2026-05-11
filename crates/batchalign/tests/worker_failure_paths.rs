@@ -378,23 +378,25 @@ async fn multi_file_job_produces_per_file_results() {
 
     let client = reqwest::Client::new();
 
-    // Submit a job with 3 files.
+    // Submit a job with 3 files. Morphotag requires
+    // `LanguageSpec::PerFile`; each file carries `@Languages: eng`
+    // so per-file resolution succeeds at dispatch time.
     let submission = JobSubmission {
         command: ReleasedCommand::Morphotag,
-        lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+        lang: LanguageSpec::PerFile,
         num_speakers: NumSpeakers(1),
         files: vec![
             FilePayload {
                 filename: "file_a.cha".into(),
-                content: "@UTF8\n@Begin\n*CHI:\thello .\n@End\n".into(),
+                content: "@UTF8\n@Languages:\teng\n@Begin\n*CHI:\thello .\n@End\n".into(),
             },
             FilePayload {
                 filename: "file_b.cha".into(),
-                content: "@UTF8\n@Begin\n*CHI:\tworld .\n@End\n".into(),
+                content: "@UTF8\n@Languages:\teng\n@Begin\n*CHI:\tworld .\n@End\n".into(),
             },
             FilePayload {
                 filename: "file_c.cha".into(),
-                content: "@UTF8\n@Begin\n*CHI:\tgoodbye .\n@End\n".into(),
+                content: "@UTF8\n@Languages:\teng\n@Begin\n*CHI:\tgoodbye .\n@End\n".into(),
             },
         ],
         media_files: vec![],

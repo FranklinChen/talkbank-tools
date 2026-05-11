@@ -1,5 +1,6 @@
 # CHAT Dependent Tier Handling by Command
 
+**Status:** Current
 Each command reads and writes different dependent tiers (`%mor`, `%gra`, `%wor`, `%xtra`).
 This determines which parse mode is used at pipeline entry.
 

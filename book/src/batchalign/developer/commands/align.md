@@ -55,7 +55,7 @@ rather than consuming GPU time. See
 level definitions.
 
 Implemented in `crates/batchalign/src/commands/align.rs`:
-```rust
+```rust,ignore
 validate_to_level(chat, ValidationLevel::MainTiers)?;
 ```
 
@@ -106,7 +106,7 @@ Implementation: `crates/batchalign/src/fa/mod.rs:345–391`.
 
 ## Worker IPC: FA task (V2 protocol)
 
-```
+```text
 Client → Worker: execute_v2 request
 {
   "task": "fa",

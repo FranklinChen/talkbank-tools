@@ -18,12 +18,12 @@ occur in TalkBank corpora:
 Examples:
 
 **`head=0`**
-```
+```text
 %gra:	1|2|SUBJ 2|0|ROOT 3|2|OBJ 4|2|PUNCT
 ```
 
 **`head=self`**
-```
+```text
 %gra:	1|3|DET 2|3|AMOD 3|3|ROOT 4|6|NSUBJ 5|6|ADVMOD 6|3|ACL-RELCL 7|3|PUNCT
 ```
 
@@ -42,7 +42,7 @@ Current `%gra` generation in `batchalign3 morphotag` emits `head=0`.
 For comparison, a UD-style rendering would use lowercase labels and colon
 subtypes:
 
-```
+```text
 %gra:	1|3|det 2|3|amod 3|0|root 4|6|nsubj 5|6|advmod 6|3|acl:relcl 7|3|punct
 ```
 

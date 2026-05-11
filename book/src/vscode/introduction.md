@@ -1,5 +1,6 @@
 # TalkBank CHAT Editor
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 The TalkBank CHAT Editor is a VS Code extension for working with

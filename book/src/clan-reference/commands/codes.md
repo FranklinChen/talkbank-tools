@@ -1,5 +1,6 @@
 # CODES -- Code Frequency Table
 
+**Status:** Current
 ## Purpose
 
 Tabulates the frequency and distribution of coding annotations found on `%cod:` dependent tiers, organized by speaker. This is useful for analyzing hand-coded behavioral or discourse annotations attached to transcripts.

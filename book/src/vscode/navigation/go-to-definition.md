@@ -1,5 +1,6 @@
 # Go to Definition
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Press `F12` or `Cmd+Click` (macOS) / `Ctrl+Click` (Windows/Linux) on a speaker code or dependent tier item to jump to its definition or aligned source. The extension knows the alignment between main tier words, `%mor` items, and `%gra` relations, so it can navigate across tiers in a single keystroke.

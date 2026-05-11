@@ -1,5 +1,6 @@
 # Deliberately Not Implemented
 
+**Status:** Current
 ## NLP Commands
 
 These commands depend on the legacy CLAN MOR data model -- trie-based lexicons, HMM/Brill taggers, and MaxEnt parsers -- which is incompatible with the UD-style morphological representation used in the current CHAT grammar and data model. Attempting to invoke them produces a clear error message explaining why.

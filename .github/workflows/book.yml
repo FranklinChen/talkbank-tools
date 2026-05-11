@@ -28,6 +28,14 @@ jobs:
         run: cargo install mdbook-linkcheck2 --locked
       - name: Build book
         run: mdbook build book
+      - name: Test book code blocks (fence-shape regression guard)
+        # Every Rust block in the book is currently rust,ignore (mdbook
+        # test can't disambiguate workspace crate variants in
+        # target/debug/deps/, so executable doctest verification lives
+        # in crates/<crate>/tests/book_*_examples.rs files instead).
+        # This step is a guard against untagged ``` fences or stray
+        # ``` rust blocks creeping back in.
+        run: mdbook test book
       - name: Upload book artifact
         uses: actions/upload-artifact@v6
         with:

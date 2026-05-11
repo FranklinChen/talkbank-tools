@@ -1,5 +1,6 @@
 # Quick Fixes
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 When the language server detects certain errors, it can offer automatic corrections. These appear as a lightbulb icon in the left gutter, or you can invoke them directly with **Cmd+.** (macOS) / **Ctrl+.** (Windows/Linux). Quick fixes are the fastest way to resolve common CHAT formatting and structural problems without manual editing.

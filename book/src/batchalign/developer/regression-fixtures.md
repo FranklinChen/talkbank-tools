@@ -43,7 +43,7 @@ tests skip gracefully rather than fail.
 
 ## Directory layout
 
-```
+```text
 batchalign3/test-fixtures/
 ├── README.md                     # convention overview + JSON schema
 ├── align/
@@ -179,7 +179,7 @@ assertions operate on the parsed `ChatFile` directly and do not.
 
 6. **Add a command-local test function to `<command>/regressions.rs`:**
 
-   ```rust
+   ```rust,ignore
     #[tokio::test]
      async fn transcribe_regression_001() {
          run_fixture("transcribe", "transcribe-regression-001").await

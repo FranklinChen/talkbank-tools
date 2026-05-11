@@ -1,5 +1,6 @@
 # Flag Translation Guide
 
+**Status:** Current
 The original CLAN uses a `+flag`/`-flag` syntax that differs from standard CLI conventions. The Rust reimplementation accepts both styles — legacy CLAN flags are automatically rewritten to modern `--flag` equivalents before parsing.
 
 ## Complete Flag Mapping

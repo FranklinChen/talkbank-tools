@@ -1,5 +1,6 @@
 # Quick Reference
 
+**Status:** Current
 **Last updated:** 2026-04-13 20:34 EDT
 
 A comprehensive reference card for every keyboard shortcut, command, and

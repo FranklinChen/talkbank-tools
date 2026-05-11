@@ -1,5 +1,6 @@
 # TEXT2CHAT -- Plain Text to CHAT Conversion
 
+**Status:** Current
 ## Purpose
 
 Converts plain text files into CHAT format by splitting on sentence-ending punctuation (`.`, `?`, `!`) and assigning all utterances to a default speaker. This is the simplest converter, useful for bootstrapping CHAT files from raw text.

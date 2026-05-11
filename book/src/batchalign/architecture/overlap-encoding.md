@@ -9,7 +9,7 @@
 
 **Model (talkbank-tools):** `crates/talkbank-model/src/model/content/other_spoken.rs`
 
-```rust
+```rust,ignore
 pub struct OtherSpokenEvent {
     pub speaker: SpeakerCode,     // e.g., "INV"
     pub text: smol_str::SmolStr,  // e.g., "oh_okay_yeah"
@@ -50,7 +50,7 @@ The content walker (`for_each_leaf` / `for_each_leaf_mut`) **skips**
 `OtherSpokenEvent` entirely. It is listed in the no-op match arm alongside
 events, pauses, overlap points, and other non-alignable content:
 
-```rust
+```rust,ignore
 UtteranceContent::OtherSpokenEvent(_) => {}  // skipped
 ```
 

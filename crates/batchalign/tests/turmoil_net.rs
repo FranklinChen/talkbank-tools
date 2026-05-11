@@ -298,7 +298,10 @@ fn serve_real_app(sim: &mut turmoil::Sim<'_>, app: &mut RealAppHandle) {
 fn test_submission() -> JobSubmission {
     JobSubmission {
         command: ReleasedCommand::Morphotag,
-        lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+        // Morphotag requires LanguageSpec::PerFile per the submission
+        // validator. The CHAT content carries `@Languages: eng` so the
+        // per-file resolver succeeds.
+        lang: LanguageSpec::PerFile,
         num_speakers: NumSpeakers(1),
         files: vec![FilePayload {
             filename: "test.cha".into(),

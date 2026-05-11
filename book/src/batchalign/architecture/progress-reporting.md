@@ -38,7 +38,7 @@ typed stage when projecting the API response.
 
 ## Data Flow
 
-```
+```text
 Orchestrator (fa.rs, transcribe pipeline, etc.)
   → ProgressSender (unbounded channel)
     → Forwarder task (spawned per file)
@@ -69,7 +69,7 @@ No orchestrator changes needed.
 
 `set_file_progress()` in `runner/util.rs` is the helper:
 
-```rust
+```rust,ignore
 set_file_progress(store, job_id, filename, FileStage::Aligning, None, None).await;
 ```
 
@@ -79,7 +79,7 @@ Orchestrators report fine-grained progress via a `ProgressSender` channel.
 The dispatch layer creates the channel with `spawn_progress_forwarder()` and
 passes the sender to the orchestrator.
 
-```rust
+```rust,ignore
 let progress_tx = spawn_progress_forwarder(store.clone(), job_id, filename);
 
 process_fa(..., Some(&progress_tx)).await;
@@ -87,7 +87,7 @@ process_fa(..., Some(&progress_tx)).await;
 
 Inside the orchestrator:
 
-```rust
+```rust,ignore
 if let Some(tx) = progress {
     let _ = tx.send(ProgressUpdate::new(
         FileStage::Aligning,
@@ -167,14 +167,14 @@ with a per-file counter as results are saved to disk.
 
 ### CLI (indicatif)
 
-```
+```text
   [=====>                  ] 3/50 files  [00:42]
   ⠋ align: Aligning 5/12
 ```
 
 ### TUI (ratatui)
 
-```
+```text
   morphotag — 3/50 files  3✓ 2⠋ 1✗ 44·  [00:42]  ~03:15
   Workers: infer:asr:eng · infer:morphosyntax:eng    Warmup: complete
   Memory: [████████████░░░░░░░░] 148/256 GB   Gate: 2 GB ● safe
@@ -274,7 +274,7 @@ column stacks three system-health panels:
 
 The `HealthResponse` struct exposes system memory data for the dashboard:
 
-```rust
+```rust,ignore
 pub system_memory_total_mb: u64,      // sysinfo::total_memory()
 pub system_memory_available_mb: u64,  // sysinfo::available_memory()
 pub system_memory_used_mb: u64,       // total - available

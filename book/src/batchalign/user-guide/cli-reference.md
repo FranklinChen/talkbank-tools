@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-05-02 07:21 EDT
+**Last updated:** 2026-05-11 09:55 EDT
 
 This page documents the current public `batchalign3` CLI surface. For anything
 you are scripting against, confirm with `batchalign3 <command> --help`.
@@ -121,12 +121,13 @@ exist at the time the command runs; a missing path is a hard error.
 ```
 
 ```bash
-# Run align on every file in the list (in-place, using net's server)
+# Run align on every file in the list (in-place, against a remote server)
 batchalign3 --server http://your-server:8001 align --file-list my-list.txt
-
-# Split a large list into batches of 10 for long re-runs
-bash scripts/align_batch_run.sh -n 10 -s http://your-server:8001 my-list.txt
 ```
+
+To process a large list in smaller batches, split the list into
+chunked files (e.g. with `split -l 10 my-list.txt batch-`) and run
+`batchalign3 align --file-list <chunk>` on each chunk sequentially.
 
 `--file-list` is mutually exclusive with positional `PATHS` arguments. It
 does not accept a separate `-o/--output` directory — each path in the list
@@ -224,7 +225,6 @@ batchalign3 serve stop
 | `--foreground` | Do not daemonize |
 | `--test-echo` | Start test-echo workers |
 | `--warmup VALUE` | Warmup preset (`off`, `minimal`, `full`) or comma-separated command list (e.g. `align,morphotag`) |
-| `--worker-idle-timeout-s N` | Idle worker shutdown timeout |
 
 ### `jobs`
 

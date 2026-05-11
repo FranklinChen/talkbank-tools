@@ -100,7 +100,7 @@ stripped — not split — because the space does not represent a separate word.
 Before passing tokens to the retokenize algorithm, whitespace is stripped from
 token text:
 
-```rust
+```rust,ignore
 if retokenize {
     // Stanza's combined tokenizer (e.g. Japanese) sometimes merges
     // adjacent CHAT words into a single token while preserving the
@@ -158,7 +158,7 @@ cleanup, but several rules are Japanese-relevant:
 When Stanza returns a Japanese bracket quote as the lemma, the function falls
 back to the surface text (`mapping.rs:445–456`):
 
-```rust
+```text
 // Handle Japanese quotes
 if target.trim() == "\u{300D}" || target.trim() == "\u{300C}" {  // 」 or 「
     target = text.to_string();
@@ -167,7 +167,7 @@ if target.trim() == "\u{300D}" || target.trim() == "\u{300C}" {  // 」 or 「
 
 After the fallback, any remaining quote characters are stripped:
 
-```rust
+```text
 target = target.replace('\u{300D}', ""); // 」
 target = target.replace('\u{300C}', ""); // 「
 ```
@@ -197,7 +197,7 @@ Japanese-specific overrides in steps 3–4.
 If the language is Japanese, verb form overrides run before generic POS mapping
 (`mapping.rs:359–365`):
 
-```rust
+```rust,ignore
 if lang2(&ctx.lang) == "ja"
     && let Some(ovr) = lang_ja::japanese_verbform(&effective_pos, &cleaned_lemma, &ud.text)
 {
@@ -216,7 +216,7 @@ All Japanese `PUNCT` tokens map to the `cm` (comma marker) POS category, and
 Japanese commas (both full-width `、` and ASCII `,`) also map to `cm`
 (`mapping.rs:367–375`):
 
-```rust
+```rust,ignore
 if lang2(&ctx.lang) == "ja" {
     if matches!(ud.upos, UdPunctable::Value(UniversalPos::Punct)) {
         effective_pos = "cm".to_string();
@@ -246,7 +246,7 @@ rules) is ported from Python's `batchalign/pipelines/morphosyntax/ja/verbforms.p
 
 ### Structure
 
-```rust
+```rust,ignore
 pub struct JaOverride {
     pub pos: &'static str,   // New POS category
     pub lemma: &'static str, // New lemma
@@ -295,7 +295,7 @@ The `is_clitic()` function (`mapping.rs:322–329`) identifies MWT sub-tokens
 that are clitics (e.g., English `n't`, `'s`; French `l'`, `-ce`). Japanese has
 no entries — the function returns `false` for all Japanese tokens:
 
-```rust
+```rust,ignore
 fn is_clitic(text: &str, ctx: &MappingContext) -> bool {
     match lang2(&ctx.lang) {
         "en" => text == "n't" || text == "'s" || text == "'ve" || text == "'ll",

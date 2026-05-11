@@ -33,7 +33,7 @@ With Coder Mode active, press `Cmd+Shift+C` (macOS) or `Ctrl+Shift+C` (Windows/L
 
 The QuickPick displays all codes from the `.cut` file as a flat list with indentation to show the hierarchy:
 
-```
+```text
   $POS
     :QUE
       :NV
@@ -48,7 +48,7 @@ Type to filter the list using VS Code's fuzzy matching. Select a code and press 
 
 The selected code is inserted as a dependent tier immediately after the current utterance:
 
-```
+```text
 *CHI:	I want the red one .
 %cod:	$PRA:request
 ```

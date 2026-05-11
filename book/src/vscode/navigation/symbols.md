@@ -1,5 +1,6 @@
 # Document Symbols
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 The extension provides standard VS Code symbol navigation features -- document outline, workspace search, rename, find references, linked editing, and code lens -- all aware of CHAT structure. These make it easy to navigate large transcript files and perform safe, file-wide speaker operations.

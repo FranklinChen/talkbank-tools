@@ -1,5 +1,6 @@
 # Cache Management
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 The extension uses a SQLite cache to store validation results, avoiding redundant re-validation of files that have not changed. This chapter covers the cache location, monitoring, and maintenance.

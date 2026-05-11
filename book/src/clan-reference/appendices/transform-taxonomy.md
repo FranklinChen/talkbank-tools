@@ -1,5 +1,6 @@
 # Transform Taxonomy
 
+**Status:** Current
 Classification of the 23 transform commands by operation level.
 
 ## Text/Layout Transforms (5)
@@ -49,19 +50,19 @@ These transforms use a combination of AST and text-level operations.
 ## Pipeline Patterns
 
 ### Standard AST pipeline (most transforms)
-```
+```text
 read file → parse → validate → transform(AST) → serialize → write
 ```
 Handled by `framework::run_transform()`.
 
 ### Text-level pipeline (DATACLEAN, LINES)
-```
+```text
 read file → parse → validate → serialize → transform(text) → write
 ```
 Uses custom run functions that operate on the serialized string.
 
 ### File-argument pipeline (COMPOUND, DATES)
-```
+```text
 copy to temp → run with file path → read output
 ```
 Some CLAN binaries don't support stdin; these use file arguments.

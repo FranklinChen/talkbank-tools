@@ -1,5 +1,6 @@
 # CLAN Command Reference
 
+**Status:** Current
 **CLAN** (Computerized Language Analysis) is a suite of commands for analyzing transcripts in [CHAT format](https://talkbank.org/0info/manuals/CHAT.html) (Codes for the Human Analysis of Transcripts). This book documents the Rust reimplementation of CLAN, invoked via the `chatter clan` command.
 
 ## Relationship to the legacy CLAN manual

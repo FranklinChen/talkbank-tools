@@ -1,5 +1,6 @@
 # Code Completion & Snippets
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 The extension provides context-aware autocompletion and snippet templates to speed up CHAT editing. Completions are triggered by specific characters at the start of a line or within an utterance, and snippets expand common CHAT structures with a single Tab press.
@@ -12,7 +13,7 @@ Completion suggestions appear automatically as you type certain trigger characte
 
 When you type `*` at the start of a line, the extension offers all speakers declared in the file's `@Participants` header. Each suggestion includes the speaker's role and auto-inserts the colon and tab separator:
 
-```
+```text
 *|  <-- cursor here
 
 Suggestions:
@@ -27,7 +28,7 @@ This ensures you never mistype a speaker code or use a code that is not declared
 
 When you type `%` at the start of a line after a main tier, the extension offers all standard dependent tier types:
 
-```
+```rust,ignore
 %|  <-- cursor here
 
 Suggestions:
@@ -74,7 +75,7 @@ This eliminates the need to memorize all bracket codes and ensures correct forma
 
 When you type `+` in an utterance context, the extension offers valid CHAT postcodes:
 
-```
+```text
 +|  <-- cursor here
 
 Suggestions:
@@ -90,7 +91,7 @@ Suggestions:
 
 Above the `@Participants` header, a code lens annotation displays the utterance count for each speaker in the file. For example:
 
-```
+```text
 CHI: 42 utterances | MOT: 38 utterances
 @Participants:	CHI Target_Child, MOT Mother
 ```

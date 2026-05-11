@@ -1,5 +1,6 @@
 # Migrating from CLAN
 
+**Status:** Current
 This guide helps users of the original CLAN C binaries transition to `chatter clan`.
 
 ## Command mapping

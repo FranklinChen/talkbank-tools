@@ -24,7 +24,7 @@ Used by engines that require a valid AST to produce correct output:
 - **Rejects** on any error — raises `ValueError` in Python.
 - Error string includes all error codes and locations:
 
-```
+```text
 Parse error: error[E316]: Could not parse content (line 5, bytes 100..120)
 ```
 
@@ -75,7 +75,7 @@ before final serialization, the production path validates the
 generated `ChatFile` again to catch bugs in our own generation code
 (MOR/GRA count mismatch, terminator identity errors).
 
-```rust
+```rust,ignore
 // crates/batchalign/src/validate.rs
 let errors = validate_chat(&chat_file);
 if !errors.is_empty() {
@@ -85,7 +85,7 @@ if !errors.is_empty() {
 
 The exception message includes error codes and line numbers:
 
-```
+```text
 Pre-serialization validation failed:
   - E705: Main tier has 2 alignable items, but %mor tier has 1 items
   - E716: Main tier terminator "." does not match %mor terminator "?" (line 23)
@@ -142,7 +142,7 @@ are derived from server `FileStatusEntry` fields (`error`,
 
 ## Error Flow
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Rust Parser                              │
 │  parse_chat_file() ──► ParseError { code, line, message }   │

@@ -15,7 +15,7 @@ The `&*` marker embeds one speaker's words inside another speaker's utterance.
 The syntax is `&*SPEAKER:word` or `&*SPEAKER:word_word` (underscores join
 compound expressions because `&*` only allows a single token).
 
-```
+```text
 *PAR:	I went to the store &*INV:mhm and bought some milk . 0_6000
 ```
 
@@ -39,7 +39,7 @@ the approximate position in PAR's text where the overlap occurred.
 Each speaker's words go on their own line. The `+<` (lazy overlap) linker
 marks that the utterance started before the previous one finished:
 
-```
+```text
 *PAR:	I went to the store and bought some milk . 0_6000
 *INV:	+< mhm . 3500_4000
 ```
@@ -127,7 +127,7 @@ batchalign3 align corpus/ -o output/ --utr-strategy two-pass
 
 The `&*` encoding becomes hard to read with multiple backchannels:
 
-```
+```text
 *PAR:	but I grew up in Princeton &*INV:oh_okay_yeah and came to
 	graduate school &*INV:mhm at Chapel_Hill &*INV:oh in ninety
 	one &*INV:mhm or maybe ninety two . 104745_118254
@@ -135,7 +135,7 @@ The `&*` encoding becomes hard to read with multiple backchannels:
 
 The `+<` encoding is cleaner:
 
-```
+```text
 *PAR:	but I grew up in Princeton and came to graduate school at
 	Chapel_Hill and in ninety one or maybe ninety two . 104745_118254
 *INV:	+< oh okay yeah .

@@ -30,7 +30,7 @@ make test     # verify nothing broke (~6s)
 
 Every command flows through these layers:
 
-```
+```text
 CLI args → CommandOptions → JobSubmission → Runner
         → shared family dispatch / worker pool → output materialization
 ```
@@ -61,7 +61,7 @@ Update the `ALL` array, `as_str()`, `TryFrom<&str>`, and `From<ReleasedCommand> 
 
 ## Step 2: Add the command-owned definition
 
-```rust
+```rust,ignore
 // crates/batchalign/src/commands/your_command.rs
 use crate::ReleasedCommand;
 use crate::commands::spec::declare_batched_text_command;
@@ -116,7 +116,7 @@ Create `crates/batchalign/src/commands/your_command.rs`.
 
 **For a command that reuses an existing runner family**:
 
-```rust
+```rust,ignore
 // commands/your_command.rs
 use crate::ReleasedCommand;
 use crate::commands::spec::declare_batched_text_command;
@@ -138,7 +138,7 @@ Only touch `runner/dispatch/*` when your command shape is genuinely new.
 **If you truly need a new family**, add or extend the shared runner kernel and
 keep the command module as the contributor-facing entrypoint:
 
-```rust
+```rust,ignore
 use crate::pipeline::PipelineServices;
 use crate::runner::{DispatchHostContext, RunnerJobSnapshot};
 pub(crate) async fn run(
@@ -179,7 +179,7 @@ hand-writing one-off runtime metadata.
 
 Create `crates/batchalign/src/your_command.rs` with the actual ML dispatch:
 
-```rust
+```rust,ignore
 pub(crate) async fn run_your_command_impl(
     chat_text: &str,
     services: PipelineServices<'_>,
@@ -199,7 +199,7 @@ See `morphosyntax.rs` or `translate.rs` for complete examples.
 
 Add to `crates/batchalign/src/args/commands.rs`:
 
-```rust
+```rust,ignore
 #[derive(Args, Debug, Clone)]
 pub struct YourCommandArgs {
     #[command(flatten)]
@@ -214,7 +214,7 @@ pub struct YourCommandArgs {
 
 Add to the `Commands` enum:
 
-```rust
+```rust,ignore
 pub enum Commands {
     // ...
     YourCommand(YourCommandArgs),
@@ -225,7 +225,7 @@ pub enum Commands {
 
 In `crates/batchalign/src/args/mod.rs`, add a match arm:
 
-```rust
+```rust,ignore
 Commands::YourCommand(a) => CommandProfile {
     command: ReleasedCommand::YourCommand,
     lang: &a.lang,
@@ -238,7 +238,7 @@ Commands::YourCommand(a) => CommandProfile {
 
 In `crates/batchalign/src/types/options.rs`, add:
 
-```rust
+```rust,ignore
 pub enum CommandOptions {
     // ...
     YourCommand(YourCommandOptions),
@@ -308,7 +308,7 @@ flowchart TD
 
 ### Key types
 
-```rust
+```text
 // Intermediate artifacts — produced by build_comparison_artifacts(), consumed by materializer
 struct ComparisonArtifacts {
     main_file: ChatFile,        // parsed morphotagged main

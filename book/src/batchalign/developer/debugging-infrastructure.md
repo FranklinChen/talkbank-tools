@@ -18,7 +18,7 @@ in one step.
 When a worker request fails, the error message itself carries enough context
 to identify the problem:
 
-```
+```text
 Failed to parse raw Stanza output for item 4
   (words: ["euh", "Lisa", "est", "au", "Mexique", ...]):
   sentence 0 word 3: missing field `lemma`.
@@ -114,7 +114,7 @@ an AI assistant (Claude Code or similar) is analyzing a failure:
 The enriched error message contains all the information needed to identify the
 root cause without any follow-up queries:
 
-```
+```text
 words: ["euh", "Lisa", "est", "au", ...]
 sentence 0 word 3: field 'upos' absent (keys: ["end_char", "id", "start_char", "text"])
 ```

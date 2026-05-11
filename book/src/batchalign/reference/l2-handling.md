@@ -20,7 +20,7 @@ secondary-language Stanza model and merges the response with the
 primary model's structural analysis. The `%mor` tier carries real
 POS/lemma/features:
 
-```
+```text
 # Default
 %mor:  ... adp|auf noun|film noun|study-Plur .
 ```
@@ -37,7 +37,7 @@ This is the legacy behavior researchers cite in work published
 before the L2 morphotag feature landed, and remains the honest
 fallback when a secondary Stanza model is known to be weak.
 
-```
+```text
 # --no-l2-morphotag
 %mor:  ... adp|auf L2|xxx L2|xxx .
 ```

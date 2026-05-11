@@ -1,5 +1,6 @@
 # Command Reference
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 Complete reference for all 33 CLAN analysis commands available in the

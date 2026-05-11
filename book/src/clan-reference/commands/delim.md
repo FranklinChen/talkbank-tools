@@ -1,5 +1,6 @@
 # DELIM -- Add Missing Utterance Terminators
 
+**Status:** Current
 ## Purpose
 
 Reimplements CLAN's `delim` command, which ensures every main tier has a terminator. Utterances missing a terminator (`.`, `?`, `!`) receive a default period (`.`). This is typically used as a repair step for files imported from external formats that lack CHAT punctuation conventions.

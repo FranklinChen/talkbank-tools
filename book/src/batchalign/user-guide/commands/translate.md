@@ -1,7 +1,7 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-05-02 02:30 EDT
+**Last updated:** 2026-05-11 10:09 EDT
 
 Add English translations to non-English CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only — no audio involved.
@@ -83,8 +83,7 @@ re-invoke the worker.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--lang CODE` | from `@Languages` | 3-letter ISO source language code. Overrides the file's `@Languages` header when set |
-| `--merge-abbrev` | off | Merge abbreviations in the output |
+| `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the translated output |
 
 ---
 

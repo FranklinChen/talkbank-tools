@@ -25,7 +25,7 @@ All 7 ML binaries are now consolidated into one binary (`ml_golden.rs`) with
 submodules. One binary = one process = one `LazyLock` = one `PreparedWorkers` =
 one set of loaded models. Peak memory is ~8-12 GB instead of 7x that.
 
-```
+```rust,ignore
 ml_golden (one binary, one process)
   → LazyLock → PreparedWorkers → python3 (Stanza, Whisper, Wave2Vec, pyannote)
   ├── ml_golden::golden           (12 tests)

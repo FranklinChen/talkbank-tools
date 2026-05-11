@@ -1,5 +1,6 @@
 # Speaker Filtering
 
+**Status:** Current
 Speaker filters restrict which speakers' utterances are analyzed. This is one of the most frequently used filters — most CLAN analyses target a specific participant (e.g., the child in a child language study).
 
 ## Include speakers

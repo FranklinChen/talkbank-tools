@@ -104,7 +104,7 @@ leaked into the CHAT main tier, the file would become unparseable.
 The architecture enforces a hard type boundary between Stanza tokens
 and CHAT words:
 
-```
+```text
 CHAT main tier words (Word in Rust AST)
       │
       ├─ extract_nlp_words() ──> list of strings sent to Python
@@ -171,7 +171,7 @@ callback that Stanza calls after tokenization but before POS tagging.
 The key insight: **Stanza's tokenizer only re-splits the same characters
 — it never reorders, adds, or removes characters.**  This means:
 
-```
+```text
 concat(stanza_tokens, no_spaces) == concat(original_words, no_spaces)
 ```
 
@@ -181,20 +181,20 @@ of an O(n*m) DP edit-distance alignment.
 #### Algorithm
 
 1. Build a character-to-word-index array from the original CHAT words:
-   ```
+   ```rust,ignore
    "ice-cream know" -> [0,0,0,0,0,0,0,0,0, 1,1,1,1]
                          i c e - c r e a m   k n o w
    ```
 
 2. Build a character-to-token-index array from Stanza's tokens:
-   ```
+   ```rust,ignore
    "ice - cream know" -> [0,0,0, 1, 2,2,2,2,2, 3,3,3,3]
                            i c e  -  c r e a m   k n o w
    ```
 
 3. For each original word, collect which Stanza tokens have characters
    in that word's range:
-   ```
+   ```rust,ignore
    word 0 ("ice-cream") -> tokens [0, 1, 2]  (need merging)
    word 1 ("know")       -> tokens [3]        (fine as-is)
    ```
@@ -252,7 +252,7 @@ trace and re-evaluation criteria.
 Stanza's MWT processor then annotates these with Range markers
 (`"id": [2, 3]`), which the Rust code in `sentence_mapping.rs` handles:
 
-```rust
+```rust,ignore
 // sentence_mapping.rs: map_ud_sentence()
 UdId::Range(start, end) => {
     // Group component words under one CHAT word index
@@ -266,7 +266,7 @@ UdId::Range(start, end) => {
 The component words are assembled into a single `Mor` with clitic
 markers:
 
-```rust
+```rust,ignore
 // mapping_helpers.rs: assemble_mors()
 // "do" (AUX) + "n't" (PART) -> aux|do~part|not
 if is_clitic(text) {
@@ -417,7 +417,7 @@ output (a `Vec<UdWord>`) and produces `%mor/%gra` strings.
 
 ### Why the Split
 
-```
+```text
 CHAT words
     │
     │  extract_nlp_words() [Rust]
@@ -465,7 +465,7 @@ Side-by-side on Brown/Eve 010600a.cha after implementation:
 from repeated contractions.  The actual MWT expansion coverage matches.
 
 Example output:
-```
+```text
 Input:   *CHI: I don't know .
 %mor:    pron|I-Prs-Nom-S1 aux|do-Fin-Ind-Pres-S2~part|not verb|know-Inf .
 ```

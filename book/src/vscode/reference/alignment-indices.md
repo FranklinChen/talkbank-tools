@@ -112,7 +112,7 @@ Neither maps the semantic word to its `%mor` lemma.
 
 The correct projection is:
 
-```rust
+```rust,ignore
 // 1. Semantic word index → chunk index via subtract-1.
 let chunk_idx = (relation.index as usize).checked_sub(1)?;
 

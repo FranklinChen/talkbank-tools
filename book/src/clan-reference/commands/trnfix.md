@@ -1,5 +1,6 @@
 # TRNFIX — Compare Two Dependent Tiers
 
+**Status:** Current
 ## Purpose
 
 Compares two dependent tiers (default: `%mor` and `%trn`) word-by-word across all utterances, reporting unique mismatch pairs with frequency counts and an overall accuracy percentage. Useful for verifying tier consistency after automatic annotation or manual correction.

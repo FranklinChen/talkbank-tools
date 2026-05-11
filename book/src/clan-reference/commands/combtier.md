@@ -1,5 +1,6 @@
 # COMBTIER -- Combine Duplicate Dependent Tiers
 
+**Status:** Current
 ## Purpose
 
 Combines duplicate dependent tiers within an utterance. The legacy manual describes `COMBTIER` narrowly: it corrects the case where transcribers create several `%com` lines, combining two `%com` lines into one by removing the second header and moving its material onto the first `%com` line.

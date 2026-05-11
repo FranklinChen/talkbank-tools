@@ -944,14 +944,14 @@ async fn column_exists(conn: &mut SqliteConnection, table: &str, column: &str) -
 // Staleness flagging (xtask audit-docs flag-staleness)
 // ---------------------------------------------------------------------------
 
-struct FlagPattern {
-    name: &'static str,
-    severity: &'static str,
+pub(crate) struct FlagPattern {
+    pub(crate) name: &'static str,
+    pub(crate) severity: &'static str,
     /// Regex to match against each line of every section body.
-    pattern: &'static str,
+    pub(crate) pattern: &'static str,
 }
 
-const FLAG_PATTERNS: &[FlagPattern] = &[
+pub(crate) const FLAG_PATTERNS: &[FlagPattern] = &[
     FlagPattern {
         name: "deleted-crate-chat-ops",
         severity: "high",

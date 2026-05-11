@@ -38,7 +38,7 @@ The installed `batchalign3` console command is a tiny Python wrapper
 packaged in the wheel at `batchalign/_bin/batchalign3`, or from
 `target/debug/batchalign3` in a source checkout.
 
-```
+```rust,ignore
 main.rs            → batchalign::cli::run_command(cli)
 batchalign/_cli.py → os.execv(batchalign/_bin/batchalign3)  [installed]
                    → os.execv(target/debug/batchalign3)      [dev checkout]

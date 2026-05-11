@@ -35,7 +35,7 @@ Built `extract_corpus_candidates` (`spec/runtime-tools/src/bin/extract_corpus_ca
 to automatically select representative files from the corpus data directory for 20 target
 languages:
 
-```
+```text
 eng, zho, fra, deu, spa, jpn, nld, heb, por, ell,
 tur, hrv, pol, ita, hun, rus, est, dan, ara, isl
 ```
@@ -154,7 +154,7 @@ All verification gates pass:
 
 ## Final State
 
-```
+```text
 corpus/reference/           374 files total
   *.cha                     345 files (original English corpus)
   constructs/                 4 files (rare grammar constructs)

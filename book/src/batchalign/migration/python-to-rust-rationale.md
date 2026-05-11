@@ -41,7 +41,7 @@ model matches the format's structure, you don't need string hacking.**
 
 ### How It Works
 
-```
+```text
               Rust                           Python (ML only)
          ┌────────────┐                   ┌──────────────┐
 CHAT  →  │ Parse AST  │  → words JSON →  │  Stanza NLP  │

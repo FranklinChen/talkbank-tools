@@ -113,7 +113,7 @@ same directory tree.
 A replacement is modeled as a first-class `UtteranceContent` variant,
 not as a flag on `Word`:
 
-```rust
+```rust,ignore
 // crates/talkbank-model/src/model/annotation/replacement.rs
 pub struct ReplacedWord {
     pub word: Word,                       // left side: original spoken word

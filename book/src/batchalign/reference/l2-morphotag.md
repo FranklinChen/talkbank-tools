@@ -137,7 +137,7 @@ The dependency relation alone strongly constrains the part-of-speech.
 This mapping is a **pure function** — no ML involved, exhaustively
 testable:
 
-```
+```text
 deprel        → POS constraint set
 ───────────────────────────────────────────
 det           → {DET}                        ← unambiguous
@@ -309,7 +309,7 @@ example.
 
 Concretely, the algorithm in pseudocode:
 
-```
+```text
 1. primary_deprel   ← primary model's deprel for word i
 2. primary_upos     ← primary model's UPOS for word i
 3. primary_head     ← primary model's head index for word i
@@ -389,7 +389,7 @@ Consecutive `@s` words with the same resolved target language are merged
 into a single span and sent as a mini-sentence to the secondary model.
 This gives the model useful context:
 
-```
+```text
 Input:   we talked about los@s:spa niños@s:spa .
 Span:    ─────────────── ^^^^^^^^^^^^^^^^^^^^^^^^
                          "los niños" → Spanish Stanza

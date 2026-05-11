@@ -1,7 +1,7 @@
 # Model Downloads and Caching
 
 **Status:** Current
-**Last updated:** 2026-05-06 13:34 EDT
+**Last updated:** 2026-05-11 11:35 EDT
 
 ## The contract
 
@@ -55,7 +55,7 @@ always know what batchalign3 is doing and roughly how long it will take.
 Example: a brand-new install running `batchalign3 morphotag input/ output/`
 will show a sequence like:
 
-```
+```text
 Downloading Stanza resource catalog (one-time, ~1 MB; future runs will be instant)…
 Stanza resource catalog ready.
 Downloading Stanza language pack for eng (en) (one-time, ~250–500 MB; future runs will use the local cache)…
@@ -67,7 +67,7 @@ Processing input/file2.cha
 
 A fresh `transcribe` run:
 
-```
+```text
 Downloading openai/whisper-large-v3 for ASR (one-time, ~3 GB; future runs will use the local cache)…
 Loading Whisper-large-v3 onto GPU…
 Calling Rev.AI for utterance-timing recovery…
@@ -232,8 +232,8 @@ The result cache lives at:
 
 | OS | Path |
 |---|---|
-| macOS | `~/Library/Application Support/batchalign3/cache.db` |
-| Linux | `~/.local/share/batchalign3/cache.db` |
+| macOS | `~/Library/Caches/batchalign3/cache.db` |
+| Linux | `~/.cache/batchalign3/cache.db` |
 | Windows | `%LocalAppData%\batchalign3\cache.db` |
 
 You can `rm` it at any time; new runs will start a fresh cache.

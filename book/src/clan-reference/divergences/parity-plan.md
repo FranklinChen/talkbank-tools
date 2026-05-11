@@ -1,5 +1,6 @@
 # Parity Improvement Plan
 
+**Status:** Current
 Current: **95% (113/118)** — 5 accepted divergences across 2 commands.
 
 ## Progress

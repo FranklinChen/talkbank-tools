@@ -1,7 +1,7 @@
 # Deterministic Simulation Testing with turmoil
 
 **Status:** Current
-**Last modified:** 2026-05-01 09:47 EDT
+**Last updated:** 2026-05-01 09:47 EDT
 
 ## Why we need this
 
@@ -69,7 +69,7 @@ flowchart LR
 The existing server architecture already provides a clean separation between
 **router creation** and **listener binding**:
 
-```rust
+```rust,ignore
 // server.rs — production path
 let (router, state) = create_app_with_prepared_workers(config, ...).await?;
 let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -122,7 +122,7 @@ additionally implements `hyper_util::client::legacy::connect::Connection`
 
 Each test creates a `turmoil::Sim` with named hosts:
 
-```rust
+```rust,ignore
 #[test]
 fn health_check_under_partition() -> turmoil::Result {
     let mut sim = turmoil::Builder::new()
@@ -226,7 +226,7 @@ These use the actual batchalign router with `MockConnectInfo` and
 The turmoil API for fault injection is declarative and operates on named
 host pairs:
 
-```rust
+```rust,ignore
 // Network partitions (messages dropped silently)
 turmoil::partition("client", "server");          // bidirectional
 turmoil::partition_oneway("client", "server");   // one direction only
@@ -255,7 +255,7 @@ default `ConnectInfo` for all requests. turmoil tests apply this to the
 router so `submit_job`'s `ConnectInfo<SocketAddr>` extractor works without
 `into_make_service_with_connect_info`:
 
-```rust
+```rust,ignore
 use axum::extract::connect_info::MockConnectInfo;
 let router = router.layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 1], 0))));
 ```
@@ -273,7 +273,7 @@ runtime** that hosts the background actors. The `Router` is extracted and
 handed to the turmoil host for simulated network serving. The runtime stays
 alive (leaked as `&'static`) so its worker threads keep polling the actors:
 
-```rust
+```rust,ignore
 let mut app = create_real_test_app_blocking(&python);
 let router = app.take_router();
 let _app: &'static _ = Box::leak(Box::new(app)); // keep actors alive

@@ -20,7 +20,9 @@ use crate::api::{JobId, JobStatus, RevAiJobId};
 use crate::host_memory::{HostMemoryCoordinator, HostMemoryError, JobExecutionPlan};
 use crate::revai::{RevAiPreflightPlan, preflight_submit_audio_paths};
 use crate::scheduling::FailureCategory;
-use crate::store::{JobStore, LeaseRenewalOutcome, RunnerJobSnapshot, unix_now};
+use crate::store::{
+    JobCompletionSnapshot, JobStore, LeaseRenewalOutcome, RunnerJobSnapshot, unix_now,
+};
 
 use super::context::{
     DirectExecutionHost, DispatchHostContext, ExecutionReservationError, HostedJobRunOutcome,
@@ -378,13 +380,7 @@ async fn run_hosted_job(
     };
 
     let completed_at = unix_now();
-    let final_status = if completion.cancelled {
-        JobStatus::Cancelled
-    } else if forced_errors > 0 || completion.all_failed {
-        JobStatus::Failed
-    } else {
-        JobStatus::Completed
-    };
+    let final_status = finalize_status(&completion, forced_errors);
 
     sink.finalize_job(job_id, final_status, completed_at).await;
 
@@ -396,6 +392,37 @@ async fn run_hosted_job(
     );
 
     Ok(HostedJobRunOutcome::Completed)
+}
+
+/// Decide a job's final terminal status from completion facts.
+///
+/// Pure function — extracted from the body of [`run_hosted_job`] so it
+/// can be unit-tested directly.
+///
+/// Decision order (each row supersedes the rows below):
+///
+/// | Predicate                              | Resulting status     |
+/// |----------------------------------------|----------------------|
+/// | `completion.cancelled`                 | `Cancelled`          |
+/// | `forced_errors > 0 \|\| any_failed`    | `Failed`             |
+/// | otherwise                              | `Completed`          |
+///
+/// The middle row is the 2026-05-11 regression fix: the
+/// previous predicate used `completion.all_failed`, which only fired
+/// when *every* terminal file errored. A job with 2 of 3 files in
+/// error and 1 success silently finalized as `Completed`, hiding the
+/// per-file failures. Per the `JobStatus` doc contract at
+/// `types/status.rs:27-31` (`Completed` means all files OK, `Failed`
+/// means one or more files errored), `any_failed` is the correct
+/// boundary.
+fn finalize_status(completion: &JobCompletionSnapshot, forced_errors: usize) -> JobStatus {
+    if completion.cancelled {
+        JobStatus::Cancelled
+    } else if forced_errors > 0 || completion.any_failed {
+        JobStatus::Failed
+    } else {
+        JobStatus::Completed
+    }
 }
 
 /// Reserve host memory for the job and compute the execution plan (worker
@@ -484,6 +511,70 @@ mod tests {
 
     use async_trait::async_trait;
     use tokio::sync::broadcast;
+
+    /// 2026-05-11 morphotag job `150c824a-48e`: 3 files, 1 done,
+    /// 2 errored, no cancellation, no forced terminal-state errors.
+    /// Before this fix the job finalized as `Completed`; now it must
+    /// be `Failed`.
+    #[test]
+    fn finalize_status_marks_partial_failure_as_failed() {
+        let completion = JobCompletionSnapshot {
+            cancelled: false,
+            all_failed: false,
+            any_failed: true,
+        };
+        assert_eq!(finalize_status(&completion, 0), JobStatus::Failed);
+    }
+
+    /// Happy path: every terminal file succeeded.
+    #[test]
+    fn finalize_status_marks_all_done_as_completed() {
+        let completion = JobCompletionSnapshot {
+            cancelled: false,
+            all_failed: false,
+            any_failed: false,
+        };
+        assert_eq!(finalize_status(&completion, 0), JobStatus::Completed);
+    }
+
+    /// Worst case: every terminal file errored.
+    #[test]
+    fn finalize_status_marks_all_failed_as_failed() {
+        let completion = JobCompletionSnapshot {
+            cancelled: false,
+            all_failed: true,
+            any_failed: true,
+        };
+        assert_eq!(finalize_status(&completion, 0), JobStatus::Failed);
+    }
+
+    /// Cancellation wins over file outcomes — even if some files
+    /// errored, a cancelled job is `Cancelled`, not `Failed`, so the
+    /// user's gesture is preserved and the job remains restartable
+    /// per the `JobStatus::can_restart` contract.
+    #[test]
+    fn finalize_status_cancellation_supersedes_failures() {
+        let completion = JobCompletionSnapshot {
+            cancelled: true,
+            all_failed: false,
+            any_failed: true,
+        };
+        assert_eq!(finalize_status(&completion, 0), JobStatus::Cancelled);
+    }
+
+    /// `forced_errors > 0` means `force_terminal_file_states` had to
+    /// push at least one file from a non-terminal state into an error
+    /// — that's a job-level abnormality independent of per-file
+    /// outcomes. Surface as `Failed`.
+    #[test]
+    fn finalize_status_forced_errors_promote_to_failed() {
+        let completion = JobCompletionSnapshot {
+            cancelled: false,
+            all_failed: false,
+            any_failed: false,
+        };
+        assert_eq!(finalize_status(&completion, 1), JobStatus::Failed);
+    }
 
     use crate::api::NumWorkers;
     use crate::cache::UtteranceCache;

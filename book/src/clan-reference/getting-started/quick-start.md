@@ -1,5 +1,6 @@
 # Quick Start
 
+**Status:** Current
 All CLAN commands follow the pattern:
 
 ```bash

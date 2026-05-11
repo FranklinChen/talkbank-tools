@@ -31,7 +31,7 @@ In the `%mor` tier rules, lemmas are parsed as opaque Unicode strings. The gramm
 
 ### Document Structure
 
-```
+```text
 document → utf8_header, begin_header, lines..., end_header
 line → header | utterance
 utterance → main_tier, dependent_tiers...
@@ -39,7 +39,7 @@ utterance → main_tier, dependent_tiers...
 
 ### Main Tier
 
-```
+```text
 main_tier → star, speaker, colon, tab, tier_body
 tier_body → contents, utterance_end
 contents → content_item, (whitespace, content_item)...
@@ -47,7 +47,7 @@ contents → content_item, (whitespace, content_item)...
 
 ### MOR Tier (UD-style)
 
-```
+```text
 mor_contents → mor_content, (whitespace, mor_content)..., terminator
 mor_content → mor_word, mor_post_clitic*
 mor_word → mor_pos, pipe, mor_lemma, mor_feature*

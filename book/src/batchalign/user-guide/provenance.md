@@ -1,6 +1,7 @@
 # Processing Provenance
 
-**Last modified:** 2026-05-01 09:47 EDT
+**Status:** Current
+**Last updated:** 2026-05-11 11:40 EDT
 
 ## What is provenance?
 
@@ -53,7 +54,7 @@ other commands (align, transcribe, etc.) are preserved.
 
 ### morphotag
 
-```
+```text
 [ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | ...]
 ```
 
@@ -66,7 +67,7 @@ other commands (align, transcribe, etc.) are preserved.
 
 ### align
 
-```
+```text
 [ba3 align | fa=whisper-fa-large-v2 ; lang=eng ; utr=rev | ...]
 ```
 
@@ -80,7 +81,7 @@ other commands (align, transcribe, etc.) are preserved.
 
 ### transcribe
 
-```
+```text
 [ba3 transcribe | asr=rev ; lang=eng | ...]
 ```
 
@@ -93,19 +94,19 @@ other commands (align, transcribe, etc.) are preserved.
 
 ### utseg
 
-```
+```text
 [ba3 utseg | engine=stanza-1.11.1 ; lang=eng | ...]
 ```
 
 ### translate
 
-```
+```text
 [ba3 translate | engine=googletrans-v1 ; lang=spa | ...]
 ```
 
 ### coref
 
-```
+```text
 [ba3 coref | engine=stanza ; lang=eng | ...]
 ```
 

@@ -1,7 +1,7 @@
 # Command Lifecycles
 
 **Status:** Current
-**Last modified:** 2026-05-03 08:50 EDT
+**Last updated:** 2026-05-03 08:50 EDT
 
 End-to-end sequence diagrams showing how jobs flow through the system,
 from CLI invocation to output files. Every batchalign command now fits one

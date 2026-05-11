@@ -1,5 +1,6 @@
 # Participant Editor
 
+**Status:** Current
 **Last updated:** 2026-03-30 13:40 EDT
 
 CHAT files encode participant metadata in `@ID` headers as pipe-delimited strings with 10 fields. Editing these by hand is tedious and error-prone -- it is easy to miscount pipes, leave a field blank, or use an invalid format. The Participant Editor provides a visual table interface for viewing and editing all participant information at once.
