@@ -1,6 +1,8 @@
 # CHAINS -- Clause Chain Analysis
 
 **Status:** Current
+**Last updated:** 2026-05-11 17:30 EDT
+
 ## Purpose
 
 Analyzes sequences of interactional codes on a single specified coding tier. In the legacy manual, `CHAINS` is described as tracking hand-entered codes on one coding tier, with `%cod`, `%spa`, and `%sit` given as examples, and with dependent-tier periods used to mark correspondence to `[^c]` clause units on the main tier.
@@ -26,6 +28,30 @@ chatter clan chains --tier cod file.cha
 | `--speaker <CODE>` | Include speaker |
 | `--tier <NAME>` | Tier label to read codes from (default: `cod`) |
 | `--format <FMT>` | Output format: text, json, csv, clan |
+
+## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
+
+> **Status: drafted from CLAN manual; not yet implemented.** Rewriter
+> at `crates/talkbank-clan/src/clan_args.rs:101` translates
+> `+dN` → `--display-mode N`; no `clap` field consumes it today.
+> Drafted from CLAN manual §7.1.2 (`Unique Options`, CHAINS) for
+> PI review.
+
+| N | CLAN behavior (verbatim from manual) |
+|---|---|
+| `+d` (no number) | "Use this switch to change zeroes to spaces in the output." Example: `chains +d +t%spa chains.cha +s$nia:%` |
+| `+d1` | "Works the same as `+d`, while also displaying every input line in the output." |
+
+### Open questions for PI review
+
+1. "Change zeroes to spaces" is a CLAN text-formatting artifact —
+   columnar output where `0` marks absence. Does chatter's typed
+   output already render absence as empty/space? If so, `--display-mode 0`
+   may be a no-op in chatter and the flag should error rather than
+   silently accept.
+2. `+d1` "displays every input line": this is a verbose-trace mode,
+   not an output-shape change. Map to `--include-input` boolean
+   instead of overloading `--display-mode`?
 
 ## Output
 

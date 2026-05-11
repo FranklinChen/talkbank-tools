@@ -1,6 +1,8 @@
 # CHECK — CHAT File Validation
 
 **Status:** Current
+**Last updated:** 2026-05-11 17:22 EDT
+
 CHECK validates CHAT files for structural correctness, checking headers, tier
 formatting, bracket matching, bullet consistency, speaker declarations, and more.
 
@@ -32,6 +34,36 @@ chatter clan check +u file.cha           # Check UD features on %mor
 | `+g4` | `--check-id` | Check for missing @ID tiers (on by default) |
 | `+g5` | `--check-unused` | Check for unused speakers |
 | `+u` | `--check-ud` | Validate UD features on %mor tier |
+
+## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
+
+> **Status: drafted from CLAN manual; not yet implemented.** Rewriter
+> at `crates/talkbank-clan/src/clan_args.rs:101` translates
+> `+dN` → `--display-mode N`; no `clap` field consumes it today.
+> Drafted from CLAN manual §7.3.5 (`Unique Options`, CHECK) for
+> PI review. Note: CHECK's `+d` is **warning-suppression**, not output
+> formatting — semantically very different from FREQ/KWAL/COMBO's `+d`.
+
+| N | CLAN behavior (verbatim from manual) |
+|---|---|
+| `+d` (no number) | "Attempts to suppress repeated warnings of the same type." |
+| `+d1` | "Suppress ALL repeated warnings of the same type." |
+
+### Open questions for PI review
+
+1. CHECK's `+d` shape is orthogonal to the other commands'
+   `--display-mode`. Mapping CHECK's `+d` to `--suppress-repeats`
+   (boolean) or `--max-per-error N` (numeric) would be more honest
+   than overloading `--display-mode`.
+2. The talkbank-tools `chatter validate` already exposes
+   `--max-errors N` (stop after N errors *total*, across files).
+   That's different from CLAN's "suppress repeats of the same type"
+   semantics. Should `--display-mode 1` for CHECK be a new flag, or a
+   variant of `--max-errors`?
+3. Both `+d` and `+d1` are about suppression — the manual text doesn't
+   distinguish their behaviors clearly. "Attempts to suppress"
+   (`+d`) vs "Suppress ALL" (`+d1`) — is the former rate-limited or
+   heuristic? PI input needed on what CLAN actually does at runtime.
 
 ## Output Format
 

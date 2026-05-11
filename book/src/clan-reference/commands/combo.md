@@ -1,6 +1,8 @@
 # COMBO -- Boolean Keyword Search
 
 **Status:** Current
+**Last updated:** 2026-05-11 17:20 EDT
+
 ## Purpose
 
 Searches for utterances matching boolean combinations of keywords. Supports AND (`+`) and OR (`,`) logic with case-insensitive substring matching. This is the primary search tool for finding utterances containing specific words or word combinations.
@@ -38,6 +40,37 @@ chatter clan combo -s "want+cookie" --speaker CHI file.cha
 | `combo +s"want^cookie" file.cha` | `chatter clan combo file.cha -s "want+cookie"` |
 | `combo +s"want\|milk" file.cha` | `chatter clan combo file.cha -s "want,milk"` |
 | `combo +s"want^cookie" +t*CHI file.cha` | `chatter clan combo file.cha -s "want+cookie" --speaker CHI` |
+
+## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
+
+> **Status: drafted from CLAN manual; not yet implemented.** Rewriter
+> at `crates/talkbank-clan/src/clan_args.rs:101` translates
+> `+dN` → `--display-mode N`; no `clap` field consumes it today.
+> Drafted from CLAN manual §7.7.10 (`Unique Options`, COMBO) for
+> PI review.
+
+| N | CLAN behavior (verbatim from manual) |
+|---|---|
+| `+d` (no number) | "Normally, combo outputs the location of the tier where the match occurs. When the `+d` switch is turned on you can output only each matched sentence in a simple legal chat format." |
+| `+d1` | "Outputs legal chat format along with line numbers and file names." |
+| `+d2` | "Outputs files names once per file only." |
+| `+d3` | "Outputs legal chat format, but with only the actual words matched by the search string, along with `@Comment` headers that are ignored by other programs." |
+| `+d4` | "Use of the `+d4` switch was described in the previous section." (Manual cross-reference; resolution pending.) |
+| `+d7` | "Search for words linked between two tiers." |
+
+### Open questions for PI review
+
+1. `+d`/`+d1`/`+d2` parallel KWAL's `+d`/`+d1`/`+d2` almost exactly.
+   Worth defining a shared `--display-mode` enum across search-style
+   commands (KWAL + COMBO) with the same variant names?
+2. `+d3` "matched words plus `@Comment` headers" is COMBO-specific.
+   Probably a separate enum variant.
+3. `+d4`: manual cross-references the "previous section". This needs
+   PI clarification — the immediately-previous section is general
+   COMBO description, not a `+d`-table.
+4. `+d7` (cross-tier linkage) overlaps with FREQ `+d7`. If both
+   commands' `+d7` is "compare two tiers", the enum variant name
+   should match.
 
 ## Output
 

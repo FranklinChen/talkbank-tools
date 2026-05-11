@@ -1,30 +1,39 @@
 # Validation Errors
 
 **Status:** Current
-**Last updated:** 2026-03-24 00:01 EDT
+**Last updated:** 2026-05-11 17:40 EDT
 
 The CHAT validator produces diagnostics at two severity levels: **errors** (must fix) and **warnings** (should fix). Each diagnostic has an error code that links to detailed documentation.
 
 ## Reading Error Output
 
+The validator emits rich diagnostics that include the error code, a
+source-pointed snippet, and a suggested fix:
+
 ```text
-corpus/sample.cha:15:3: error[E304]: missing speaker code on main tier line
-corpus/sample.cha:20:1: error[E308]: speaker MOT not declared in @Participants
+  × error[E304]: Missing speaker in main tier (line 15, column 3)
+
+15 │ *	hello world .
+   ·  ╰── here
+   ╰────
+  help: Add a speaker code between * and : (e.g., *CHI:)
 ```
 
-Each line contains:
+Each diagnostic contains:
 - **File path** and **location** (line:column)
 - **Severity** — `error` or `warning`
-- **Error code** — `E` prefix for errors, `W` prefix for warnings
+- **Error code** — `E` prefix for errors, `W` prefix for warnings, with
+  a URL pointing at the per-code documentation page
 - **Message** — human-readable description
+- **Suggestion** — actionable fix guidance where available
 
 ## Error Code Ranges
 
 | Range | Category | Examples |
 |-------|----------|----------|
 | E1xx | UTF-8 and encoding | E101: Invalid line format |
-| E2xx | File structure | E202: Missing @Begin, E203: Missing @End |
-| E3xx | Main tier (speakers, terminators, content) | E304: Missing speaker, E308: Undeclared speaker, E305: Missing terminator |
+| E2xx | Word-level content | E202: Missing form type after `@`, E203: Invalid form type marker, E207: Unknown annotation |
+| E3xx | Main tier (speakers, terminators, content) | E301: Empty/missing main tier, E304: Missing speaker, E305: Missing terminator, E306: Empty utterance, E307: Invalid speaker, E308: Undeclared speaker |
 | E4xx | Dependent tier structure | E401: Duplicate dependent tier |
 | E5xx | Headers | E501: Duplicate header, E504: Missing @Participants, E505: Invalid @ID format |
 | E6xx | Dependent tier validation | E601: Invalid dependent tier, E604: %gra without %mor |

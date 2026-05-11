@@ -512,9 +512,11 @@ impl Validate for TierContentItems {
         let error_context = ErrorContext::new(field_text.clone(), span, field_text.clone());
 
         if self.0.is_empty() {
+            // E306: no content after the speaker. Same code as the
+            // "only separators" branch below.
             errors.report(
                 ParseError::new(
-                    ErrorCode::MissingTerminator,
+                    ErrorCode::EmptyUtterance,
                     Severity::Error,
                     SourceLocation::new(span),
                     error_context,

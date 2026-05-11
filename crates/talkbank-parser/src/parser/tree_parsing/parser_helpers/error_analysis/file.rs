@@ -94,8 +94,8 @@ pub(crate) fn analyze_error_node(node: Node, source: &str, errors: &impl ErrorSi
             return;
         }
 
-        // E305: Check for missing content after speaker (*SPEAKER: with nothing after)
-        // Check if error text contains colon and ends with colon (with possible whitespace)
+        // E306: `*SPEAKER:` with nothing after — empty utterance.
+        // Detected when the error text ends at (or just after) the colon.
         if let Some(last_colon) = error_text.rfind(':') {
             let trailing_ws = error_text
                 .bytes()
@@ -105,7 +105,7 @@ pub(crate) fn analyze_error_node(node: Node, source: &str, errors: &impl ErrorSi
             if trailing_ws + 1 >= error_text.len() - last_colon {
                 errors.report(
                     ParseError::new(
-                        ErrorCode::MissingTerminator,
+                        ErrorCode::EmptyUtterance,
                         Severity::Error,
                         SourceLocation::from_offsets(start, end),
                         ErrorContext::new(source, start..end, error_text),

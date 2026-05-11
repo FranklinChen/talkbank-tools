@@ -199,6 +199,7 @@ pub(super) fn build_filter(common: &CommonAnalysisArgs) -> FilterConfig {
         gems: gem_filter,
         words: word_filter,
         utterance_range: common.range,
+        id_filter: common.id_filter.clone(),
         ..FilterConfig::default()
     }
 }

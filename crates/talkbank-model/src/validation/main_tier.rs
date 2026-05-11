@@ -127,9 +127,16 @@ mod tests {
         let errors = ErrorCollector::new();
         main.validate(&ctx, &errors);
         let error_vec = errors.into_vec();
+        // E305 (`MissingTerminator`) — not E304, which is `MissingSpeaker`
+        // and is reserved for tree-sitter recovery cases where the `*` or
+        // the speaker token itself is absent.
         assert!(
-            error_vec.iter().any(|e| e.code.as_str() == "E304"),
-            "Expected E304 when terminator missing outside CA mode"
+            error_vec.iter().any(|e| e.code.as_str() == "E305"),
+            "Expected E305 when terminator missing outside CA mode, got: {error_vec:?}"
+        );
+        assert!(
+            error_vec.iter().all(|e| e.code.as_str() != "E304"),
+            "E304 must not be emitted for missing terminator"
         );
     }
 
@@ -146,8 +153,8 @@ mod tests {
         main.validate(&ctx, &errors);
         let error_vec = errors.into_vec();
         assert!(
-            error_vec.iter().all(|e| e.code.as_str() != "E304"),
-            "CA mode should not emit E304 for missing terminator"
+            error_vec.iter().all(|e| e.code.as_str() != "E305"),
+            "CA mode should not emit E305 for missing terminator"
         );
     }
 }

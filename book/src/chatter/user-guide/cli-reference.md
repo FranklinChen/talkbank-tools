@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-05-06 20:33 EDT
+**Last updated:** 2026-05-11 15:39 EDT
 
 The `chatter` CLI is the public command-line surface for `talkbank-tools`.
 
@@ -25,7 +25,7 @@ flowchart TD
     chatter --> cache["cache\n(stats, clear)"]
     chatter --> schema["schema\n(JSON Schema output)"]
     chatter --> clan["clan\n(talkbank-clan)"]
-    chatter --> debug["debug\n(overlap-audit, linker-audit,\nfind, sanitize)"]
+    chatter --> debug["debug\n(overlap-audit, linker-audit,\nfind, sanitize, fix-s)"]
 
     clan --> freq["freq"]
     clan --> mlu["mlu"]
@@ -40,6 +40,7 @@ chatter validate PATH...
 chatter normalize INPUT
 chatter to-json INPUT
 chatter from-json INPUT
+chatter to-xml INPUT
 chatter validate-utseg PRE_DIR POST_DIR
 chatter show-alignment INPUT
 chatter watch PATH

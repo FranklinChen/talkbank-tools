@@ -1,6 +1,8 @@
 # FREQ -- Word Frequency
 
 **Status:** Current
+**Last updated:** 2026-05-11 17:02 EDT
+
 ## Purpose
 
 Counts word tokens and types and computes type-token ratio (TTR). The legacy manual describes `FREQ` as one of CLAN's most powerful and easiest-to-use programs, producing word-frequency counts and lexical-diversity measures over selected files and speakers.
@@ -48,6 +50,63 @@ chatter clan freq --include-word "the" file.cha
 | `freq +t*CHI file.cha` | `chatter clan freq file.cha --speaker CHI` |
 | `freq +s"the" file.cha` | `chatter clan freq file.cha --include-word "the"` (case-sensitive matching not currently supported — see callout above) |
 | `freq *.cha` | `chatter clan freq corpus/` |
+
+## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
+
+> **Status: drafted from CLAN manual; not yet implemented.** The legacy
+> rewriter at `crates/talkbank-clan/src/clan_args.rs:101` translates
+> `+dN` → `--display-mode N`, but no `clap` field consumes that token
+> today. This section drafts the per-N table from CLAN manual
+> §7.10.15 (`Unique Options`, FREQ) verbatim, for PI review and
+> subsequent TDD implementation. Tracked in
+> `<workspace>/docs/superpowers/plans/2026-05-11-clan-rewriter-honor-three-flags.md`
+> Phase 3.
+
+`FREQ` uses `+d` to switch output format, *not* to vary verbosity. Each
+value of N selects a different report shape. Quoted from CLAN manual
+§7.10.15:
+
+| N | CLAN behavior (verbatim from manual) |
+|---|---|
+| `+d` (no number) | "Perform a particular level of data analysis. By default, the output consists of all selected words found in the input data file(s) and their corresponding frequencies." (Equivalent to no-flag default.) |
+| `+d0` | "Output provides a concordance with the frequencies of each word, the files and line numbers where each word, and the text in the line that matches." |
+| `+d1` | "Outputs each of the words found in the input data file(s) one word per line with no further information about frequency. Later this output could be used as a word list file for `kwal` or `combo` programs." |
+| `+d2` | "Output is sent to a file in a form that can be opened directly in Excel. To do this, you must include information about the speaker roles you wish to include in the output spreadsheet." (Manual example: `freq +d2 +t@ID="*|Target_Child|*" *.cha`.) |
+| `+d3` | "Essentially the same as that for `+d2`, but with only the statistics on types, tokens, and the type–token ratio. Word frequencies are not placed into the output." (Note: `+d2` and `+d3` assume `+f`; no need to pass it explicitly.) |
+| `+d4` | "Allows you to output just the type–token information." |
+| `+d5` | "Output all words you are searching for, including those that occur with zero frequency. ... Can be combined with other `+d` switches." |
+| `+d6` | "When used for searches on the main line, outputs matched forms with a separate tabulation of replaced forms, errors, partial omissions, and full forms." Also `+d6 +sm\|n*,o%` on `%mor` line: produces separate counts per part-of-speech instantiation. |
+| `+d7` | "Links forms on a 'source' tier with their corresponding words on a 'target' tier." Default source is `%mor`; pass a tier name to change source. Items on the two tiers must be in one-to-one correspondence. `+c5` swaps source ↔ target. |
+| `+d8` | "Outputs words and frequencies of cross tabulation of one dependent tier with another." |
+
+### Open questions for PI review
+
+1. `+d0`: emits a concordance — overlaps with `KWAL` semantically. Should
+   chatter's `freq --display-mode 0` reuse the `kwal` output path
+   internally, or produce its own concordance shape?
+2. `+d1`: word-list output suitable as input to `kwal +s@file`. Should
+   the file be auto-named (`<basename>.fre`?) or printed to stdout by
+   default?
+3. `+d2`/`+d3`: "form that can be opened directly in Excel" maps to
+   `--format csv` in chatter. Is this duplication acceptable, or should
+   `--display-mode 2` *imply* `--format csv` (and conflict-error
+   otherwise)?
+4. `+d4`: "type-token information only" — same content as the existing
+   text/json default, minus the word frequencies. Add a new
+   `Truncated` variant to the output struct, or emit a CSV row with
+   just types/tokens/TTR?
+5. `+d5`: combinable with other `+d` values. How should this combine in
+   clap — a `Vec<DisplayMode>` rather than scalar `Option<u8>`?
+6. `+d6`/`+d7`/`+d8`: deeply specific to `%mor` and cross-tier
+   tabulation. Are these in scope for chatter's freq, or are they
+   future work (probably alongside or instead of `mortable` /
+   `freqpos`)?
+
+The `+dCN` form (capital `C` plus a number — "output only words used by
+<, <=, =, => or > than N percent of speakers") is a separate flag from
+plain `+dN`; the rewriter does not currently handle `+dC...`. It would
+get its own clap field (`--speaker-percentage`-style) rather than
+overload `--display-mode`.
 
 ## Output
 

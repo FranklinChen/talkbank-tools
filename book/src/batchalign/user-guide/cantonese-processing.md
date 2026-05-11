@@ -1,7 +1,7 @@
 # Cantonese Engines
 
 **Status:** Current
-**Last updated:** 2026-05-11 11:12 EDT
+**Last updated:** 2026-05-11 15:46 EDT
 
 Batchalign includes alternative ASR and forced alignment engines for Cantonese.
 These are built-in modules activated via `--engine-overrides` and shipped in
@@ -131,5 +131,5 @@ dependencies (like OpenCC) are required.
 
 ## See Also
 
-- [Cantonese and CJK — Architecture](../../../architecture/language-and-multilingual/cantonese-and-cjk.md) — engine architecture, normalization pipeline, segmenter selection
+- [Cantonese and CJK — Architecture](../../architecture/language-and-multilingual/cantonese-and-cjk.md) — engine architecture, normalization pipeline, segmenter selection
 - [Adding Inference Providers](../developer/adding-engines.md) — how to add new built-in engines

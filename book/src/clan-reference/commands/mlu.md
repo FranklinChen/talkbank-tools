@@ -1,6 +1,8 @@
 # MLU -- Mean Length of Utterance
 
 **Status:** Current
+**Last updated:** 2026-05-11 17:14 EDT
+
 ## Purpose
 
 Calculates mean length of utterance in morphemes from the `%mor` tier. When no `%mor` tier is available and `--words` was not passed, reports "utterances = 0, morphemes = 0" (matching CLAN behavior -- no fallback to word counting).
@@ -33,6 +35,37 @@ chatter clan mlu --format json corpus/
 |---|---|
 | `mlu file.cha` | `chatter clan mlu file.cha` |
 | `mlu +t*CHI file.cha` | `chatter clan mlu file.cha --speaker CHI` |
+
+## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
+
+> **Status: drafted from CLAN manual; not yet implemented.** The
+> rewriter at `crates/talkbank-clan/src/clan_args.rs:101` translates
+> `+dN` → `--display-mode N`, but no `clap` field consumes that token
+> today. Drafted from CLAN manual §7.21.2 (`Unique Options`, MLU) for
+> PI review. Plan: `<workspace>/docs/superpowers/plans/2026-05-11-clan-rewriter-honor-three-flags.md`
+> Phase 3.
+
+MLU's `+d` table is small — two N-values, both Excel-friendly output
+formats. Quoted from CLAN manual §7.21.2:
+
+| N | CLAN behavior (verbatim from manual) |
+|---|---|
+| `+d` (no number) | "You can use this switch, together with the ID specification to output data for Excel." Example: `mlu +d +tCHI sample.cha` produces a one-line @ID-keyed record: ``en\|sample\|CHI\|1;10.4\|female\|\|\|Target_Child\|\| 5  7 1.400 0.490`` (fields: @ID, utterance count, morpheme count, MLU, MLU std dev). Requires `@ID` headers per participant. |
+| `+d1` | "This level of the `+d` switch outputs data in another systematic format, with data for each speaker on a single line. However, this form is less adapted to input to a statistical program than the output for the basic `+d` switch. Also, this switch works with the `+u` switch, whereas the basic `+d` switch does not." Example: ``*CHI:  5  7 1.400 0.490``. |
+
+### Open questions for PI review
+
+1. `+d` (no number) maps cleanly to `--format csv` in chatter. Should
+   `--display-mode 0` (or absent N) imply `--format csv`, or remain a
+   separate axis?
+2. `+d1` is "less adapted to statistical input" yet combinable with
+   `+u`. That combinability is the differentiating feature; should
+   chatter expose it as a `--display-mode merged-by-speaker` enum
+   variant?
+3. The `+d` output requires `@ID` headers per participant. Should
+   `--display-mode` error early if `@ID` rows are missing for any
+   matched speaker, or fall back to the speaker-code-only form
+   silently?
 
 ## Algorithm
 

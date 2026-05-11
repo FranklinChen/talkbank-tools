@@ -557,20 +557,16 @@ fn check_duplicate_speakers(file: &ChatFile, config: &CheckConfig, errors: &mut 
 
     // Also check for duplicate @ID tiers for the same speaker
     let mut seen_id_speakers: BTreeSet<&str> = BTreeSet::new();
-    for line in file.lines.iter() {
-        if let Line::Header { header, .. } = line
-            && let Header::ID(id) = header.as_ref()
-        {
-            let speaker = id.speaker.as_str();
-            if !speaker.is_empty() && !seen_id_speakers.insert(speaker) {
-                errors.push(CheckError {
-                    error_number: 13,
-                    line: 0,
-                    message: format!("Duplicate @ID declaration for speaker '{speaker}'."),
-                    context: String::new(),
-                    error_code: String::new(),
-                });
-            }
+    for id in file.id_headers() {
+        let speaker = id.speaker.as_str();
+        if !speaker.is_empty() && !seen_id_speakers.insert(speaker) {
+            errors.push(CheckError {
+                error_number: 13,
+                line: 0,
+                message: format!("Duplicate @ID declaration for speaker '{speaker}'."),
+                context: String::new(),
+                error_code: String::new(),
+            });
         }
     }
 }

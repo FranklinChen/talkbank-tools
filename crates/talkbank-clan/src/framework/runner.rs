@@ -15,14 +15,17 @@
 //! skipped (non-fatal), following CLAN's behavior of continuing through file
 //! errors.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use talkbank_model::ParseValidateOptions;
+use talkbank_model::validation::ValidationState;
+use talkbank_model::{ChatFile, IDHeader, ParseValidateOptions, SpeakerCode};
 use talkbank_transform::{PipelineError, parse_file_and_validate};
 use tracing::{debug, warn};
 
 use super::command::{AnalysisCommand, FileContext};
 use super::filter::{FilterConfig, update_active_gems};
+use super::id_filter::IdFilter;
 
 /// Error type for analysis runner operations.
 #[derive(Debug, thiserror::Error)]
@@ -158,6 +161,26 @@ impl AnalysisRunner {
                 }
             };
 
+            // --id-filter prefilter + speaker-lookup. Single header pass:
+            // build a `SpeakerCode → &IDHeader` map and check whether at
+            // least one entry matches the pattern. When `id_filter` is
+            // unset the map is empty (and not consulted later either).
+            let id_by_speaker: HashMap<SpeakerCode, &IDHeader> = match self
+                .filter
+                .id_filter
+                .as_ref()
+            {
+                None => HashMap::new(),
+                Some(filter) => {
+                    let (admits, map) = scan_id_headers(&chat_file, filter);
+                    if !admits {
+                        debug!(path = %path.display(), pattern = %filter, "Skipping file: no @ID matches --id-filter");
+                        continue;
+                    }
+                    map
+                }
+            };
+
             let filename = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -189,11 +212,59 @@ impl AnalysisRunner {
                     continue;
                 }
 
+                // --id-filter speaker-level filter (only when the flag
+                // was set; otherwise no work).
+                if let Some(id_filter) = self.filter.id_filter.as_ref()
+                    && !speaker_passes_id_filter(id_filter, &id_by_speaker, &utterance.main.speaker)
+                {
+                    continue;
+                }
+
                 command.process_utterance(utterance, &file_ctx, state);
             }
 
             command.end_file(&file_ctx, state);
         }
+    }
+}
+
+/// Single pass over the file's `@ID` headers, returning both:
+///
+/// - whether the file passes the `--id-filter` prefilter (at least one
+///   `@ID` matches the pattern), and
+/// - a `SpeakerCode → &IDHeader` lookup for the per-utterance speaker
+///   filter.
+///
+/// A file with no `@ID` headers is not admitted — the filter encodes a
+/// positive requirement, and absence cannot satisfy a positive match.
+fn scan_id_headers<'a, S: ValidationState>(
+    chat_file: &'a ChatFile<S>,
+    filter: &IdFilter,
+) -> (bool, HashMap<SpeakerCode, &'a IDHeader>) {
+    let mut admits = false;
+    let mut map: HashMap<SpeakerCode, &'a IDHeader> = HashMap::new();
+    for id in chat_file.id_headers() {
+        if filter.matches(id) {
+            admits = true;
+        }
+        map.entry(id.speaker.clone()).or_insert(id);
+    }
+    (admits, map)
+}
+
+/// Whether the speaker's `@ID` row matches the filter.
+///
+/// If the file has no `@ID` row for this speaker, the speaker fails the
+/// filter (no evidence to admit). This is conservative and matches the
+/// file-prefilter rule: absence cannot satisfy a positive match.
+fn speaker_passes_id_filter(
+    filter: &IdFilter,
+    id_by_speaker: &HashMap<SpeakerCode, &IDHeader>,
+    speaker: &SpeakerCode,
+) -> bool {
+    match id_by_speaker.get(speaker) {
+        Some(id_header) => filter.matches(id_header),
+        None => false,
     }
 }
 

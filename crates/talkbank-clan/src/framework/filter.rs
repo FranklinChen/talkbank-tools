@@ -42,6 +42,18 @@ pub struct FilterConfig {
     /// Restrict to a 1-based utterance range within each file (CUTT: +z)
     /// inclusive — e.g., `25-125` processes utterances 25–125
     pub utterance_range: Option<UtteranceRange>,
+    /// Filter by `@ID` header pattern (CUTT: `+t@ID="lang|*|CHI|*"`).
+    ///
+    /// When `Some`, the analysis runner uses it twice:
+    ///  - **file prefilter:** skip any file whose `@ID` headers all fail
+    ///    the match;
+    ///  - **utterance filter:** drop utterances whose speaker's `@ID` row
+    ///    fails the match.
+    ///
+    /// `FilterConfig::matches` does not consult this field directly; the
+    /// runner is responsible for both passes because it owns the parsed
+    /// `@ID` headers.
+    pub id_filter: Option<super::IdFilter>,
 }
 
 /// Inclusive 1-based utterance range within a file.

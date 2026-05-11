@@ -8,6 +8,7 @@
 //! - <https://talkbank.org/0info/manuals/CHAT.html#File_Format>
 //! - <https://talkbank.org/0info/manuals/CHAT.html#Participants_Header>
 
+use crate::model::header::IDHeader;
 use crate::model::{Participant, Utterance};
 use crate::validation::ValidationState;
 use crate::{Header, WriteChat};
@@ -22,6 +23,29 @@ impl<S: ValidationState> ChatFile<S> {
     /// utterances (for example `@Comment` lines mid-file).
     pub fn headers(&self) -> impl Iterator<Item = &Header> {
         self.lines.iter().filter_map(|line| line.as_header())
+    }
+
+    /// Iterates the file's `@ID` headers in original file order.
+    ///
+    /// Convenience over [`headers`](Self::headers) for the common case of
+    /// "give me the typed `@ID` rows" — every CHAT reader that filters
+    /// header lines by variant would otherwise hand-roll the same
+    /// `matches!(_, Header::ID(_))` extraction.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use talkbank_model::model::ChatFile;
+    /// # let chat_file = ChatFile::new(vec![]);
+    /// for id in chat_file.id_headers() {
+    ///     println!("speaker {} role {}", id.speaker, id.role);
+    /// }
+    /// ```
+    pub fn id_headers(&self) -> impl Iterator<Item = &IDHeader> {
+        self.headers().filter_map(|h| match h {
+            Header::ID(id) => Some(id),
+            _ => None,
+        })
     }
 
     /// Iterates header lines with source spans in file order.

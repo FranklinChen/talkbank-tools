@@ -195,22 +195,22 @@
       "tree_sitter": {
         "kind": "error",
         "codes": [
-          "E304"
+          "E305"
         ]
       },
       "direct": {
         "kind": "error",
         "codes": [
-          "E304"
+          "E305"
         ]
       },
-      "divergence_note": null
+      "divergence_note": "Path B fix (2026-05-11): both parsers now emit E305 (MissingTerminator) where they previously emitted E304 (MissingSpeaker). E304 was a day-one variant-vs-emission swap; see model/content/main_tier.rs:737 comment."
     },
     "E3xx_main_tier_errors/E305_missing_content.cha": {
       "tree_sitter": {
         "kind": "error",
         "codes": [
-          "E305"
+          "E306"
         ]
       },
       "direct": {
@@ -219,7 +219,7 @@
           "E316"
         ]
       },
-      "divergence_note": "tree-sitter expects error E305, direct expects error E316. Direct parser currently emits generic UnparsableContent for word/main-tier parse failures instead of more specific E2xx/E3xx codes."
+      "divergence_note": "Path B fix (2026-05-11): tree-sitter now emits E306 (EmptyUtterance) where it previously emitted E305 (MissingTerminator). Direct parser still emits generic E316 UnparsableContent. Fixture filename retained with the legacy prefix for archaeology; the leading \"E305_\" no longer matches the emitted code."
     },
     "E3xx_main_tier_errors/E306_no_content.cha": {
       "tree_sitter": {
@@ -537,7 +537,7 @@
           "E723"
         ]
       },
-      "divergence_note": "The file has 5 %gra relations against 4 %mor chunks (count mismatch → E720) AND includes a `4|4|EXTRA` self-loop that the validator counts as a second ROOT (→ E723). The file-comment's `Expected error: E713` was from the original authoring intent but the actual malformed data surfaces two different checks; both are correct given the input."
+      "divergence_note": "The file has 5 %gra relations against 4 %mor chunks (count mismatch \u2192 E720) AND includes a `4|4|EXTRA` self-loop that the validator counts as a second ROOT (\u2192 E723). The file-comment's `Expected error: E713` was from the original authoring intent but the actual malformed data surfaces two different checks; both are correct given the input."
     },
     "E4xx_alignment_errors/clitic_alignment_mismatch.cha": {
       "tree_sitter": {
@@ -1714,7 +1714,7 @@
           "E360"
         ]
       },
-      "divergence_note": "The deprecated `·\\d+_\\d+-·` skip-bullet form (dash before closing NAK, deprecated 2026-03-31) is rejected by the grammar and surfaces as E360. Previously Rust silently stripped the dash; fixed 2026-04-22 so the grammar's rejection propagates as a parse error."
+      "divergence_note": "The deprecated `\u00b7\\d+_\\d+-\u00b7` skip-bullet form (dash before closing NAK, deprecated 2026-03-31) is rejected by the grammar and surfaces as E360. Previously Rust silently stripped the dash; fixed 2026-04-22 so the grammar's rejection propagates as a parse error."
     },
     "E3xx_main_tier_errors/E361_invalid_timestamp.cha": {
       "tree_sitter": {

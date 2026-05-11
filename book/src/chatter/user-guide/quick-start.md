@@ -1,7 +1,7 @@
 # Quick Start
 
 **Status:** Current
-**Last updated:** 2026-05-02 02:30 EDT
+**Last updated:** 2026-05-11 17:25 EDT
 
 This page gets you from zero to productive with `chatter` in five minutes.
 [Install chatter first](installation.md) if you haven't already.
@@ -21,16 +21,14 @@ If the file is valid:
 ```
 
 If there are problems, you'll see rich diagnostics with the exact location
-and a stable error code:
+and a stable error code. For example, an utterance missing its terminator:
 
 ```text
-  × error[E304]: missing speaker code on main tier line
+  × error[E304]: Expected terminator not found (line 6, column 1)
 
-   ╭─[transcript.cha:6:1]
- 6 │ *	hello world .
-   ·  ╰── expected speaker code (e.g., *CHI:)
-   ╰────
-  help: A main tier line must start with *SPEAKER:\t
+ 6 │ *CHI:	hello world
+
+  help: Add a terminator at the end: Standard (. ? !), Interruption (+... +/.)
 ```
 
 Every error code (`E304`, `E705`, etc.) links to
@@ -70,7 +68,7 @@ Output shows word frequencies by speaker. Add filters:
 ```bash
 chatter clan freq transcript.cha --speaker CHI    # one speaker
 chatter clan mlu transcript.cha --speaker CHI     # mean length of utterance
-chatter clan combo transcript.cha --include-word "want"  # co-occurrence
+chatter clan combo transcript.cha --include-word "want"  # boolean keyword search
 ```
 
 All CLAN commands support `--format json` and `--format csv` for

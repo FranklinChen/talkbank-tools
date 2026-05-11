@@ -1,6 +1,8 @@
 # CHIP -- Child/Parent Interaction Profile
 
 **Status:** Current
+**Last updated:** 2026-05-11 17:18 EDT
+
 ## Purpose
 
 Analyzes interaction patterns between a child speaker and their conversational partners. Categorizes successive utterance pairs to measure imitation, repetition, and overlap. CHIP is commonly used in child language research to quantify how much a child imitates or echoes their interlocutor.
@@ -20,6 +22,31 @@ chatter clan chip --format json file.cha
 | `--speaker <CODE>` | `+t*CHI` | Include speaker |
 | `--exclude-speaker <CODE>` | `-t*CHI` | Exclude speaker |
 | `--format <FMT>` | -- | Output format: text, json, csv |
+
+## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
+
+> **Status: drafted from CLAN manual; not yet implemented.** The
+> rewriter at `crates/talkbank-clan/src/clan_args.rs:101` translates
+> `+dN` → `--display-mode N`, but no `clap` field consumes that token
+> today. Drafted from CLAN manual §7.4.5 (`Unique Options`, CHIP) for
+> PI review.
+
+| N | CLAN behavior (verbatim from manual) |
+|---|---|
+| `+d` (no number) | "Using `+d` with no further number outputs only coding tiers, which are useful for iterative analyses." |
+| `+d1` | "Using `+d1` outputs only summary statistics, which can then be sent to a statistical program." |
+
+### Open questions for PI review
+
+1. CHIP's `+d` shape (coding-tier-only vs summary-only) is orthogonal
+   to the FREQ/KWAL/MLU shape (output format selectors). Should the
+   `--display-mode` enum's variants be CHIP-specific
+   (`coding-tiers` / `summary`) or share a name space with FREQ's
+   variants?
+2. "Useful for iterative analyses" implies the coding-tier output is
+   intended to be piped to another `chatter clan` command. Should
+   chatter prefer making this the *default* JSON output shape, with
+   `--display-mode summary` collapsing to just the matrix?
 
 ## Interaction Categories
 

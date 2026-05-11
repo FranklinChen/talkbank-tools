@@ -6,7 +6,7 @@
 //! raw `start-end` strings past argument parsing.
 
 use clap::{Args, ValueEnum};
-use talkbank_clan::framework::{UtteranceRange, parse_utterance_range};
+use talkbank_clan::framework::{IdFilter, UtteranceRange, parse_id_filter, parse_utterance_range};
 
 /// Shared filtering and output arguments for CLAN analysis commands.
 #[derive(Args, Debug, Clone)]
@@ -38,6 +38,17 @@ pub struct CommonAnalysisArgs {
     /// Restrict to a 1-based utterance range within each file (e.g., "25-125")
     #[arg(long, value_parser = parse_utterance_range)]
     pub range: Option<UtteranceRange>,
+
+    /// Filter by `@ID` header pattern, pipe-separated in @ID column order
+    /// (`lang|corpus|speaker|age|sex|group|ses|role|education|custom`).
+    ///
+    /// Each field is `*` / empty (wildcard) or a literal match.
+    /// Trailing wildcards may be omitted: `eng|*|CHI` ≡ `eng|*|CHI|`
+    /// ≡ `eng|*|CHI|*`. A file is included only if at least one `@ID`
+    /// matches; within matching files, utterances from non-matching
+    /// speakers are dropped. Replaces legacy CLAN `+t@ID="…"`.
+    #[arg(long, value_parser = parse_id_filter)]
+    pub id_filter: Option<IdFilter>,
 
     /// Output results per file instead of aggregated across all files
     #[arg(long)]

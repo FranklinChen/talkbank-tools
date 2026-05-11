@@ -734,12 +734,12 @@ impl crate::validation::Validate for MainTier {
         let tier_content = &self.content;
         let content_items = &tier_content.content;
 
-        // E304: Check for missing terminator.
-        // Main tier utterances must end with a terminator unless CA mode is active.
+        // E305: missing terminator — main tier utterances must end with a
+        // terminator unless CA mode is active.
         if tier_content.terminator.is_none() && !context.shared.ca_mode {
             errors.report(
                 ParseError::new(
-                    ErrorCode::MissingSpeaker,
+                    ErrorCode::MissingTerminator,
                     Severity::Error,
                     SourceLocation::new(self.span),
                     ErrorContext::new(self.speaker.as_str(), self.span, self.speaker.as_str()),

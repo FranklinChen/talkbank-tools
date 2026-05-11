@@ -36,6 +36,7 @@ mod cod;
 mod command;
 pub mod domain_types;
 mod filter;
+mod id_filter;
 mod input;
 pub mod mor;
 mod normalized_word;
@@ -61,6 +62,7 @@ pub use filter::{
     FilterConfig, GemFilter, ParseUtteranceRangeError, SpeakerFilter, TierFilter, UtteranceRange,
     WordFilter, parse_utterance_range,
 };
+pub use id_filter::{IdFilter, IdPattern, IdPatternField, ParseIdFilterError, parse_id_filter};
 pub use input::DiscoveredChatFiles;
 pub use normalized_word::{NormalizedWord, clan_display_form, clan_display_form_preserve_case};
 pub use output::{AnalysisResult, CommandOutput, OutputFormat, Section, TableRow};

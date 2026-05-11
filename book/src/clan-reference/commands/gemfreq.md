@@ -1,7 +1,7 @@
 # GEMFREQ -- Word Frequency Within Gem Segments
 
 **Status:** Current
-**Last updated:** 2026-05-02 03:00 EDT
+**Last updated:** 2026-05-11 17:43 EDT
 
 ## Purpose
 
@@ -38,6 +38,38 @@ as an optional restriction.
 
 For full per-flag descriptions, output formats, word-normalization
 rules, and CLAN-equivalence tables, see [freq.md](freq.md).
+
+## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
+
+> **Status: drafted from CLAN manual; not yet implemented.** Rewriter
+> at `crates/talkbank-clan/src/clan_args.rs:101` translates
+> `+dN` → `--display-mode N`; no `clap` field consumes it today.
+> Drafted from CLAN manual §7.14 (`Unique Options`, GEMFREQ) for
+> PI review.
+>
+> **Important divergence flag.** In CLAN, GEMFREQ's `+d` table is
+> identical to **GEM's** (legal CHAT format + annotation), not
+> identical to **FREQ's** (output format selector with 9 values).
+> chatter's gemfreq currently inherits the freq common-args, so any
+> `--display-mode N` implementation has to decide which semantics
+> apply — and that's worth pulling apart before clap touches it.
+
+| N | CLAN behavior (verbatim from manual) |
+|---|---|
+| `+d0` | "Produces simple output that is in legal chat format." |
+| `+d1` | "Adds information to the legal chat output regarding file names, line numbers, and `@ID` codes." |
+
+### Open questions for PI review
+
+1. GEMFREQ in CLAN borrows GEM's `+d`, not FREQ's. Should chatter
+   follow CLAN's CLAN-faithful behavior (treat `--display-mode 0` as
+   the GEM-style legal-CHAT output), or should the chatter `gemfreq`
+   inherit FREQ's `--display-mode` table (since they share
+   common-args)?
+2. If we honor CLAN's split, `gemfreq` is the *only* analyze command
+   whose `+d` differs from its lexically-similar parent. That feels
+   like a CLAN historical accident worth deviating from in
+   chatter — but it's a deviation, not a faithful port.
 
 ## When to use `gemfreq` vs `freq --gem`
 
