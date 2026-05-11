@@ -1,6 +1,8 @@
 # Word Filtering
 
 **Status:** Current
+**Last updated:** 2026-05-11 18:58 EDT
+
 Word filters restrict analysis to utterances containing (or not containing) specific words. Primarily useful with KWAL (keyword search) and COMBO (boolean search), but available on all commands.
 
 ## Include words
@@ -28,13 +30,9 @@ CLAN equivalent: `-s"um" -s"uh"`
 
 ## Case sensitivity
 
-By default, word matching is case-insensitive (`the` matches `The`, `THE`, `the`). Use `--case-sensitive` for exact matching:
+By default, word matching is case-insensitive (`the` matches `The`, `THE`, `the`).
 
-```bash
-chatter clan kwal --include-word "The" --case-sensitive file.cha
-```
-
-CLAN equivalent: `+k`
+The CLAN `+k` flag (and its `--case-sensitive` rewrite) is **currently non-functional**: the rewriter at `crates/talkbank-clan/src/clan_args.rs:104` produces `--case-sensitive`, but no `clap` field consumes it. Word matching today is always case-insensitive. Tracked alongside `+dN` and `+fEXT` in `docs/superpowers/plans/2026-05-11-clan-rewriter-honor-three-flags.md`. See also [`flag-translation.md`](../getting-started/flag-translation.md).
 
 ## What counts as a "word"
 

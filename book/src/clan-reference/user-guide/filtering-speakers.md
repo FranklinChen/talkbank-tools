@@ -1,6 +1,8 @@
 # Speaker Filtering
 
 **Status:** Current
+**Last updated:** 2026-05-11 18:58 EDT
+
 Speaker filters restrict which speakers' utterances are analyzed. This is one of the most frequently used filters — most CLAN analyses target a specific participant (e.g., the child in a child language study).
 
 ## Include speakers
@@ -28,19 +30,28 @@ CLAN equivalent: `-t*INV`
 
 ## @ID filtering
 
-Filter speakers by metadata fields in the `@ID` header (language, corpus, role, age, sex, education, group, custom):
+Filter speakers by metadata fields in the `@ID` header. The filter is pipe-delimited, in CHAT `@ID` column order:
 
-```bash
-# All children (by role)
-chatter clan freq --id-filter "|||Target_Child" file.cha
-
-# English speakers only
-chatter clan freq --id-filter "eng|" file.cha
+```text
+lang|corpus|speaker|age|sex|group|ses|role|education|custom
 ```
 
-CLAN equivalent: `+t@ID="eng|"`
+Each field is either `*` (wildcard), empty (also wildcard), or a literal exact match. Trailing fields may be omitted entirely.
 
-The `@ID` filter matches against the pipe-delimited fields: `language|corpus|code|age|sex|group|education|role|custom|`.
+```bash
+# All children (role = Target_Child, at position 8)
+chatter clan freq --id-filter "*|*|*|*|*|*|*|Target_Child" file.cha
+
+# English-language speakers only
+chatter clan freq --id-filter "eng|" file.cha
+
+# A specific speaker code (position 3)
+chatter clan freq --id-filter "*|*|CHI" file.cha
+```
+
+CLAN equivalent: `+t@ID="*|*|*|*|*|*|*|Target_Child"`.
+
+Authoritative parser: `crates/talkbank-clan/src/framework/id_filter.rs`. The language field is a comma-separated list in the underlying `@ID`; the filter matches if any language in the `@ID` matches the pattern.
 
 ## Interaction with other filters
 
