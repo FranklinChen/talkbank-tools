@@ -1,6 +1,8 @@
 # REPEAT -- Mark Utterances Containing Revisions
 
 **Status:** Current
+**Last updated:** 2026-05-12 11:31 EDT
+
 ## Purpose
 
 Reimplements CLAN's `repeat` command, which adds a `[+ rep]` postcode to utterances from a target speaker that contain revision markers. Only utterances that do not already have `[+ rep]` are modified.
@@ -19,12 +21,20 @@ chatter clan repeat --speaker CHI file.cha
 
 ## Revision Markers Detected
 
-- `[//]` -- retracing (exact repetition with correction)
-- `[///]` -- multiple retracing
-- `[/-]` -- reformulation (false start)
-- `[/?]` -- uncertain retracing
+Per `is_revision_kind()` at
+`crates/talkbank-clan/src/transforms/repeat.rs:81-87`, three of the
+four `RetraceKind` variants trigger `[+ rep]`:
 
-Note: Simple repetitions (`[/]`) do **not** trigger the `[+ rep]` marker. Only revisions and reformulations do.
+- `[//]` — full retrace (`RetraceKind::Full`)
+- `[///]` — multiple retracing (`RetraceKind::Multiple`)
+- `[/-]` — reformulation (`RetraceKind::Reformulation`)
+
+Note: Simple partial repetition (`[/]`, `RetraceKind::Partial`)
+does **not** trigger the `[+ rep]` marker — that's the
+"non-revision" case. (Earlier versions of this doc listed a `[/?]`
+"uncertain retracing" marker as the fourth case; there is no such
+marker — the grammar has exactly four retrace tokens, all listed
+above and at `book/src/chat-format/retraces.md`.)
 
 ## Behavior
 
