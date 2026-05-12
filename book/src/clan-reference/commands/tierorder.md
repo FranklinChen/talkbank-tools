@@ -1,6 +1,8 @@
 # TIERORDER -- Reorder Dependent Tiers to Canonical Order
 
 **Status:** Current
+**Last updated:** 2026-05-12 13:40 EDT
+
 ## Purpose
 
 Reorders dependent tiers into a consistent order. The legacy manual describes `TIERORDER` as putting dependent tiers into a consistent alphabetical order, with `/lib/fixes/tierorder.cut` able to control the order.
@@ -19,19 +21,27 @@ This command has no configurable options.
 
 ## Behavior
 
-Dependent tiers are sorted into the following canonical order, grouped by function:
+Dependent tiers are sorted into the following canonical order
+(per the `tier_order()` priority function at
+`crates/talkbank-clan/src/transforms/tierorder.rs:57-100`):
 
-1. **Linguistic analysis tiers** (highest priority):
-   `%mor` -> `%gra` -> `%pho` -> `%mod` -> `%wor` -> `%sin`
+1. **Linguistic analysis tiers** (priorities 0-5):
+   `%mor` → `%gra` → `%pho` → `%mod` → `%wor` → `%sin`
 
-2. **Behavioral/descriptive tiers**:
-   `%act` -> `%cod` -> `%com` -> `%spa` -> `%gpx` -> `%sit` -> `%exp` -> `%int` -> `%add`
+2. **Phon project syllabification/alignment tiers** (priorities 6-8):
+   `%xmodsyl` → `%xphosyl` → `%xphoaln`
 
-3. **Simple text tiers**:
-   `%alt` -> `%coh` -> `%def` -> `%eng` -> `%err` -> `%fac` -> `%flo` -> `%gls` -> `%ort` -> `%par` -> `%tim`
+3. **Behavioral/descriptive tiers** (priorities 10-18):
+   `%act` → `%cod` → `%com` → `%spa` → `%gpx` → `%sit` → `%exp` → `%int` → `%add`
 
-4. **User-defined tiers** (lowest priority):
-   `%x*` (sorted last)
+4. **Simple text tiers** (priorities 20-30):
+   `%alt` → `%coh` → `%def` → `%eng` → `%err` → `%fac` → `%flo` → `%gls` → `%ort` → `%par` → `%tim`
+
+5. **User-defined tiers** (priority 100):
+   `%x*` (anything beyond the standard set)
+
+6. **Unsupported tiers** (priority 101):
+   tiers that hit the grammar's catch-all but aren't recognized CHAT tiers
 
 Utterances with zero or one dependent tier are left unchanged.
 
