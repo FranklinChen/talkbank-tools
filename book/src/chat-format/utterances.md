@@ -100,7 +100,7 @@ Utterances can include media timestamps (bullets) that link to audio/video:
 
 The numbers represent start and end times in milliseconds. The bullets
 delimiting the pair render as `•` in most editors; on disk they are
-the NAK control character (``). See `grammar/grammar.js` rule
+the NAK control character (`U+0015`). See `grammar/grammar.js` rule
 `bullet`.
 
 ## Dependent Tiers
