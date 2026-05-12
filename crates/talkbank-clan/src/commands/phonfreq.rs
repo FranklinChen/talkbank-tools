@@ -87,8 +87,11 @@ pub struct PhonfreqEntry {
 /// PHONFREQ command: count phone frequencies from the `%pho` tier.
 ///
 /// Iterates over `PhoItem`s (words and groups) on each utterance's
-/// `%pho` tier, counting lowercase ASCII characters with positional
-/// tracking. Utterances without a `%pho` tier are silently skipped.
+/// `%pho` tier, counting alphabetic characters (Unicode, including
+/// IPA) plus the `+` compound marker — with positional tracking.
+/// Stress marks (`ˈ`, `ˌ`), length marks (`ː`), digits, and other
+/// non-letter symbols are skipped. Utterances without a `%pho`
+/// tier are silently skipped.
 pub struct PhonfreqCommand;
 
 impl PhonfreqCommand {
