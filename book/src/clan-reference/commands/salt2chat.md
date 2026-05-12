@@ -1,6 +1,8 @@
 # SALT2CHAT -- SALT Transcription to CHAT Conversion
 
 **Status:** Current
+**Last updated:** 2026-05-12 13:36 EDT
+
 ## Purpose
 
 Converts SALT (Systematic Analysis of Language Transcripts) transcription files into CHAT format. SALT is a widely used clinical transcription system with its own conventions for speaker codes, morpheme annotations, and error marking.
@@ -15,8 +17,13 @@ chatter clan salt2chat input.slt
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `language` | `"eng"` | ISO 639 language code for the `@Languages` header |
-| `corpus` | `"salt_corpus"` | Corpus name for the `@ID` header |
+| `-l`, `--language` | `"eng"` | ISO 639 language code for the `@Languages` header |
+| `-o`, `--output` | stdout | Output CHAT file path |
+
+The corpus name in `@ID` headers is hardcoded to `"salt_corpus"`
+(`crates/talkbank-clan/src/converters/salt2chat.rs:193`); there is
+no CLI flag to override it. Same pattern as the other converters
+in this directory.
 
 ## Speaker Mapping
 
