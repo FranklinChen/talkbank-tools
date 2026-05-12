@@ -1,6 +1,8 @@
 # RTF2CHAT -- Rich Text Format to CHAT Conversion
 
 **Status:** Current
+**Last updated:** 2026-05-12 13:35 EDT
+
 ## Purpose
 
 Converts Rich Text Format (RTF) files into CHAT format by stripping RTF formatting commands and extracting plain text content.
@@ -15,8 +17,13 @@ chatter clan rtf2chat input.rtf
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `language` | `"eng"` | ISO 639 language code for the `@Languages` header |
-| `corpus` | `"rtf_corpus"` | Corpus name for the `@ID` header |
+| `-l`, `--language` | `"eng"` | ISO 639 language code for the `@Languages` header |
+| `-o`, `--output` | stdout | Output CHAT file path |
+
+The corpus name in `@ID` headers is hardcoded to `"rtf_corpus"`
+(`crates/talkbank-clan/src/converters/rtf2chat.rs:212`); there is
+no CLI flag to override it. Same pattern as the other converters
+in this directory.
 
 ## Processing Steps
 
