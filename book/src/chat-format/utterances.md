@@ -1,7 +1,7 @@
 # Utterances
 
 **Status:** Reference
-**Last updated:** 2026-03-24 00:01 EDT
+**Last updated:** 2026-05-11 23:22 EDT
 
 An utterance is the fundamental unit of a CHAT transcript. It consists of a main tier (the transcribed speech) followed by zero or more dependent tiers (annotations).
 
@@ -15,7 +15,7 @@ The main tier begins with `*SPEAKER:` followed by a tab and the utterance conten
 
 ### Speaker Codes
 
-Speaker codes are three uppercase letters matching a code declared in `@Participants`:
+Speaker codes are short identifiers (up to seven characters from `A-Z`, `0-9`, `_`, `-`, `'`; three uppercase letters is the convention) matching a code declared in `@Participants`:
 
 ```chat
 @Participants:	CHI Target_Child, MOT Mother
@@ -33,11 +33,12 @@ Every utterance must end with a terminator:
 | `?` | Question |
 | `!` | Exclamation |
 | `+...` | Trailing off |
+| `+..?` | Trailing-off question |
 | `+/.` | Interruption |
 | `+//.` | Self-interruption |
 | `+/?` | Interrupted question |
 | `+!?` | Broken question |
-| `+".` | Quotation follows on next line |
+| `+"/.` | Quotation follows on next line |
 
 ### Line Continuation
 
@@ -70,10 +71,10 @@ Angle brackets `< >` group words for annotations:
 ```
 
 Common group annotations:
-- `[/]` — retrace (exact repetition)
-- `[//]` — retrace with correction
-- `[///]` — reformulation
-- `[/-]` — false start
+- `[/]` — partial retrace (speaker repeats the same words)
+- `[//]` — full retrace (speaker restarts with different words)
+- `[///]` — multiple retracing (multiple false starts)
+- `[/-]` — reformulation (speaker rephrases with different structure)
 - `[?]` — uncertain transcription
 
 ### Special Forms
@@ -94,10 +95,13 @@ Common group annotations:
 Utterances can include media timestamps (bullets) that link to audio/video:
 
 ```chat
-*CHI:	I want cookies . 1234_5678
+*CHI:	I want cookies . •1234_5678•
 ```
 
-The numbers represent start and end times in milliseconds.
+The numbers represent start and end times in milliseconds. The bullets
+delimiting the pair render as `•` in most editors; on disk they are
+the NAK control character (``). See `grammar/grammar.js` rule
+`bullet`.
 
 ## Dependent Tiers
 
