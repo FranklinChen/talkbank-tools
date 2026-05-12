@@ -180,7 +180,7 @@ omitted, or unintelligible content defeats that purpose.
 
 ### Replacements and Retraces Are Orthogonal
 
-A retrace (`[/]`, `[//]`, `[///]`, `[/-]`, `[/?]`) and a replacement
+A retrace (`[/]`, `[//]`, `[///]`, `[/-]`) and a replacement
 (`[:]`) are distinct annotations operating at different structural
 levels:
 

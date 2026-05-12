@@ -1,6 +1,6 @@
 //! Retrace content — words the speaker said then corrected.
 //!
-//! CHAT uses retrace markers (`[/]`, `[//]`, `[///]`, `[/-]`, `[/?]`) to
+//! CHAT uses retrace markers (`[/]`, `[//]`, `[///]`, `[/-]`) to
 //! indicate that the preceding content was spoken but then corrected or
 //! repeated. Retrace content is excluded from %mor alignment but included
 //! in %pho/%sin/%wor (because the material was phonologically produced).

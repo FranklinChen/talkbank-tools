@@ -1,7 +1,7 @@
 # Retraces and Repetitions
 
 **Status:** Current
-**Last updated:** 2026-03-26 10:33 EDT
+**Last updated:** 2026-05-11 23:16 EDT
 
 Retraces mark content that the speaker said but then corrected, repeated,
 or abandoned. They are one of the most consequential constructs in CHAT
@@ -19,7 +19,6 @@ marked with a trailing bracket code:
 | `[//]` | Full correction | Speaker restarts with different words |
 | `[///]` | Multiple correction | Multiple false starts |
 | `[/-]` | Reformulation | Speaker rephrases with different structure |
-| `[/?]` | Uncertain | Unclear whether repetition is intentional |
 
 ### Single-Word Retraces
 
@@ -90,7 +89,7 @@ other content items:
 // crates/talkbank-model/src/model/content/retrace.rs
 pub struct Retrace {
     pub content: BracketedContent,          // the retraced words
-    pub kind: RetraceKind,                  // Partial, Full, Multiple, Reformulation, Uncertain
+    pub kind: RetraceKind,                  // Partial, Full, Multiple, Reformulation
     pub is_group: bool,                     // <word> [/] vs word [/]
     pub annotations: Vec<ContentAnnotation>,// non-retrace annotations after marker
     pub span: Span,
