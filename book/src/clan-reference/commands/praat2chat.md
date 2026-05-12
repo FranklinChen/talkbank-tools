@@ -1,6 +1,8 @@
 # PRAAT2CHAT -- Praat TextGrid Bidirectional Conversion
 
 **Status:** Current
+**Last updated:** 2026-05-12 11:29 EDT
+
 ## Purpose
 
 Converts between Praat TextGrid files and CHAT format. TextGrid files contain time-aligned interval tiers widely used in phonetic research.
@@ -22,8 +24,13 @@ chatter clan praat2chat input.TextGrid
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `language` | `"eng"` | ISO 639 language code for the `@Languages` header |
-| `corpus` | `"praat_corpus"` | Corpus name for the `@ID` header |
+| `-l`, `--language` | `"eng"` | ISO 639 language code for the `@Languages` header |
+| `-o`, `--output` | stdout | Output CHAT file path |
+
+The corpus name in `@ID` headers is hardcoded to `"praat_corpus"`
+(`crates/talkbank-clan/src/converters/praat2chat.rs:200`); there is
+no CLI flag to override it. Same pattern as the other converters
+in this directory.
 
 ## TextGrid Format Support
 
