@@ -1,6 +1,8 @@
 # LIPP2CHAT -- LIPP Phonetic Profile to CHAT Conversion
 
 **Status:** Current
+**Last updated:** 2026-05-12 10:51 EDT
+
 ## Purpose
 
 Converts LIPP (Logical International Phonetics Programs) phonetic profile data into CHAT format. Each entry becomes an utterance, and phonetic transcriptions are placed on `%pho` dependent tiers.
@@ -15,9 +17,9 @@ chatter clan lipp2chat input.lipp
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `speaker` | `"SPK"` | Speaker code for all utterances |
-| `language` | `"eng"` | ISO 639 language code for the `@Languages` header |
-| `corpus` | `"lipp_corpus"` | Corpus name for the `@ID` header |
+| `-s`, `--speaker` | `"CHI"` | Speaker code for all utterances |
+| `-l`, `--language` | `"eng"` | ISO 639 language code for the `@Languages` header |
+| `-c`, `--corpus` | `"lipp_corpus"` | Corpus name for the `@ID` header |
 
 ## Input Format
 
