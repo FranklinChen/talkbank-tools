@@ -12,9 +12,9 @@ See the [CLAN manual](https://talkbank.org/0info/manuals/CLAN.html#_Toc220409095
 ## Usage
 
 ```bash
-chatter clan combo -s "want+cookie" file.cha
-chatter clan combo -s "want,milk" file.cha
-chatter clan combo -s "want+cookie" --speaker CHI file.cha
+chatter clan combo -S "want+cookie" file.cha
+chatter clan combo -S "want,milk" file.cha
+chatter clan combo -S "want+cookie" --speaker CHI file.cha
 ```
 
 ## Options
@@ -22,7 +22,7 @@ chatter clan combo -s "want+cookie" --speaker CHI file.cha
 | Option | Description |
 |--------|-------------|
 | `--speaker <CODE>` | Include speaker |
-| `-s <EXPR>` | Search expression (repeatable; multiple `-s` flags combined with OR) |
+| `-S`, `--search <EXPR>` | Search expression (required, repeatable; multiple `--search` flags combined with OR) |
 | `--format <FMT>` | Output format: text, json, csv, clan |
 
 ## Search Syntax
@@ -30,16 +30,16 @@ chatter clan combo -s "want+cookie" --speaker CHI file.cha
 - `+` between terms means AND (all terms must be present in the utterance)
 - `,` between terms means OR (at least one term must be present)
 - Terms are case-insensitive substring matches against countable words
-- Multiple `-s` flags are combined with OR (any expression matching counts)
+- Multiple `--search` flags are combined with OR (any expression matching counts)
 - AND takes precedence if both `+` and `,` appear in one expression
 
 ## CLAN Equivalence
 
 | CLAN command | Rust equivalent |
 |---|---|
-| `combo +s"want^cookie" file.cha` | `chatter clan combo file.cha -s "want+cookie"` |
-| `combo +s"want\|milk" file.cha` | `chatter clan combo file.cha -s "want,milk"` |
-| `combo +s"want^cookie" +t*CHI file.cha` | `chatter clan combo file.cha -s "want+cookie" --speaker CHI` |
+| `combo +s"want^cookie" file.cha` | `chatter clan combo file.cha -S "want+cookie"` |
+| `combo +s"want\|milk" file.cha` | `chatter clan combo file.cha -S "want,milk"` |
+| `combo +s"want^cookie" +t*CHI file.cha` | `chatter clan combo file.cha -S "want+cookie" --speaker CHI` |
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 
