@@ -62,12 +62,20 @@ Only cross-speaker adjacency is considered; consecutive utterances by the same s
 
 ## Output
 
-**36-measure matrix format** matching CLAN exactly:
+**36-measure matrix format** structurally matching CLAN:
 
 - ADU (adult) / CHI (child) / ASR (adult-speech-related) / CSR (child-speech-related) columns
 - Per directed speaker pair (MOT->CHI is distinct from CHI->MOT)
 - Counts and percentages for each interaction category
 - Grand totals across all pairs
+
+**Current implementation status (2026-05-12):** the matrix header,
+row labels, and ADU/CHI/ASR/CSR column layout are implemented and
+written by `chip.rs:246-260`. The actual *measure values* are
+written as zeros — `chip.rs:253` carries a comment "currently all
+zeros — full computation not yet implemented." So the structural
+parity is in place but the analytical numbers are not yet
+computed. See §Golden test parity below for the consequence.
 
 ### Echo behavior
 
@@ -81,7 +89,7 @@ It does **not** echo `%gra` tiers, matching CLAN's behavior.
 
 ### Matrix format
 
-Uses the exact **36-measure matrix format** with ADU/CHI/ASR/CSR columns, matching CLAN character-for-character.
+Uses the exact **36-measure matrix format** with ADU/CHI/ASR/CSR columns. Header, row labels, and column structure match CLAN character-for-character; per §Output, the measure-value cells are currently emitted as zeros pending full implementation.
 
 ### Echo content
 
@@ -97,4 +105,9 @@ Supports text, JSON, and CSV. CLAN produces text only.
 
 ### Golden test parity
 
-100% parity with CLAN C binary output.
+No CHIP-specific golden tests are currently checked in (`rg
+'chip_golden|chip.*golden'` returns nothing in `tests/` and
+`crates/talkbank-clan/`). The previous "100% parity" claim was
+incorrect given the stub measure values described above. Once the
+36 measures are computed, golden tests should be added against a
+real CLAN CHIP run.
