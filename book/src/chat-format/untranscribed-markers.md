@@ -1,7 +1,7 @@
 # Untranscribed Markers: `xxx`, `yyy`, `www`
 
 **Status:** Reference
-**Last updated:** 2026-04-27 19:01 EDT
+**Last updated:** 2026-05-11 23:21 EDT
 
 CHAT reserves three short word-level markers for material the human
 transcriber cannot or chose not to render as words on the main tier.
@@ -67,7 +67,9 @@ against the whole field.
 
 ## What ASR pipelines should do instead
 
-The batchalign3 `transcript_from_asr_utterances` gate (in
+The `transcript_from_asr_utterances` gate (defined in
+`crates/talkbank-transform/src/asr_postprocess/cleanup.rs`, exercised
+by the pipeline assembled in
 `crates/talkbank-transform/src/build_chat/`) demonstrates the right
 pattern:
 
