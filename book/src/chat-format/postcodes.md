@@ -1,7 +1,7 @@
 # Postcodes (`[+ ...]`)
 
 **Status:** Reference
-**Last updated:** 2026-05-11 22:09 EDT
+**Last updated:** 2026-05-11 23:01 EDT
 
 A **postcode** is a tagged annotation token that attaches to an
 *utterance as a whole* and appears after the terminator. The
@@ -132,34 +132,29 @@ Two consequences worth pinning down explicitly:
   postcode. A `[% exclude this]` after a word does not mean "exclude
   the utterance" to any consumer.
 
-## Quotation Postcodes (Special Case)
+## Not Postcodes: Quotation Markers
 
-Two postcode texts have structural meaning enforced by the validator
-rather than by convention:
+Quotation marking in CHAT is **not a postcode form**. The constructs
+`+"/.` (quotation end), `+"/`, and `+"` (quotation linkers /
+continuations) are tier-level **terminators and linkers**, not
+`[+ ...]` postcodes — the grammar rule `postcode` in
+`grammar/grammar.js` is strictly `[+ <text>]`, and the quotation
+forms live under separate grammar rules (`quoted_new_line`,
+`linker_quotation_follows`).
 
-| Postcode | Meaning |
-|---|---|
-| `["/]` | Quotation **begin** marker |
-| `["/.]` | Quotation **end** marker |
+See [Utterances → Terminators](utterances.md#terminators) for the
+syntactic forms, and the
+`talkbank-model::validation::cross_utterance` validator family
+(gated by `ValidationContext::enable_quotation_validation`) for the
+cross-utterance balance checks.
 
-Both forms are used to demarcate quoted speech. The
-`talkbank-model::validation::utterance::quotation::check_quotation_balance`
-validator emits **E242 `UnbalancedQuotation`** when a `"/.` end
-postcode appears in an utterance without a preceding `"/` begin in
-the same utterance, or when an utterance contains an unclosed `"/`
-begin. The text MUST match exactly — trailing whitespace or
-alternative punctuation breaks the match and the pair is treated
-as unbalanced.
-
-Scope: this validator only checks **intra-utterance** balance and
-runs unconditionally on every utterance (see
-`talkbank-model/src/model/file/utterance/validate.rs` where
-`check_quotation_balance` is called outside any opt-in gate). The
-`enable_quotation_validation` flag on `ValidationContext` gates a
-separate family of cross-utterance quotation validators in
-`talkbank-model::validation::cross_utterance`, which deal with the
-**terminator-based** quotation forms (`+"/`, `+"/.`) rather than
-these postcode forms — those validators are off by default.
+A walker in `talkbank-model::validation::utterance::quotation`
+(`check_quotation_balance`) does scan the postcode list for text
+`"/` and `"/.`, but a sweep over the data-json corpus mirror
+(101,414 files, 2026-05-11) returned zero such postcodes — that
+code path is effectively dead, retained presumably as defence
+against hand-edited oddities. The real quotation-balance work
+happens in the cross-utterance family above.
 
 ## Position in the AST
 
