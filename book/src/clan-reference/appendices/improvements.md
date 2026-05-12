@@ -1,6 +1,8 @@
 # CLAN Command Divergences & Improvements
 
 **Status:** Current
+**Last updated:** 2026-05-12 04:24 EDT
+
 This document tracks every divergence between the original CLAN commands and
 the Rust `chatter analyze` reimplementation. It covers CLI interface, output
 format, counting semantics, error handling, and intentional improvements.
@@ -18,7 +20,7 @@ Until then, this document serves as the authoritative migration reference.
 
 - [Philosophical Divergence: Semantic Model vs String Matching](#philosophical-divergence)
 - [General Framework Divergences](#general-framework-divergences)
-- [Analysis Commands](#analysis-commands) (30 commands)
+- [Analysis Commands](#analysis-commands) (29 commands)
 - [Transform Commands](#transform-commands) (18 commands)
 - [Format Converters](#format-converters) (12 commands)
 - [Key Discoveries](#key-discoveries)
@@ -212,8 +214,8 @@ chatter analyze freq sample.cha --format json > sample.frq.json
 #### IPSYN — Index of Productive Syntax
 
 - Parses %mor tier structure for syntactic pattern matching.
-- 56 grammatical categories scored (matching CLAN's IPSyn rule set).
-- Golden test parity: verified
+- The built-in scoring covers a **representative subset** of the ~56 grammatical categories in the full English IPSyn rule set (see `crates/talkbank-clan/src/commands/ipsyn.rs`). Full coverage requires supplying an external rule file.
+- Golden test parity: verified for the built-in subset
 
 #### VOCD — Vocabulary Diversity (D Statistic)
 
