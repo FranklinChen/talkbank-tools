@@ -1,6 +1,8 @@
 # Glossary
 
 **Status:** Current
+**Last updated:** 2026-05-12 04:22 EDT
+
 ## CHAT Format Terms
 
 **CHAT** (Codes for the Human Analysis of Transcripts)
@@ -13,7 +15,7 @@
 : Lines beginning with `%` that provide annotations for the preceding main tier (e.g., `%mor:` for morphology, `%gra:` for grammar).
 
 **Speaker code**
-: Three-letter identifier for a participant (e.g., CHI = child, MOT = mother, FAT = father, INV = investigator).
+: Short identifier for a participant — up to seven characters from `A-Z`, `0-9`, `_`, `-`, `'`; three uppercase letters is the convention (e.g., CHI = child, MOT = mother, FAT = father, INV = investigator).
 
 **%mor tier**
 : Morphological analysis tier containing POS tags and morpheme breakdowns.
@@ -21,8 +23,8 @@
 **%gra tier**
 : Grammatical relations tier containing dependency structure.
 
-**Gem** (General Empirical Measure)
-: A marked segment of transcript bounded by `@BG` (begin gem) and `@EG` (end gem) headers.
+**Gem**
+: A marked segment of transcript bounded by `@Bg` (begin gem) and `@Eg` (end gem) headers. See [Filtering gems](../user-guide/filtering-gems.md).
 
 **Terminator**
 : Utterance-ending punctuation (`.` period, `?` question, `!` exclamation) that appears at the end of main tier lines.
