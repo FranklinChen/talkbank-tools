@@ -9,7 +9,7 @@
 //!
 //! | CLAN command | Rust equivalent |
 //! |---|---|
-//! | `roles +d"OLD>NEW" file.cha` | `chatter clan roles --rename "OLD>NEW" file.cha` |
+//! | `roles +d"OLD>NEW" file.cha` | `chatter clan roles --rename "OLD=NEW" file.cha` |
 //!
 //! # Differences from CLAN
 //!
