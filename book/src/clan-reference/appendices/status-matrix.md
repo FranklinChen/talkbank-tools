@@ -1,6 +1,8 @@
 # Command Status Matrix
 
 **Status:** Current
+**Last updated:** 2026-05-12 04:26 EDT
+
 Status of all CLAN commands in the Rust reimplementation.
 
 **Coverage: 70/70 CLAN binaries** (100%). Every CLAN binary in `OSX-CLAN/src/unix/bin/` has a corresponding module. The 6 NLP commands (MOR, POST, MEGRASP, etc.) are deliberately not implemented but produce clear error messages. Additionally, 7 implemented commands are outside that local binary inventory: COMPLEXITY, CORELEX, WDSIZE, LAB2CHAT, RTF2CHAT, ROLES, and TRIM.
@@ -123,10 +125,18 @@ These commands depend on the legacy CLAN MOR data model (trie-based lexicons, HM
 ## Compatibility-Alias Subcommands
 
 These CLAN binaries have their own `clap` subcommand variant — exposed
-under the same name as the legacy CLAN binary — but dispatch to a
-shared analysis pipeline rather than implementing independent logic.
-The dedicated subcommand exists so legacy CLAN scripts that invoke
-the binary by name continue to work.
+under the same name as the legacy CLAN binary — but are categorized
+as compatibility aliases in
+`crates/talkbank-cli/src/cli/args/clan_commands.rs` (search for
+`CompatibilityAlias`). The dedicated subcommand exists so legacy
+CLAN scripts that invoke the binary by name continue to work.
+
+Five subcommand names are bucketed as `CompatibilityAlias`: `check`,
+`fixit`, `indent`, `longtier`, and `gemfreq`. Only `gemfreq` is
+documented in detail here because its dispatch target differs from
+its name; the other four (`check`, `fixit`, `indent`, `longtier`)
+are listed in the main category tables above and dispatch to their
+namesakes through the standard pipeline.
 
 | Subcommand | Dispatches to | Notes |
 |---|---|---|
