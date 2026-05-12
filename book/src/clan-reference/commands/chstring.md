@@ -17,7 +17,8 @@ chatter clan chstring --changes changes.cut file.cha
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--changes` | path | `changes.cut` | Path to the changes file containing find/replace pairs |
+| `-c`, `--changes` | path | *(required)* | Path to the changes file containing find/replace pairs |
+| `-o`, `--output` | path | stdout | Output CHAT file path |
 
 ## Changes File Format
 
@@ -30,7 +31,7 @@ find_text2
 replace_text2
 ```
 
-The file must have an even number of non-empty lines. By default, CLAN looks for `changes.cut` in the current directory.
+The file must have an even number of non-empty lines. CLAN looks for `changes.cut` in the current directory by default; `chatter clan chstring` requires the path to be passed explicitly via `--changes`.
 
 ## Behavior
 
