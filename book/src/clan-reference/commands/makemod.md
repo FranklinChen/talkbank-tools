@@ -1,6 +1,8 @@
 # MAKEMOD -- Generate %mod Tier from Pronunciation Lexicon
 
 **Status:** Current
+**Last updated:** 2026-05-12 11:05 EDT
+
 ## Purpose
 
 Reimplements CLAN's MAKEMOD command, which looks up each countable word on main tiers in a pronunciation lexicon (CMU dictionary format) and generates a `%mod` dependent tier with the phonemic transcription. Words not found in the lexicon are marked with `???`.
@@ -15,12 +17,16 @@ chatter clan makemod --lexicon cmulex.cut file.cha
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--lexicon` | path | `cmulex.cut` | Path to the pronunciation lexicon file |
+| `-l`, `--lexicon` | path | *(required)* | Path to the pronunciation lexicon file |
 | `--all-alternatives` | bool | `false` | Show all alternative pronunciations (default: first only) |
+| `-o`, `--output` | path | stdout | Output CHAT file path |
 
 ## External Data
 
-Requires a CMU-format lexicon file (default: `cmulex.cut` from the CLAN `lib/` directory).
+Requires a CMU-format lexicon file. CLAN ships a `cmulex.cut` in
+its `lib/` directory and uses that by default; `chatter clan
+makemod` does not bundle a lexicon, so `--lexicon` must be passed
+explicitly.
 
 Format: `WORD  phoneme1 phoneme2 ...` (one entry per line). Lines starting with `#` or `%` are treated as comments. Words with `(N)` suffix (variant number like `READ(2)`) are treated as pronunciation alternatives for the base word.
 
