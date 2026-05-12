@@ -1,7 +1,7 @@
 # Diagnostic and JSON Output Contract
 
 **Status:** Current
-**Last updated:** 2026-03-24 00:01 EDT
+**Last updated:** 2026-05-11 23:37 EDT
 
 This page documents the machine-readable JSON surfaces currently exposed by the
 top-level `chatter` CLI. It does not try to freeze every JSON payload emitted by
@@ -13,62 +13,29 @@ top-level `chatter` CLI. It does not try to freeze every JSON payload emitted by
 - Treat additional fields as additive unless this page says otherwise.
 - Treat message wording as human-facing text, not a stable machine contract.
 
-## `chatter validate FILE --format json`
+## `chatter validate ... --format json`
 
-Single-file validation emits one JSON object on stdout.
+Both `chatter validate FILE --format json` and
+`chatter validate DIR --format json` emit **newline-delimited JSON
+(NDJSON)** on stdout, with the same record shapes in both modes:
 
-Observed shape:
-
-```json
-{
-  "file": "/path/to/file.cha",
-  "status": "valid",
-  "cached": true,
-  "error_count": 0,
-  "errors": []
-}
-```
-
-For invalid files, each error object currently includes:
-
-```json
-{
-  "code": "E502",
-  "severity": "Error",
-  "message": "Missing required @End header",
-  "location": {
-    "start": 108,
-    "end": 108
-  }
-}
-```
-
-Contract notes:
-
-- `file`, `status`, `error_count`, and `errors` are stable.
-- `cached` (optional) indicates the result came from the validation cache; only present when `true`.
-- `status` is currently `valid` or `invalid`.
-- `location.start` and `location.end` are byte offsets into the input file.
-- Exit code `0` means success; exit code `1` means validation failure or I/O failure.
-
-## `chatter validate DIR --format json`
-
-Directory validation does not emit one aggregate JSON object. It currently emits
-newline-delimited JSON records:
-
-1. zero or more per-file records, then
+1. zero or more per-file records (one per validated file), then
 2. one final summary record.
 
-Observed record types:
+A single-file invocation still emits a file record followed by a
+summary record — it is not a single-object surface.
+
+### Per-file records
+
+Valid files:
 
 ```json
-{
-  "type": "file",
-  "file": "/path/to/file.cha",
-  "status": "valid",
-  "cache_hit": false
-}
+{"type":"file","file":"/path/to/file.cha","status":"valid","cache_hit":false}
 ```
+
+Invalid files (the `errors` array is opaque per-error JSON; the
+`note` field is appended when the validator stopped further checks
+because of structural errors):
 
 ```json
 {
@@ -79,12 +46,19 @@ Observed record types:
   "errors": [
     {
       "code": "E502",
-      "message": "Missing required @End header",
+      "message": "Missing @End header at end of file",
       "severity": "Error"
     }
-  ]
+  ],
+  "note": "Some additional checks may not have run because of structural errors. Fix the structural errors first, then re-validate."
 }
 ```
+
+Parser-failure files use `"status":"parse_error"` with an `error`
+string. Read-failure files use `"status":"read_error"` with an
+`error` string.
+
+### Summary record
 
 ```json
 {
@@ -101,11 +75,27 @@ Observed record types:
 }
 ```
 
-Contract notes:
+When `--roundtrip` is set, the summary also includes
+`roundtrip_passed` and `roundtrip_failed` counters.
 
-- `type`, `file`, `status`, and the summary counters above are the stable fields.
-- Directory-mode invalid-file errors currently omit `location`.
-- Exit code `0` means all files validated successfully; exit code `1` means at least one file failed or an I/O error occurred.
+### Contract notes
+
+- The `type` field is stable: `"file"` or `"summary"`.
+- For file records: `file` and `status` are stable; `cache_hit` is
+  stable for `valid` records. `error_count` and `errors` are
+  stable for `invalid` records.
+- For summary records: `directory`, `total_files`, `valid`,
+  `invalid`, `parse_errors`, `cache_hits`, `cache_misses`,
+  `cache_hit_rate`, and `cancelled` are stable.
+- `status` values currently observed: `valid`, `invalid`,
+  `parse_error`, `read_error`. New status values may appear.
+- Errors do not include a byte-offset `location` field in the
+  NDJSON surface; for byte-offset diagnostics use the LSP or the
+  non-JSON renderer.
+- The `note` field on invalid file records is human-facing
+  guidance and may be added or omitted between releases.
+- Exit code `0` means all files validated successfully; exit code
+  `1` means at least one file failed or an I/O error occurred.
 
 ## `chatter to-json`
 
