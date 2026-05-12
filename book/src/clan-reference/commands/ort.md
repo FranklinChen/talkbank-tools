@@ -1,6 +1,8 @@
 # ORT -- Orthographic Conversion via Dictionary Lookup
 
 **Status:** Current
+**Last updated:** 2026-05-12 11:11 EDT
+
 ## Purpose
 
 Reimplements CLAN's CONVORT command, which applies orthographic conversion rules from a dictionary file to main-tier words. When a word is modified, the original main-tier text is preserved on a `%ort:` dependent tier for reference.
@@ -15,11 +17,17 @@ chatter clan ort --dictionary ort.cut file.cha
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--dictionary` | path | `ort.cut` | Path to the orthographic conversion dictionary |
+| `-d`, `--dictionary` | path | *(required)* | Path to the orthographic conversion dictionary |
+| `-o`, `--output` | path | stdout | Output CHAT file path |
 
 ## External Data
 
-Requires an orthographic conversion dictionary (default: `ort.cut`). Format: `from_word  to_word` (one pair per line, tab or space separated). Lines starting with `#` or `;` are treated as comments. Lookups are case-insensitive.
+Requires an orthographic conversion dictionary. CLAN uses `ort.cut`
+from its `lib/` directory by default; `chatter clan ort` does not
+bundle a dictionary, so `--dictionary` must be passed explicitly.
+Format: `from_word  to_word` (one pair per line, tab or space
+separated). Lines starting with `#` or `;` are treated as
+comments. Lookups are case-insensitive.
 
 ## Behavior
 
