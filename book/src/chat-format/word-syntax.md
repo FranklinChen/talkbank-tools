@@ -1,7 +1,7 @@
 # Word Syntax
 
 **Status:** Reference
-**Last updated:** 2026-03-24 00:01 EDT
+**Last updated:** 2026-05-11 23:33 EDT
 
 Words are the primary content unit on the main tier. CHAT defines several word types and annotation mechanisms.
 
@@ -122,13 +122,24 @@ Fillers are marked with `&-`:
 *CHI:	&-um I want &-uh cookie .
 ```
 
-### Interposed Events
+### Interposed Speech (Other Speaker)
 
-Actions that occur during speech:
+Brief background speech from a different speaker is marked with the
+`&*SPK:text` prefix — it captures the interjection without creating
+a full turn line:
 
 ```chat
-*CHI:	I want [^ sneezes] cookie .
+*CHI:	I want &*MOT:careful a cookie .
 ```
+
+This says CHI was speaking and MOT briefly said "careful" mid-turn.
+If the intervention is substantial enough to constitute its own turn,
+transcribe it as a separate `*MOT:` utterance instead. Model:
+`crates/talkbank-model/src/model/content/other_spoken.rs`.
+
+(Note: `[^ text]` is a *freecode* annotation — a free-form
+researcher code attached to the preceding word — and is unrelated to
+events. See `grammar/grammar.js` rule `freecode`.)
 
 ## Pauses
 
@@ -164,7 +175,7 @@ Groups followed by retrace markers indicate speech disfluencies:
 *CHI:	<I want a> [///] give me a cookie .
 ```
 
-- `[/]` — exact retrace (repetition)
-- `[//]` — retrace with correction
-- `[///]` — reformulation (complete restart)
-- `[/-]` — false start (abandoned utterance)
+- `[/]` — partial retrace (speaker repeats the same words)
+- `[//]` — full retrace (speaker restarts with different words)
+- `[///]` — multiple retracing (multiple false starts)
+- `[/-]` — reformulation (speaker rephrases with different structure)
