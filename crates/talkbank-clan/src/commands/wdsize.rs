@@ -13,9 +13,9 @@
 //!
 //! # Differences from CLAN
 //!
-//! - Uses typed `MorTier` items with `MorWord.stem` rather than raw string
+//! - Uses typed `MorTier` items with `MorWord.lemma` rather than raw string
 //!   parsing of `%mor` tier text.
-//! - Compound words concatenate all compound stems (matching CLAN behavior).
+//! - Compound words concatenate all compound lemmas (matching CLAN behavior).
 //! - Supports JSON and CSV output in addition to text/XLS.
 //! - Optional `--main-tier` flag to count main tier words instead of stems.
 
