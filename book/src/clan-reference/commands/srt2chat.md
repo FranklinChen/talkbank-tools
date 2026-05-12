@@ -1,6 +1,8 @@
 # SRT2CHAT -- SRT Subtitle to CHAT Conversion
 
 **Status:** Current
+**Last updated:** 2026-05-12 13:37 EDT
+
 ## Purpose
 
 Parses SRT (SubRip) subtitle files and converts them to CHAT format, mapping each subtitle block to an utterance with timing bullets derived from the SRT timestamps.
@@ -15,9 +17,14 @@ chatter clan srt2chat input.srt
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `speaker` | `"SPK"` | Speaker code for all utterances |
-| `language` | `"eng"` | ISO 639 language code for the `@Languages` header |
-| `corpus` | `"srt_corpus"` | Corpus name for the `@ID` header |
+| `-l`, `--language` | `"eng"` | ISO 639 language code for the `@Languages` header |
+| `-o`, `--output` | stdout | Output CHAT file path |
+
+The speaker code (`"SPK"`) and corpus name (`"srt_corpus"`) in
+`@ID` headers are both hardcoded at
+`crates/talkbank-clan/src/converters/srt2chat.rs:152`; there are
+no CLI flags to override them. Same pattern as the other
+converters in this directory.
 
 ## Input Format
 
