@@ -29,6 +29,7 @@ async fn live_fixture_runs_utseg_job_when_available() {
             ..CommonOptions::default()
         },
         merge_abbrev: false.into(),
+        utseg_fallback: false.into(),
     });
 
     let (info, results) = submit_and_complete(

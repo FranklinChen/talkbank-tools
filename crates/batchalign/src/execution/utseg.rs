@@ -37,6 +37,7 @@ pub(crate) async fn dispatch_utseg_job(
     host: &DispatchHostContext,
     gateway: Arc<dyn WorkerGateway>,
     should_merge_abbrev: bool,
+    allow_stanza_fallback: bool,
 ) -> Result<(), crate::error::ServerError> {
     let plan = planning::build_job_plan(job).map_err(|error| {
         crate::error::ServerError::Validation(format!("Utseg planning failed: {error}"))
@@ -110,7 +111,9 @@ pub(crate) async fn dispatch_utseg_job(
         joinset.spawn(async move {
             let _permit = permit; // released on drop after the task completes
             let single = vec![file_input];
-            let results = gateway_for_task.utseg_batch(&single, &lang).await;
+            let results = gateway_for_task
+                .utseg_batch(&single, &lang, allow_stanza_fallback)
+                .await;
             write_text_results(
                 &job_for_task,
                 &host_for_task,
@@ -207,6 +210,7 @@ mod tests {
             &self,
             files: &[TextBatchFileInput],
             _lang: &LanguageCode3,
+            _allow_stanza_fallback: bool,
         ) -> TextBatchFileResults {
             let mut state = self.state.lock().unwrap();
             state.batch_calls += 1;
@@ -252,6 +256,7 @@ mod tests {
                 options: CommandOptions::Utseg(UtsegOptions {
                     common: CommonOptions::default(),
                     merge_abbrev: merge_abbrev.into(),
+                    utseg_fallback: false.into(),
                 }),
                 runtime_state: BTreeMap::new(),
                 debug_traces: false,
@@ -311,6 +316,7 @@ mod tests {
             &host,
             Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
             false,
+            false,
         )
         .await
         .expect("utseg dispatch");
@@ -332,7 +338,7 @@ mod tests {
         let gateway = Arc::new(FakeUtsegGateway::default());
         let job = utseg_snapshot(temp.path(), true);
 
-        dispatch_utseg_job(&job, &host, gateway as Arc<dyn WorkerGateway>, true)
+        dispatch_utseg_job(&job, &host, gateway as Arc<dyn WorkerGateway>, true, false)
             .await
             .expect("utseg dispatch");
 

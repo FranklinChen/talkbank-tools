@@ -47,12 +47,13 @@ use crate::text_batch::{
 };
 
 /// Command-specific parameters for the utseg workflow family.
-///
-/// Retained as a zero-field struct so the generic `TextBatchOperation`
-/// shape stays symmetric with morphotag/translate; may grow again when
-/// utseg acquires real command-specific options.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct UtsegWorkflowParams;
+pub(crate) struct UtsegWorkflowParams {
+    /// Operator opt-in to the legacy Stanza constituency-parser
+    /// fallback when no language-specific TalkBank BERT utseg model is
+    /// configured. Set by the `--utseg-fallback-stanza` CLI flag.
+    pub allow_stanza_fallback: bool,
+}
 
 /// Typed workflow operation for utseg.
 pub(crate) struct UtsegOperation;
@@ -76,7 +77,7 @@ impl TextBatchOperation for UtsegOperation {
         chat_text: ChatText<'_>,
         lang: &LanguageCode3,
         shared: Self::Shared<'_>,
-        _params: Self::Params<'_>,
+        params: Self::Params<'_>,
     ) -> Result<String, ServerError> {
         run_utseg_impl(
             chat_text.as_ref(),
@@ -84,6 +85,7 @@ impl TextBatchOperation for UtsegOperation {
             shared.pool,
             shared.cache,
             shared.engine_version,
+            params.allow_stanza_fallback,
         )
         .await
     }
@@ -92,9 +94,9 @@ impl TextBatchOperation for UtsegOperation {
         files: &[TextBatchFileInput],
         lang: &LanguageCode3,
         shared: Self::Shared<'_>,
-        _params: Self::Params<'_>,
+        params: Self::Params<'_>,
     ) -> TextBatchFileResults {
-        run_utseg_batch_impl(files, lang, shared.pool).await
+        run_utseg_batch_impl(files, lang, shared.pool, params.allow_stanza_fallback).await
     }
 }
 
@@ -111,13 +113,16 @@ pub async fn process_utseg(
     pool: &WorkerPool,
     cache: &crate::cache::UtteranceCache,
     engine_version: &EngineVersion,
+    allow_stanza_fallback: bool,
 ) -> Result<String, ServerError> {
     UtsegWorkflow::new()
         .run_per_file(TextPerFileWorkflowRequest {
             chat_text: ChatText::from(chat_text),
             lang,
             shared: PipelineServices::new(pool, cache, engine_version),
-            params: UtsegWorkflowParams,
+            params: UtsegWorkflowParams {
+                allow_stanza_fallback,
+            },
         })
         .await
 }
@@ -127,9 +132,10 @@ pub async fn infer_utseg_assignments(
     pool: &WorkerPool,
     lang: &LanguageCode3,
     items: &[UtsegBatchItem],
+    allow_stanza_fallback: bool,
 ) -> Result<Vec<UtsegResponse>, ServerError> {
     let indexed_items: Vec<(usize, UtsegBatchItem)> = items.iter().cloned().enumerate().collect();
-    infer_batch(pool, &indexed_items, lang).await
+    infer_batch(pool, &indexed_items, lang, allow_stanza_fallback).await
 }
 
 // ---------------------------------------------------------------------------
@@ -146,13 +152,16 @@ pub(crate) async fn process_utseg_batch(
     pool: &WorkerPool,
     cache: &crate::cache::UtteranceCache,
     engine_version: &EngineVersion,
+    allow_stanza_fallback: bool,
 ) -> TextBatchFileResults {
     UtsegWorkflow::new()
         .run_batch_files(TextBatchWorkflowRequest {
             files,
             lang,
             shared: PipelineServices::new(pool, cache, engine_version),
-            params: UtsegWorkflowParams,
+            params: UtsegWorkflowParams {
+                allow_stanza_fallback,
+            },
         })
         .await
 }
@@ -163,6 +172,7 @@ async fn run_utseg_impl(
     pool: &WorkerPool,
     cache: &crate::cache::UtteranceCache,
     engine_version: &EngineVersion,
+    allow_stanza_fallback: bool,
 ) -> Result<String, ServerError> {
     run_text_pipeline(
         chat_text,
@@ -175,7 +185,10 @@ async fn run_utseg_impl(
             integrate: integrate_assignments,
             apply: apply_utseg_results,
         },
-        infer_batch,
+        // The generic pipeline's `infer` signature doesn't carry
+        // command-specific state, so capture the operator opt-in here
+        // and bind it onto each `infer_batch` invocation.
+        async move |pool, items, lang| infer_batch(pool, items, lang, allow_stanza_fallback).await,
     )
     .await
 }
@@ -184,6 +197,7 @@ async fn run_utseg_batch_impl(
     files: &[TextBatchFileInput],
     lang: &LanguageCode3,
     pool: &WorkerPool,
+    allow_stanza_fallback: bool,
 ) -> TextBatchFileResults {
     run_text_batch_pipeline(
         files,
@@ -195,7 +209,7 @@ async fn run_utseg_batch_impl(
             collect: collect_utseg_batch_items,
             apply: apply_utseg_file,
         },
-        infer_batch,
+        async move |pool, items, lang| infer_batch(pool, items, lang, allow_stanza_fallback).await,
     )
     .await
 }
@@ -231,10 +245,16 @@ fn apply_utseg_file(
 
 /// Send batch items to a worker for constituency inference via batched
 /// `execute_v2`.
+///
+/// `allow_stanza_fallback` propagates the operator opt-in
+/// (`--utseg-fallback-stanza`) to the worker so it can engage the
+/// legacy Stanza constituency-parser fallback when no
+/// language-specific BERT utseg model is configured.
 async fn infer_batch(
     pool: &WorkerPool,
     items: &[(usize, UtsegBatchItem)],
     lang: &LanguageCode3,
+    allow_stanza_fallback: bool,
 ) -> Result<Vec<UtsegResponse>, ServerError> {
     let payload_items: Vec<_> = items.iter().map(|(_, item)| item.clone()).collect();
     let artifacts = PreparedArtifactRuntimeV2::new("utseg_v2").map_err(|error| {
@@ -243,10 +263,16 @@ async fn infer_batch(
         ))
     })?;
     let request_ids = PreparedTextRequestIdsV2::for_task("utseg");
-    let request = build_utseg_request_v2(artifacts.store(), &request_ids, lang, &payload_items)
-        .map_err(|error| {
-            ServerError::Validation(format!("failed to build utseg V2 worker request: {error}"))
-        })?;
+    let request = build_utseg_request_v2(
+        artifacts.store(),
+        &request_ids,
+        lang,
+        &payload_items,
+        allow_stanza_fallback,
+    )
+    .map_err(|error| {
+        ServerError::Validation(format!("failed to build utseg V2 worker request: {error}"))
+    })?;
 
     info!(
         num_items = items.len(),

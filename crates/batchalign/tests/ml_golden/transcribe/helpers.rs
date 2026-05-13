@@ -25,6 +25,7 @@ pub(super) fn transcribe_options(
         wor,
         merge_abbrev: false.into(),
         batch_size: 8,
+        utseg_fallback: false.into(),
     })
 }
 

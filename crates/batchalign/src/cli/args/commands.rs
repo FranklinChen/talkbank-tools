@@ -294,6 +294,14 @@ pub struct TranscribeArgs {
     #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
     pub no_merge_abbrev: bool,
 
+    /// Opt in to the legacy Stanza constituency-parser fallback for
+    /// utterance segmentation when no language-specific TalkBank BERT
+    /// model is configured for `--lang`. Default refuses substitution;
+    /// pass this flag to permit the same Stanza-based segmenter that
+    /// Batchalign 2 used for unsupported languages (quality varies).
+    #[arg(long)]
+    pub utseg_fallback_stanza: bool,
+
     /// Language (3-letter ISO code).
     #[arg(long, default_value = "eng")]
     pub lang: String,
@@ -494,6 +502,14 @@ pub struct UtsegArgs {
     /// Do not merge abbreviations in output (default).
     #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
     pub no_merge_abbrev: bool,
+
+    /// Opt in to the legacy Stanza constituency-parser fallback for
+    /// utterance segmentation when no language-specific TalkBank BERT
+    /// model is configured for `--lang`. Default refuses substitution;
+    /// pass this flag to permit the same Stanza-based segmenter that
+    /// Batchalign 2 used for unsupported languages (quality varies).
+    #[arg(long)]
+    pub utseg_fallback_stanza: bool,
 }
 
 /// Arguments for the `benchmark` command.

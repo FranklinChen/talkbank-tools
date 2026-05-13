@@ -277,6 +277,7 @@ mod tests {
                 diarize: false,
                 wor: Default::default(),
                 merge_abbrev: false.into(),
+                utseg_fallback: false.into(),
                 batch_size: 1,
             }),
             paths_mode: true,

@@ -520,6 +520,7 @@ fn batch_infer_ipc_roundtrip() {
             serde_json::json!({"words": ["world"], "terminator": "."}),
         ],
         mwt: BTreeMap::new(),
+        allow_stanza_fallback: false,
     };
 
     let req_json = serde_json::to_string(&req).unwrap();

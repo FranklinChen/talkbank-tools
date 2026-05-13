@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use super::params::{MergeAbbrevPolicy, WorTierPolicy};
+pub use super::params::{MergeAbbrevPolicy, UtsegFallbackPolicy, WorTierPolicy};
 
 // ---------------------------------------------------------------------------
 // Default helpers
@@ -277,6 +277,14 @@ pub struct TranscribeOptions {
     #[serde(default)]
     pub merge_abbrev: MergeAbbrevPolicy,
 
+    /// Operator opt-in to the legacy Stanza constituency-parser
+    /// fallback for utseg when no language-specific TalkBank BERT
+    /// model is configured for the job's language. Driven by the
+    /// `--utseg-fallback-stanza` CLI flag; default refuses
+    /// substitution.
+    #[serde(default)]
+    pub utseg_fallback: UtsegFallbackPolicy,
+
     /// Whisper batch size.
     #[serde(default = "default_batch_size")]
     pub batch_size: i32,
@@ -364,6 +372,14 @@ pub struct UtsegOptions {
     /// Merge abbreviated forms during processing.
     #[serde(default)]
     pub merge_abbrev: MergeAbbrevPolicy,
+
+    /// Operator opt-in to the legacy Stanza constituency-parser
+    /// fallback for utseg when no language-specific TalkBank BERT
+    /// model is configured for the job's language. Driven by the
+    /// `--utseg-fallback-stanza` CLI flag; default refuses
+    /// substitution.
+    #[serde(default)]
+    pub utseg_fallback: UtsegFallbackPolicy,
 }
 
 /// Options for the `benchmark` command.
@@ -521,6 +537,18 @@ impl CommandOptions {
         self.merge_abbrev_policy().should_merge()
     }
 
+    /// Operator opt-in to the Stanza utseg fallback for this command.
+    ///
+    /// Commands without an utseg surface return
+    /// [`UtsegFallbackPolicy::Refuse`].
+    pub fn utseg_fallback_policy(&self) -> UtsegFallbackPolicy {
+        match self {
+            Self::Transcribe(o) | Self::TranscribeS(o) => o.utseg_fallback,
+            Self::Utseg(o) => o.utseg_fallback,
+            _ => UtsegFallbackPolicy::Refuse,
+        }
+    }
+
     /// Compute the engine overrides string that worker dispatch will actually
     /// use for this command's primary GPU task.
     ///
@@ -635,6 +663,7 @@ mod tests {
             diarize: true,
             wor: false.into(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
             batch_size: 16,
         });
         let json = serde_json::to_string(&opts).unwrap();
@@ -650,6 +679,7 @@ mod tests {
             diarize: true,
             wor: false.into(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
             batch_size: 8,
         });
         let json = serde_json::to_string(&opts).unwrap();
@@ -789,6 +819,7 @@ mod tests {
             diarize: false,
             wor: false.into(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
             batch_size: 8,
         };
 
@@ -876,6 +907,7 @@ mod tests {
         let opts = CommandOptions::Utseg(UtsegOptions {
             common: CommonOptions::default(),
             merge_abbrev: true.into(),
+            utseg_fallback: false.into(),
         });
         let json = serde_json::to_string(&opts).unwrap();
         let back: CommandOptions = serde_json::from_str(&json).unwrap();
@@ -1063,6 +1095,7 @@ mod tests {
             diarize: false,
             wor: false.into(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
             batch_size: 8,
         });
 
@@ -1077,6 +1110,7 @@ mod tests {
             diarize: false,
             wor: false.into(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
             batch_size: 8,
         });
 

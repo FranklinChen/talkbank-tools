@@ -386,6 +386,7 @@ mod tests {
                     diarize: false,
                     wor: WorTierPolicy::Omit,
                     merge_abbrev: false.into(),
+                    utseg_fallback: false.into(),
                     batch_size: 8,
                 }),
                 runtime_state: BTreeMap::new(),

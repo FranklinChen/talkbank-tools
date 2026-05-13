@@ -74,6 +74,7 @@ async fn stanza_profile_groups_morphotag_and_utseg() {
             ..CommonOptions::default()
         },
         merge_abbrev: false.into(),
+        utseg_fallback: false.into(),
     });
 
     let (info_ut, _outputs_ut) = submit_paths_and_complete(

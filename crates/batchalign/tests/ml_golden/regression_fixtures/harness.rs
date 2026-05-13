@@ -100,6 +100,7 @@ fn command_options_for(manifest: &FixtureManifest) -> CommandOptions {
             },
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
         other => panic!(
             "regression_fixtures runner does not yet support command {other:?} — add the dispatch arm"

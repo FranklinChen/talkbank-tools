@@ -91,6 +91,7 @@ async fn stress_oversubscribe_does_not_storm_global_cap_rejections() {
             lang: lang.clone(),
             items: vec![json!({"words": ["hello"], "lang": lang.as_ref()})],
             mwt: BTreeMap::new(),
+            allow_stanza_fallback: false,
         },
     )
     .await;

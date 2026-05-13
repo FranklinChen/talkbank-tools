@@ -37,6 +37,7 @@ fn test_submission(files: Vec<FilePayload>) -> JobSubmission {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
         paths_mode: false,
         source_paths: vec![],

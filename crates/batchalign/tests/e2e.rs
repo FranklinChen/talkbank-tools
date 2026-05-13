@@ -147,6 +147,7 @@ async fn e2e_empty_input() {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
         paths_mode: false,
         source_paths: vec![],
@@ -289,6 +290,7 @@ async fn e2e_override_media_cache_option() {
         wor: false.into(),
         merge_abbrev: false.into(),
         batch_size: 8,
+        utseg_fallback: false.into(),
     });
 
     let files = vec![FilePayload {
@@ -325,6 +327,7 @@ async fn e2e_retokenize_option() {
         wor: false.into(),
         merge_abbrev: false.into(),
         batch_size: 8,
+        utseg_fallback: false.into(),
     });
 
     let files = vec![FilePayload {
@@ -664,6 +667,7 @@ async fn e2e_cancel_job() {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
         paths_mode: false,
         source_paths: vec![],
@@ -736,6 +740,7 @@ async fn e2e_job_status_lifecycle() {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
         paths_mode: false,
         source_paths: vec![],

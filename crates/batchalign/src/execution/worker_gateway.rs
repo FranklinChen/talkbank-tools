@@ -55,10 +55,18 @@ pub(crate) trait WorkerGateway: Send + Sync {
     ) -> Result<String, ServerError>;
 
     /// Run utterance segmentation over one cross-file batch of CHAT inputs.
+    ///
+    /// `allow_stanza_fallback` propagates the
+    /// `--utseg-fallback-stanza` operator opt-in: when `true`, the
+    /// worker engages the legacy Stanza constituency-parser segmenter
+    /// for languages without a TalkBank BERT utseg model. When
+    /// `false` (default), the worker raises `UtsegModelNotFoundError`
+    /// rather than silently substituting one model for another.
     async fn utseg_batch(
         &self,
         files: &[TextBatchFileInput],
         lang: &LanguageCode3,
+        allow_stanza_fallback: bool,
     ) -> TextBatchFileResults;
 
     /// Run translation over one cross-file batch of CHAT inputs.
@@ -173,6 +181,7 @@ impl WorkerGateway for PooledWorkerGateway {
         &self,
         files: &[TextBatchFileInput],
         lang: &LanguageCode3,
+        allow_stanza_fallback: bool,
     ) -> TextBatchFileResults {
         crate::utseg::process_utseg_batch(
             files,
@@ -180,6 +189,7 @@ impl WorkerGateway for PooledWorkerGateway {
             &self.pool,
             &self.cache,
             &self.engine_version,
+            allow_stanza_fallback,
         )
         .await
     }

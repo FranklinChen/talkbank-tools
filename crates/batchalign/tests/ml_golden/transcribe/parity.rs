@@ -32,6 +32,7 @@ async fn parity_transcribe_disfluency_markup() {
         wor: WorTierPolicy::Omit,
         merge_abbrev: false.into(),
         batch_size: 8,
+        utseg_fallback: false.into(),
     });
 
     let (info, outputs) = jobs
@@ -83,6 +84,7 @@ async fn parity_transcribe_retrace_markup() {
         wor: WorTierPolicy::Omit,
         merge_abbrev: false.into(),
         batch_size: 8,
+        utseg_fallback: false.into(),
     });
 
     let (info, outputs) = jobs

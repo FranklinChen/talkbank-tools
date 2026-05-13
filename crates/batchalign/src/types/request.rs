@@ -475,6 +475,7 @@ mod tests {
             options: CommandOptions::Utseg(UtsegOptions {
                 common: CommonOptions::default(),
                 merge_abbrev: Default::default(),
+                utseg_fallback: Default::default(),
             }),
             paths_mode: false,
             source_paths: vec![],
@@ -528,6 +529,7 @@ mod tests {
                 diarize: false,
                 wor: false.into(),
                 merge_abbrev: false.into(),
+                utseg_fallback: false.into(),
                 batch_size: 8,
             }),
             paths_mode: true,

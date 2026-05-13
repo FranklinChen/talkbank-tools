@@ -507,6 +507,7 @@ async fn stanza_worker_survives_many_sequential_requests() {
                     lang: LanguageCode3::eng(),
                     items: vec![item.clone()],
                     mwt: BTreeMap::new(),
+                    allow_stanza_fallback: false,
                 },
             )
             .await
@@ -610,6 +611,7 @@ async fn worker_with_delay_responds_when_timeout_is_generous() {
             lang: LanguageCode3::eng(),
             items: vec![json!({"test": true})],
             mwt: BTreeMap::new(),
+            allow_stanza_fallback: false,
         })
         .await
         .expect("batch_infer with delay should succeed");
@@ -647,6 +649,7 @@ async fn stanza_sequential_dispatch_reuses_worker() {
                     lang: LanguageCode3::eng(),
                     items: vec![item.clone()],
                     mwt: BTreeMap::new(),
+                    allow_stanza_fallback: false,
                 },
             )
             .await

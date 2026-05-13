@@ -206,6 +206,7 @@ async fn smoke_utseg() {
         CommandOptions::Utseg(UtsegOptions {
             common: CommonOptions::default(),
             merge_abbrev: Default::default(),
+            utseg_fallback: false.into(),
         }),
     )
     .await;
@@ -289,6 +290,7 @@ async fn smoke_transcribe() {
             wor: Default::default(),
             merge_abbrev: Default::default(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
     )
     .await;

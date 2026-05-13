@@ -89,8 +89,9 @@ class TestBatchInferUtseg:
         assert response.results[1].error == "Invalid batch item"
 
     def test_builds_single_language_pipeline_and_serializes_trees(self, monkeypatch) -> None:
-        # The Stanza branch is opt-in (BUG-032 default-refuse).
-        monkeypatch.setenv("BA3_UTSEG_FALLBACK_STANZA", "1")
+        # The Stanza branch is opt-in via the request-level typed field
+        # `allow_stanza_fallback`; the CLI surface is
+        # `--utseg-fallback-stanza` on every utseg-invoking subcommand.
         init_kwargs: list[dict[str, Any]] = []
         seen_texts: list[str] = []
         monotonic = iter([100.0, 104.0])
@@ -124,6 +125,7 @@ class TestBatchInferUtseg:
                 task="utseg",
                 lang="",
                 items=[{"words": ["I", "eat", "cookies"]}],
+                allow_stanza_fallback=True,
             ),
             build_stanza_config,
         )
@@ -148,8 +150,6 @@ class TestBatchInferUtseg:
         pattern. Silent substitution is the foot-gun this raise exists
         to prevent.
         """
-        monkeypatch.delenv("BA3_UTSEG_FALLBACK_STANZA", raising=False)
-
         from batchalign.inference.utseg import UtsegModelNotFoundError
 
         with pytest.raises(UtsegModelNotFoundError) as exc_info:
@@ -167,13 +167,17 @@ class TestBatchInferUtseg:
 
         message = str(exc_info.value)
         assert "spa" in message
-        assert "BA3_UTSEG_FALLBACK_STANZA" in message
+        # The CLI flag is the primary user-facing remediation; the
+        # resolver-entry path is the developer fix.
+        assert "--utseg-fallback-stanza" in message
+        # Env var must NOT appear — it was removed in favor of the
+        # typed protocol field + CLI flag.
+        assert "BA3_UTSEG_FALLBACK_STANZA" not in message
 
     def test_emits_loud_fallback_notice_when_opted_in(
         self, monkeypatch
     ) -> None:
-        """Opt-in fallback path: env var set → Stanza loads, notice fires."""
-        monkeypatch.setenv("BA3_UTSEG_FALLBACK_STANZA", "1")
+        """Opt-in fallback path: request field set → Stanza loads, notice fires."""
         emit_calls: list[tuple[str, str | None]] = []
 
         def _capture_emit(requested_lang: str, pack: str | None) -> None:
@@ -202,6 +206,7 @@ class TestBatchInferUtseg:
                 task="utseg",
                 lang="spa",
                 items=[{"words": ["hola", "como", "estas"]}],
+                allow_stanza_fallback=True,
             ),
             build_stanza_config,
             utterance_boundary_model=None,
@@ -240,7 +245,6 @@ class TestBatchInferUtseg:
 
     def test_builds_multilingual_pipeline_and_handles_runtime_failure(self, monkeypatch) -> None:
         # Multilingual Stanza pipeline is also opt-in — no BERT was loaded here.
-        monkeypatch.setenv("BA3_UTSEG_FALLBACK_STANZA", "1")
         init_kwargs: list[dict[str, Any]] = []
         seen_texts: list[str] = []
         monotonic = iter([5.0, 9.0])
@@ -283,6 +287,7 @@ class TestBatchInferUtseg:
                 task="utseg",
                 lang="eng",
                 items=[{"words": ["good", "path"]}, {"words": ["boom", "now"]}],
+                allow_stanza_fallback=True,
             ),
             build_stanza_config,
         )
@@ -307,12 +312,12 @@ class TestBatchInferUtseg:
     ) -> None:
         # Empty-langs path is reachable only when the operator opted in
         # to the Stanza fallback; otherwise the dispatcher refuses earlier.
-        monkeypatch.setenv("BA3_UTSEG_FALLBACK_STANZA", "1")
         response = batch_infer_utseg(
             BatchInferRequest(
                 task="utseg",
                 lang="",
                 items=[{"words": ["still", "works"]}],
+                allow_stanza_fallback=True,
             ),
             lambda langs: ([], {}),
         )

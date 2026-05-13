@@ -88,6 +88,7 @@ mod tests {
             &self,
             _files: &[TextBatchFileInput],
             _lang: &LanguageCode3,
+            _allow_stanza_fallback: bool,
         ) -> TextBatchFileResults {
             unreachable!()
         }

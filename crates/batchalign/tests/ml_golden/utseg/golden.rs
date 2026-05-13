@@ -12,6 +12,7 @@ fn utseg_options() -> CommandOptions {
             ..CommonOptions::default()
         },
         merge_abbrev: false.into(),
+        utseg_fallback: false.into(),
     })
 }
 

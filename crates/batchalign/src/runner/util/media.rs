@@ -282,6 +282,7 @@ mod tests {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         });
 
         assert!(!should_preflight(ReleasedCommand::Transcribe, Some(&opts)));

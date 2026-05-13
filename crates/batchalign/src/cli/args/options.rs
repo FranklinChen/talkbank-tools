@@ -233,6 +233,7 @@ pub fn build_typed_options(cmd: &Commands, global: &GlobalOpts) -> Option<Comman
                 diarize,
                 wor: resolve_wor_tier_policy(a.wor, a.nowor),
                 merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
+                utseg_fallback: a.utseg_fallback_stanza.into(),
                 batch_size: 8,
             };
             if diarize {
@@ -263,6 +264,7 @@ pub fn build_typed_options(cmd: &Commands, global: &GlobalOpts) -> Option<Comman
         Commands::Utseg(a) => Some(CommandOptions::Utseg(UtsegOptions {
             common,
             merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
+            utseg_fallback: a.utseg_fallback_stanza.into(),
         })),
         Commands::Benchmark(a) => {
             let asr_engine = if let Some(engine) = a.asr_engine_custom.as_deref() {

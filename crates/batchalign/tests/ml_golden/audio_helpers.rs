@@ -103,6 +103,7 @@ pub(crate) async fn transcribe_audio_clip(audio_name: &str, lang: &str, label: &
         wor: WorTierPolicy::Omit,
         merge_abbrev: false.into(),
         batch_size: 8,
+        utseg_fallback: false.into(),
     });
 
     let (info, outputs) = jobs

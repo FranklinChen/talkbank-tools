@@ -581,6 +581,7 @@ mod tests {
             &self,
             _files: &[crate::text_batch::TextBatchFileInput],
             _lang: &crate::api::LanguageCode3,
+            _allow_stanza_fallback: bool,
         ) -> crate::text_batch::TextBatchFileResults {
             unreachable!("compare tests do not call utseg_batch")
         }

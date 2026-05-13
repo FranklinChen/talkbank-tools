@@ -500,8 +500,13 @@ async fn process_asr_with_prechat_segmentation(
     }
 
     let items = build_prechat_utseg_items(&prepared_chunks);
-    let assignments =
-        crate::utseg::infer_utseg_assignments(ctx.services.pool, resolved_lang, &items).await?;
+    let assignments = crate::utseg::infer_utseg_assignments(
+        ctx.services.pool,
+        resolved_lang,
+        &items,
+        ctx.opts.allow_stanza_fallback_utseg,
+    )
+    .await?;
     let split_chunks = apply_prechat_assignments(&prepared_chunks, &assignments);
     let mut utterances = asr_postprocess::utterances_from_prepared_chunks(split_chunks);
     asr_postprocess::finalize_utterances(&mut utterances, &lang_str);
@@ -810,6 +815,7 @@ fn stage_run_utseg<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> St
             ctx.services.pool,
             ctx.services.cache,
             ctx.services.engine_version,
+            ctx.opts.allow_stanza_fallback_utseg,
         )
         .await?;
         ctx.dumper.dump_post_utseg_chat(filename, &result);
@@ -920,6 +926,7 @@ mod tests {
             with_utseg: false,
             with_morphosyntax: false,
             override_media_cache: false,
+            allow_stanza_fallback_utseg: false,
             write_wor: false,
             media_name: Some("sample".into()),
             rev_job_id: None,

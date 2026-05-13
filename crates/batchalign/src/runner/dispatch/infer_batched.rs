@@ -161,6 +161,7 @@ pub(crate) async fn dispatch_batched_infer(
                 services.pool,
                 services.cache,
                 services.engine_version,
+                job.dispatch.options.utseg_fallback_policy().is_allowed(),
             )
             .await
         }

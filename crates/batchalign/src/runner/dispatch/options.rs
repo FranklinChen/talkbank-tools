@@ -108,6 +108,11 @@ pub(crate) struct TranscribeDispatchParams {
     pub batch_size: i32,
     pub merge_abbrev: MergeAbbrevPolicy,
     pub override_media_cache: bool,
+    /// Operator opt-in to the legacy Stanza constituency-parser
+    /// fallback for utseg when no language-specific TalkBank BERT
+    /// utseg model is configured. Surfaced as
+    /// `--utseg-fallback-stanza` on the transcribe / transcribe-s CLI.
+    pub allow_stanza_fallback_utseg: bool,
 }
 
 /// Extract transcribe dispatch parameters from [`CommandOptions`].
@@ -126,6 +131,7 @@ pub(crate) fn extract_transcribe_dispatch_params(
                 batch_size: t.batch_size,
                 merge_abbrev: t.merge_abbrev,
                 override_media_cache: t.common.override_media_cache,
+                allow_stanza_fallback_utseg: t.utseg_fallback.is_allowed(),
             })
         }
         _ => None,
@@ -388,6 +394,7 @@ mod tests {
             wor: true.into(),
             merge_abbrev: true.into(),
             batch_size: 32,
+            utseg_fallback: false.into(),
         });
         let params = extract_transcribe_dispatch_params(&opts).unwrap();
         assert_eq!(params.asr_engine, AsrEngineName::WhisperX);
@@ -407,6 +414,7 @@ mod tests {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         });
         let params = extract_transcribe_dispatch_params(&opts).unwrap();
         assert_eq!(params.asr_engine, AsrEngineName::RevAi);
@@ -428,6 +436,7 @@ mod tests {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         });
 
         let params = extract_transcribe_dispatch_params(&opts).unwrap();
@@ -551,6 +560,7 @@ mod tests {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         });
         assert!(extract_fa_dispatch_params(&transcribe, CachePolicy::UseCache).is_none());
     }
@@ -595,6 +605,7 @@ mod tests {
                 wor: false.into(),
                 merge_abbrev: false.into(),
                 batch_size: 8,
+                utseg_fallback: false.into(),
             }),
             CommandOptions::Morphotag(MorphotagOptions {
                 common: common.clone(),

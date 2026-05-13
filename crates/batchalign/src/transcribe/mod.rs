@@ -128,6 +128,7 @@ mod tests {
             with_utseg: false,
             with_morphosyntax: false,
             override_media_cache: false,
+            allow_stanza_fallback_utseg: false,
             write_wor: false,
             media_name: Some("sample".into()),
             rev_job_id: None,

@@ -215,6 +215,7 @@ def execute_utseg_request_v2(
                 task=InferTask.UTSEG,
                 lang=utseg_request.lang,
                 items=[item.model_dump(mode="json") for item in batch.items],
+                allow_stanza_fallback=utseg_request.allow_stanza_fallback,
             )
         )
 

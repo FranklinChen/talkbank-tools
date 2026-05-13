@@ -234,6 +234,15 @@ pub struct BatchInferRequest {
     /// defaults to empty on deserialization.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mwt: BTreeMap<String, Vec<String>>,
+    /// Operator opt-in to the legacy Stanza constituency-parser
+    /// fallback for utseg when no language-specific TalkBank BERT
+    /// model is configured. Set by the `--utseg-fallback-stanza` CLI
+    /// flag. Only consulted by the `Utseg` task; ignored by other
+    /// inference tasks. Default `false` mirrors the
+    /// `WhisperHubModelNotFoundError` "refuse silent substitution"
+    /// pattern.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_stanza_fallback: bool,
 }
 
 /// Response from batched inference — one `InferResponse` per item.
@@ -352,6 +361,7 @@ mod tests {
                 serde_json::json!({"words": ["goodbye"]}),
             ],
             mwt: BTreeMap::new(),
+            allow_stanza_fallback: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Empty mwt should be omitted from JSON
@@ -367,6 +377,7 @@ mod tests {
             lang: LanguageCode3::eng(),
             items: vec![serde_json::json!({"words": ["gonna"]})],
             mwt: BTreeMap::from([("gonna".into(), vec!["going".into(), "to".into()])]),
+            allow_stanza_fallback: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"mwt\""));
@@ -389,6 +400,7 @@ mod tests {
             lang: LanguageCode3::eng(),
             items: vec![],
             mwt: BTreeMap::new(),
+            allow_stanza_fallback: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"task\":\"translate\""));

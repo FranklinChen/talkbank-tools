@@ -144,6 +144,11 @@ pub struct TranscribeOptions {
     pub with_morphosyntax: bool,
     /// Whether to override the cache for utseg/morphosyntax.
     pub override_media_cache: bool,
+    /// Operator opt-in to the legacy Stanza constituency-parser
+    /// fallback for utseg when no language-specific TalkBank BERT
+    /// model is configured. Set by `--utseg-fallback-stanza` on the
+    /// transcribe / transcribe-s CLI surface. Defaults to `false`.
+    pub allow_stanza_fallback_utseg: bool,
     /// Whether to generate `%wor` tiers in the transcribe output.
     ///
     /// Defaults to `false` (BA2 parity: `--wor` was opt-in for transcribe).

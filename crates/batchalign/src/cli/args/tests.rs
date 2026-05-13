@@ -200,6 +200,116 @@ fn parse_transcribe_asr_engine_override() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// --utseg-fallback-stanza — operator opt-in to the legacy Stanza
+// constituency-parser fallback for utseg when no language-specific
+// TalkBank BERT model is configured. Replaces the
+// `BA3_UTSEG_FALLBACK_STANZA` env var with a typed CLI surface
+// discoverable from `--help`. Exposed on every utseg-invoking
+// subcommand: transcribe, transcribe-s, and utseg.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn parse_transcribe_with_utseg_fallback_stanza() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "transcribe",
+        "audio/",
+        "--lang",
+        "spa",
+        "--utseg-fallback-stanza",
+    ]);
+    if let Commands::Transcribe(a) = &cli.command {
+        assert!(
+            a.utseg_fallback_stanza,
+            "--utseg-fallback-stanza must set the flag on TranscribeArgs"
+        );
+    } else {
+        panic!("expected Transcribe");
+    }
+}
+
+#[test]
+fn transcribe_s_typed_options_carry_utseg_fallback_stanza() {
+    // The `transcribe_s` shape is produced when `transcribe --diarize`
+    // is invoked. The flag must propagate through to the typed
+    // `CommandOptions::TranscribeS` variant.
+    let opts = typed_options_for(&[
+        "batchalign3",
+        "transcribe",
+        "audio/",
+        "--diarize",
+        "--utseg-fallback-stanza",
+    ]);
+    match opts {
+        CommandOptions::TranscribeS(o) => assert!(
+            o.utseg_fallback.is_allowed(),
+            "--utseg-fallback-stanza must reach TranscribeS typed options under --diarize"
+        ),
+        other => panic!("expected TranscribeS options, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_utseg_with_utseg_fallback_stanza() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "utseg",
+        "corpus/",
+        "--lang",
+        "spa",
+        "--utseg-fallback-stanza",
+    ]);
+    if let Commands::Utseg(a) = &cli.command {
+        assert!(
+            a.utseg_fallback_stanza,
+            "--utseg-fallback-stanza must set the flag on UtsegArgs"
+        );
+    } else {
+        panic!("expected Utseg");
+    }
+}
+
+#[test]
+fn utseg_fallback_default_is_refuse() {
+    // Without the flag, every utseg-invoking subcommand must default
+    // to refusing the Stanza substitution (BUG-032 invariant).
+    let opts = typed_options_for(&["batchalign3", "transcribe", "audio/"]);
+    match opts {
+        CommandOptions::Transcribe(o) => assert!(
+            !o.utseg_fallback.is_allowed(),
+            "default Transcribe must refuse Stanza utseg fallback"
+        ),
+        other => panic!("expected Transcribe options, got {other:?}"),
+    }
+
+    let opts = typed_options_for(&["batchalign3", "utseg", "corpus/"]);
+    match opts {
+        CommandOptions::Utseg(o) => assert!(
+            !o.utseg_fallback.is_allowed(),
+            "default Utseg must refuse Stanza utseg fallback"
+        ),
+        other => panic!("expected Utseg options, got {other:?}"),
+    }
+}
+
+#[test]
+fn utseg_fallback_allowed_when_flag_passed() {
+    let opts = typed_options_for(&[
+        "batchalign3",
+        "transcribe",
+        "audio/",
+        "--utseg-fallback-stanza",
+    ]);
+    match opts {
+        CommandOptions::Transcribe(o) => assert!(
+            o.utseg_fallback.is_allowed(),
+            "--utseg-fallback-stanza must lift TranscribeOptions.utseg_fallback to AllowStanza"
+        ),
+        other => panic!("expected Transcribe options, got {other:?}"),
+    }
+}
+
 #[test]
 fn parse_translate_with_file_list_and_output() {
     let cli = Cli::parse_from([

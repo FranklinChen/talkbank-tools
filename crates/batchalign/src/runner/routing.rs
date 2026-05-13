@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use crate::api::{EngineVersion, NumWorkers, ReleasedCommand, RevAiJobId};
 use crate::cache::UtteranceCache;
+
 use crate::capability::resolve_worker_capability_snapshot;
 use crate::commands::{RunnerDispatchKind, command_runner_dispatch_kind};
 use crate::execution::{
@@ -315,7 +316,14 @@ pub(super) async fn dispatch_job_with_execution_context(
             engine_version = %engine_version,
             "Using recipe-owned utseg execution path"
         );
-        dispatch_utseg_job(&job, host, gateway, plan.should_merge_abbrev).await?;
+        dispatch_utseg_job(
+            &job,
+            host,
+            gateway,
+            plan.should_merge_abbrev,
+            job.dispatch.options.utseg_fallback_policy().is_allowed(),
+        )
+        .await?;
     } else if use_infer && command == ReleasedCommand::Translate {
         let engine_version = EngineVersion::from(
             engine_versions

@@ -287,6 +287,13 @@ class UtsegRequestV2(BaseModel):
     lang: LanguageCode
     payload_ref_id: WorkerArtifactIdV2
     item_count: int = Field(ge=0)
+    # Operator opt-in to the legacy Stanza constituency-parser
+    # fallback for unsupported languages. Surfaced as
+    # `--utseg-fallback-stanza` on the CLI. Defaults to `False` so a
+    # request from an older client that omits the field deserializes
+    # with the safe "refuse" behavior; replaces the previous
+    # `BA3_UTSEG_FALLBACK_STANZA` env-var control flow.
+    allow_stanza_fallback: bool = False
 
 
 class TranslateRequestV2(BaseModel):

@@ -433,6 +433,13 @@ pub struct UtsegRequestV2 {
     pub payload_ref_id: WorkerArtifactIdV2,
     /// Number of utterance items frozen into the prepared batch payload.
     pub item_count: u32,
+    /// Operator opt-in to the legacy Stanza constituency-parser
+    /// fallback for unsupported languages. Set by the
+    /// `--utseg-fallback-stanza` CLI flag. Defaults to `false` so
+    /// older clients (and any non-CLI caller) refuse silent
+    /// substitution by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_stanza_fallback: bool,
 }
 
 /// V2 translation request payload.

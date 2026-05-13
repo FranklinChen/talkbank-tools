@@ -130,6 +130,7 @@ impl TranscribeDispatchPlan {
             merge_abbrev,
             override_media_cache,
             wor_tier,
+            allow_stanza_fallback_utseg,
             batch_size: _,
         } = extract_transcribe_dispatch_params(&job.dispatch.options)?;
         let with_utseg = runtime_flag(job, "utseg", true);
@@ -149,6 +150,7 @@ impl TranscribeDispatchPlan {
                 with_utseg,
                 with_morphosyntax,
                 override_media_cache,
+                allow_stanza_fallback_utseg,
                 write_wor: wor_tier.should_write(),
                 media_name: None,
                 rev_job_id: None,
@@ -192,6 +194,7 @@ impl BenchmarkDispatchPlan {
                 with_utseg: false,
                 with_morphosyntax: false,
                 override_media_cache,
+                allow_stanza_fallback_utseg: false,
                 write_wor: wor_tier.should_write(),
                 media_name: None,
                 rev_job_id: None,
@@ -409,6 +412,7 @@ mod tests {
                 wor: false.into(),
                 merge_abbrev: true.into(),
                 batch_size: 32,
+                utseg_fallback: false.into(),
             }),
             runtime_state,
         );
@@ -448,6 +452,7 @@ mod tests {
                 wor: false.into(),
                 merge_abbrev: false.into(),
                 batch_size: 8,
+                utseg_fallback: false.into(),
             }),
             BTreeMap::new(),
         );

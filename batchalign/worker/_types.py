@@ -181,6 +181,14 @@ class BatchInferRequest(BaseModel):
     items: list[WorkerJSONValue] = Field(default_factory=list)
     mwt: dict[str, list[str]] = Field(default_factory=dict)
     retokenize: bool = False
+    # Operator opt-in to the legacy Stanza constituency-parser fallback
+    # for utseg when no language-specific TalkBank BERT model is
+    # configured. Surfaced as `--utseg-fallback-stanza` on every
+    # utseg-invoking CLI subcommand (transcribe, transcribe_s, utseg).
+    # Default-refuse mirrors the WhisperHubModelNotFoundError pattern:
+    # silent substitution between models is the foot-gun this flag
+    # exists to prevent.
+    allow_stanza_fallback: bool = False
 
 
 class BatchInferResponse(BaseModel):

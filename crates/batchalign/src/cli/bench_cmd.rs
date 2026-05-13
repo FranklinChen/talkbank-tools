@@ -74,6 +74,7 @@ fn build_options(_global: &GlobalOpts, args: &BenchArgs) -> CommandOptions {
             diarize: false,
             wor: false.into(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
             batch_size: 8,
         }),
         BenchTarget::TranscribeS => CommandOptions::TranscribeS(TranscribeOptions {
@@ -82,6 +83,7 @@ fn build_options(_global: &GlobalOpts, args: &BenchArgs) -> CommandOptions {
             diarize: true,
             wor: false.into(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
             batch_size: 8,
         }),
         BenchTarget::Morphotag => CommandOptions::Morphotag(MorphotagOptions {
@@ -96,6 +98,7 @@ fn build_options(_global: &GlobalOpts, args: &BenchArgs) -> CommandOptions {
         BenchTarget::Utseg => CommandOptions::Utseg(UtsegOptions {
             common,
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
         }),
         BenchTarget::Benchmark => CommandOptions::Benchmark(BenchmarkOptions {
             common,

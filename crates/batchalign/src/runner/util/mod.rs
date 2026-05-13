@@ -335,6 +335,7 @@ mod tests {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 4,
+            utseg_fallback: false.into(),
         });
         assert!(should_preflight(ReleasedCommand::Transcribe, Some(&opts)));
     }
@@ -349,6 +350,7 @@ mod tests {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 4,
+            utseg_fallback: false.into(),
         });
         assert!(!should_preflight(ReleasedCommand::Transcribe, Some(&opts)));
     }

@@ -176,6 +176,7 @@ async fn measure_stanza_per_key_throughput() {
                 .map(|_| synthetic_item(lang.clone()))
                 .collect(),
             mwt: BTreeMap::new(),
+            allow_stanza_fallback: false,
         },
     )
     .await;

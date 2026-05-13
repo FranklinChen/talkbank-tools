@@ -119,6 +119,58 @@ impl From<MergeAbbrevPolicy> for bool {
     }
 }
 
+/// Operator opt-in to the legacy Stanza constituency-parser fallback
+/// for utterance segmentation when no language-specific TalkBank BERT
+/// utseg model is configured for the requested language.
+///
+/// The default is [`Refuse`], which mirrors the
+/// `WhisperHubModelNotFoundError` pattern: silent substitution of one
+/// model for another is the foot-gun this enum exists to prevent.
+/// Operators who want the previous behavior pass
+/// `--utseg-fallback-stanza` on the CLI; this is surfaced on every
+/// utseg-invoking subcommand (transcribe, transcribe-s, utseg).
+///
+/// Serialized as a plain JSON `bool` (`#[serde(into = "bool", from
+/// = "bool")]`) so persisted job documents that predate this field
+/// (`#[serde(default)]` on the surrounding option structs) load as
+/// `Refuse` without a schema migration.
+///
+/// [`Refuse`]: UtsegFallbackPolicy::Refuse
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "bool", from = "bool")]
+#[derive(Default)]
+pub enum UtsegFallbackPolicy {
+    /// Refuse to segment when no language-specific BERT model is
+    /// configured; raise a typed error pointing the user at
+    /// `--utseg-fallback-stanza` and at the resolver-entry workflow.
+    #[default]
+    Refuse,
+    /// Use Stanza constituency parsing as the segmenter for languages
+    /// without a BERT model. Quality varies by Stanza language pack.
+    AllowStanza,
+}
+
+impl UtsegFallbackPolicy {
+    /// Returns `true` when the Stanza fallback should be permitted.
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Self::AllowStanza)
+    }
+}
+
+impl From<bool> for UtsegFallbackPolicy {
+    /// Converts from the CLI `--utseg-fallback-stanza` flag — `true`
+    /// means the operator has opted in to the Stanza substitution.
+    fn from(allow: bool) -> Self {
+        if allow { Self::AllowStanza } else { Self::Refuse }
+    }
+}
+
+impl From<UtsegFallbackPolicy> for bool {
+    fn from(policy: UtsegFallbackPolicy) -> Self {
+        policy.is_allowed()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fine-grained cache overrides
 // ---------------------------------------------------------------------------

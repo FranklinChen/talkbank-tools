@@ -436,6 +436,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
         "transcribe_s" => CommandOptions::TranscribeS(TranscribeOptions {
             common: CommonOptions::default(),
@@ -444,6 +445,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
         "morphotag" => CommandOptions::Morphotag(MorphotagOptions {
             common: CommonOptions::default(),
@@ -461,6 +463,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
         "utseg" => CommandOptions::Utseg(UtsegOptions {
             common: CommonOptions::default(),
             merge_abbrev: false.into(),
+            utseg_fallback: false.into(),
         }),
         "benchmark" => CommandOptions::Benchmark(BenchmarkOptions {
             common: CommonOptions::default(),
@@ -489,6 +492,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
             wor: false.into(),
             merge_abbrev: false.into(),
             batch_size: 8,
+            utseg_fallback: false.into(),
         }),
     }
 }

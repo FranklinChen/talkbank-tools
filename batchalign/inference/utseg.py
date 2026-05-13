@@ -6,7 +6,6 @@ Pure inference — no CHAT, no caching, no pipeline.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -33,26 +32,15 @@ class UtsegModelNotFoundError(RuntimeError):
     requested language and the operator has not opted in to the
     Stanza constituency-parser fallback.
 
-    The default refuses substitution. Operators who want the previous
-    Stanza-fallback behavior must set the
-    ``BA3_UTSEG_FALLBACK_STANZA=1`` environment variable on the worker
-    process. This mirrors the ``WhisperHubModelNotFoundError`` pattern
-    in ``batchalign/inference/whisper_hub.py`` — surface the gap rather
+    The default refuses substitution. Operators who want the legacy
+    Stanza-fallback behavior pass ``--utseg-fallback-stanza`` on any
+    utseg-invoking CLI subcommand; this sets
+    ``BatchInferRequest.allow_stanza_fallback=True`` on every utseg
+    request the job emits. This mirrors the
+    ``WhisperHubModelNotFoundError`` pattern in
+    ``batchalign/inference/whisper_hub.py`` — surface the gap rather
     than silently substitute one model for another.
     """
-
-
-# Worker-level opt-in. When this env var is set to a truthy value
-# (``"1"``, ``"true"``, ``"yes"`` — case-insensitive) the dispatcher
-# retains the legacy Stanza fallback for languages without a BERT
-# entry. Otherwise it raises ``UtsegModelNotFoundError``.
-_FALLBACK_OPT_IN_ENV = "BA3_UTSEG_FALLBACK_STANZA"
-_FALLBACK_OPT_IN_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes"})
-
-
-def _stanza_fallback_opted_in() -> bool:
-    raw = os.environ.get(_FALLBACK_OPT_IN_ENV, "")
-    return raw.strip().lower() in _FALLBACK_OPT_IN_TRUTHY
 
 
 # Stage identifier for the opt-in fallback notice. Stage names form a
@@ -72,8 +60,10 @@ def _emit_stanza_fallback_notice(
     """Surface the BERT-absent → Stanza substitution to the user.
 
     Only fires when the operator has opted in via
-    ``BA3_UTSEG_FALLBACK_STANZA``. The default-refuse path raises
-    ``UtsegModelNotFoundError`` instead and never reaches this helper.
+    ``--utseg-fallback-stanza`` (which sets
+    ``BatchInferRequest.allow_stanza_fallback=True``). The
+    default-refuse path raises ``UtsegModelNotFoundError`` instead and
+    never reaches this helper.
     """
     # Avoid a circular import at module load time — the progress
     # protocol pulls in worker config that imports this module
@@ -91,7 +81,7 @@ def _emit_stanza_fallback_notice(
     user_message = (
         f"No TalkBank utseg model for language '{requested_display}'; "
         f"using Stanza constituency parsing ({pack_display} pack) "
-        f"because {_FALLBACK_OPT_IN_ENV} is set. Quality will vary."
+        f"because --utseg-fallback-stanza was passed. Quality will vary."
     )
 
     L.warning(
@@ -188,14 +178,15 @@ def batch_infer_utseg(
         L.info("batch_infer utseg(boundary-model): %d items, %.3fs", n, elapsed)
         return BatchInferResponse(results=results)
 
-    if not _stanza_fallback_opted_in():
+    if not req.allow_stanza_fallback:
         raise UtsegModelNotFoundError(
             f"No TalkBank utseg model is configured for language "
-            f"'{req.lang or '<unspecified>'}'. Either add a resolver "
-            f"entry in batchalign/models/resolve.py for a published "
-            f"model, or set {_FALLBACK_OPT_IN_ENV}=1 on the worker to "
-            f"opt in to Stanza constituency-parser fallback (quality "
-            f"will vary)."
+            f"'{req.lang or '<unspecified>'}'. Pass --utseg-fallback-stanza "
+            f"on the CLI (e.g. `batchalign3 transcribe --utseg-fallback-stanza "
+            f"--lang {req.lang or 'xxx'} ...`) to use the legacy Stanza "
+            f"constituency-parser fallback (quality will vary), or add a "
+            f"resolver entry in batchalign/models/resolve.py if you have "
+            f"published a language-specific TalkBank utseg model."
         )
 
     langs: list[str] = [req.lang] if req.lang else ["eng"]
