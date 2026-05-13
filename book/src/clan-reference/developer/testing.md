@@ -1,7 +1,7 @@
 # Testing Strategy
 
 **Status:** Current
-**Last updated:** 2026-05-11 20:22 EDT
+**Last updated:** 2026-05-12 21:14 EDT
 
 ## Unit tests
 
@@ -15,7 +15,10 @@ cargo test --doc -p talkbank-clan           # Doctests only (nextest can't run t
 
 ## Snapshot tests
 
-Snapshot tests use `insta` to capture command output and detect regressions. Snapshots live in `tests/snapshots/`.
+Snapshot tests use `insta` to capture command output and detect regressions. They live alongside the test that produces them:
+
+- `crates/talkbank-clan/tests/snapshots/` — snapshots from `transform_golden.rs`, `converter_golden.rs`, and other top-level tests in the `tests/` directory
+- `crates/talkbank-clan/tests/clan_golden/snapshots/` — snapshots produced by the `clan_golden` test module (paired `@clan`/`@rust` pairs)
 
 ```bash
 cargo insta review -p talkbank-clan         # Review pending snapshot changes
