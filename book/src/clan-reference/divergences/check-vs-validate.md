@@ -1,6 +1,8 @@
 # CHECK vs `chatter validate`
 
 **Status:** Current
+**Last updated:** 2026-05-12 21:18 EDT
+
 The `chatter` CLI has two validation tools with different purposes:
 
 | | `chatter clan check` | `chatter validate` |
@@ -8,9 +10,9 @@ The `chatter` CLI has two validation tools with different purposes:
 | **Purpose** | CLAN CHECK compatibility | Modern validation workflow |
 | **Audience** | Users migrating from CLAN | Day-to-day development |
 | **Output format** | CLAN-style `*** File "path": line N.` | Rich diagnostics with context, spans, suggestions |
-| **Error codes** | CHECK numbers (1-161) | Typed codes (E001-E999, W-codes) |
+| **Error codes** | CHECK numbers (1–161) | Typed codes (`E###`, `W###`) |
 | **Flags** | CLAN `+flag` syntax | Modern `--flag` syntax |
-| **Caching** | No | Yes (SQLite, 95K+ files) |
+| **Caching** | No | Yes (SQLite-backed) |
 | **Directory support** | Single file | Recursive with parallelism |
 | **JSON output** | Via `--format json` | Via `--format json` |
 | **Fix suggestions** | No | Yes (some errors) |
@@ -51,25 +53,29 @@ Both tools run the same underlying `parse_and_validate_streaming` pipeline from 
 
 ## Output Comparison
 
-The same error looks different in each tool:
+The same error looks different in each tool. For a file declaring `MOT` in `@Participants:` but with no matching `@ID:` line:
 
 **`chatter clan check sample.cha`**:
 ```text
-*** File "sample.cha": line 3.
+*** File "sample.cha": line 4.
 @Participants:	CHI Target_Child, MOT Mother
-MISSING @ID TIER FOR SPEAKER MOT.(99)
+Speaker 'MOT' declared in @Participants but has no matching @ID header(60)
 ```
 
 **`chatter validate sample.cha`**:
-```rust,ignore
-error[E305]: missing @ID header for speaker MOT
-  --> sample.cha:3:1
-   |
- 3 | @Participants:	CHI Target_Child, MOT Mother
-   |                                   ^^^ speaker declared here
-   |
-   = help: add @ID header: @ID: eng|corpus|MOT|||||Mother|||
+```text
+× error[E522]: Speaker 'MOT' declared in @Participants but has no matching
+│ @ID header (line 4, column 1, bytes 29..73)
+ ╭─[sample.cha:4:1]
+ 4 │ @Participants:  CHI Target_Child, MOT Mother
+   · ──────────────────────┬─────────────────────
+   ·                       ╰── here
+ ╰────
+help: Add @ID header: @ID:	<lang>|<corpus>|MOT|<age>|<sex>|<group>|<ses>|
+      Mother|<edu>|<custom>|
 ```
+
+Same underlying check (`E522` on the typed side ↔ CHECK number `60` on the legacy side); different rendering.
 
 ## Additional Checks in CHECK
 
@@ -99,10 +105,12 @@ additionally checks research conventions.
 
 ## Error Number Mapping
 
-CHECK's 161 error numbers map to our typed error codes. About 50 have direct
-correspondences; the rest either don't apply (our parser handles them structurally)
-or represent CLAN-specific checks we don't replicate. Use `chatter clan check +e`
-to see all 161 error messages.
+The mapping table from typed `ErrorCode` to CHECK number 1–161 lives in
+`crates/talkbank-clan/src/commands/check/error_map.rs` (`check_error_number`).
+The match arms there are the live source of truth — count them directly
+rather than caching a stale number in this doc. Variants without a CHECK
+equivalent fall through to `0`; those errors render as `[<code>]` in
+CHECK output instead of `(<n>)`.
 
-Unmapped errors (those our validator catches but CHECK doesn't number) appear
-with `[E-code]` instead of `(N)` in CHECK output.
+Use `chatter clan check +e` to see all 161 CHECK error messages (the
+canonical strings from CLAN's `check_mess()`).
