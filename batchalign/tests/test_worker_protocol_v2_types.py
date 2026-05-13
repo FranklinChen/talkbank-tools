@@ -50,12 +50,19 @@ _SCHEMA_MODELS: dict[str, type[BaseModel]] = {
 
 
 def _prune_absent_none_fields(value: object, raw: object) -> object:
-    """Drop serialized ``None`` fields only when the fixture omitted them."""
+    """Drop serialized default fields only when the fixture omitted them.
+
+    Mirrors the Rust ``#[serde(default, skip_serializing_if = ...)]``
+    pattern: a field with its default value (``None`` or ``False``) is
+    pruned from the model's serialized form when the fixture also
+    omits it, so round-tripping a fixture that predates the field
+    stays exact-equal.
+    """
 
     if isinstance(value, dict) and isinstance(raw, dict):
         pruned: dict[str, object] = {}
         for key, item in value.items():
-            if item is None and key not in raw:
+            if key not in raw and (item is None or item is False):
                 continue
             pruned[key] = _prune_absent_none_fields(item, raw.get(key))
         return pruned
