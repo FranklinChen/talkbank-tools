@@ -161,7 +161,11 @@ impl From<bool> for UtsegFallbackPolicy {
     /// Converts from the CLI `--utseg-fallback-stanza` flag — `true`
     /// means the operator has opted in to the Stanza substitution.
     fn from(allow: bool) -> Self {
-        if allow { Self::AllowStanza } else { Self::Refuse }
+        if allow {
+            Self::AllowStanza
+        } else {
+            Self::Refuse
+        }
     }
 }
 
