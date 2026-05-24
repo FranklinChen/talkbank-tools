@@ -166,6 +166,16 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         }
         (b'+', b't') | (b'-', b't') => rewrite_tier_speaker(polarity, rest),
 
+        // MLU / MLT `-bw` — switch the counting unit from morphemes
+        // (`%mor`-based, the default) to words (main-tier-based).
+        // Without this arm, `-bw` falls through to clap, which parses
+        // it as a `-b -w` short-flag pair and errors on the unknown
+        // `-b`. Scoped to Mlu | Mlt; other commands don't share the
+        // morphemes-vs-words counting axis.
+        (b'-', b'b') if matches!(subcommand, Mlu | Mlt) && rest == "w" => {
+            Some(vec!["--words".into()])
+        }
+
         // +s"word" / +sword / -s"word" / -sword — word include/exclude
         // `+sF` under SCRIPT is the template-file argument
         // (`--template F`); SCRIPT's `+s` is the only CLAN command
@@ -850,6 +860,36 @@ mod tests {
         let input = args("clan analyze freq +z25-125 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, args("clan analyze freq --range 25-125 file.cha"));
+    }
+
+    #[test]
+    fn mlu_minus_bw_to_words() {
+        // CLAN `-bw` on MLU/MLT switches the counting unit from
+        // morphemes to words. The audit page lists this as a Done
+        // mapping (`-bw` → `--words`), but the rewriter had no arm
+        // for `-bw` — only a stale comment. clap parsed `-bw` as a
+        // short-flag-with-value form and errored on the unknown
+        // `-b`. This test guards the new Mlu/Mlt-scoped arm.
+        let input = args("clan analyze mlu -bw file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan analyze mlu --words file.cha"));
+    }
+
+    #[test]
+    fn mlt_minus_bw_to_words() {
+        let input = args("clan analyze mlt -bw file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan analyze mlt --words file.cha"));
+    }
+
+    #[test]
+    fn freq_minus_bw_unchanged() {
+        // The `-bw` rewrite is scoped to MLU/MLT — other commands
+        // don't share the morphemes-vs-words counting axis, so
+        // `-bw` should fall through unchanged for them.
+        let input = args("clan analyze freq -bw file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan analyze freq -bw file.cha"));
     }
 
     #[test]
