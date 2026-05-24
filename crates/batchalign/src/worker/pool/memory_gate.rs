@@ -155,6 +155,77 @@ pub(super) fn host_min_free_mb_threshold_for_tier(tier: &crate::types::runtime::
     }
 }
 
+/// Compute the admission-gate startup reservation for one worker,
+/// taking the engine choice into account.
+///
+/// Returns `MAX(profile_baseline, per_engine_resident_size)` across
+/// every populated engine field (asr / fa / translate). The
+/// profile-level baseline
+/// ([`batchalign_types::worker_profile::WorkerProfile::startup_reservation_mb_for_tier`])
+/// is correct when every worker in a profile has roughly the same
+/// resident footprint, but breaks down for any worker that loads its
+/// own large model in-process:
+///
+/// * **Translate (IO profile):** SeamlessM4T-medium ~2.4 GB,
+///   NLLB-200-distilled-1.3B ~5 GB — both well over
+///   `tier.io_startup_mb` (2 GB Small/Medium, 4 GB Large/Fleet).
+/// * **ASR (GPU profile):** Whisper-large-v3 ~3.5 GB — over the
+///   Medium-tier `tier.gpu_startup_mb` (3 GB).
+/// * **FA (GPU profile):** Whisper-large-v2 FA ~3.5 GB — same shape.
+///
+/// Reserving only the profile baseline lets the admission gate keep
+/// approving heavy-model workers under memory pressure until the OS
+/// OOM killer fires. Per
+/// [`crate::types::engines::TranslateEngineName::resident_memory_mb`]
+/// (and the analogous methods on `AsrEngineName` / `FaEngineName`),
+/// each engine declares its footprint and this helper inflates the
+/// reservation accordingly. A single worker only ever loads ONE
+/// engine of each kind, so taking the MAX across populated fields
+/// gives the correct worst-case projection for that worker.
+///
+/// Production callers pass `group.engine_overrides` (the
+/// JSON-serialized [`crate::types::engines::EngineOverrides`] the
+/// pool stores on the group). Malformed JSON falls back to the
+/// profile baseline so a parse error never makes the gate more
+/// permissive than its prior behavior — and the failure is logged
+/// once at `warn` so operators can catch schema drift before a
+/// runtime OOM does.
+pub(super) fn engine_aware_startup_reservation_mb(
+    profile: batchalign_types::worker_profile::WorkerProfile,
+    engine_overrides_json: &str,
+    tier: &crate::types::runtime::MemoryTier,
+) -> batchalign_types::api::MemoryMb {
+    use crate::types::engines::EngineOverrides;
+    let base = profile.startup_reservation_mb_for_tier(tier);
+    let engine_floor = match serde_json::from_str::<EngineOverrides>(engine_overrides_json) {
+        Ok(overrides) => [
+            overrides.translate.map(|e| e.resident_memory_mb()),
+            overrides.asr.map(|e| e.resident_memory_mb()),
+            overrides.fa.map(|e| e.resident_memory_mb()),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0),
+        Err(error) => {
+            // Empty string is the documented "no overrides" case used
+            // throughout the test infrastructure; never warn on it.
+            // For any other parse failure, warn once so an operator
+            // running with a malformed `engine_overrides` payload can
+            // catch the schema drift before workload OOM does.
+            if !engine_overrides_json.is_empty() {
+                tracing::warn!(
+                    engine_overrides_json,
+                    %error,
+                    "engine_aware_startup_reservation_mb: failed to parse engine_overrides JSON; falling back to profile baseline reservation"
+                );
+            }
+            0
+        }
+    };
+    batchalign_types::api::MemoryMb(base.0.max(engine_floor))
+}
+
 /// State-aware admission check.
 ///
 /// Implements the principled rearch follow-up: the memory gate is
@@ -212,6 +283,7 @@ fn check_memory_saturation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     /// The Medium-tier floor must equal exactly 2048 MB — the
     /// rearch's original number, preserved for the workstation case
@@ -223,6 +295,206 @@ mod tests {
         let medium = crate::types::runtime::MemoryTier::from_total_mb(32_000);
         assert_eq!(MIN_FREE_MEMORY_MB, 2048);
         assert_eq!(host_min_free_mb_threshold_for_tier(&medium), 2048);
+    }
+
+    // ---- engine_aware_startup_reservation_mb ----
+
+    /// A translate worker carrying no engine override falls back to
+    /// the IO profile's static reservation. The new helper must not
+    /// regress that baseline.
+    #[test]
+    fn engine_aware_reservation_falls_back_to_profile_baseline() {
+        let medium = crate::types::runtime::MemoryTier::from_total_mb(32_000);
+        let baseline = batchalign_types::worker_profile::WorkerProfile::Io
+            .startup_reservation_mb_for_tier(&medium)
+            .0;
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Io,
+            "{}",
+            &medium,
+        )
+        .0;
+        assert_eq!(reservation, baseline);
+    }
+
+    /// A translate worker carrying ``{"translate":"google"}`` does
+    /// not inflate the IO baseline — googletrans is a thin HTTP
+    /// client with no local model, so the IO reservation is already
+    /// enough. Pinned to detect accidental over-reservation that
+    /// would refuse Google workers on memory-tight hosts.
+    #[test]
+    fn engine_aware_reservation_for_google_matches_io_baseline() {
+        let medium = crate::types::runtime::MemoryTier::from_total_mb(32_000);
+        let baseline = batchalign_types::worker_profile::WorkerProfile::Io
+            .startup_reservation_mb_for_tier(&medium)
+            .0;
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Io,
+            r#"{"translate":"google"}"#,
+            &medium,
+        )
+        .0;
+        assert_eq!(reservation, baseline);
+    }
+
+    /// A translate worker carrying ``{"translate":"nllb"}`` must
+    /// reserve at least NLLB-200-distilled-1.3B's resident footprint
+    /// (~5500 MB) on every tier — well above the IO baseline of 2 GB
+    /// (Small/Medium) or 4 GB (Large/Fleet). One case per
+    /// ``MemoryTierKind`` so a per-tier regression names itself.
+    #[rstest]
+    fn engine_aware_reservation_for_nllb_meets_resident_footprint(
+        #[values(16_000_u64, 32_000, 64_000, 256_000)] total_mb: u64,
+    ) {
+        let nllb_rss = crate::types::engines::TranslateEngineName::Nllb.resident_memory_mb();
+        let tier = crate::types::runtime::MemoryTier::from_total_mb(total_mb);
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Io,
+            r#"{"translate":"nllb"}"#,
+            &tier,
+        )
+        .0;
+        assert!(
+            reservation >= nllb_rss,
+            "tier total={total_mb} MB: reservation {reservation} < NLLB \
+             resident footprint {nllb_rss}"
+        );
+    }
+
+    /// A translate worker carrying ``{"translate":"seamless"}`` must
+    /// reserve at least Seamless's resident footprint (~2900 MB). On
+    /// Small/Medium tiers the IO baseline of 2 GB is too low; on
+    /// Large/Fleet the 4 GB IO baseline already covers Seamless and
+    /// the helper returns the larger value (baseline).
+    #[rstest]
+    fn engine_aware_reservation_for_seamless_meets_resident_footprint(
+        #[values(16_000_u64, 32_000, 64_000, 256_000)] total_mb: u64,
+    ) {
+        let seamless_rss =
+            crate::types::engines::TranslateEngineName::Seamless.resident_memory_mb();
+        let tier = crate::types::runtime::MemoryTier::from_total_mb(total_mb);
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Io,
+            r#"{"translate":"seamless"}"#,
+            &tier,
+        )
+        .0;
+        assert!(
+            reservation >= seamless_rss,
+            "tier total={total_mb} MB: reservation {reservation} < Seamless \
+             resident footprint {seamless_rss}"
+        );
+    }
+
+    /// A worker carrying ``{"asr":"whisper"}`` must reserve at least
+    /// Whisper-large-v3's resident footprint (~3500 MB) on every tier.
+    /// Regression test against under-reservation on Medium-tier GPU
+    /// hosts (3 GB baseline vs. ~3.5 GB resident).
+    #[rstest]
+    fn engine_aware_reservation_for_whisper_asr_meets_resident_footprint(
+        #[values(16_000_u64, 32_000, 64_000, 256_000)] total_mb: u64,
+    ) {
+        let whisper_rss = crate::types::engines::AsrEngineName::Whisper.resident_memory_mb();
+        let tier = crate::types::runtime::MemoryTier::from_total_mb(total_mb);
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Gpu,
+            r#"{"asr":"whisper"}"#,
+            &tier,
+        )
+        .0;
+        assert!(
+            reservation >= whisper_rss,
+            "tier total={total_mb} MB: reservation {reservation} < Whisper \
+             resident footprint {whisper_rss}"
+        );
+    }
+
+    /// A worker carrying ``{"fa":"whisper_fa"}`` must reserve at least
+    /// Whisper-large-v2 FA's resident footprint (~3500 MB) on every
+    /// tier.
+    #[rstest]
+    fn engine_aware_reservation_for_whisper_fa_meets_resident_footprint(
+        #[values(16_000_u64, 32_000, 64_000, 256_000)] total_mb: u64,
+    ) {
+        let whisper_fa_rss = crate::types::engines::FaEngineName::Whisper.resident_memory_mb();
+        let tier = crate::types::runtime::MemoryTier::from_total_mb(total_mb);
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Gpu,
+            r#"{"fa":"whisper_fa"}"#,
+            &tier,
+        )
+        .0;
+        assert!(
+            reservation >= whisper_fa_rss,
+            "tier total={total_mb} MB: reservation {reservation} < Whisper \
+             FA resident footprint {whisper_fa_rss}"
+        );
+    }
+
+    /// When more than one engine field is populated, the reservation
+    /// must be at least the MAX of the per-engine footprints. A
+    /// single worker only loads one engine of each kind, so MAX is
+    /// the correct worst-case projection — never SUM.
+    #[test]
+    fn engine_aware_reservation_takes_max_across_engines() {
+        let nllb_rss = crate::types::engines::TranslateEngineName::Nllb.resident_memory_mb();
+        let whisper_rss = crate::types::engines::AsrEngineName::Whisper.resident_memory_mb();
+        let expected_floor = nllb_rss.max(whisper_rss);
+        let tier = crate::types::runtime::MemoryTier::from_total_mb(32_000);
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Gpu,
+            r#"{"asr":"whisper","translate":"nllb"}"#,
+            &tier,
+        )
+        .0;
+        assert!(
+            reservation >= expected_floor,
+            "reservation {reservation} < MAX(NLLB {nllb_rss}, Whisper {whisper_rss}) \
+             = {expected_floor}"
+        );
+        // Sanity check: must NOT be summed.
+        assert!(
+            reservation < nllb_rss + whisper_rss,
+            "reservation {reservation} looks like NLLB + Whisper rather than MAX"
+        );
+    }
+
+    /// A worker carrying a cloud ASR engine (Tencent, here) on a
+    /// Medium-tier GPU host gets the GPU baseline (3 GB), not the
+    /// cloud client's 200 MB. The MAX clamps to the profile baseline
+    /// rather than letting a thin HTTP client under-reserve.
+    #[test]
+    fn engine_aware_reservation_for_cloud_asr_matches_gpu_baseline() {
+        let medium = crate::types::runtime::MemoryTier::from_total_mb(32_000);
+        let baseline = batchalign_types::worker_profile::WorkerProfile::Gpu
+            .startup_reservation_mb_for_tier(&medium)
+            .0;
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Gpu,
+            r#"{"asr":"tencent"}"#,
+            &medium,
+        )
+        .0;
+        assert_eq!(reservation, baseline);
+    }
+
+    /// Malformed engine_overrides JSON must NOT make the admission
+    /// gate more permissive than the profile baseline. Failure to
+    /// parse falls back to the static reservation rather than
+    /// silently dropping the engine-aware floor.
+    #[test]
+    fn engine_aware_reservation_malformed_json_falls_back_to_baseline() {
+        let medium = crate::types::runtime::MemoryTier::from_total_mb(32_000);
+        let baseline = batchalign_types::worker_profile::WorkerProfile::Io
+            .startup_reservation_mb_for_tier(&medium)
+            .0;
+        let reservation = engine_aware_startup_reservation_mb(
+            batchalign_types::worker_profile::WorkerProfile::Io,
+            "this is not json",
+            &medium,
+        )
+        .0;
+        assert_eq!(reservation, baseline);
     }
 
     /// Threshold of `u64::MAX` makes the gate certain to refuse with

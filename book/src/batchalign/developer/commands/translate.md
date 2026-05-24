@@ -1,7 +1,7 @@
 # translate — Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-05-23 09:08 EDT
+**Last updated:** 2026-05-23 21:39 EDT
 
 Implementation guide for the `translate` command. For user-facing
 documentation, see [User Guide: translate](../../user-guide/commands/translate.md).
@@ -18,9 +18,9 @@ documentation, see [User Guide: translate](../../user-guide/commands/translate.m
 | Translate orchestration | `crates/batchalign/src/translate.rs` | Cross-file batching, cache, `%xtra` injection |
 | Batch dispatch | `crates/batchalign/src/runner/dispatch/infer_batched.rs` | Shared with morphotag and utseg |
 | Injection | `crates/batchalign/src/translate.rs` | Writes `%xtra:` tiers from translation strings |
-| Engine type | `crates/batchalign/src/types/engines.rs` — `TranslateEngineName` | Wire-format enum (`google` / `seamless`), `EngineBackend` impl, `EngineOverrides.translate` field |
+| Engine type | `crates/batchalign/src/types/engines.rs` — `TranslateEngineName` | Wire-format enum (`google` / `seamless` / `nllb`), `EngineBackend` impl, `EngineOverrides.translate` field |
 | Engine resolution (server) | `crates/batchalign/src/types/options.rs` — `TranslateOptions::effective_translate_engine` | Precedence: shared `--engine-overrides` `{"translate":"..."}` > `--translate-engine` flag > Google default |
-| Engine bootstrap | `batchalign/worker/_model_loading/translation.py::load_translation_engine(bootstrap)` | Reads `bootstrap.engine_overrides["translate"]`, dispatches via exhaustive match to `_load_google_translate` or `_load_seamless_translate`. Unknown engine names raise `ValueError` |
+| Engine bootstrap | `batchalign/worker/_model_loading/translation.py::load_translation_engine(bootstrap)` | Reads `bootstrap.engine_overrides["translate"]`, dispatches via exhaustive match to `_load_google_translate`, `_load_seamless_translate`, or `_load_nllb_translate`. Unknown engine names raise `ValueError` |
 | Engine resolution (worker) | `batchalign/worker/_model_loading/translation.py::resolve_translate_engine` | Pure function from `engine_overrides` dict → `TranslationBackend`; default Google |
 | Worker IPC | `batchalign/inference/translate.py` — `batch_infer_translate()` | Iterates batch items, calls the resolved `translate_fn(text, src_lang)`, returns `raw_translation` per item. Sleeps 1.5s per item when backend is `GOOGLE` (rate limit). Pre-processing (Chinese space removal) happens in Rust before the call; post-processing in Rust after |
 
@@ -79,7 +79,7 @@ lowest:
 1. `common.engine_overrides.translate` — set by
    `--engine-overrides '{"translate":"<engine>"}'`.
 2. `TranslateOptions.translate_engine: TranslateEngineName` — set by
-   `--translate-engine google|seamless`. Defaults to Google via
+   `--translate-engine google|nllb|seamless`. Defaults to Google via
    `default_translate_engine()`.
 
 There is deliberately no `server.yaml` knob for engine selection.
@@ -90,8 +90,8 @@ a config file. See the no-config-junk principle in
 
 The worker pool key includes the resolved translate engine
 (`dispatch_engine_overrides_json` always emits a `translate` entry).
-Google and Seamless workers are not interchangeable, so they end up
-in separate pools.
+Google, Seamless, and NLLB workers are not interchangeable, so they
+end up in separate pools.
 
 ## BA2 → BA3 migration notes
 

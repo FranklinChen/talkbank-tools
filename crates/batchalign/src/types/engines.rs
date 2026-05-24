@@ -175,6 +175,24 @@ impl FaEngineName {
     pub fn as_wire_name(&self) -> &str {
         self.wire_name()
     }
+
+    /// Resident memory footprint estimate for one worker process running
+    /// this FA engine, in MB. Used by the admission gate to reserve enough
+    /// headroom for engines whose actual RSS exceeds the default GPU-profile
+    /// reservation (``tier.gpu_startup_mb``: 6 GB Small / 3 GB Medium /
+    /// 16 GB Large+Fleet). See
+    /// [`super::super::worker::pool::memory_gate::engine_aware_startup_reservation_mb`].
+    pub fn resident_memory_mb(&self) -> u64 {
+        match self {
+            // Whisper-large-v2 FA: ~3 GB weights + tokenizer + Python
+            // runtime. Same shape as Whisper-large-v3 ASR, hence the
+            // shared constant.
+            Self::Whisper => WHISPER_LARGE_V3_RSS_MB,
+            // MMS / torchaudio Wave2Vec FA models: ~1.2 GB + runtime
+            // margin. Cantonese FA is the same shape.
+            Self::Wave2Vec | Self::Wav2vecCanto => WAVE2VEC_FA_RSS_MB,
+        }
+    }
 }
 
 impl Serialize for FaEngineName {
@@ -286,6 +304,27 @@ impl AsrEngineName {
         self.wire_name()
     }
 
+    /// Resident memory footprint estimate for one worker process running
+    /// this ASR engine, in MB. Used by the admission gate to reserve
+    /// enough headroom for engines whose actual RSS exceeds the default
+    /// GPU-profile reservation (``tier.gpu_startup_mb``: 6 GB Small /
+    /// 3 GB Medium / 16 GB Large+Fleet). See
+    /// [`super::super::worker::pool::memory_gate::engine_aware_startup_reservation_mb`].
+    pub fn resident_memory_mb(&self) -> u64 {
+        match self {
+            // Whisper-large-v3 (and its WhisperHub fine-tunes): ~3 GB
+            // model + tokenizer + Python runtime. WhisperX is included
+            // here for symmetry/future-proofing even though
+            // ``dispatch_override_name`` returns ``None`` for it today
+            // (it doesn't get a pool-managed Python worker), so the
+            // admission gate never observes this value in production.
+            Self::Whisper | Self::WhisperHub | Self::WhisperX => WHISPER_LARGE_V3_RSS_MB,
+            // Cloud HTTP clients with no local model.
+            Self::RevAi | Self::WhisperOai
+            | Self::HkTencent | Self::HkAliyun | Self::HkFunaudio => HTTP_CLIENT_BASELINE_RSS_MB,
+        }
+    }
+
     /// Whether this engine is the Rust-owned Rev.AI path.
     pub fn is_revai(&self) -> bool {
         matches!(self, Self::RevAi)
@@ -387,7 +426,53 @@ impl TranslateEngineName {
     pub fn as_wire_name(&self) -> &str {
         self.wire_name()
     }
+
+    /// Resident memory footprint estimate for one worker process
+    /// running this translate engine, in MB. Used by the admission
+    /// gate to reserve enough headroom for engines whose actual RSS
+    /// exceeds the default IO-profile reservation
+    /// (``tier.io_startup_mb``: 2 GB Small/Medium, 4 GB Large/Fleet).
+    /// The estimate is the observed model + tokenizer + Python
+    /// runtime footprint with a modest margin; conservative on the
+    /// side of over-reserving so the OS OOM killer isn't the fallback
+    /// safety mechanism. Related but distinct from the *on-disk*
+    /// model-size hints used by the Python progress events
+    /// (``batchalign/worker/_progress.py::_HF_SIZE_HINTS_GB``).
+    pub fn resident_memory_mb(&self) -> u64 {
+        match self {
+            Self::Google => HTTP_CLIENT_BASELINE_RSS_MB,
+            Self::Seamless => SEAMLESS_M4T_MEDIUM_RSS_MB,
+            Self::Nllb => NLLB_200_DISTILLED_1_3B_RSS_MB,
+        }
+    }
 }
+
+/// Resident memory estimate for any worker that runs a thin HTTP-client
+/// engine with no local model loaded — googletrans for translate, and
+/// the cloud ASR engines (Rev.AI, WhisperOai, HkTencent, HkAliyun,
+/// HkFunaudio). Baseline Python + worker scaffolding only.
+pub(crate) const HTTP_CLIENT_BASELINE_RSS_MB: u64 = 200;
+
+/// Resident memory estimate for a worker running the local
+/// SeamlessM4T-medium model: ~2.4 GB weights + tokenizer + runtime,
+/// with margin.
+pub(crate) const SEAMLESS_M4T_MEDIUM_RSS_MB: u64 = 2_900;
+
+/// Resident memory estimate for a worker running the local
+/// NLLB-200-distilled-1.3B model: ~5 GB weights + tokenizer +
+/// runtime, with margin.
+pub(crate) const NLLB_200_DISTILLED_1_3B_RSS_MB: u64 = 5_500;
+
+/// Resident memory estimate for a worker running the Whisper-large-v3
+/// ASR model or the Whisper-large-v2 FA model (same shape). ~3 GB
+/// weights + tokenizer + Python runtime + margin.
+pub(crate) const WHISPER_LARGE_V3_RSS_MB: u64 = 3_500;
+
+/// Resident memory estimate for a worker running an MMS / Wave2Vec
+/// forced-alignment model (including the Cantonese variant): ~1.2 GB
+/// torchaudio weights + runtime margin.
+pub(crate) const WAVE2VEC_FA_RSS_MB: u64 = 1_800;
+
 
 impl Serialize for TranslateEngineName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -586,6 +671,78 @@ mod tests {
         let err = TranslateEngineName::from_wire_name("gogle").unwrap_err();
         assert_eq!(err.category, "translate");
         assert_eq!(err.name, "gogle");
+    }
+
+    #[test]
+    fn translate_engine_resident_memory_ordering() {
+        // Pins the physical ordering — Google (HTTP client) <
+        // Seamless (~2.4 GB) < NLLB (~5 GB) — that the admission-gate
+        // engine-aware reservation
+        // (``worker::pool::memory_gate::engine_aware_startup_reservation_mb``)
+        // relies on. A typo here would silently re-introduce under-
+        // reservation for the heavier engines.
+        let google_mb = TranslateEngineName::Google.resident_memory_mb();
+        let seamless_mb = TranslateEngineName::Seamless.resident_memory_mb();
+        let nllb_mb = TranslateEngineName::Nllb.resident_memory_mb();
+        assert!(
+            google_mb < seamless_mb,
+            "Google ({google_mb} MB) must be smaller than Seamless ({seamless_mb} MB)"
+        );
+        assert!(
+            seamless_mb < nllb_mb,
+            "Seamless ({seamless_mb} MB) must be smaller than NLLB ({nllb_mb} MB)"
+        );
+    }
+
+    #[test]
+    fn asr_engine_resident_memory_partitions_local_vs_cloud() {
+        // Local Whisper variants must all match the heavy-model
+        // footprint; cloud HTTP clients must all match the cheap
+        // baseline. The admission gate's engine-aware reservation
+        // depends on this partition being clean.
+        assert_eq!(
+            AsrEngineName::Whisper.resident_memory_mb(),
+            WHISPER_LARGE_V3_RSS_MB
+        );
+        assert_eq!(
+            AsrEngineName::WhisperHub.resident_memory_mb(),
+            WHISPER_LARGE_V3_RSS_MB
+        );
+        assert_eq!(
+            AsrEngineName::WhisperX.resident_memory_mb(),
+            WHISPER_LARGE_V3_RSS_MB
+        );
+        for cloud in [
+            AsrEngineName::RevAi,
+            AsrEngineName::WhisperOai,
+            AsrEngineName::HkTencent,
+            AsrEngineName::HkAliyun,
+            AsrEngineName::HkFunaudio,
+        ] {
+            assert_eq!(
+                cloud.resident_memory_mb(),
+                HTTP_CLIENT_BASELINE_RSS_MB,
+                "{cloud:?} should match the cloud HTTP-client baseline"
+            );
+        }
+        assert!(HTTP_CLIENT_BASELINE_RSS_MB < WHISPER_LARGE_V3_RSS_MB);
+    }
+
+    #[test]
+    fn fa_engine_resident_memory_separates_whisper_from_wave2vec() {
+        assert_eq!(
+            FaEngineName::Whisper.resident_memory_mb(),
+            WHISPER_LARGE_V3_RSS_MB
+        );
+        assert_eq!(
+            FaEngineName::Wave2Vec.resident_memory_mb(),
+            WAVE2VEC_FA_RSS_MB
+        );
+        assert_eq!(
+            FaEngineName::Wav2vecCanto.resident_memory_mb(),
+            WAVE2VEC_FA_RSS_MB
+        );
+        assert!(WAVE2VEC_FA_RSS_MB < WHISPER_LARGE_V3_RSS_MB);
     }
 
     #[test]

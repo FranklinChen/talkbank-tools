@@ -1,29 +1,36 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-05-23 09:08 EDT
+**Last updated:** 2026-05-23 21:39 EDT
 
 Add English translations to non-English CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only — no audio involved.
 
 ## Engine
 
-Two backends are available:
+Three backends are available:
 
 - **Google Translate** (`googletrans`) — calls the public Google Translate
   endpoint. Requires outbound reachability to `translate.google.com`;
   unsuitable for hosts behind the Great Firewall unless a VPN is active.
   Rate-limited to one item per 1.5 seconds inside the worker. **Default.**
+- **Meta NLLB-200-distilled-1.3B** (`facebook/nllb-200-distilled-1.3B`) —
+  runs locally in the Python worker. Model is downloaded from HuggingFace
+  on first use (~5 GB) and cached thereafter; no outbound network at
+  inference time. **Recommended fallback for hosts where Google is
+  unreachable** (e.g. behind the GFW). Long-form Mandarin and Japanese
+  translate cleanly; short greetings (≤ 5 characters) can be wrong but
+  failures are bounded. Runs unthrottled.
 - **Meta SeamlessM4T** (`facebook/hf-seamless-m4t-medium`) — runs locally
-  in the Python worker. Model is downloaded from HuggingFace on first use
-  and cached thereafter; no outbound network at inference time. Runs
-  unthrottled.
+  in the Python worker. BA2-inherited fallback. Empirical 2026-05-23
+  comparison found short-CJK quality is poor and the model hallucinates
+  on empty inputs; **prefer `nllb` for new work.** Retained for back-compat.
 
-Select with `--translate-engine google|seamless`. Default is Google.
+Select with `--translate-engine google|nllb|seamless`. Default is Google.
 Operators on hosts where Google Translate is unreachable pass
-`--translate-engine seamless` explicitly per invocation (a shell alias
-is the right place to make that persistent for a given user) — there is
-no per-host config file knob for engine selection, by design.
+`--translate-engine nllb` explicitly per invocation (a shell alias is the
+right place to make that persistent for a given user) — there is no
+per-host config file knob for engine selection, by design.
 
 For symmetry with how ASR and FA engines are selected, the shared
 `--engine-overrides '{"translate":"<engine>"}'` global flag also
@@ -113,7 +120,7 @@ re-invoke the worker.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--translate-engine google\|seamless` | `google` | Pick the translation engine for this invocation |
+| `--translate-engine google\|nllb\|seamless` | `google` | Pick the translation engine for this invocation. `nllb` is the recommended self-hosted fallback; `seamless` is BA2-inherited and retained for back-compat. |
 | `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the translated output |
 
 ---
@@ -137,9 +144,9 @@ will say so.
 
 | Situation | What happens |
 | --- | --- |
-| Google Translate unreachable (GFW block, network outage, DNS failure) | File marked failed with `translate failed for N item(s): item 0: Translation failed: ConnectionResetError ...`. Use `--translate-engine seamless` for hosts where Google is unreliable. |
-| Rate-limit (429) on one or more items | File marked failed citing the 429 message verbatim. Retry; if persistent, switch to Seamless or split the workload. |
-| Seamless first-download (HuggingFace) fails | File marked failed with the underlying HF error. If on a host where the default HF endpoint is slow, set `HF_ENDPOINT=https://hf-mirror.com` before the worker starts. |
+| Google Translate unreachable (GFW block, network outage, DNS failure) | File marked failed with `translate failed for N item(s): item 0: Translation failed: ConnectionResetError ...`. Use `--translate-engine nllb` for hosts where Google is unreliable. |
+| Rate-limit (429) on one or more items | File marked failed citing the 429 message verbatim. Retry; if persistent, switch to `--translate-engine nllb` or split the workload. |
+| Self-hosted model first-download (HuggingFace) fails | File marked failed with the underlying HF error. If on a host where the default HF endpoint is slow, set `HF_ENDPOINT=https://hf-mirror.com` before the worker starts. Applies to both `nllb` (~5 GB) and `seamless` (~1.2 GB). |
 | googletrans library import error in a stripped venv | Worker startup fails (loud), not a per-job failure. |
 
 ---

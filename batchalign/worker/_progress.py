@@ -103,6 +103,7 @@ _HF_SIZE_HINTS_GB: dict[str, float] = {
     "openai/whisper-tiny": 0.07,
     "talkbank/dia-fork": 0.5,
     "facebook/hf-seamless-m4t-medium": 2.4,
+    "facebook/nllb-200-distilled-1.3B": 5.0,
     "jonatasgrosman/wav2vec2-large-xlsr-53-english": 1.2,
 }
 
@@ -143,6 +144,14 @@ HF_ARTIFACTS_SEAMLESS: tuple[str, ...] = (
     "preprocessor_config.json",
     "tokenizer.json",
     "tokenizer_config.json",
+)
+HF_ARTIFACTS_NLLB: tuple[str, ...] = (
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "sentencepiece.bpe.model",
 )
 
 

@@ -7,6 +7,8 @@ can be checked directly.
 
 from __future__ import annotations
 
+import pytest
+
 from batchalign.device import DevicePolicy
 from batchalign.worker._model_loading.asr import (
     load_asr_engine,
@@ -29,21 +31,48 @@ class TestResolveInjectedRevaiApiKey:
 
 
 class TestResolveAsrEngine:
-    """Engine selection must stay deterministic and type-light."""
+    """Engine selection must stay deterministic, typed, and loud on bad input."""
 
     def test_override_wins(self) -> None:
-        assert resolve_asr_engine({"asr": "whisper"}, "from-config") == "whisper"
+        assert (
+            resolve_asr_engine({"asr": "whisper"}, "from-config")
+            is AsrEngine.WHISPER
+        )
 
     def test_rev_is_selected_when_key_present(self) -> None:
-        assert resolve_asr_engine(None, "from-config") == "rev"
+        assert resolve_asr_engine(None, "from-config") is AsrEngine.REV
 
     def test_whisper_is_default_without_key(self) -> None:
-        assert resolve_asr_engine(None, None) == "whisper"
+        assert resolve_asr_engine(None, None) is AsrEngine.WHISPER
 
     def test_whisper_hub_override_wins(self) -> None:
         assert (
-            resolve_asr_engine({"asr": "whisper_hub"}, "from-config") == "whisper_hub"
+            resolve_asr_engine({"asr": "whisper_hub"}, "from-config")
+            is AsrEngine.WHISPER_HUB
         )
+
+    def test_resolve_returns_typed_enum_not_string(self) -> None:
+        # Pin the return-type contract so a future refactor that
+        # accidentally returns ``str`` (the historical shape) breaks
+        # immediately rather than at the dispatch site.
+        result = resolve_asr_engine({"asr": "tencent"}, None)
+        assert isinstance(result, AsrEngine)
+        assert result is AsrEngine.TENCENT
+
+    def test_unknown_engine_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="unknown asr engine 'wisper'"):
+            resolve_asr_engine({"asr": "wisper"}, None)
+
+    def test_unknown_engine_error_mentions_supported_options(self) -> None:
+        # The supported-engines list is derived from the AsrEngine
+        # enum, so adding a 7th variant requires zero changes here.
+        with pytest.raises(ValueError) as exc_info:
+            resolve_asr_engine({"asr": "x"}, None)
+        msg = str(exc_info.value)
+        for variant in AsrEngine:
+            assert variant.value in msg, (
+                f"error message {msg!r} missing variant {variant.value!r}"
+            )
 
 
 def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:

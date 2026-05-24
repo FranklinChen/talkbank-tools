@@ -159,6 +159,7 @@ impl WorkerPool {
                                         worker_returned_ref.clone(),
                                         spawn_permits_ref.clone(),
                                         profile,
+                                        item.engine_overrides.clone(),
                                     ))
                                 })
                                 .clone();

@@ -62,3 +62,4 @@ class TranslationBackend(Enum):
 
     GOOGLE = "google"
     SEAMLESS = "seamless"
+    NLLB = "nllb"

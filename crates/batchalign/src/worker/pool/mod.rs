@@ -370,6 +370,15 @@ pub(super) struct WorkerGroup {
     /// lifetime of the group. Read by admission control to look up
     /// the per-profile slot in `PoolConfig::max_workers_per_key`.
     pub(super) profile: WorkerProfile,
+
+    /// JSON-serialized engine overrides for this group's key. Mirrors
+    /// `WorkerKey.2`; stored on the group so admission control can
+    /// consult the engine selection without re-locating the key. Used
+    /// by the engine-aware memory reservation
+    /// ([`super::memory_gate::engine_aware_startup_reservation_mb`])
+    /// to inflate the per-spawn reservation when the translate engine
+    /// is a heavy local-model backend (NLLB, SeamlessM4T).
+    pub(super) engine_overrides: String,
 }
 
 impl WorkerGroup {
@@ -377,6 +386,7 @@ impl WorkerGroup {
         worker_returned: Arc<tokio::sync::Notify>,
         spawn_permits: Arc<Semaphore>,
         profile: WorkerProfile,
+        engine_overrides: String,
     ) -> Self {
         Self {
             idle: std::sync::Mutex::new(VecDeque::new()),
@@ -388,6 +398,7 @@ impl WorkerGroup {
             worker_returned,
             spawn_permits,
             profile,
+            engine_overrides,
         }
     }
 

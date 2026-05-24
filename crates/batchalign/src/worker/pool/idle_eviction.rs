@@ -146,6 +146,7 @@ mod tests {
                 worker_returned,
                 spawn_permits,
                 WorkerProfile::Stanza,
+                String::new(),
             )),
             pid: WorkerPid(pid),
             rss_mb,

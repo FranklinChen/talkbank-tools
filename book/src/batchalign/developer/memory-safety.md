@@ -1,7 +1,7 @@
 # Memory Safety: Preventing Kernel OOM Crashes
 
 **Status:** Current
-**Last updated:** 2026-05-21 15:20 EDT
+**Last updated:** 2026-05-23 22:00 EDT
 
 ## The Problem
 
@@ -74,6 +74,19 @@ falls back to the canonical per-tier `MemoryTier::*_startup_mb`
 (Principle 1), `MemoryTier` is the sole canonical source of these
 values; an architectural-invariant test in `types/runtime.rs`
 prevents reintroduction of parallel constants.
+
+The Mode-A fallback is further **engine-aware** for the IO profile,
+via `memory_gate::engine_aware_startup_reservation_mb`. The IO
+baseline (`tier.io_startup_mb`: 2 GB Small/Medium, 4 GB Large/Fleet)
+is correct for engines that are thin API clients (Google Translate
+via `googletrans`) but under-reserves for engines that load large
+local models in the worker process — SeamlessM4T (~2.4 GB resident)
+and NLLB-200-distilled-1.3B (~5 GB resident). The helper takes the
+MAX of the profile baseline and the engine's resident footprint as
+declared by `TranslateEngineName::resident_memory_mb`, so the
+admission gate refuses to spawn an NLLB worker on a Medium-tier
+host that doesn't have ~5 GB of headroom. Workers running the
+lightweight Google engine continue to pay the IO baseline.
 
 Admission is back-pressure, not safety (Principle 5). The
 correctness floor is `worker/memory_guard.rs` (per-spawn host-memory

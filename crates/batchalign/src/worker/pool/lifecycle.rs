@@ -149,6 +149,7 @@ impl WorkerPool {
                     self.worker_returned.clone(),
                     self.spawn_permits.clone(),
                     profile,
+                    engine_overrides.to_owned(),
                 ))
             })
             .clone()
@@ -242,10 +243,15 @@ impl WorkerPool {
         // tier. See `host_min_free_mb_threshold_for_tier`.
         let mem_threshold =
             memory_gate::host_min_free_mb_threshold_for_tier(&self.config.runtime.memory_tier);
-        let reservation_mb = group
-            .profile
-            .startup_reservation_mb_for_tier(&self.config.runtime.memory_tier)
-            .0;
+        // Engine-aware: lifts the reservation above the profile baseline
+        // when the engine override carries a heavy local model. See
+        // ``memory_gate::engine_aware_startup_reservation_mb``.
+        let reservation_mb = memory_gate::engine_aware_startup_reservation_mb(
+            group.profile,
+            &group.engine_overrides,
+            &self.config.runtime.memory_tier,
+        )
+        .0;
         let (estimate_mb, estimate_source) =
             match rss_observer::observed_avg_rss_mb_for_profile(&self.groups, group.profile) {
                 Some(observed) => (observed, rss_observer::EstimateSource::ObservedAvgIdle),
