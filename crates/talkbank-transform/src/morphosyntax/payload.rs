@@ -194,31 +194,12 @@ pub fn collect_payloads(
                 // for why this isn't a sentinel: it's the canonical
                 // Stanza-input default explicitly chosen for the
                 // ambiguous case, not a stand-in for a parse failure.
-                //
-                // CA-prosody arrows (`→`, `↗`, `↘`, `≋`, `≈`, …) are
-                // content separators per CHECK; the parser mis-types
-                // them as `Terminator::Ca*` (BUG-009) and a raw copy
-                // would emit them into `%mor` as invalid CHAT.
-                // Normalize to Period for the morphotag payload only;
-                // the main tier still round-trips the original variant.
                 let terminator_typed: talkbank_model::Terminator =
-                    match utt.main.content.terminator.clone() {
-                        None
-                        | Some(talkbank_model::Terminator::CaRisingToHigh { .. })
-                        | Some(talkbank_model::Terminator::CaRisingToMid { .. })
-                        | Some(talkbank_model::Terminator::CaLevel { .. })
-                        | Some(talkbank_model::Terminator::CaFallingToMid { .. })
-                        | Some(talkbank_model::Terminator::CaFallingToLow { .. })
-                        | Some(talkbank_model::Terminator::CaTechnicalBreak { .. })
-                        | Some(talkbank_model::Terminator::CaTechnicalBreakLinker { .. })
-                        | Some(talkbank_model::Terminator::CaNoBreak { .. })
-                        | Some(talkbank_model::Terminator::CaNoBreakLinker { .. }) => {
-                            talkbank_model::Terminator::Period {
-                                span: talkbank_model::Span::DUMMY,
-                            }
-                        }
-                        Some(t) => t,
-                    };
+                    utt.main.content.terminator.clone().unwrap_or(
+                        talkbank_model::Terminator::Period {
+                            span: talkbank_model::Span::DUMMY,
+                        },
+                    );
 
                 // Resolution must use the same language as dispatch.
                 // Pre-2026-05-02 this had a separate `or(Some(primary_lang))`

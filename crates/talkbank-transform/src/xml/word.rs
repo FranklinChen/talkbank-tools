@@ -322,20 +322,15 @@ impl XmlEmitter {
         tiers: &UtteranceTiers<'_>,
         chunk_index_1based: usize,
     ) -> Result<(), XmlWriteError> {
-        // CA intonation-contour terminators (`⇗`, `↗`, `→`, `↘`,
-        // `⇘`) were parsed by Rust as a single `Terminator` variant
-        // but Java Chatter renders them as two sibling XML elements:
-        // an `<s type="rising to high"/>` separator followed by the
-        // `<t type="missing CA terminator"/>` placeholder. Peel off
-        // the `<s>` here when the terminator carries pitch-contour
-        // semantics — the `<t>` then collapses to the "missing"
-        // placeholder via the same path as utterances with no
-        // terminator at all.
-        if let Some(s_label) = ca_terminator_separator_label(terminator) {
-            let mut s_tag = BytesStart::new("s");
-            s_tag.push_attribute(("type", s_label));
-            self.writer.write_event(Event::Empty(s_tag))?;
-        }
+        // CA intonation-contour arrows (`⇗ ↗ → ↘ ⇘`) and CA TCU
+        // markers (`≋ +≋ ≈ +≈`) are modeled as ``Separator`` variants,
+        // not as ``Terminator`` variants — the parser dispatches them
+        // through ``non_colon_separator``. So this code path only sees
+        // genuine terminators (``Period``, ``Question``, ``+/.`` etc.)
+        // and the ``<s>`` peel-off that used to live here for the CA
+        // case is now naturally emitted by the separator renderer at
+        // the call site that produces ``<s type="…"/>`` from each
+        // ``Separator`` variant.
 
         // `<t type="…"/>`. Java Chatter uses the short letter code
         // for the three standard sentence terminators and a prose
@@ -1197,31 +1192,11 @@ fn separator_tag_type(sep: &Separator) -> Option<&'static str> {
     })
 }
 
-/// Recognise CA intonation-contour terminators that Java Chatter
-/// splits into a preceding `<s type="…"/>` plus `<t type="missing CA
-/// terminator"/>`. Returns the `<s>` label for pitch-contour
-/// terminators (`CaRisingToHigh`, `CaFallingToLow`, …). Other
-/// terminator variants render as a single `<t>`.
-fn ca_terminator_separator_label(terminator: &Terminator) -> Option<&'static str> {
-    Some(match terminator {
-        Terminator::CaRisingToHigh { .. } => "rising to high",
-        Terminator::CaRisingToMid { .. } => "rising to mid",
-        Terminator::CaLevel { .. } => "level",
-        Terminator::CaFallingToMid { .. } => "falling to mid",
-        Terminator::CaFallingToLow { .. } => "falling to low",
-        _ => return None,
-    })
-}
-
 /// Map every [`Terminator`] variant to its `<t type="…"/>` attribute
-/// value per `baseTerminatorType` in `talkbank.xsd`. The CA intonation
-/// contours (`⇗`/`↗`/`→`/`↘`/`⇘`) collapse to
-/// `"missing CA terminator"`; the `<s>` preamble they also carry is
-/// emitted separately via [`ca_terminator_separator_label`]. CA
-/// linker variants (`CaNoBreakLinker`, `CaTechnicalBreakLinker`)
-/// render identically to their non-linker counterparts — the linker
-/// role is expressed on the *next* utterance's `<linker>`, not on
-/// this `<t>`.
+/// value per `baseTerminatorType` in `talkbank.xsd`. CA intonation
+/// arrows and CA TCU markers are NOT terminators (they're
+/// ``Separator`` variants); the corresponding XML rendering happens
+/// in the separator path.
 pub(super) fn terminator_type_attr(terminator: &Terminator) -> &'static str {
     match terminator {
         Terminator::Period { .. } => "p",
@@ -1237,17 +1212,6 @@ pub(super) fn terminator_type_attr(terminator: &Terminator) -> &'static str {
         Terminator::QuotedNewLine { .. } => "quotation next line",
         Terminator::QuotedPeriodSimple { .. } => "quotation precedes",
         Terminator::BreakForCoding { .. } => "broken for coding",
-        Terminator::CaNoBreak { .. } | Terminator::CaNoBreakLinker { .. } => {
-            "no break TCU continuation"
-        }
-        Terminator::CaTechnicalBreak { .. } | Terminator::CaTechnicalBreakLinker { .. } => {
-            "technical break TCU continuation"
-        }
-        Terminator::CaRisingToHigh { .. }
-        | Terminator::CaRisingToMid { .. }
-        | Terminator::CaLevel { .. }
-        | Terminator::CaFallingToMid { .. }
-        | Terminator::CaFallingToLow { .. } => "missing CA terminator",
     }
 }
 

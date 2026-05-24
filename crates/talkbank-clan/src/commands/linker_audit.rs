@@ -593,11 +593,6 @@ fn classify_terminator(term: &Terminator) -> TerminatorKind {
         Terminator::QuotedNewLine { .. } => TerminatorKind::QuotationFollows,
         Terminator::QuotedPeriodSimple { .. } => TerminatorKind::QuotationPrecedes,
         Terminator::BreakForCoding { .. } => TerminatorKind::BreakForCoding,
-        Terminator::CaTechnicalBreak { .. } => TerminatorKind::CaTechnicalBreak,
-        Terminator::CaTechnicalBreakLinker { .. } => TerminatorKind::CaTechnicalBreakLinker,
-        Terminator::CaNoBreak { .. } => TerminatorKind::CaNoBreak,
-        Terminator::CaNoBreakLinker { .. } => TerminatorKind::CaNoBreakLinker,
-        _ => TerminatorKind::CaIntonation,
     }
 }
 

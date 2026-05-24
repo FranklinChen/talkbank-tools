@@ -172,102 +172,17 @@ pub enum Terminator {
         /// Source span for error reporting.
         span: Span,
     },
-
-    // ===== Legacy CA variants kept for backward-compatibility =====
-    //
-    // New parsing/classification code intentionally treats these surface forms
-    // as separators or linkers instead of utterance terminators.
-    /// ⇗ (U+21D7) - Rising to high intonation (Conversation Analysis)
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#RisingToHigh>
-    #[serde(rename = "ca_rising_to_high")]
-    CaRisingToHigh {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// ↗ (U+2197) - Rising to mid intonation (Conversation Analysis)
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#RisingToMid>
-    #[serde(rename = "ca_rising_to_mid")]
-    CaRisingToMid {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// → (U+2192) - Level/continuing intonation (Conversation Analysis)
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#Level_Intonation>
-    #[serde(rename = "ca_level")]
-    CaLevel {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// ↘ (U+2198) - Falling to mid intonation (Conversation Analysis)
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#FallingToMid>
-    #[serde(rename = "ca_falling_to_mid")]
-    CaFallingToMid {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// ⇘ (U+21D8) - Falling to low intonation (Conversation Analysis)
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#FallingToLow>
-    #[serde(rename = "ca_falling_to_low")]
-    CaFallingToLow {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// ≋ (U+224B) - Technical break TCU (Turn-Constructional Unit) - Conversation Analysis
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#TCU_Technical_Break>
-    #[serde(rename = "ca_technical_break")]
-    CaTechnicalBreak {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// +≋ (U+224B) - Technical break TCU linker/terminator - Conversation Analysis
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#TCU_Continuation_Linker>
-    #[serde(rename = "ca_technical_break_linker")]
-    CaTechnicalBreakLinker {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// ≈ (U+2248) - No break TCU - Conversation Analysis
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#TCU_NoBreak>
-    #[serde(rename = "ca_no_break")]
-    CaNoBreak {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
-    /// +≈ (U+2248) - No break TCU linker/terminator - Conversation Analysis
-    /// Reference: <https://talkbank.org/0info/manuals/CHAT.html#TCU_NoBreak_Linker>
-    #[serde(rename = "ca_no_break_linker")]
-    CaNoBreakLinker {
-        #[serde(skip)]
-        #[schemars(skip)]
-        #[semantic_eq(skip)]
-        /// Source span for error reporting.
-        span: Span,
-    },
 }
+
+// NOTE: CA-prosody arrows (⇗ ↗ → ↘ ⇘) and CA TCU markers (≋ +≋ ≈ +≈) are
+// modeled as ``Separator`` variants, not as ``Terminator`` variants. The
+// grammar dispatches them to ``non_colon_separator``; the parser builds
+// ``Separator::Level``, ``Separator::RisingToMid``, etc. CHECK accepts
+// them anywhere on the main tier — they are NOT utterance-final tokens.
+// The previous ``Terminator::Ca*`` variants were the bug behind BUG-009
+// (the morphotag pipeline propagated ⇗↗→↘⇘ into ``%mor`` because they
+// were typed as terminators); they were retired once the parser was
+// fixed to dispatch them as separators.
 
 impl Terminator {
     /// Parse the canonical CHAT terminator string into its typed variant.
@@ -330,16 +245,7 @@ impl Terminator {
             | Terminator::QuotedPeriodSimple { span }
             | Terminator::SelfInterruptedQuestion { span }
             | Terminator::TrailingOffQuestion { span }
-            | Terminator::BreakForCoding { span }
-            | Terminator::CaRisingToHigh { span }
-            | Terminator::CaRisingToMid { span }
-            | Terminator::CaLevel { span }
-            | Terminator::CaFallingToMid { span }
-            | Terminator::CaFallingToLow { span }
-            | Terminator::CaTechnicalBreak { span }
-            | Terminator::CaTechnicalBreakLinker { span }
-            | Terminator::CaNoBreak { span }
-            | Terminator::CaNoBreakLinker { span } => *span,
+            | Terminator::BreakForCoding { span } => *span,
         }
     }
 }
@@ -361,16 +267,6 @@ impl WriteChat for Terminator {
             Terminator::SelfInterruptedQuestion { .. } => w.write_str("+//?"),
             Terminator::TrailingOffQuestion { .. } => w.write_str("+..?"),
             Terminator::BreakForCoding { .. } => w.write_str("+."),
-            // CA terminators
-            Terminator::CaRisingToHigh { .. } => w.write_char('\u{21D7}'), // ⇗
-            Terminator::CaRisingToMid { .. } => w.write_char('\u{2197}'),  // ↗
-            Terminator::CaLevel { .. } => w.write_char('\u{2192}'),        // →
-            Terminator::CaFallingToMid { .. } => w.write_char('\u{2198}'), // ↘
-            Terminator::CaFallingToLow { .. } => w.write_char('\u{21D8}'), // ⇘
-            Terminator::CaTechnicalBreak { .. } => w.write_char('\u{224B}'), // ≋
-            Terminator::CaTechnicalBreakLinker { .. } => w.write_str("+\u{224B}"), // +≋
-            Terminator::CaNoBreak { .. } => w.write_char('\u{2248}'),      // ≈
-            Terminator::CaNoBreakLinker { .. } => w.write_str("+\u{2248}"), // +≈
         }
     }
 }

@@ -246,11 +246,6 @@ pub fn run_linker_audit(paths: &[PathBuf], anomalies_path: Option<&Path>) {
             Terminator::QuotedNewLine { .. } => "+\"/.",
             Terminator::QuotedPeriodSimple { .. } => "+\".",
             Terminator::BreakForCoding { .. } => "+.",
-            Terminator::CaTechnicalBreak { .. } => "≋",
-            Terminator::CaTechnicalBreakLinker { .. } => "+≋",
-            Terminator::CaNoBreak { .. } => "≈",
-            Terminator::CaNoBreakLinker { .. } => "+≈",
-            _ => "(ca-intonation)",
         }
     }
 
