@@ -320,8 +320,11 @@ impl AsrEngineName {
             // admission gate never observes this value in production.
             Self::Whisper | Self::WhisperHub | Self::WhisperX => WHISPER_LARGE_V3_RSS_MB,
             // Cloud HTTP clients with no local model.
-            Self::RevAi | Self::WhisperOai
-            | Self::HkTencent | Self::HkAliyun | Self::HkFunaudio => HTTP_CLIENT_BASELINE_RSS_MB,
+            Self::RevAi
+            | Self::WhisperOai
+            | Self::HkTencent
+            | Self::HkAliyun
+            | Self::HkFunaudio => HTTP_CLIENT_BASELINE_RSS_MB,
         }
     }
 
@@ -472,7 +475,6 @@ pub(crate) const WHISPER_LARGE_V3_RSS_MB: u64 = 3_500;
 /// forced-alignment model (including the Cantonese variant): ~1.2 GB
 /// torchaudio weights + runtime margin.
 pub(crate) const WAVE2VEC_FA_RSS_MB: u64 = 1_800;
-
 
 impl Serialize for TranslateEngineName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
