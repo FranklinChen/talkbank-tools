@@ -1,7 +1,7 @@
 # ELAN2CHAT -- ELAN XML to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:27 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -51,3 +51,20 @@ Uses simple string-based XML parsing to avoid adding a `quick-xml` dependency. S
 ## Reference
 
 See the [CLAN manual](https://talkbank.org/0info/manuals/CLAN.html#_Toc220409298) for the original ELAN2CHAT command documentation.
+
+## CLAN `+`-flag coverage audit
+
+ELAN2CHAT is a **converter** — input ELAN `.eaf` XML, output CHAT.
+Sources: `OSX-CLAN/src/clan/Elan2Chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/elan2chat.rs`.
+
+### ELAN2CHAT-specific `+`-flags (from `Elan2Chat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+a` | Output tiers as found in `.eaf` (default: sort by utterance delimiter) | — | Missing |
+| `+b` | Multiple bullets per line (default: one per line) | — | Missing |
+
+Audit summary: 1 Done (default conversion), 2 Missing. Both
+gaps are output-shape policy switches; chatter's default
+follows CLAN's default in both cases.

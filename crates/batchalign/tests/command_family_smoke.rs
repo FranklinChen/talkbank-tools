@@ -233,6 +233,7 @@ async fn smoke_translate() {
         CommandOptions::Translate(TranslateOptions {
             common: CommonOptions::default(),
             merge_abbrev: Default::default(),
+            ..TranslateOptions::default()
         }),
     )
     .await;

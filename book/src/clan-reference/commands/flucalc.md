@@ -1,6 +1,8 @@
 # FLUCALC -- Fluency Calculation
 
 **Status:** Current
+**Last updated:** 2026-05-22 09:22 EDT
+
 ## Purpose
 
 Detects and quantifies disfluencies in speech transcripts, producing per-speaker counts of stuttering-like disfluencies (SLD) and typical disfluencies (TD). FLUCALC is the standard tool in CLAN for analyzing fluency in stuttering research.
@@ -15,17 +17,62 @@ chatter clan flucalc --speaker CHI file.cha
 chatter clan flucalc --format json file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
-| Option | Description |
-|--------|-------------|
-| `--speaker <CODE>` | Include speaker |
-| `--exclude-speaker <CODE>` | Exclude speaker |
-| `--format <FMT>` | Output format: text, json, csv, clan |
+| Option | CLAN flag | Description |
+|--------|-----------|-------------|
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
 
-FLUCALC has no command-specific flags beyond the shared
-`CommonAnalysisArgs` set. There is no `--syllable-mode` switch in the
-current CLI; output measures are word-based.
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `flucalc` flag. Sources:
+
+* `OSX-CLAN/src/clan/flucalc.cpp` — `usage()` and `getflag()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` FLUCALC branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Flucalc` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+### FLUCALC-specific `+`-flags (from `flucalc.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+a` | Get pause durations from `%wor` tier | — | Missing | chatter ignores `%wor` for pauses. |
+| `+b` | Word-mode analyses (default: syllable mode) | — | Missing | chatter is word-mode only. |
+| `+b1` | Word mode with repetition/retraces | — | Missing | |
+| `+c` | Compute pause duration from `(2.4)` notation | — | Missing | Inline pause-time parsing. |
+| `+c1` | Add phonological fragment to SLD instead of TD | — | Missing | Counting policy switch. |
+| `+c5` | With `+p`: reverse source/target tier priority | — | Missing | |
+| `+dN` | Sample size `N` (s, w) — e.g. `+d100s` for 100 syllables | — | Rewriter only | `--display-mode N`; no consuming clap field. |
+| `+e1`..`+e5` | Side-effect file creation (syllable counts, fluent utterances, disfluencies) | — | Missing | |
+| `+u` | Compute output per utterance | partial via `--per-file` | Partial | Different granularity. |
+| `+pS` / `+p@F` | Search word `S` and match POS | — | Missing | |
+| `+g` / `-g` / `+gS` | Gem semantics (same overload as EVAL) | `--gem` (S form only) | Partial | |
+| `+n` / `-n` | Gem termination semantics | — | Missing | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 4 |
+| Partial | 2 |
+| Rewriter only | 5 |
+| Missing | 13 |
+
+FLUCALC's largest gap is the **syllable-vs-word mode** (`+b` vs
+default syllable). chatter operates exclusively in word mode,
+which produces *different counts* from CLAN's default. This is a
+**silent wrong** for researchers expecting CLAN-default
+syllable-mode output. Filed as a Phase 1.7 high-priority
+follow-up.
 
 ## Disfluency Categories
 

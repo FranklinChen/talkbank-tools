@@ -1,7 +1,7 @@
 # LIPP2CHAT -- LIPP Phonetic Profile to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:25 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -44,3 +44,10 @@ A well-formed CHAT file where each LIPP entry becomes an utterance on the main t
 
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
+
+## CLAN `+`-flag coverage audit
+
+LIPP2CHAT has **no dedicated `.cpp`** in CLAN's source tree —
+chatter exposes a first-class converter for the LIPP phonetic
+profile format with no CLAN counterpart to compare against.
+Audit summary: chatter extension. No CLAN flag surface.

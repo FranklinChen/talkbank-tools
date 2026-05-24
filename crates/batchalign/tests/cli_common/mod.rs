@@ -455,6 +455,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
         "translate" => CommandOptions::Translate(TranslateOptions {
             common: CommonOptions::default(),
             merge_abbrev: false.into(),
+            ..TranslateOptions::default()
         }),
         "coref" => CommandOptions::Coref(CorefOptions {
             common: CommonOptions::default(),

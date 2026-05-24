@@ -19,16 +19,20 @@ use thiserror::Error;
 use crate::commands::chains::ChainsConfig;
 use crate::commands::codes::CodesConfig;
 use crate::commands::combo::ComboConfig;
+use crate::commands::cooccur::CooccurConfig;
 use crate::commands::corelex::CorelexConfig;
+use crate::commands::dist::DistConfig;
 use crate::commands::dss::DssConfig;
 use crate::commands::eval::EvalConfig;
 use crate::commands::flucalc::FlucalcConfig;
 use crate::commands::freq::FreqConfig;
+use crate::commands::freqpos::FreqposConfig;
 use crate::commands::ipsyn::IpsynConfig;
 use crate::commands::keymap::KeymapConfig;
 use crate::commands::kideval::KidevalConfig;
 use crate::commands::kwal::KwalConfig;
 use crate::commands::maxwd::MaxwdConfig;
+use crate::commands::mlt::MltConfig;
 use crate::commands::mlu::MluConfig;
 use crate::commands::mortable::MortableConfig;
 use crate::commands::rely::RelyConfig;
@@ -36,6 +40,7 @@ use crate::commands::script::ScriptConfig;
 use crate::commands::sugar::SugarConfig;
 use crate::commands::trnfix::TrnfixConfig;
 use crate::commands::uniq::UniqConfig;
+use crate::commands::vocd::VocdConfig;
 use crate::commands::wdsize::WdsizeConfig;
 use crate::framework::{RunnerError, TransformError};
 
@@ -332,7 +337,7 @@ pub enum AnalysisRequest {
     /// `mlu`
     Mlu(MluConfig),
     /// `mlt`
-    Mlt,
+    Mlt(MltConfig),
     /// `wdlen`
     Wdlen,
     /// `wdsize`
@@ -340,7 +345,7 @@ pub enum AnalysisRequest {
     /// `maxwd`
     Maxwd(MaxwdConfig),
     /// `freqpos`
-    Freqpos,
+    Freqpos(FreqposConfig),
     /// `timedur`
     Timedur,
     /// `kwal`
@@ -350,9 +355,9 @@ pub enum AnalysisRequest {
     /// `combo`
     Combo(ComboConfig),
     /// `cooccur`
-    Cooccur,
+    Cooccur(CooccurConfig),
     /// `dist`
-    Dist,
+    Dist(DistConfig),
     /// `chip`
     Chip,
     /// `phonfreq`
@@ -360,7 +365,7 @@ pub enum AnalysisRequest {
     /// `modrep`
     Modrep,
     /// `vocd`
-    Vocd,
+    Vocd(VocdConfig),
     /// `codes`
     Codes(CodesConfig),
     /// `chains`
@@ -393,59 +398,401 @@ pub enum AnalysisRequest {
     Uniq(UniqConfig),
 }
 
-/// Raw analysis options supplied by outer adapters before defaults are applied.
+/// FREQ-specific raw input. See [`AnalysisOptions`].
 #[derive(Debug, Clone, Default)]
-pub struct AnalysisOptions {
-    /// Whether to run `freq` against `%mor`.
+pub struct FreqOptions {
+    /// Run `freq` against the `%mor` tier instead of the main tier.
     pub mor: bool,
-    /// Whether `mlu` should count words instead of morphemes.
+    /// CLAN `+c` / `+c0` / `+c1` capitalization filter. Default
+    /// (`Any`) counts every countable word.
+    pub capitalization: crate::framework::CapitalizationFilter,
+    /// CLAN `+o1`: sort entries by reverse concordance.
+    pub reverse_concordance: bool,
+    /// CLAN `+d1`: emit alphabetized deduped word list only.
+    pub word_list_only: bool,
+    /// CLAN `+d4`: emit only per-speaker type/token/TTR summary.
+    pub types_tokens_only: bool,
+    /// CLAN `+k`: case-sensitive keying.
+    pub case_sensitive: bool,
+}
+
+/// MLU-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct MluOptions {
+    /// Count words instead of morphemes.
     pub words: bool,
-    /// Whether `wdsize` should read from the main tier.
+    /// CLAN `+gS`: drop utterances consisting solely of these words.
+    pub solo_word_exclusions: Vec<String>,
+}
+
+/// MLT-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct MltOptions {
+    /// CLAN `+gS`: drop utterances consisting solely of these words.
+    pub solo_word_exclusions: Vec<String>,
+}
+
+/// WDSIZE-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct WdsizeOptions {
+    /// Read from the main tier instead of the `%mor` tier.
     pub main_tier: bool,
-    /// Result limit for commands such as `maxwd`.
+    /// CLAN `+w[>|<|=]N`: include only words whose character
+    /// length satisfies the comparison.
+    pub length_filter: Option<crate::commands::wdsize::LengthFilter>,
+}
+
+/// MAXWD-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct MaxwdOptions {
+    /// Result limit (CLAN: `+cN`). `None` ⇒ apply `MaxwdConfig`
+    /// default.
     pub limit: Option<crate::framework::WordLimit>,
-    /// Keyword list for `kwal` and `keymap`.
+    /// CLAN `+a`: restrict to words whose length is unique within
+    /// a speaker's lexicon.
+    pub unique_length_only: bool,
+    /// CLAN `+xN` (repeatable): drop words of length N. Each
+    /// `+xN` on the CLI appends one entry.
+    pub exclude_lengths: Vec<usize>,
+    /// CLAN `+k`: case-sensitive word keying.
+    pub case_sensitive: bool,
+}
+
+/// KWAL-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct KwalOptions {
+    /// Keyword search list.
     pub keywords: Vec<crate::framework::KeywordPattern>,
-    /// Search expressions for `combo`.
+    /// CLAN `+b`: keyword must be the only countable word on
+    /// the tier (single-word utterance match).
+    pub strict_match: bool,
+    /// CLAN `+k`: case-sensitive keyword matching. Default
+    /// (`false`) lowercases both sides before comparison.
+    pub case_sensitive: bool,
+    /// CLAN `+d` (no N): emit matching utterances as legal CHAT
+    /// (drop the location decoration).
+    pub legal_chat: bool,
+    /// CLAN `-wN`: pre-match context lines.
+    pub context_before: u32,
+    /// CLAN `+wN`: post-match context lines.
+    pub context_after: u32,
+}
+
+/// COMBO-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct ComboOptions {
+    /// Search expressions (parsed downstream by
+    /// `commands::combo::SearchExpr::parse`).
     pub search: Vec<String>,
-    /// Maximum code depth for `codes`.
+    /// Exclude search expressions (CLAN: `-sS`).
+    pub exclude_search: Vec<String>,
+    /// CLAN `+g3`: only the first matching expression per utterance.
+    pub first_match_only: bool,
+    /// CLAN `+g7`: deduplicate repeated matched words.
+    pub dedupe_matches: bool,
+    /// CLAN `+k`: case-sensitive matching. When `true`, the
+    /// `SearchExpr::parse_with_case` step preserves case in the
+    /// stored terms, and `process_utterance` populates words via
+    /// `cleaned_text()` instead of `NormalizedWord::from_word`.
+    pub case_sensitive: bool,
+    /// CLAN `-wN`: pre-match context lines.
+    pub context_before: u32,
+    /// CLAN `+wN`: post-match context lines.
+    pub context_after: u32,
+}
+
+/// DIST-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct DistOptions {
+    /// CLAN `+g`: count each word at most once per turn.
+    pub once_per_turn: bool,
+    /// CLAN `+k`: case-sensitive word keying.
+    pub case_sensitive: bool,
+}
+
+/// COOCCUR-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct CooccurOptions {
+    /// CLAN `+d`: render output without the leading count column.
+    pub no_frequency_counts: bool,
+    /// CLAN `+nN`: cluster size (number of adjacent words per
+    /// row). `0` falls back to the `CooccurConfig` default of 2.
+    pub cluster_size: u8,
+}
+
+/// FREQPOS-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct FreqposOptions {
+    /// CLAN `+d`: switch position classification from
+    /// first/last/other to first/second/other.
+    pub position_classification: crate::commands::freqpos::PositionClassification,
+    /// CLAN `+k`: case-sensitive word keying.
+    pub case_sensitive: bool,
+}
+
+/// VOCD-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct VocdOptions {
+    /// CLAN `+c` / `+c0` / `+c1` capitalization filter. Default
+    /// (`Any`) feeds every countable word to the D-statistic
+    /// sampler.
+    pub capitalization: crate::framework::CapitalizationFilter,
+    /// CLAN `+k`: case-sensitive token keying.
+    pub case_sensitive: bool,
+}
+
+/// CODES-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct CodesOptions {
+    /// Maximum hierarchical code depth. `None` ⇒ default.
     pub max_depth: Option<crate::framework::CodeDepth>,
-    /// Tier selector used by several analysis commands.
+}
+
+/// CHAINS-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct ChainsOptions {
+    /// Tier to walk (defaults to `CodesConfig` default).
     pub tier: Option<crate::framework::TierKind>,
-    /// Frequency threshold for `corelex`.
+}
+
+/// CORELEX-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct CorelexOptions {
+    /// Minimum frequency for core classification.
     pub threshold: Option<crate::framework::FrequencyThreshold>,
-    /// Shared max-utterance limit used by several analyzers.
+}
+
+/// DSS-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct DssOptions {
+    /// Override the bundled DSS rules file.
+    pub rules_path: Option<PathBuf>,
+    /// Cap on utterances scored.
     pub max_utterances: Option<crate::framework::UtteranceLimit>,
+}
+
+/// EVAL-specific raw input (shared by `eval` and `eval-dialect`).
+#[derive(Debug, Clone, Default)]
+pub struct EvalOptions {
     /// Optional normative database path.
     pub database_path: Option<PathBuf>,
     /// Optional normative database demographic filter.
     pub database_filter: Option<crate::database::DatabaseFilter>,
-    /// Whether `flucalc` should use syllable mode.
+}
+
+/// FLUCALC-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct FlucalcOptions {
+    /// Use syllable counts instead of word counts.
     pub syllable_mode: bool,
-    /// KidEval DSS utterance cap.
-    pub dss_max_utterances: Option<crate::framework::UtteranceLimit>,
-    /// KidEval IPSyn utterance cap.
-    pub ipsyn_max_utterances: Option<crate::framework::UtteranceLimit>,
-    /// Shared rules path for analyzers such as `dss` and `ipsyn`.
+}
+
+/// IPSYN-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct IpsynOptions {
+    /// Override the bundled IPSyn rules file.
     pub rules_path: Option<PathBuf>,
-    /// Kideval DSS rules path.
+    /// Cap on utterances scored.
+    pub max_utterances: Option<crate::framework::UtteranceLimit>,
+}
+
+/// KEYMAP-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct KeymapOptions {
+    /// Keyword search list.
+    pub keywords: Vec<crate::framework::KeywordPattern>,
+    /// Tier to scan (defaults to `KeymapConfig::default().tier`).
+    pub tier: Option<crate::framework::TierKind>,
+}
+
+/// KIDEVAL-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct KidevalOptions {
+    /// Override the bundled DSS rules file.
     pub dss_rules_path: Option<PathBuf>,
-    /// Kideval IPSyn rules path.
+    /// Override the bundled IPSyn rules file.
     pub ipsyn_rules_path: Option<PathBuf>,
-    /// Mortable script path.
+    /// Cap on utterances scored by the embedded DSS sub-analysis.
+    pub dss_max_utterances: Option<crate::framework::UtteranceLimit>,
+    /// Cap on utterances scored by the embedded IPSyn sub-analysis.
+    pub ipsyn_max_utterances: Option<crate::framework::UtteranceLimit>,
+    /// Optional normative database path.
+    pub database_path: Option<PathBuf>,
+    /// Optional normative database demographic filter.
+    pub database_filter: Option<crate::database::DatabaseFilter>,
+}
+
+/// MORTABLE-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct MortableOptions {
+    /// Path to the language-script `.cut` file (required).
     pub script_path: Option<PathBuf>,
-    /// Secondary file for `rely`.
+}
+
+/// RELY-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct RelyOptions {
+    /// Path to the comparison file (required).
     pub second_file: Option<PathBuf>,
-    /// Template file path for `script`.
+    /// Tier to align (defaults to `RelyConfig::default().tier`).
+    pub tier: Option<crate::framework::TierKind>,
+}
+
+/// SCRIPT-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptOptions {
+    /// Path to the template file (required).
     pub template_path: Option<PathBuf>,
-    /// Minimum utterance count for `sugar`.
+}
+
+/// SUGAR-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct SugarOptions {
+    /// Minimum utterance count threshold.
     pub min_utterances: Option<crate::framework::UtteranceLimit>,
-    /// First tier for `trnfix`.
+}
+
+/// TRNFIX-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct TrnfixOptions {
+    /// First tier of the swap.
     pub tier1: Option<crate::framework::TierKind>,
-    /// Second tier for `trnfix`.
+    /// Second tier of the swap.
     pub tier2: Option<crate::framework::TierKind>,
-    /// Whether `uniq` should sort by frequency.
+}
+
+/// UNIQ-specific raw input.
+#[derive(Debug, Clone, Default)]
+pub struct UniqOptions {
+    /// Sort by descending frequency instead of alphabetical order.
     pub sort_by_frequency: bool,
+}
+
+/// Raw analysis options supplied by outer adapters before defaults
+/// are applied. Variant carries the per-command `*Options` for
+/// commands that take input, or is unit for commands that don't.
+///
+/// The variant doubles as the command discriminator: the builder
+/// no longer needs a separate [`AnalysisCommandName`] parameter
+/// because [`Self::command_name`] derives it from the variant.
+///
+/// Note: `Eval` and `EvalDialect` share the same `EvalOptions`
+/// shape but are distinct variants so the dispatcher can pick the
+/// right `EvalVariant` downstream.
+#[derive(Debug, Clone)]
+pub enum AnalysisOptions {
+    /// FREQ.
+    Freq(FreqOptions),
+    /// MLU.
+    Mlu(MluOptions),
+    /// MLT.
+    Mlt(MltOptions),
+    /// WDLEN — no input options.
+    Wdlen,
+    /// WDSIZE.
+    Wdsize(WdsizeOptions),
+    /// MAXWD.
+    Maxwd(MaxwdOptions),
+    /// FREQPOS.
+    Freqpos(FreqposOptions),
+    /// TIMEDUR — no input options.
+    Timedur,
+    /// KWAL.
+    Kwal(KwalOptions),
+    /// GEMLIST — no input options.
+    Gemlist,
+    /// COMBO.
+    Combo(ComboOptions),
+    /// COOCCUR.
+    Cooccur(CooccurOptions),
+    /// DIST.
+    Dist(DistOptions),
+    /// CHIP — no input options.
+    Chip,
+    /// PHONFREQ — no input options.
+    Phonfreq,
+    /// MODREP — no input options.
+    Modrep,
+    /// VOCD.
+    Vocd(VocdOptions),
+    /// CODES.
+    Codes(CodesOptions),
+    /// CHAINS.
+    Chains(ChainsOptions),
+    /// COMPLEXITY — no input options.
+    Complexity,
+    /// CORELEX.
+    Corelex(CorelexOptions),
+    /// DSS.
+    Dss(DssOptions),
+    /// EVAL.
+    Eval(EvalOptions),
+    /// EVAL-DIALECT (shares `EvalOptions` shape with `Eval`).
+    EvalDialect(EvalOptions),
+    /// FLUCALC.
+    Flucalc(FlucalcOptions),
+    /// IPSYN.
+    Ipsyn(IpsynOptions),
+    /// KEYMAP.
+    Keymap(KeymapOptions),
+    /// KIDEVAL.
+    Kideval(KidevalOptions),
+    /// MORTABLE.
+    Mortable(MortableOptions),
+    /// RELY.
+    Rely(RelyOptions),
+    /// SCRIPT.
+    Script(ScriptOptions),
+    /// SUGAR.
+    Sugar(SugarOptions),
+    /// TRNFIX.
+    Trnfix(TrnfixOptions),
+    /// UNIQ.
+    Uniq(UniqOptions),
+}
+
+impl AnalysisOptions {
+    /// Derive the command-identity tag from the variant. Used by
+    /// callers (banner rendering, scope determination) that need a
+    /// stable name string independent of the option payload.
+    pub fn command_name(&self) -> AnalysisCommandName {
+        match self {
+            AnalysisOptions::Freq(_) => AnalysisCommandName::Freq,
+            AnalysisOptions::Mlu(_) => AnalysisCommandName::Mlu,
+            AnalysisOptions::Mlt(_) => AnalysisCommandName::Mlt,
+            AnalysisOptions::Wdlen => AnalysisCommandName::Wdlen,
+            AnalysisOptions::Wdsize(_) => AnalysisCommandName::Wdsize,
+            AnalysisOptions::Maxwd(_) => AnalysisCommandName::Maxwd,
+            AnalysisOptions::Freqpos(_) => AnalysisCommandName::Freqpos,
+            AnalysisOptions::Timedur => AnalysisCommandName::Timedur,
+            AnalysisOptions::Kwal(_) => AnalysisCommandName::Kwal,
+            AnalysisOptions::Gemlist => AnalysisCommandName::Gemlist,
+            AnalysisOptions::Combo(_) => AnalysisCommandName::Combo,
+            AnalysisOptions::Cooccur(_) => AnalysisCommandName::Cooccur,
+            AnalysisOptions::Dist(_) => AnalysisCommandName::Dist,
+            AnalysisOptions::Chip => AnalysisCommandName::Chip,
+            AnalysisOptions::Phonfreq => AnalysisCommandName::Phonfreq,
+            AnalysisOptions::Modrep => AnalysisCommandName::Modrep,
+            AnalysisOptions::Vocd(_) => AnalysisCommandName::Vocd,
+            AnalysisOptions::Codes(_) => AnalysisCommandName::Codes,
+            AnalysisOptions::Chains(_) => AnalysisCommandName::Chains,
+            AnalysisOptions::Complexity => AnalysisCommandName::Complexity,
+            AnalysisOptions::Corelex(_) => AnalysisCommandName::Corelex,
+            AnalysisOptions::Dss(_) => AnalysisCommandName::Dss,
+            AnalysisOptions::Eval(_) => AnalysisCommandName::Eval,
+            AnalysisOptions::EvalDialect(_) => AnalysisCommandName::EvalDialect,
+            AnalysisOptions::Flucalc(_) => AnalysisCommandName::Flucalc,
+            AnalysisOptions::Ipsyn(_) => AnalysisCommandName::Ipsyn,
+            AnalysisOptions::Keymap(_) => AnalysisCommandName::Keymap,
+            AnalysisOptions::Kideval(_) => AnalysisCommandName::Kideval,
+            AnalysisOptions::Mortable(_) => AnalysisCommandName::Mortable,
+            AnalysisOptions::Rely(_) => AnalysisCommandName::Rely,
+            AnalysisOptions::Script(_) => AnalysisCommandName::Script,
+            AnalysisOptions::Sugar(_) => AnalysisCommandName::Sugar,
+            AnalysisOptions::Trnfix(_) => AnalysisCommandName::Trnfix,
+            AnalysisOptions::Uniq(_) => AnalysisCommandName::Uniq,
+        }
+    }
 }
 
 /// Built analysis plan after library-owned defaults and validation are applied.
@@ -468,160 +815,214 @@ pub struct RelyRequest {
 
 /// Builder that turns raw outer-layer options into typed library requests.
 pub struct AnalysisRequestBuilder {
-    command_name: AnalysisCommandName,
     options: AnalysisOptions,
 }
 
 impl AnalysisRequestBuilder {
-    /// Create a builder for one named CLAN analysis command.
-    pub fn new(command_name: AnalysisCommandName, options: AnalysisOptions) -> Self {
-        Self {
-            command_name,
-            options,
-        }
+    /// Create a builder. The variant encodes the command identity;
+    /// callers that previously passed an `AnalysisCommandName`
+    /// separately should construct the matching variant instead.
+    pub fn new(options: AnalysisOptions) -> Self {
+        Self { options }
     }
 
     /// Validate, apply library defaults, and build the analysis plan.
     pub fn build(self) -> Result<AnalysisPlan, AnalysisServiceError> {
-        let command_name = self.command_name;
-        let options = self.options;
-
-        match command_name {
-            AnalysisCommandName::Freq => {
+        match self.options {
+            AnalysisOptions::Freq(o) => {
                 Ok(AnalysisPlan::Service(AnalysisRequest::Freq(FreqConfig {
-                    use_mor: options.mor,
+                    use_mor: o.mor,
+                    capitalization: o.capitalization,
+                    reverse_concordance: o.reverse_concordance,
+                    word_list_only: o.word_list_only,
+                    types_tokens_only: o.types_tokens_only,
+                    case_sensitive: o.case_sensitive,
                 })))
             }
-            AnalysisCommandName::Mlu => {
-                Ok(AnalysisPlan::Service(AnalysisRequest::Mlu(MluConfig {
-                    words_only: options.words,
-                })))
-            }
-            AnalysisCommandName::Mlt => Ok(AnalysisPlan::Service(AnalysisRequest::Mlt)),
-            AnalysisCommandName::Wdlen => Ok(AnalysisPlan::Service(AnalysisRequest::Wdlen)),
-            AnalysisCommandName::Wdsize => Ok(AnalysisPlan::Service(AnalysisRequest::Wdsize(
+            AnalysisOptions::Mlu(o) => Ok(AnalysisPlan::Service(AnalysisRequest::Mlu(MluConfig {
+                words_only: o.words,
+                solo_word_exclusions: o.solo_word_exclusions,
+            }))),
+            AnalysisOptions::Mlt(o) => Ok(AnalysisPlan::Service(AnalysisRequest::Mlt(MltConfig {
+                solo_word_exclusions: o.solo_word_exclusions,
+            }))),
+            AnalysisOptions::Wdlen => Ok(AnalysisPlan::Service(AnalysisRequest::Wdlen)),
+            AnalysisOptions::Wdsize(o) => Ok(AnalysisPlan::Service(AnalysisRequest::Wdsize(
                 WdsizeConfig {
-                    use_main_tier: options.main_tier,
+                    use_main_tier: o.main_tier,
+                    length_filter: o.length_filter,
                 },
             ))),
-            AnalysisCommandName::Maxwd => {
+            AnalysisOptions::Maxwd(o) => {
                 let default = MaxwdConfig::default();
                 Ok(AnalysisPlan::Service(AnalysisRequest::Maxwd(MaxwdConfig {
-                    limit: options.limit.unwrap_or(default.limit),
+                    limit: o.limit.unwrap_or(default.limit),
+                    unique_length_only: o.unique_length_only,
+                    exclude_lengths: o.exclude_lengths,
+                    case_sensitive: o.case_sensitive,
                 })))
             }
-            AnalysisCommandName::Freqpos => Ok(AnalysisPlan::Service(AnalysisRequest::Freqpos)),
-            AnalysisCommandName::Timedur => Ok(AnalysisPlan::Service(AnalysisRequest::Timedur)),
-            AnalysisCommandName::Kwal => Ok(AnalysisPlan::Service(AnalysisRequest::kwal(
-                options.keywords,
-            )?)),
-            AnalysisCommandName::Gemlist => Ok(AnalysisPlan::Service(AnalysisRequest::Gemlist)),
-            AnalysisCommandName::Combo => {
-                let search: Vec<crate::commands::combo::SearchExpr> = options
+            AnalysisOptions::Freqpos(o) => Ok(AnalysisPlan::Service(AnalysisRequest::Freqpos(
+                FreqposConfig {
+                    position_classification: o.position_classification,
+                    case_sensitive: o.case_sensitive,
+                },
+            ))),
+            AnalysisOptions::Timedur => Ok(AnalysisPlan::Service(AnalysisRequest::Timedur)),
+            AnalysisOptions::Kwal(o) => {
+                Ok(AnalysisPlan::Service(AnalysisRequest::kwal(KwalConfig {
+                    keywords: o.keywords,
+                    strict_match: o.strict_match,
+                    case_sensitive: o.case_sensitive,
+                    legal_chat: o.legal_chat,
+                    context_before: o.context_before,
+                    context_after: o.context_after,
+                })?))
+            }
+            AnalysisOptions::Gemlist => Ok(AnalysisPlan::Service(AnalysisRequest::Gemlist)),
+            AnalysisOptions::Combo(o) => {
+                let case_sensitive = o.case_sensitive;
+                let search: Vec<crate::commands::combo::SearchExpr> = o
                     .search
                     .iter()
-                    .map(|expr| crate::commands::combo::SearchExpr::parse(expr))
+                    .map(|expr| {
+                        crate::commands::combo::SearchExpr::parse_with_case(expr, case_sensitive)
+                    })
                     .collect();
                 if search.is_empty() {
                     return Err(AnalysisServiceError::InvalidRequest(
                         "combo requires at least one search expression".to_owned(),
                     ));
                 }
+                let exclude: Vec<crate::commands::combo::SearchExpr> = o
+                    .exclude_search
+                    .iter()
+                    .map(|expr| {
+                        crate::commands::combo::SearchExpr::parse_with_case(expr, case_sensitive)
+                    })
+                    .collect();
                 Ok(AnalysisPlan::Service(AnalysisRequest::Combo(ComboConfig {
                     search,
+                    exclude,
+                    first_match_only: o.first_match_only,
+                    dedupe_matches: o.dedupe_matches,
+                    case_sensitive,
+                    context_before: o.context_before,
+                    context_after: o.context_after,
                 })))
             }
-            AnalysisCommandName::Cooccur => Ok(AnalysisPlan::Service(AnalysisRequest::Cooccur)),
-            AnalysisCommandName::Dist => Ok(AnalysisPlan::Service(AnalysisRequest::Dist)),
-            AnalysisCommandName::Chip => Ok(AnalysisPlan::Service(AnalysisRequest::Chip)),
-            AnalysisCommandName::Phonfreq => Ok(AnalysisPlan::Service(AnalysisRequest::Phonfreq)),
-            AnalysisCommandName::Modrep => Ok(AnalysisPlan::Service(AnalysisRequest::Modrep)),
-            AnalysisCommandName::Vocd => Ok(AnalysisPlan::Service(AnalysisRequest::Vocd)),
-            AnalysisCommandName::Codes => {
-                let default = CodesConfig::default();
-                Ok(AnalysisPlan::Service(AnalysisRequest::Codes(CodesConfig {
-                    max_depth: options.max_depth.unwrap_or(default.max_depth),
-                })))
-            }
-            AnalysisCommandName::Chains => {
-                let default = ChainsConfig::default();
-                Ok(AnalysisPlan::Service(AnalysisRequest::Chains(
-                    ChainsConfig {
-                        tier: options.tier.unwrap_or(default.tier),
+            AnalysisOptions::Cooccur(o) => {
+                let default = CooccurConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Cooccur(
+                    CooccurConfig {
+                        no_frequency_counts: o.no_frequency_counts,
+                        cluster_size: if o.cluster_size == 0 {
+                            default.cluster_size
+                        } else {
+                            o.cluster_size
+                        },
                     },
                 )))
             }
-            AnalysisCommandName::Complexity => {
-                Ok(AnalysisPlan::Service(AnalysisRequest::Complexity))
-            }
-            AnalysisCommandName::Corelex => {
-                let default = CorelexConfig::default();
-                Ok(AnalysisPlan::Service(AnalysisRequest::Corelex(
-                    CorelexConfig {
-                        min_frequency: options.threshold.unwrap_or(default.min_frequency),
-                    },
-                )))
-            }
-            AnalysisCommandName::Dss => {
-                let default = DssConfig::default();
-                Ok(AnalysisPlan::Service(AnalysisRequest::Dss(DssConfig {
-                    rules_path: options.rules_path,
-                    max_utterances: options.max_utterances.unwrap_or(default.max_utterances),
+            AnalysisOptions::Dist(o) => {
+                Ok(AnalysisPlan::Service(AnalysisRequest::Dist(DistConfig {
+                    once_per_turn: o.once_per_turn,
+                    case_sensitive: o.case_sensitive,
                 })))
             }
-            AnalysisCommandName::Eval => {
-                let default = EvalConfig::default();
-                Ok(AnalysisPlan::Service(AnalysisRequest::Eval(EvalConfig {
-                    database_path: options.database_path,
-                    database_filter: options.database_filter,
+            AnalysisOptions::Chip => Ok(AnalysisPlan::Service(AnalysisRequest::Chip)),
+            AnalysisOptions::Phonfreq => Ok(AnalysisPlan::Service(AnalysisRequest::Phonfreq)),
+            AnalysisOptions::Modrep => Ok(AnalysisPlan::Service(AnalysisRequest::Modrep)),
+            AnalysisOptions::Vocd(o) => {
+                let default = VocdConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Vocd(VocdConfig {
+                    capitalization: o.capitalization,
+                    case_sensitive: o.case_sensitive,
                     ..default
                 })))
             }
-            AnalysisCommandName::EvalDialect => {
-                Ok(AnalysisPlan::Service(AnalysisRequest::Eval(EvalConfig {
-                    database_path: options.database_path,
-                    database_filter: options.database_filter,
-                    variant: crate::commands::eval::EvalVariant::Dialect,
+            AnalysisOptions::Codes(o) => {
+                let default = CodesConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Codes(CodesConfig {
+                    max_depth: o.max_depth.unwrap_or(default.max_depth),
                 })))
             }
-            AnalysisCommandName::Flucalc => Ok(AnalysisPlan::Service(AnalysisRequest::Flucalc(
-                FlucalcConfig {
-                    syllable_mode: options.syllable_mode,
-                },
-            ))),
-            AnalysisCommandName::Ipsyn => {
-                let default = IpsynConfig::default();
-                Ok(AnalysisPlan::Service(AnalysisRequest::Ipsyn(IpsynConfig {
-                    rules_path: options.rules_path,
-                    max_utterances: options.max_utterances.unwrap_or(default.max_utterances),
-                })))
-            }
-            AnalysisCommandName::Keymap => {
-                let tier = options.tier.unwrap_or_else(|| KeymapConfig::default().tier);
-                Ok(AnalysisPlan::Service(AnalysisRequest::keymap(
-                    options.keywords,
-                    tier,
-                )?))
-            }
-            AnalysisCommandName::Kideval => {
-                let default = KidevalConfig::default();
-                Ok(AnalysisPlan::Service(AnalysisRequest::Kideval(
-                    KidevalConfig {
-                        dss_rules_path: options.dss_rules_path,
-                        ipsyn_rules_path: options.ipsyn_rules_path,
-                        dss_max_utterances: options
-                            .dss_max_utterances
-                            .unwrap_or(default.dss_max_utterances),
-                        ipsyn_max_utterances: options
-                            .ipsyn_max_utterances
-                            .unwrap_or(default.ipsyn_max_utterances),
-                        database_path: options.database_path,
-                        database_filter: options.database_filter,
+            AnalysisOptions::Chains(o) => {
+                let default = ChainsConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Chains(
+                    ChainsConfig {
+                        tier: o.tier.unwrap_or(default.tier),
                     },
                 )))
             }
-            AnalysisCommandName::Mortable => {
-                let script_path = options.script_path.ok_or_else(|| {
+            AnalysisOptions::Complexity => Ok(AnalysisPlan::Service(AnalysisRequest::Complexity)),
+            AnalysisOptions::Corelex(o) => {
+                let default = CorelexConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Corelex(
+                    CorelexConfig {
+                        min_frequency: o.threshold.unwrap_or(default.min_frequency),
+                    },
+                )))
+            }
+            AnalysisOptions::Dss(o) => {
+                let default = DssConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Dss(DssConfig {
+                    rules_path: o.rules_path,
+                    max_utterances: o.max_utterances.unwrap_or(default.max_utterances),
+                })))
+            }
+            AnalysisOptions::Eval(o) => {
+                let default = EvalConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Eval(EvalConfig {
+                    database_path: o.database_path,
+                    database_filter: o.database_filter,
+                    ..default
+                })))
+            }
+            AnalysisOptions::EvalDialect(o) => {
+                Ok(AnalysisPlan::Service(AnalysisRequest::Eval(EvalConfig {
+                    database_path: o.database_path,
+                    database_filter: o.database_filter,
+                    variant: crate::commands::eval::EvalVariant::Dialect,
+                })))
+            }
+            AnalysisOptions::Flucalc(o) => Ok(AnalysisPlan::Service(AnalysisRequest::Flucalc(
+                FlucalcConfig {
+                    syllable_mode: o.syllable_mode,
+                },
+            ))),
+            AnalysisOptions::Ipsyn(o) => {
+                let default = IpsynConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Ipsyn(IpsynConfig {
+                    rules_path: o.rules_path,
+                    max_utterances: o.max_utterances.unwrap_or(default.max_utterances),
+                })))
+            }
+            AnalysisOptions::Keymap(o) => {
+                let tier = o.tier.unwrap_or_else(|| KeymapConfig::default().tier);
+                Ok(AnalysisPlan::Service(AnalysisRequest::keymap(
+                    o.keywords, tier,
+                )?))
+            }
+            AnalysisOptions::Kideval(o) => {
+                let default = KidevalConfig::default();
+                Ok(AnalysisPlan::Service(AnalysisRequest::Kideval(
+                    KidevalConfig {
+                        dss_rules_path: o.dss_rules_path,
+                        ipsyn_rules_path: o.ipsyn_rules_path,
+                        dss_max_utterances: o
+                            .dss_max_utterances
+                            .unwrap_or(default.dss_max_utterances),
+                        ipsyn_max_utterances: o
+                            .ipsyn_max_utterances
+                            .unwrap_or(default.ipsyn_max_utterances),
+                        database_path: o.database_path,
+                        database_filter: o.database_filter,
+                    },
+                )))
+            }
+            AnalysisOptions::Mortable(o) => {
+                let script_path = o.script_path.ok_or_else(|| {
                     AnalysisServiceError::InvalidRequest(
                         "mortable requires a scriptPath option".to_owned(),
                     )
@@ -630,20 +1031,20 @@ impl AnalysisRequestBuilder {
                     MortableConfig { script_path },
                 )))
             }
-            AnalysisCommandName::Rely => {
-                let secondary_file = options.second_file.ok_or_else(|| {
+            AnalysisOptions::Rely(o) => {
+                let secondary_file = o.second_file.ok_or_else(|| {
                     AnalysisServiceError::InvalidRequest(
                         "rely requires a secondFile option".to_owned(),
                     )
                 })?;
-                let tier = options.tier.unwrap_or_else(|| RelyConfig::default().tier);
+                let tier = o.tier.unwrap_or_else(|| RelyConfig::default().tier);
                 Ok(AnalysisPlan::Rely(RelyRequest {
                     secondary_file,
                     config: RelyConfig { tier },
                 }))
             }
-            AnalysisCommandName::Script => {
-                let template_path = options.template_path.ok_or_else(|| {
+            AnalysisOptions::Script(o) => {
+                let template_path = o.template_path.ok_or_else(|| {
                     AnalysisServiceError::InvalidRequest(
                         "script requires a templatePath option".to_owned(),
                     )
@@ -652,24 +1053,24 @@ impl AnalysisRequestBuilder {
                     ScriptConfig { template_path },
                 )))
             }
-            AnalysisCommandName::Sugar => {
+            AnalysisOptions::Sugar(o) => {
                 let default = SugarConfig::default();
                 Ok(AnalysisPlan::Service(AnalysisRequest::Sugar(SugarConfig {
-                    min_utterances: options.min_utterances.unwrap_or(default.min_utterances),
+                    min_utterances: o.min_utterances.unwrap_or(default.min_utterances),
                 })))
             }
-            AnalysisCommandName::Trnfix => {
+            AnalysisOptions::Trnfix(o) => {
                 let default = TrnfixConfig::default();
                 Ok(AnalysisPlan::Service(AnalysisRequest::Trnfix(
                     TrnfixConfig {
-                        tier1: options.tier1.unwrap_or(default.tier1),
-                        tier2: options.tier2.unwrap_or(default.tier2),
+                        tier1: o.tier1.unwrap_or(default.tier1),
+                        tier2: o.tier2.unwrap_or(default.tier2),
                     },
                 )))
             }
-            AnalysisCommandName::Uniq => {
+            AnalysisOptions::Uniq(o) => {
                 Ok(AnalysisPlan::Service(AnalysisRequest::Uniq(UniqConfig {
-                    sort_by_frequency: options.sort_by_frequency,
+                    sort_by_frequency: o.sort_by_frequency,
                 })))
             }
         }
@@ -677,17 +1078,16 @@ impl AnalysisRequestBuilder {
 }
 
 impl AnalysisRequest {
-    /// Validate and construct a `kwal` request.
-    pub fn kwal(
-        keywords: Vec<crate::framework::KeywordPattern>,
-    ) -> Result<Self, AnalysisServiceError> {
-        if keywords.is_empty() {
+    /// Validate and construct a `kwal` request. The caller assembles the
+    /// `KwalConfig` (likely from a `KwalOptions`); this function's only
+    /// job is the non-empty-keywords check.
+    pub fn kwal(config: KwalConfig) -> Result<Self, AnalysisServiceError> {
+        if config.keywords.is_empty() {
             return Err(AnalysisServiceError::InvalidRequest(
                 "kwal requires at least one keyword".to_owned(),
             ));
         }
-
-        Ok(Self::Kwal(KwalConfig { keywords }))
+        Ok(Self::Kwal(config))
     }
 
     /// Validate and construct a `keymap` request.
@@ -717,4 +1117,174 @@ pub enum AnalysisServiceError {
     /// Underlying runner failure.
     #[error(transparent)]
     Runner(#[from] RunnerError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `AnalysisOptions::command_name` derives the
+    /// `AnalysisCommandName` from the variant. Spot-check several
+    /// variants to pin the mapping; the full set is exhaustive by
+    /// construction inside the method.
+    #[test]
+    fn analysis_options_command_name_freq() {
+        let opts = AnalysisOptions::Freq(FreqOptions::default());
+        assert_eq!(opts.command_name(), AnalysisCommandName::Freq);
+    }
+
+    #[test]
+    fn analysis_options_command_name_combo() {
+        let opts = AnalysisOptions::Combo(ComboOptions::default());
+        assert_eq!(opts.command_name(), AnalysisCommandName::Combo);
+    }
+
+    #[test]
+    fn analysis_options_command_name_dist() {
+        let opts = AnalysisOptions::Dist(DistOptions::default());
+        assert_eq!(opts.command_name(), AnalysisCommandName::Dist);
+    }
+
+    /// No-options unit variants still map to their command names.
+    #[test]
+    fn analysis_options_command_name_unit_variants() {
+        assert_eq!(
+            AnalysisOptions::Wdlen.command_name(),
+            AnalysisCommandName::Wdlen
+        );
+        assert_eq!(
+            AnalysisOptions::Cooccur(CooccurOptions::default()).command_name(),
+            AnalysisCommandName::Cooccur,
+        );
+        assert_eq!(
+            AnalysisOptions::Chip.command_name(),
+            AnalysisCommandName::Chip
+        );
+        assert_eq!(
+            AnalysisOptions::Complexity.command_name(),
+            AnalysisCommandName::Complexity
+        );
+    }
+
+    /// `Eval` and `EvalDialect` share the `EvalOptions` payload
+    /// shape but produce distinct command names. The variant
+    /// discrimination is load-bearing because the builder routes
+    /// `EvalDialect` to `EvalConfig { variant: Dialect, .. }`.
+    #[test]
+    fn analysis_options_command_name_distinguishes_eval_dialect() {
+        let plain = AnalysisOptions::Eval(EvalOptions::default());
+        let dialect = AnalysisOptions::EvalDialect(EvalOptions::default());
+        assert_eq!(plain.command_name(), AnalysisCommandName::Eval);
+        assert_eq!(dialect.command_name(), AnalysisCommandName::EvalDialect);
+    }
+
+    /// Builder consumes the DIST variant and threads
+    /// `once_per_turn` into the resulting `DistConfig`.
+    #[test]
+    fn builder_threads_dist_once_per_turn() {
+        let plan = AnalysisRequestBuilder::new(AnalysisOptions::Dist(DistOptions {
+            once_per_turn: true,
+            case_sensitive: false,
+        }))
+        .build()
+        .expect("dist should build");
+        match plan {
+            AnalysisPlan::Service(AnalysisRequest::Dist(config)) => {
+                assert!(config.once_per_turn);
+            }
+            other => panic!("unexpected plan: {other:?}"),
+        }
+    }
+
+    /// Builder threads `FreqOptions::capitalization` into
+    /// `FreqConfig::capitalization`.
+    #[test]
+    fn builder_threads_freq_capitalization() {
+        let plan = AnalysisRequestBuilder::new(AnalysisOptions::Freq(FreqOptions {
+            mor: false,
+            capitalization: crate::framework::CapitalizationFilter::MidUpper,
+            reverse_concordance: false,
+            word_list_only: false,
+            types_tokens_only: false,
+            case_sensitive: false,
+        }))
+        .build()
+        .expect("freq should build");
+        match plan {
+            AnalysisPlan::Service(AnalysisRequest::Freq(config)) => {
+                assert_eq!(
+                    config.capitalization,
+                    crate::framework::CapitalizationFilter::MidUpper
+                );
+            }
+            other => panic!("unexpected plan: {other:?}"),
+        }
+    }
+
+    /// Builder threads `VocdOptions::capitalization` into
+    /// `VocdConfig::capitalization`. Distinct from the FREQ test
+    /// because each command has its own `*Config` value but the
+    /// `CapitalizationFilter` is shared.
+    #[test]
+    fn builder_threads_vocd_capitalization() {
+        let plan = AnalysisRequestBuilder::new(AnalysisOptions::Vocd(VocdOptions {
+            capitalization: crate::framework::CapitalizationFilter::InitialUpper,
+            case_sensitive: false,
+        }))
+        .build()
+        .expect("vocd should build");
+        match plan {
+            AnalysisPlan::Service(AnalysisRequest::Vocd(config)) => {
+                assert_eq!(
+                    config.capitalization,
+                    crate::framework::CapitalizationFilter::InitialUpper
+                );
+            }
+            other => panic!("unexpected plan: {other:?}"),
+        }
+    }
+
+    /// Builder threads COMBO's `first_match_only` and
+    /// `dedupe_matches` into the resulting `ComboConfig`. The
+    /// search expression is required (builder errors without it),
+    /// so the test provides one.
+    #[test]
+    fn builder_threads_combo_first_match_and_dedupe() {
+        let plan = AnalysisRequestBuilder::new(AnalysisOptions::Combo(ComboOptions {
+            search: vec!["want".to_owned()],
+            exclude_search: vec![],
+            first_match_only: true,
+            dedupe_matches: true,
+            case_sensitive: false,
+            context_before: 0,
+            context_after: 0,
+        }))
+        .build()
+        .expect("combo should build");
+        match plan {
+            AnalysisPlan::Service(AnalysisRequest::Combo(config)) => {
+                assert!(config.first_match_only);
+                assert!(config.dedupe_matches);
+            }
+            other => panic!("unexpected plan: {other:?}"),
+        }
+    }
+
+    /// Builder maps `EvalDialect` variant to
+    /// `EvalConfig::variant = Dialect`, not the default `Eval`
+    /// variant. Pins the variant routing introduced in the enum
+    /// refactor.
+    #[test]
+    fn builder_eval_dialect_variant_is_dialect() {
+        let plan =
+            AnalysisRequestBuilder::new(AnalysisOptions::EvalDialect(EvalOptions::default()))
+                .build()
+                .expect("eval-dialect should build");
+        match plan {
+            AnalysisPlan::Service(AnalysisRequest::Eval(config)) => {
+                assert_eq!(config.variant, crate::commands::eval::EvalVariant::Dialect);
+            }
+            other => panic!("unexpected plan: {other:?}"),
+        }
+    }
 }

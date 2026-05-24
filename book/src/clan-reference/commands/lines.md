@@ -1,6 +1,8 @@
 # LINES -- Add or Remove Sequential Line Numbers
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:05 EDT
+
 ## Purpose
 
 Adds or removes line numbers for display. The legacy manual describes `LINES` as inserting line numbers based on CLAN's "Show Line Numbers" display and using `+n` to remove them.
@@ -21,6 +23,21 @@ chatter clan lines --remove file.cha
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--remove` | bool | `false` | Remove existing line numbers instead of adding them |
+
+## CLAN `+`-flag coverage audit
+
+LINES is a **transform**. Sources:
+`OSX-CLAN/src/clan/lines.cpp::usage`,
+`crates/talkbank-clan/src/transforms/lines.rs`.
+
+### LINES-specific `+`-flags (from `lines.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+n` | Remove all line/tier numbers | `--remove` | Done | Direct mapping; rewriter routes `+n` → `--remove` (since 2026-05-22). |
+
+Audit summary: 1 Done (add-numbers default), 1 Done (`+n`
+removal mapped). 0 Missing.
 
 ## Behavior
 

@@ -45,7 +45,17 @@ use crate::framework::{
 
 /// Configuration for the DIST command.
 #[derive(Debug, Clone, Default)]
-pub struct DistConfig {}
+pub struct DistConfig {
+    /// CLAN `+g`: count each word at most once per utterance/turn.
+    /// Mainly affects the `total_count` column; `first_turn` /
+    /// `last_turn` are unchanged.
+    pub once_per_turn: bool,
+    /// CLAN `+k`: case-sensitive word keying. Default (`false`)
+    /// lowercases via `NormalizedWord::from_word`; when `true`,
+    /// the key preserves original case so `Want`/`want`/`WANT`
+    /// land in separate by-word entries.
+    pub case_sensitive: bool,
+}
 
 /// Distribution stats for a single word.
 #[derive(Debug, Clone, Serialize)]
@@ -175,7 +185,17 @@ pub struct DistState {
 ///
 /// Tracks turns (one per utterance) and records per-word first/last turn.
 #[derive(Debug, Clone, Default)]
-pub struct DistCommand;
+pub struct DistCommand {
+    /// User-facing configuration (e.g. CLAN `+g` once-per-turn).
+    pub config: DistConfig,
+}
+
+impl DistCommand {
+    /// Construct with explicit configuration.
+    pub fn new(config: DistConfig) -> Self {
+        Self { config }
+    }
+}
 
 impl AnalysisCommand for DistCommand {
     type Config = DistConfig;
@@ -194,13 +214,21 @@ impl AnalysisCommand for DistCommand {
 
         let turn = state.current_turn;
 
-        // Collect all words from this utterance
+        // `+g` (`once_per_turn`) collapses repeated occurrences of
+        // the same word within one utterance to a single count.
+        // `first_turn` / `last_turn` are unaffected because they
+        // only ever update on first/most-recent encounter.
+        let mut seen_this_turn: std::collections::HashSet<NormalizedWord> =
+            std::collections::HashSet::new();
+        let case_sensitive = self.config.case_sensitive;
         for word in countable_words(&utterance.main.content.content) {
-            let key = NormalizedWord::from_word(word);
+            let key = NormalizedWord::from_word_cased(word, case_sensitive);
             let display = clan_display_form(word);
 
-            let dist = state.by_word.entry(key).or_default();
-            dist.total_count += 1;
+            let dist = state.by_word.entry(key.clone()).or_default();
+            if !self.config.once_per_turn || seen_this_turn.insert(key) {
+                dist.total_count += 1;
+            }
             if dist.first_turn == 0 {
                 dist.first_turn = turn;
                 dist.display_form = display;
@@ -270,7 +298,7 @@ mod tests {
     /// Every utterance counts as its own turn (matching CLAN behavior).
     #[test]
     fn dist_turn_counting() {
-        let command = DistCommand;
+        let command = DistCommand::default();
         let mut state = DistState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
         let ctx = file_ctx(&chat_file);
@@ -290,7 +318,7 @@ mod tests {
     /// Consecutive same-speaker utterances each count as a turn (CLAN behavior).
     #[test]
     fn dist_same_speaker_still_increments_turns() {
-        let command = DistCommand;
+        let command = DistCommand::default();
         let mut state = DistState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
         let ctx = file_ctx(&chat_file);
@@ -307,10 +335,59 @@ mod tests {
         assert_eq!(result.total_turns, 3);
     }
 
+    /// `+g` (`once_per_turn`) deduplicates repeated words within
+    /// a single turn — `hello hello bye` counts `hello` once, not
+    /// twice. `first_turn` / `last_turn` are unchanged by the flag.
+    #[test]
+    fn dist_once_per_turn_collapses_repeats_in_one_turn() {
+        let command = DistCommand::new(DistConfig {
+            once_per_turn: true,
+            case_sensitive: false,
+        });
+        let mut state = DistState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        // Turn 1 has "hello" twice + "bye"; Turn 2 has "hello".
+        // Default: total_count(hello)=3, total_count(bye)=1.
+        // +g:      total_count(hello)=2 (one per turn), bye=1.
+        let u1 = make_utterance("CHI", &["hello", "hello", "bye"]);
+        let u2 = make_utterance("MOT", &["hello"]);
+        command.process_utterance(&u1, &ctx, &mut state);
+        command.process_utterance(&u2, &ctx, &mut state);
+
+        let result = command.finalize(state);
+        let hello = result.words.iter().find(|w| w.word == "hello").unwrap();
+        assert_eq!(hello.total_count, 2);
+        assert_eq!(hello.first_turn, 1);
+        assert_eq!(hello.last_turn, 2);
+        let bye = result.words.iter().find(|w| w.word == "bye").unwrap();
+        assert_eq!(bye.total_count, 1);
+    }
+
+    /// Default behaviour (without `+g`) still counts every occurrence.
+    /// Companion to the once-per-turn test for an obvious diff.
+    #[test]
+    fn dist_default_counts_every_occurrence() {
+        let command = DistCommand::default();
+        let mut state = DistState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u1 = make_utterance("CHI", &["hello", "hello", "bye"]);
+        let u2 = make_utterance("MOT", &["hello"]);
+        command.process_utterance(&u1, &ctx, &mut state);
+        command.process_utterance(&u2, &ctx, &mut state);
+
+        let result = command.finalize(state);
+        let hello = result.words.iter().find(|w| w.word == "hello").unwrap();
+        assert_eq!(hello.total_count, 3);
+    }
+
     /// Word entries should retain first and last turn positions across speakers.
     #[test]
     fn dist_word_first_last_turn() {
-        let command = DistCommand;
+        let command = DistCommand::default();
         let mut state = DistState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
         let ctx = file_ctx(&chat_file);
@@ -331,10 +408,46 @@ mod tests {
     /// Finalizing untouched state should produce zero turns and no words.
     #[test]
     fn dist_empty_state() {
-        let command = DistCommand;
+        let command = DistCommand::default();
         let state = DistState::default();
         let result = command.finalize(state);
         assert!(result.words.is_empty());
         assert_eq!(result.total_turns, 0);
+    }
+
+    /// CLAN DIST `+k` / `--case-sensitive`: case variants land in
+    /// separate by-word entries.
+    #[test]
+    fn dist_case_sensitive_splits_case_variants() {
+        let command = DistCommand::new(DistConfig {
+            case_sensitive: true,
+            ..DistConfig::default()
+        });
+        let mut state = DistState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u = make_utterance("CHI", &["Want", "want", "WANT"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        let result = command.finalize(state);
+        // Three distinct keys.
+        assert_eq!(result.words.len(), 3);
+    }
+
+    /// Default lowercases the key, collapsing case variants into
+    /// one entry.
+    #[test]
+    fn dist_default_collapses_case_variants() {
+        let command = DistCommand::default();
+        let mut state = DistState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u = make_utterance("CHI", &["Want", "want", "WANT"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        let result = command.finalize(state);
+        assert_eq!(result.words.len(), 1);
     }
 }

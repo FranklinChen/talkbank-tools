@@ -1,7 +1,7 @@
 # SRT2CHAT -- SRT Subtitle to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 13:37 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -51,3 +51,14 @@ A well-formed CHAT file where each SRT subtitle block becomes a timed utterance.
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
 - Accepts both comma and period as millisecond separators in timestamps
+
+## CLAN `+`-flag coverage audit
+
+SRT2CHAT is a **converter** — input SRT subtitles, output CHAT.
+Sources: `OSX-CLAN/src/clan/Srt2Chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/srt2chat.rs`.
+
+CLAN's `Srt2Chat.cpp::usage` documents **no command-specific
+`+`-flags**. Byte-parity complete for the documented surface.
+
+Audit summary: 1 Done, 0 Missing.

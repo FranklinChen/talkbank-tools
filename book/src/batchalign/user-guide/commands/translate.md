@@ -1,19 +1,49 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-05-11 10:09 EDT
+**Last updated:** 2026-05-23 09:08 EDT
 
 Add English translations to non-English CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only — no audio involved.
 
 ## Engine
 
-The worker picks Google Translate (`googletrans`) at startup if the library
-is importable, and silently falls back to Meta SeamlessM4T
-(`facebook/hf-seamless-m4t-medium`) if `googletrans` cannot be imported.
-There is no user-facing flag to choose — the selection is determined at
-worker boot. Google calls are rate-limited to one item per 1.5 seconds
-inside the worker; Seamless runs unthrottled.
+Two backends are available:
+
+- **Google Translate** (`googletrans`) — calls the public Google Translate
+  endpoint. Requires outbound reachability to `translate.google.com`;
+  unsuitable for hosts behind the Great Firewall unless a VPN is active.
+  Rate-limited to one item per 1.5 seconds inside the worker. **Default.**
+- **Meta SeamlessM4T** (`facebook/hf-seamless-m4t-medium`) — runs locally
+  in the Python worker. Model is downloaded from HuggingFace on first use
+  and cached thereafter; no outbound network at inference time. Runs
+  unthrottled.
+
+Select with `--translate-engine google|seamless`. Default is Google.
+Operators on hosts where Google Translate is unreachable pass
+`--translate-engine seamless` explicitly per invocation (a shell alias
+is the right place to make that persistent for a given user) — there is
+no per-host config file knob for engine selection, by design.
+
+For symmetry with how ASR and FA engines are selected, the shared
+`--engine-overrides '{"translate":"<engine>"}'` global flag also
+works and takes precedence over `--translate-engine`.
+
+### Migrating from BA2
+
+BA2 read the translation engine from `~/.batchalign.ini`:
+
+```ini
+[translate]
+engine = seamless_translate
+```
+
+BA3 does not honor that key. The replacement is the explicit CLI flag
+`--translate-engine seamless` (or the shared
+`--engine-overrides '{"translate":"seamless"}'`). If you previously
+relied on the INI entry for routine runs, drop the line from
+`~/.batchalign.ini` and add the flag to whatever wrapper or alias you
+invoke `batchalign3 translate` through.
 
 ## Re-running on already-translated files
 
@@ -83,7 +113,34 @@ re-invoke the worker.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `--translate-engine google\|seamless` | `google` | Pick the translation engine for this invocation |
 | `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the translated output |
+
+---
+
+## Failure modes
+
+batchalign3 translate fails fast on engine failures rather than emitting
+partial output. When the worker reports a per-utterance error (engine
+network failure, GFW block on Google, rate-limit exhaustion, model
+runtime error), the affected file is marked failed with a typed
+`ItemErrors` message naming the first few offending items and the
+total count. Other files in the same batch continue normally — one
+bad file does not poison the rest (BA2-parity multi-file semantics).
+
+The output `.cha` for a failed file is **not** written. There is no
+silent path where a job appears successful but produced a `.cha`
+with missing `%xtra` tiers — if a tier is missing, the job result
+will say so.
+
+### Common cases
+
+| Situation | What happens |
+| --- | --- |
+| Google Translate unreachable (GFW block, network outage, DNS failure) | File marked failed with `translate failed for N item(s): item 0: Translation failed: ConnectionResetError ...`. Use `--translate-engine seamless` for hosts where Google is unreliable. |
+| Rate-limit (429) on one or more items | File marked failed citing the 429 message verbatim. Retry; if persistent, switch to Seamless or split the workload. |
+| Seamless first-download (HuggingFace) fails | File marked failed with the underlying HF error. If on a host where the default HF endpoint is slow, set `HF_ENDPOINT=https://hf-mirror.com` before the worker starts. |
+| googletrans library import error in a stripped venv | Worker startup fails (loud), not a per-job failure. |
 
 ---
 

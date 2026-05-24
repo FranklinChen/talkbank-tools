@@ -336,6 +336,23 @@ verify:
 	@$(MAKE) fuzz-check
 	@echo "==> [G14] Imported Batchalign Rust/PyO3 gate"
 	@$(MAKE) batchalign-ci-rust
+	@echo "==> [G15] mdBook build + linkcheck"
+	@$(MAKE) book-check
+
+# Build the unified TalkBank mdBook and run the linkcheck2 backend.
+# The book.toml configures both [output.html] and [output.linkcheck2],
+# so a single `mdbook build` exercises HTML rendering and exhaustive
+# link verification (catching SUMMARY-unreachable targets like the
+# 2026-05-22 batchalign/introduction.md regression). Requires `mdbook`
+# and `mdbook-linkcheck` on PATH; CI installs both, and any local
+# operator running `make verify` must have them installed too.
+book-check:
+	@command -v mdbook >/dev/null || { \
+		echo "ERROR: mdbook not found on PATH."; \
+		echo "Install: cargo install mdbook mdbook-linkcheck mdbook-mermaid"; \
+		exit 1; \
+	}
+	mdbook build book
 
 # Reference corpus grammar node type coverage
 coverage:

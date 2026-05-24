@@ -1,7 +1,7 @@
 # MAKEMOD -- Generate %mod Tier from Pronunciation Lexicon
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:05 EDT
+**Last updated:** 2026-05-22 13:12 EDT
 
 ## Purpose
 
@@ -20,6 +20,21 @@ chatter clan makemod --lexicon cmulex.cut file.cha
 | `-l`, `--lexicon` | path | *(required)* | Path to the pronunciation lexicon file |
 | `--all-alternatives` | bool | `false` | Show all alternative pronunciations (default: first only) |
 | `-o`, `--output` | path | stdout | Output CHAT file path |
+
+## CLAN `+`-flag coverage audit
+
+MAKEMOD is a **transform**. Sources:
+`OSX-CLAN/src/clan/makemod.cpp::usage`,
+`crates/talkbank-clan/src/transforms/makemod.rs`.
+
+### MAKEMOD-specific `+`-flags (from `makemod.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+a` | Print out all alternative pronunciations (default: first) | `--all-alternatives` | Done | Direct mapping; rewriter routes `+a` → `--all-alternatives` (since 2026-05-22). |
+
+Audit summary: 2 Done (default first-only + `+a` all-alts).
+0 Missing. Clean parity.
 
 ## External Data
 

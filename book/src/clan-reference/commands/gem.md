@@ -1,7 +1,7 @@
 # GEM -- Extract Gem Segments
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:42 EDT
+**Last updated:** 2026-05-22 12:56 EDT
 
 ## Purpose
 
@@ -30,6 +30,37 @@ chatter clan gem --gem story file.cha
 | `--gem <LABEL>` | `+g"label"` | Extract only gem segments matching this label |
 
 Without `--gem`, all gem segments in the file are extracted.
+
+## CLAN `+`-flag coverage audit
+
+GEM is a **transform** (input CHAT → output CHAT containing only
+gem segments). Sources: `OSX-CLAN/src/clan/gem.cpp::usage`,
+`crates/talkbank-clan/src/transforms/gem.rs`.
+
+### GEM-specific `+`-flags (from `gem.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+a` | Output all tiers but the gems themselves (default: gem-only) | — | Missing | Inverse extraction mode. |
+| `+b` | Output beg-bullet value of first speaker utterance in gem | — | Missing | Bullet-output addition. |
+| `+e` | Do not output nested gems with the matched one | — | Missing | Same `+e` semantic as in GEMFREQ. |
+| `+g` (no S) | Marker tier should contain all words specified by `+s` | — | Missing | EVAL-style `+g` overload. |
+| `+gS` | Restrict to gem labelled `S` | `--gem <LABEL>` | Done | |
+| `+n` | Each gem terminated by next `@G` | — | Missing | Same gem-termination semantic as in EVAL/COREELEX/FLUCALC. |
+| `+dN` | Output-format variants (from manual §7.13) | — | Rewriter only | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 |
+| Rewriter only | 4 |
+| Missing | 6 |
+
+GEM's command-specific gaps overlap heavily with GEMFREQ's: both
+the `+e` nested-gem and `+n` termination toggles are missing in
+both. A shared "gem-segment scoping" config could close both
+commands' gaps at once; filed as a Phase 1.7 follow-up.
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

@@ -1,6 +1,8 @@
 use super::*;
 use crate::api::ReleasedCommand;
-use crate::options::{AsrEngineName, CommandOptions, FaEngineName, UtrEngine as AppUtrEngine};
+use crate::options::{
+    AsrEngineName, CommandOptions, FaEngineName, TranslateEngineName, UtrEngine as AppUtrEngine,
+};
 use clap::{CommandFactory, Parser};
 use rstest::rstest;
 use std::path::{Path, PathBuf};
@@ -1789,5 +1791,90 @@ fn build_options_engine_overrides_multiple_commands() {
             !opts.common().engine_overrides.is_empty(),
             "engine_overrides should be non-empty for {variant_name}"
         );
+    }
+}
+
+// ---- Translate-engine CLI flag ----
+
+#[test]
+fn translate_engine_flag_defaults_to_google_when_absent() {
+    let cli = Cli::parse_from(["batchalign3", "translate", "corpus/"]);
+    let opts = build_typed_options(&cli.command, &cli.global).unwrap();
+    match opts {
+        CommandOptions::Translate(t) => {
+            assert_eq!(t.translate_engine, TranslateEngineName::Google);
+            assert_eq!(t.effective_translate_engine(), TranslateEngineName::Google);
+        }
+        other => panic!("expected Translate variant, got: {other:?}"),
+    }
+}
+
+#[test]
+fn translate_engine_flag_seamless_is_parsed() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "translate",
+        "--translate-engine",
+        "seamless",
+        "corpus/",
+    ]);
+    let opts = build_typed_options(&cli.command, &cli.global).unwrap();
+    match opts {
+        CommandOptions::Translate(t) => {
+            assert_eq!(t.translate_engine, TranslateEngineName::Seamless);
+            assert_eq!(
+                t.effective_translate_engine(),
+                TranslateEngineName::Seamless,
+            );
+        }
+        other => panic!("expected Translate variant, got: {other:?}"),
+    }
+}
+
+#[test]
+fn translate_engine_flag_nllb_is_parsed() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "translate",
+        "--translate-engine",
+        "nllb",
+        "corpus/",
+    ]);
+    let opts = build_typed_options(&cli.command, &cli.global).unwrap();
+    match opts {
+        CommandOptions::Translate(t) => {
+            assert_eq!(t.translate_engine, TranslateEngineName::Nllb);
+            assert_eq!(t.effective_translate_engine(), TranslateEngineName::Nllb,);
+        }
+        other => panic!("expected Translate variant, got: {other:?}"),
+    }
+}
+
+#[test]
+fn translate_engine_global_override_beats_explicit_flag() {
+    // --engine-overrides is the shared cross-command override mechanism;
+    // it must take precedence over the per-command --translate-engine
+    // flag (mirrors how --engine-overrides beats --asr-engine in
+    // transcribe).
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "--engine-overrides",
+        r#"{"translate":"seamless"}"#,
+        "translate",
+        "--translate-engine",
+        "google",
+        "corpus/",
+    ]);
+    let opts = build_typed_options(&cli.command, &cli.global).unwrap();
+    match opts {
+        CommandOptions::Translate(t) => {
+            assert_eq!(t.translate_engine, TranslateEngineName::Google);
+            assert_eq!(
+                t.effective_translate_engine(),
+                TranslateEngineName::Seamless,
+                "shared --engine-overrides must beat the per-command flag",
+            );
+        }
+        other => panic!("expected Translate variant, got: {other:?}"),
     }
 }

@@ -1,7 +1,7 @@
 # RELY — Inter-Rater Reliability (Cohen's Kappa)
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:45 EDT
+**Last updated:** 2026-05-22 09:48 EDT
 
 ## Purpose
 
@@ -25,12 +25,47 @@ chatter clan rely file1.cha file2.cha --tier spa
 3. For each aligned pair, count per-code agreements (minimum of the two counts for each code in that utterance)
 4. Compute overall observed agreement (Po) and expected agreement (Pe) for Cohen's kappa: `k = (Po - Pe) / (1 - Pe)`
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN flag | Description |
 |--------|-----------|-------------|
-| `--tier <name>` | — | Tier label to compare (default: `cod`) |
-| `--format <fmt>` | — | Output format: text, json, csv |
+| `--tier <name>` | `+t%X` (rewriter target) | Tier label to compare (default: `cod`) |
+| `--format <fmt>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+RELY is a **paired-file analysis** (control + second file). The
+flag set is largely inherited; the command-specific flags govern
+which aspects of the comparison are computed.
+
+### RELY-specific `+`-flags (from `rely.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+a` | Add tiers from second file to first (control) file | — | Missing | Tier-merging mode (not a kappa computation). |
+| `+b` | Include BULLETS in string comparison | — | Missing | Bullets are CHAT-format media-link markers. |
+| `+c` | Do not compare data on non-selected tier | — | Missing | |
+| `+c1` | Compare only main part of code (`$COD:EX` → just `$COD`) | — | Missing | Code-prefix granularity. |
+| `+d` | Compute percentage-agreement coefficient | — | Rewriter only | Multi-dispatch (see Display Modes section). |
+| `+dmN` | Compute student correctness (m1 = first is control, m2 = second is control) | — | Rewriter only | |
+| `+dN` | Compute Cohen's kappa with `N` possible categories | — | Rewriter only | chatter computes kappa always; `N` (category count) is not user-specifiable. |
+| `+u` | Compute kappa across all pairs of files | — | Missing | |
+| `+m` | Merge files and place error flags in output | — | Missing | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 4 |
+| Partial | 0 |
+| Rewriter only | 4 |
+| Missing | 11 |
+
+RELY has the most **fragmented `+d`** semantics of any CLAN
+command: `+d` (percentage), `+dmN` (student correctness), `+dN`
+(numeric kappa) all use the same flag letter with different
+shapes. Researchers expecting CLAN's per-flag-shape behavior need
+the multi-dispatch wired through `--display-mode`.
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

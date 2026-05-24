@@ -1,7 +1,7 @@
 # POSTMORTEM -- Pattern-Matching Rules for %mor Post-Processing
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:28 EDT
+**Last updated:** 2026-05-22 13:11 EDT
 
 ## Purpose
 
@@ -26,6 +26,36 @@ chatter clan postmortem --rules rules.cut --target-tier spa file.cha
 | `-r`, `--rules` | path | *(required)* | Path to the rules file |
 | `--target-tier` | string | `"mor"` | Target tier label to apply rules to |
 | `-o`, `--output` | path | stdout | Output CHAT file path |
+
+## CLAN `+`-flag coverage audit
+
+POSTMORTEM is a **transform**. Sources:
+`OSX-CLAN/src/clan/postmortem.cpp::usage`,
+`crates/talkbank-clan/src/transforms/postmortem.rs`.
+
+### POSTMORTEM-specific `+`-flags (from `postmortem.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+a` | Create files with ambiguous results (default: no ambiguous) | — | Missing | Ambiguity-output policy. |
+| `+a1` | Interactive disambiguation (non-UNX only) | — | Missing | Interactive mode; out of scope for a CLI tool. |
+| `+a2` | Mark all changes (with color on non-UNX) | — | Missing | Diff-style output. |
+| `+cF` | Dictionary/rules file (default `postmortem.cut`) | `--rules <PATH>` | Done | Direct mapping. chatter requires explicit path. |
+| `+MF` | Path of mor lib folder (UNX only) | — | Missing | Library lookup. |
+| `+p1` | Look for `postmortem.cut` in working directory first | — | Missing | Path-search heuristic. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 |
+| Missing | 5 |
+
+POSTMORTEM's `+a` variants are output-policy switches (ambiguity
+handling, interactive disambiguation, change-marking). chatter
+implements only the default "non-ambiguous, no marking" behaviour.
+Filed as Phase 1.7 follow-ups; not load-bearing for the typical
+rule-application workflow.
 
 ## External Data
 

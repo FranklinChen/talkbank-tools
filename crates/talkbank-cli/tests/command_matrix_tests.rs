@@ -561,8 +561,17 @@ fn clan_matrix_analysis_formats_and_filters_are_stable() -> Result<(), TestError
     let dir = tempdir()?;
     let file_path = write_fixture(dir.path(), "analysis.cha", MULTI_SPEAKER_UPPERCASE_CHAT)?;
 
-    let text = run_path_command(&harness, &["clan", "freq"], &file_path, &[])?;
-    assert_success(&text, "clan freq text");
+    // Explicit `--format text` — `chatter clan` now defaults to CLAN
+    // format ("Speaker: *CHI:" + uppercase tokens); the text format
+    // is the one this assertion block was originally written against
+    // (per-speaker "Speaker: CHI" banner, lower-cased tokens).
+    let text = run_path_command(
+        &harness,
+        &["clan", "freq"],
+        &file_path,
+        &["--format", "text"],
+    )?;
+    assert_success(&text, "clan freq --format text");
     let text_stdout = stdout_string(&text);
     assert!(text_stdout.contains("Speaker: CHI"));
     assert!(text_stdout.contains("Speaker: MOT"));

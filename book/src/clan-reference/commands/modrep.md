@@ -1,6 +1,8 @@
 # MODREP — Model/Replica Comparison
 
 **Status:** Current
+**Last updated:** 2026-05-22 09:50 EDT
+
 ## Purpose
 
 Compares the model (target) pronunciation on the `%mod` tier with the actual (replica) pronunciation on the `%pho` tier, tracking word-by-word mappings between model forms and replica forms. This is used in phonological analysis to assess how closely a speaker's productions match the adult target forms.
@@ -22,12 +24,46 @@ chatter clan modrep file.cha --speaker CHI
    - Record each (model, replica) pair in a frequency map per speaker
 2. Report per-speaker tables of model words with their replica variants and frequency counts
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN flag | Description |
 |--------|-----------|-------------|
-| `--speaker <code>` | `+t*CODE` | Restrict to specific speaker |
-| `--format <fmt>` | — | Output format: text, json, csv |
+| `--speaker <code>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <code>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--format <fmt>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+### MODREP-specific `+`-flags (from `modrep.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+a` | Sort output by descending frequency | (default) | Done | |
+| `+bS` | Set model tier name to `S` (e.g. `+b*CHI` or `+b%hes`); `S = "*"` to use `+t@ID=` | — | Missing | chatter hard-codes `%mod` as the model tier. |
+| `+cS` | Set replica tier name to `S` | — | Missing | chatter hard-codes `%pho` as the replica tier. |
+| `+d` | Spreadsheet output | — | Rewriter only | |
+| `+nS` / `+n@F` | Word `S` (or file `@F`) included in output associated with `+c` | — | Missing | Replica-side word allowlist. |
+| `+oS` / `+o@F` | Word `S` (or file `@F`) included in output associated with `+b` | — | Missing | Model-side word allowlist. |
+| `+o3` | Combine selected speakers per file | partial via `--per-file` inverse | Partial | |
+| `+sS` / `-sS` | Word `S` included/excluded from input | `--include-word` / `--exclude-word` | Done | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 6 |
+| Partial | 1 |
+| Rewriter only | 4 |
+| Missing | 5 |
+
+MODREP's biggest gap is the **tier-name customization** (`+bS`,
+`+cS`): researchers using non-default model/replica tier names
+cannot redirect chatter's MODREP. The `+nS` / `+oS` word
+allowlists are also missing, which limits MODREP to whole-file
+comparisons rather than targeted lexical subsets.
 
 ## Output
 

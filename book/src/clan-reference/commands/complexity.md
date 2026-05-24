@@ -1,7 +1,7 @@
 # COMPLEXITY — Syntactic Complexity Ratio
 
 **Status:** Current
-**Last updated:** 2026-05-12 10:07 EDT
+**Last updated:** 2026-05-22 09:47 EDT
 
 Computes syntactic complexity by counting subordinating dependency relations in the `%gra` tier.
 
@@ -57,6 +57,16 @@ Per speaker:
 ## Requirements
 
 Requires a `%gra` dependent tier. Utterances without `%gra` are skipped.
+
+## CLAN `+`-flag coverage audit
+
+COMPLEXITY has **no command-specific `+`-flags** in CLAN's
+`usage()` — the entire flag surface is the inherited general
+set, except that COMPLEXITY's `getflag()` has special handling
+for `+s` patterns containing bracket-prefixed postcodes
+(`[+ ...]` / `[~+ ...]` / `[+ +...]`).
+
+Inherited general flags: same as [FREQ](./freq.md#general-flags-freq-inherits-from-cutt-cpp-mainusage). chatter's `Complexity` clap struct uses the standard `CommonAnalysisArgs`. Audit summary: 6 Done / 1 Partial / 4 Rewriter only / 3 Missing.
 
 ## Differences from CLAN
 

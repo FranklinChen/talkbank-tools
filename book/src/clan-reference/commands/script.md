@@ -1,7 +1,7 @@
 # SCRIPT — Compare Utterances to a Template
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:47 EDT
+**Last updated:** 2026-05-22 09:48 EDT
 
 ## Purpose
 
@@ -22,13 +22,35 @@ chatter clan script corpus/ --template template.cha --speaker CHI
 2. For each subject utterance, accumulate word frequency counts
 3. At finalization, compute per-word matches (minimum of ideal and actual), omissions, and additions
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN flag | Description |
 |--------|-----------|-------------|
-| `--template <path>` | — | Path to template/script file (required) |
-| `--speaker <code>` | `+t*CODE` | Restrict to specific speaker |
-| `--format <fmt>` | — | Output format: text, json, csv |
+| `--template <path>` | `+sF` | Path to template/script file (required) |
+| `--speaker <code>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <code>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--format <fmt>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+### SCRIPT-specific `+`-flags (from `script.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+e` | Count error codes in retraces or repeats (default: don't count) | — | Missing | Counting-policy switch for error-marked words. |
+| `+sF` | Specify template script file `F` (required) | `--template <path>` | Done | Direct mapping; rewriter routes `+sF` → `--template F` for SCRIPT (since the per-subcommand routing batch). |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 6 |
+| Partial | 0 |
+| Rewriter only | 4 |
+| Missing | 4 |
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

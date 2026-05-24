@@ -8,31 +8,51 @@
 //! boundaries. Keep command construction and shared output policy inside
 //! `talkbank-clan`; keep CLI argument mapping and terminal UX here.
 
-use crate::cli::ClanCommands;
-use talkbank_clan::commands::chains::ChainsConfig;
+use crate::cli::{CapitalizationArg, ClanCommands, FreqposPositionArg};
 use talkbank_clan::commands::codes::CodesConfig;
 use talkbank_clan::commands::corelex::CorelexConfig;
 use talkbank_clan::commands::dss::DssConfig;
+use talkbank_clan::commands::freqpos::PositionClassification;
 use talkbank_clan::commands::ipsyn::IpsynConfig;
 use talkbank_clan::commands::keymap::KeymapConfig;
 use talkbank_clan::commands::maxwd::MaxwdConfig;
 use talkbank_clan::commands::rely::RelyConfig;
 use talkbank_clan::commands::trnfix::TrnfixConfig;
-use talkbank_clan::service_types::{AnalysisCommandName, AnalysisOptions};
+use talkbank_clan::framework::CapitalizationFilter;
+use talkbank_clan::service_types::{
+    AnalysisOptions, ChainsOptions, CodesOptions, ComboOptions, CorelexOptions, DistOptions,
+    DssOptions, EvalOptions, FlucalcOptions, FreqOptions, IpsynOptions, KeymapOptions,
+    KidevalOptions, KwalOptions, MaxwdOptions, MltOptions, MluOptions, MortableOptions,
+    RelyOptions, ScriptOptions, SugarOptions, TrnfixOptions, UniqOptions, VocdOptions,
+    WdsizeOptions,
+};
 
-use super::helpers::{run_analysis_and_print, run_paired_analysis_and_print};
+use super::helpers::{
+    load_search_expr_files_or_exit, run_analysis_and_print, run_paired_analysis_and_print,
+};
 
 pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
     match command {
         ClanCommands::Freq {
-            path, mor, common, ..
+            path,
+            mor,
+            capitalization,
+            reverse_concordance,
+            word_list_only,
+            types_tokens_only,
+            common,
+            ..
         } => {
+            let case_sensitive = common.case_sensitive;
             run_analysis_and_print(
-                AnalysisCommandName::Freq,
-                AnalysisOptions {
+                AnalysisOptions::Freq(FreqOptions {
                     mor,
-                    ..AnalysisOptions::default()
-                },
+                    capitalization: capitalization_to_filter(capitalization),
+                    reverse_concordance,
+                    word_list_only,
+                    types_tokens_only,
+                    case_sensitive,
+                }),
                 &path,
                 &common,
             );
@@ -40,43 +60,52 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
         ClanCommands::Mlu {
             path,
             words,
+            mut exclude_solo_word,
+            exclude_solo_word_file,
             common,
             ..
         } => {
+            exclude_solo_word.extend(load_search_expr_files_or_exit(&exclude_solo_word_file));
             run_analysis_and_print(
-                AnalysisCommandName::Mlu,
-                AnalysisOptions {
+                AnalysisOptions::Mlu(MluOptions {
                     words,
-                    ..AnalysisOptions::default()
-                },
+                    solo_word_exclusions: exclude_solo_word,
+                }),
                 &path,
                 &common,
             );
         }
-        ClanCommands::Mlt { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Mlt,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Wdlen { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Wdlen,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
+        ClanCommands::Mlt {
+            path,
+            mut exclude_solo_word,
+            exclude_solo_word_file,
+            common,
+            ..
+        } => {
+            exclude_solo_word.extend(load_search_expr_files_or_exit(&exclude_solo_word_file));
+            run_analysis_and_print(
+                AnalysisOptions::Mlt(MltOptions {
+                    solo_word_exclusions: exclude_solo_word,
+                }),
+                &path,
+                &common,
+            )
+        }
+        ClanCommands::Wdlen { path, common, .. } => {
+            run_analysis_and_print(AnalysisOptions::Wdlen, &path, &common);
+        }
         ClanCommands::Wdsize {
             path,
             main_tier,
+            length_filter,
             common,
             ..
         } => {
             run_analysis_and_print(
-                AnalysisCommandName::Wdsize,
-                AnalysisOptions {
+                AnalysisOptions::Wdsize(WdsizeOptions {
                     main_tier,
-                    ..AnalysisOptions::default()
-                },
+                    length_filter,
+                }),
                 &path,
                 &common,
             );
@@ -84,117 +113,170 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
         ClanCommands::Maxwd {
             path,
             limit,
+            unique_length_only,
+            exclude_length,
             common,
             ..
         } => {
+            let case_sensitive = common.case_sensitive;
             run_analysis_and_print(
-                AnalysisCommandName::Maxwd,
-                AnalysisOptions {
+                AnalysisOptions::Maxwd(MaxwdOptions {
                     limit: option_if_not_default(limit, MaxwdConfig::default().limit),
-                    ..AnalysisOptions::default()
-                },
+                    unique_length_only,
+                    exclude_lengths: exclude_length,
+                    case_sensitive,
+                }),
                 &path,
                 &common,
             );
         }
-        ClanCommands::Freqpos { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Freqpos,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Timedur { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Timedur,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Kwal {
+        ClanCommands::Freqpos {
             path,
-            keyword,
+            position_classification,
             common,
             ..
         } => {
+            let pc = match position_classification {
+                FreqposPositionArg::Last => PositionClassification::FirstLastOther,
+                FreqposPositionArg::Second => PositionClassification::FirstSecondOther,
+            };
+            let case_sensitive = common.case_sensitive;
             run_analysis_and_print(
-                AnalysisCommandName::Kwal,
-                AnalysisOptions {
+                AnalysisOptions::Freqpos(talkbank_clan::service_types::FreqposOptions {
+                    position_classification: pc,
+                    case_sensitive,
+                }),
+                &path,
+                &common,
+            );
+        }
+        ClanCommands::Timedur { path, common, .. } => {
+            run_analysis_and_print(AnalysisOptions::Timedur, &path, &common);
+        }
+        ClanCommands::Kwal {
+            path,
+            keyword,
+            strict_match,
+            legal_chat,
+            context_before,
+            context_after,
+            common,
+            ..
+        } => {
+            let case_sensitive = common.case_sensitive;
+            run_analysis_and_print(
+                AnalysisOptions::Kwal(KwalOptions {
                     keywords: keyword
                         .into_iter()
                         .map(talkbank_clan::framework::KeywordPattern::from)
                         .collect(),
-                    ..AnalysisOptions::default()
-                },
+                    strict_match,
+                    case_sensitive,
+                    legal_chat,
+                    context_before,
+                    context_after,
+                }),
                 &path,
                 &common,
             );
         }
-        ClanCommands::Gemlist { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Gemlist,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
+        ClanCommands::Gemlist { path, common, .. } => {
+            run_analysis_and_print(AnalysisOptions::Gemlist, &path, &common);
+        }
         ClanCommands::Combo {
             path,
-            search,
+            mut search,
+            mut exclude_search,
+            search_file,
+            exclude_search_file,
+            first_match_only,
+            dedupe_matches,
+            context_before,
+            context_after,
+            common,
+            ..
+        } => {
+            search.extend(load_search_expr_files_or_exit(&search_file));
+            exclude_search.extend(load_search_expr_files_or_exit(&exclude_search_file));
+            let case_sensitive = common.case_sensitive;
+            run_analysis_and_print(
+                AnalysisOptions::Combo(ComboOptions {
+                    search,
+                    exclude_search,
+                    first_match_only,
+                    dedupe_matches,
+                    case_sensitive,
+                    context_before,
+                    context_after,
+                }),
+                &path,
+                &common,
+            );
+        }
+        ClanCommands::Cooccur {
+            path,
+            no_frequency_counts,
+            cluster_size,
             common,
             ..
         } => {
             run_analysis_and_print(
-                AnalysisCommandName::Combo,
-                AnalysisOptions {
-                    search,
-                    ..AnalysisOptions::default()
-                },
+                AnalysisOptions::Cooccur(talkbank_clan::service_types::CooccurOptions {
+                    no_frequency_counts,
+                    cluster_size,
+                }),
                 &path,
                 &common,
             );
         }
-        ClanCommands::Cooccur { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Cooccur,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Dist { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Dist,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Chip { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Chip,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Phonfreq { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Phonfreq,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Modrep { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Modrep,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
-        ClanCommands::Vocd { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Vocd,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
+        ClanCommands::Dist {
+            path,
+            once_per_turn,
+            common,
+            ..
+        } => {
+            let case_sensitive = common.case_sensitive;
+            run_analysis_and_print(
+                AnalysisOptions::Dist(DistOptions {
+                    once_per_turn,
+                    case_sensitive,
+                }),
+                &path,
+                &common,
+            )
+        }
+        ClanCommands::Chip { path, common, .. } => {
+            run_analysis_and_print(AnalysisOptions::Chip, &path, &common);
+        }
+        ClanCommands::Phonfreq { path, common, .. } => {
+            run_analysis_and_print(AnalysisOptions::Phonfreq, &path, &common);
+        }
+        ClanCommands::Modrep { path, common, .. } => {
+            run_analysis_and_print(AnalysisOptions::Modrep, &path, &common);
+        }
+        ClanCommands::Vocd {
+            path,
+            capitalization,
+            common,
+            ..
+        } => {
+            let case_sensitive = common.case_sensitive;
+            run_analysis_and_print(
+                AnalysisOptions::Vocd(VocdOptions {
+                    capitalization: capitalization_to_filter(capitalization),
+                    case_sensitive,
+                }),
+                &path,
+                &common,
+            )
+        }
         ClanCommands::Uniq {
             path, sort, common, ..
         } => {
             run_analysis_and_print(
-                AnalysisCommandName::Uniq,
-                AnalysisOptions {
+                AnalysisOptions::Uniq(UniqOptions {
                     sort_by_frequency: sort,
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
@@ -206,11 +288,9 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             ..
         } => {
             run_analysis_and_print(
-                AnalysisCommandName::Codes,
-                AnalysisOptions {
+                AnalysisOptions::Codes(CodesOptions {
                     max_depth: option_if_not_default(max_depth, CodesConfig::default().max_depth),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
@@ -224,27 +304,27 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
         } => {
             let default = TrnfixConfig::default();
             run_analysis_and_print(
-                AnalysisCommandName::Trnfix,
-                AnalysisOptions {
+                AnalysisOptions::Trnfix(TrnfixOptions {
                     tier1: option_if_not_default(tier1, default.tier1),
                     tier2: option_if_not_default(tier2, default.tier2),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
         }
-        ClanCommands::Sugar { path, common, .. } => {
-            // CLAN's sugar refuses without `+t*<SPK>`. Match its
-            // exact stderr message.
+        ClanCommands::Sugar {
+            path,
+            min_utterances,
+            common,
+            ..
+        } => {
             if common.speaker.is_empty() {
                 super::helpers::exit_with_clan_refusal(
                     "Please specify at least one speaker tier code with \"+t\" option on command line.",
                 );
             }
             run_analysis_and_print(
-                AnalysisCommandName::Sugar,
-                AnalysisOptions::default(),
+                AnalysisOptions::Sugar(SugarOptions { min_utterances }),
                 &path,
                 &common,
             );
@@ -255,8 +335,6 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             common,
             ..
         } => {
-            // CLAN's mortable refuses without `+l<script>`. Match
-            // CLAN's two-line refusal message exactly.
             let script = script.unwrap_or_else(|| {
                 super::helpers::exit_with_clan_refusal(
                     "Please specify language script file name with \"+l\" option.\n\
@@ -264,11 +342,9 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
                 )
             });
             run_analysis_and_print(
-                AnalysisCommandName::Mortable,
-                AnalysisOptions {
+                AnalysisOptions::Mortable(MortableOptions {
                     script_path: Some(script),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
@@ -276,30 +352,20 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
         ClanCommands::Chains {
             path, tier, common, ..
         } => {
-            // CLAN's chains refuses without `+t<tier>` — emit the
-            // same message on stderr and exit non-zero before any
-            // banner is printed.
             let tier = tier.unwrap_or_else(|| {
                 super::helpers::exit_with_clan_refusal(
                     "Please specify a code tier with \"+t\" option.",
                 )
             });
             run_analysis_and_print(
-                AnalysisCommandName::Chains,
-                AnalysisOptions {
-                    tier: Some(tier),
-                    ..AnalysisOptions::default()
-                },
+                AnalysisOptions::Chains(ChainsOptions { tier: Some(tier) }),
                 &path,
                 &common,
             );
         }
-        ClanCommands::Complexity { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Complexity,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
+        ClanCommands::Complexity { path, common, .. } => {
+            run_analysis_and_print(AnalysisOptions::Complexity, &path, &common);
+        }
         ClanCommands::Corelex {
             path,
             threshold,
@@ -307,14 +373,12 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             ..
         } => {
             run_analysis_and_print(
-                AnalysisCommandName::Corelex,
-                AnalysisOptions {
+                AnalysisOptions::Corelex(CorelexOptions {
                     threshold: option_if_not_default(
                         threshold,
                         CorelexConfig::default().min_frequency,
                     ),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
@@ -327,15 +391,13 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             ..
         } => {
             run_analysis_and_print(
-                AnalysisCommandName::Keymap,
-                AnalysisOptions {
+                AnalysisOptions::Keymap(KeymapOptions {
                     keywords: keyword
                         .into_iter()
                         .map(talkbank_clan::framework::KeywordPattern::from)
                         .collect(),
                     tier: option_if_not_default(tier, KeymapConfig::default().tier),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
@@ -347,11 +409,9 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             ..
         } => {
             run_analysis_and_print(
-                AnalysisCommandName::Script,
-                AnalysisOptions {
+                AnalysisOptions::Script(ScriptOptions {
                     template_path: Some(template),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
@@ -363,22 +423,21 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             format,
         } => {
             run_paired_analysis_and_print(
-                AnalysisCommandName::Rely,
-                AnalysisOptions {
+                AnalysisOptions::Rely(RelyOptions {
                     second_file: Some(file2),
                     tier: option_if_not_default(tier, RelyConfig::default().tier),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &file1,
                 format,
             );
         }
-        ClanCommands::Flucalc { path, common, .. } => run_analysis_and_print(
-            AnalysisCommandName::Flucalc,
-            AnalysisOptions::default(),
-            &path,
-            &common,
-        ),
+        ClanCommands::Flucalc { path, common, .. } => {
+            run_analysis_and_print(
+                AnalysisOptions::Flucalc(FlucalcOptions::default()),
+                &path,
+                &common,
+            );
+        }
         ClanCommands::Dss {
             path,
             rules,
@@ -386,23 +445,19 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             common,
             ..
         } => {
-            // CLAN's dss refuses without `+t*<SPK>` (speaker tier).
-            // Mirror that here: require at least one `--speaker`.
             if common.speaker.is_empty() {
                 super::helpers::exit_with_clan_refusal(
                     "Please specify at least one speaker tier name with \"+t\" option.",
                 );
             }
             run_analysis_and_print(
-                AnalysisCommandName::Dss,
-                AnalysisOptions {
+                AnalysisOptions::Dss(DssOptions {
                     rules_path: rules,
                     max_utterances: option_if_not_default(
                         max_utterances,
                         DssConfig::default().max_utterances,
                     ),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
@@ -414,9 +469,6 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
             common,
             ..
         } => {
-            // CLAN's ipsyn refuses without `+l<rules>`. Match the
-            // exact two-line message including the example
-            // continuation.
             if rules.is_none() {
                 super::helpers::exit_with_clan_refusal(
                     "Please specify ipsyn rules file name with \"+l\" option.\n\
@@ -424,29 +476,25 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
                 );
             }
             run_analysis_and_print(
-                AnalysisCommandName::Ipsyn,
-                AnalysisOptions {
+                AnalysisOptions::Ipsyn(IpsynOptions {
                     rules_path: rules,
                     max_utterances: option_if_not_default(
                         max_utterances,
                         IpsynConfig::default().max_utterances,
                     ),
-                    ..AnalysisOptions::default()
-                },
+                }),
                 &path,
                 &common,
             );
         }
         ClanCommands::Eval { path, common, .. } => {
-            // CLAN's eval refuses without `+t*<SPK>`.
             if common.speaker.is_empty() {
                 super::helpers::exit_with_clan_refusal(
                     "Please specify at least one speaker tier code with \"+t\" option on command line.",
                 );
             }
             run_analysis_and_print(
-                AnalysisCommandName::Eval,
-                AnalysisOptions::default(),
+                AnalysisOptions::Eval(EvalOptions::default()),
                 &path,
                 &common,
             );
@@ -473,26 +521,23 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
                 );
             }
             run_analysis_and_print(
-                AnalysisCommandName::Kideval,
-                AnalysisOptions {
+                AnalysisOptions::Kideval(KidevalOptions {
                     dss_rules_path: dss_rules,
                     ipsyn_rules_path: ipsyn_rules,
-                    ..AnalysisOptions::default()
-                },
+                    ..KidevalOptions::default()
+                }),
                 &path,
                 &common,
             );
         }
         ClanCommands::EvalD { path, common, .. } => {
-            // CLAN's eval-d refuses without `+t*<SPK>` (same as eval).
             if common.speaker.is_empty() {
                 super::helpers::exit_with_clan_refusal(
                     "Please specify at least one speaker tier code with \"+t\" option on command line.",
                 );
             }
             run_analysis_and_print(
-                AnalysisCommandName::EvalDialect,
-                AnalysisOptions::default(),
+                AnalysisOptions::EvalDialect(EvalOptions::default()),
                 &path,
                 &common,
             );
@@ -504,4 +549,15 @@ pub(super) fn dispatch(command: ClanCommands) -> Result<(), ClanCommands> {
 
 fn option_if_not_default<T: PartialEq>(value: T, default: T) -> Option<T> {
     if value == default { None } else { Some(value) }
+}
+
+/// Convert the CLI `--capitalization` argument into the domain
+/// `CapitalizationFilter` consumed by FREQ and VOCD. `None`
+/// (flag absent) maps to `Any` — no filter.
+fn capitalization_to_filter(arg: Option<CapitalizationArg>) -> CapitalizationFilter {
+    match arg {
+        None => CapitalizationFilter::Any,
+        Some(CapitalizationArg::Initial) => CapitalizationFilter::InitialUpper,
+        Some(CapitalizationArg::Mid) => CapitalizationFilter::MidUpper,
+    }
 }

@@ -1,7 +1,7 @@
 # CHAT2VTT -- CHAT to WebVTT Subtitle Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-02 03:00 EDT
+**Last updated:** 2026-05-22 13:33 EDT
 
 ## Purpose
 
@@ -37,6 +37,17 @@ The subcommand takes a single positional `<PATH>` argument (one CHAT
 file at a time). It does not accept directory inputs, file lists, or
 the `CommonAnalysisArgs` filtering flags (`--speaker`, `--gem`, etc.) —
 WebVTT conversion is structural, not analytic.
+
+## CLAN `+`-flag coverage audit
+
+CHAT2VTT does **not exist as a separate CLAN command** — CLAN's
+WebVTT output is selected via `chat2srt +v`. chatter splits the
+two outputs into separate subcommands (`chat2srt` produces SRT,
+`chat2vtt` produces WebVTT). See [CHAT2SRT](chat2srt.md) for
+the shared audit.
+
+Audit summary: chatter extension. No CLAN flag surface for this
+subcommand specifically.
 
 ## Input Format
 

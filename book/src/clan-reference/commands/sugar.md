@@ -1,7 +1,7 @@
 # SUGAR -- Sampling Utterances and Grammatical Analysis Revised
 
 **Status:** Current
-**Last updated:** 2026-05-12 13:38 EDT
+**Last updated:** 2026-05-22 09:22 EDT
 
 ## Purpose
 
@@ -17,13 +17,53 @@ chatter clan sugar --speaker CHI file.cha
 chatter clan sugar --format json file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
-| Option | Description |
-|--------|-------------|
-| `--speaker <CODE>` | Include speaker |
-| `--exclude-speaker <CODE>` | Exclude speaker |
-| `--format <FMT>` | Output format: text, json, csv, clan |
+| Option | CLAN flag | Description |
+|--------|-----------|-------------|
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `sugar` flag, mapped
+against chatter's coverage. Sources:
+
+* `OSX-CLAN/src/clan/sugar.cpp` — `usage()` and `getflag()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` SUGAR branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Sugar` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+SUGAR is a **required-flag refusal** command in chatter — same
+refusal byte-parity as EVAL/KIDEVAL/DSS/IPSYN.
+
+### SUGAR-specific `+`-flags (from `sugar.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+aN` | Minimum-utterance threshold (default 50) | `--min-utterances N` | Done | Fixed 2026-05-22. New clap field on `Sugar`; rewriter routes `+aN` → `--min-utterances N`. |
+| `+bS` / `-bS` | Morpheme-delimiter customization | — | Missing | Shared with WDLEN/MAXWD/EVAL. |
+| `-d` | Show utterances that fail at least one verb requirement | — | Missing | Diagnostic listing. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 5 |
+| Partial | 0 |
+| Rewriter only | 5 |
+| Missing | 7 |
+
+SUGAR's narrowest gap was `+aN`: closed 2026-05-22 with a new
+`--min-utterances N` clap field and rewriter routing.
 
 SUGAR has no command-specific flags beyond the shared
 `CommonAnalysisArgs` set. The minimum-utterance threshold (50) is a

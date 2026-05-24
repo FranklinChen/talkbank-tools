@@ -44,25 +44,56 @@ use talkbank_model::Word;
 ///
 /// # Invariant
 ///
-/// The inner `String` is always lowercased and cleaned (CHAT markup stripped).
+/// The inner `String` is always `Word::cleaned_text()` (CHAT markup stripped),
+/// optionally lower-cased. Case-folding is controlled by the caller via
+/// [`Self::from_word`] (always lowercased — CLAN default) versus
+/// [`Self::from_word_cased`] (lowercased iff `case_sensitive` is `false`,
+/// preserved otherwise — controls CLAN `+k`).
+///
 /// Never construct with `NormalizedWord(raw_string)` directly outside of this
-/// module; always use `NormalizedWord::from_word`.
+/// module; always go through one of the constructors so the invariant stays
+/// in one place.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct NormalizedWord(pub(crate) String);
 
 impl NormalizedWord {
-    /// Construct the canonical normalized form of a word.
+    /// Construct the canonical lowercased form of a word — CLAN's default.
     ///
     /// Applies `word.cleaned_text()` (strips CHAT markup / trailing punctuation)
-    /// then `to_lowercase()`. This is the single authoritative normalization
-    /// point for all analysis commands.
+    /// then `to_lowercase()`. Equivalent to `from_word_cased(word, false)`.
     ///
     /// # Precondition
     ///
     /// `word` must pass [`crate::framework::word_filter::is_countable_word`].
     /// Results are unspecified (but safe) for non-countable words.
     pub fn from_word(word: &Word) -> Self {
-        NormalizedWord(word.cleaned_text().to_lowercase())
+        Self::from_word_cased(word, false)
+    }
+
+    /// Construct the word key honouring CLAN's `+k` flag. When
+    /// `case_sensitive` is `false` (CLAN default), the result is lower-cased
+    /// `cleaned_text`; when `true`, original case is preserved.
+    ///
+    /// Used by every analysis command's `process_utterance` so the `+k`
+    /// branch lives in one place rather than being inlined per command.
+    ///
+    /// # Precondition
+    ///
+    /// `word` must pass [`crate::framework::word_filter::is_countable_word`].
+    pub fn from_word_cased(word: &Word, case_sensitive: bool) -> Self {
+        Self::from_text_cased(&word.cleaned_text(), case_sensitive)
+    }
+
+    /// Construct the word key from an already-cleaned `&str` (e.g. `%mor`
+    /// serializations), honouring `+k`. Sibling of [`Self::from_word_cased`]
+    /// for callers that don't have a `&Word`.
+    pub fn from_text_cased(text: &str, case_sensitive: bool) -> Self {
+        let key = if case_sensitive {
+            text.to_owned()
+        } else {
+            text.to_lowercase()
+        };
+        NormalizedWord(key)
     }
 
     /// Return the normalized text as a string slice.

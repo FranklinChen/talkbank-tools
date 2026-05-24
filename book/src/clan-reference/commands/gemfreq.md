@@ -1,7 +1,7 @@
 # GEMFREQ -- Word Frequency Within Gem Segments
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:43 EDT
+**Last updated:** 2026-05-22 09:40 EDT
 
 ## Purpose
 
@@ -38,6 +38,45 @@ as an optional restriction.
 
 For full per-flag descriptions, output formats, word-normalization
 rules, and CLAN-equivalence tables, see [freq.md](freq.md).
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `gemfreq` flag. Sources:
+
+* `OSX-CLAN/src/clan/gemfreq.cpp` — `usage()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` GEMFREQ branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* chatter's `gemfreq` is wired as an alias for
+  `freq --gem` — the clap field surface is FREQ's.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+### GEMFREQ-specific `+`-flags (from `gemfreq.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+e` | Do not output nested gems along with the matched one | — | Missing | Gem-nesting handling. |
+| `+g` (no S) | Marker tier should contain all words specified by `+s` | — | Missing | EVAL-style `+g` overload. |
+| `+n` | Each gem terminated by the next `@G` | — | Missing | Gem-termination semantic switch. |
+| `+o` | Sort output by descending frequency | (default) | Done | chatter sort matches. |
+| `+wS` / `+w@S` | Search for word `S` (or words in file `@S`) | `--include-word` | Partial | File-list form missing. |
+| `-wS` | Exclude word `S` | `--exclude-word` | Partial | |
+| `+yN` | Display whole tier unchanged (1) or cleaned up (0) | — | Missing | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 6 |
+| Partial | 2 |
+| Rewriter only | 4 |
+| Missing | 8 |
+
+The `+g` / `+n` / `+yN` cluster are GEMFREQ's most distinctive
+gaps: they control gem-segment scoping (nested gems, termination
+semantic, raw-vs-cleaned text output) and have no chatter analog.
+Most users will be served by the simple `gemfreq --gem LABEL`
+form already wired through the FREQ alias.
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

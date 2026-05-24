@@ -304,6 +304,21 @@ pub fn run_rust(
     run_rust_filtered(command_name, file, extra_args, format, None)
 }
 
+/// Parse the `--capitalization <initial|mid>` argv pair from the
+/// harness's `extra_args` slice into the domain enum.
+fn parse_capitalization_arg(extra_args: &[&str]) -> talkbank_clan::framework::CapitalizationFilter {
+    use talkbank_clan::framework::CapitalizationFilter;
+    extra_args
+        .windows(2)
+        .find(|w| w[0] == "--capitalization")
+        .map(|w| match w[1] {
+            "initial" => CapitalizationFilter::InitialUpper,
+            "mid" => CapitalizationFilter::MidUpper,
+            _ => CapitalizationFilter::Any,
+        })
+        .unwrap_or(CapitalizationFilter::Any)
+}
+
 /// Run the Rust implementation of a CLAN command with an optional filter.
 pub fn run_rust_filtered(
     command_name: &str,
@@ -329,17 +344,29 @@ pub fn run_rust_filtered(
     match command_name {
         "freq" => {
             use talkbank_clan::commands::freq::{FreqCommand, FreqConfig};
+            use talkbank_clan::framework::CapitalizationFilter;
             let use_mor = extra_args.contains(&"--mor");
-            run_and_render!(FreqCommand::new(FreqConfig { use_mor }))
+            let capitalization = parse_capitalization_arg(extra_args);
+            run_and_render!(FreqCommand::new(FreqConfig {
+                use_mor,
+                capitalization,
+                reverse_concordance: extra_args.contains(&"--reverse-concordance"),
+                word_list_only: extra_args.contains(&"--word-list-only"),
+                types_tokens_only: extra_args.contains(&"--types-tokens-only"),
+                case_sensitive: extra_args.contains(&"--case-sensitive"),
+            }))
         }
         "mlu" => {
             use talkbank_clan::commands::mlu::{MluCommand, MluConfig};
             let words_only = extra_args.contains(&"--words");
-            run_and_render!(MluCommand::new(MluConfig { words_only }))
+            run_and_render!(MluCommand::new(MluConfig {
+                words_only,
+                ..MluConfig::default()
+            }))
         }
         "mlt" => {
             use talkbank_clan::commands::mlt::MltCommand;
-            run_and_render!(MltCommand)
+            run_and_render!(MltCommand::default())
         }
         "wdlen" => {
             use talkbank_clan::commands::wdlen::WdlenCommand;
@@ -347,15 +374,15 @@ pub fn run_rust_filtered(
         }
         "freqpos" => {
             use talkbank_clan::commands::freqpos::FreqposCommand;
-            run_and_render!(FreqposCommand)
+            run_and_render!(FreqposCommand::default())
         }
         "cooccur" => {
             use talkbank_clan::commands::cooccur::CooccurCommand;
-            run_and_render!(CooccurCommand)
+            run_and_render!(CooccurCommand::default())
         }
         "dist" => {
             use talkbank_clan::commands::dist::DistCommand;
-            run_and_render!(DistCommand)
+            run_and_render!(DistCommand::default())
         }
         "maxwd" => {
             use talkbank_clan::commands::maxwd::{MaxwdCommand, MaxwdConfig};
@@ -365,7 +392,8 @@ pub fn run_rust_filtered(
                 .and_then(|w| w[1].parse().ok())
                 .unwrap_or(20);
             run_and_render!(MaxwdCommand::new(MaxwdConfig {
-                limit: talkbank_clan::framework::WordLimit::new(limit)
+                limit: talkbank_clan::framework::WordLimit::new(limit),
+                ..MaxwdConfig::default()
             }))
         }
         "kwal" => {
@@ -380,6 +408,7 @@ pub fn run_rust_filtered(
                     .into_iter()
                     .map(talkbank_clan::framework::KeywordPattern::from)
                     .collect(),
+                ..KwalConfig::default()
             }))
         }
         "chip" => {
@@ -399,8 +428,14 @@ pub fn run_rust_filtered(
             run_and_render!(PhonfreqCommand)
         }
         "vocd" => {
-            use talkbank_clan::commands::vocd::VocdCommand;
-            run_and_render!(VocdCommand::default())
+            use talkbank_clan::commands::vocd::{VocdCommand, VocdConfig};
+            let capitalization = parse_capitalization_arg(extra_args);
+            let config = VocdConfig {
+                capitalization,
+                case_sensitive: extra_args.contains(&"--case-sensitive"),
+                ..VocdConfig::default()
+            };
+            run_and_render!(VocdCommand::new(config))
         }
         "combo" => {
             use talkbank_clan::commands::combo::{ComboCommand, ComboConfig, SearchExpr};
@@ -409,7 +444,11 @@ pub fn run_rust_filtered(
                 .filter(|w| w[0] == "--search")
                 .map(|w| SearchExpr::parse(w[1]))
                 .collect();
-            run_and_render!(ComboCommand::new(ComboConfig { search }))
+            run_and_render!(ComboCommand::new(ComboConfig {
+                search,
+                exclude: vec![],
+                ..ComboConfig::default()
+            }))
         }
         "codes" => {
             use talkbank_clan::commands::codes::{CodesCommand, CodesConfig};
@@ -517,7 +556,10 @@ pub fn run_rust_filtered(
         "wdsize" => {
             use talkbank_clan::commands::wdsize::{WdsizeCommand, WdsizeConfig};
             let use_main_tier = extra_args.contains(&"--main-tier");
-            run_and_render!(WdsizeCommand::new(WdsizeConfig { use_main_tier }))
+            run_and_render!(WdsizeCommand::new(WdsizeConfig {
+                use_main_tier,
+                ..WdsizeConfig::default()
+            }))
         }
         other => panic!("Unknown command: {other}"),
     }

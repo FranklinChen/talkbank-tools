@@ -1,7 +1,7 @@
 # CHIP -- Child/Parent Interaction Profile
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:18 EDT
+**Last updated:** 2026-05-22 09:42 EDT
 
 ## Purpose
 
@@ -15,13 +15,61 @@ chatter clan chip --speaker CHI file.cha
 chatter clan chip --format json file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN Flag | Description |
 |--------|-----------|-------------|
-| `--speaker <CODE>` | `+t*CHI` | Include speaker |
-| `--exclude-speaker <CODE>` | `-t*CHI` | Exclude speaker |
-| `--format <FMT>` | -- | Output format: text, json, csv |
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `chip` flag. Sources:
+
+* `OSX-CLAN/src/clan/chip.cpp` — `usage()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` CHIP branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Chip` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+### CHIP-specific `+`-flags (from `chip.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+bS` | Speaker ID `S` is an adult | — | Missing | CHIP's role tagging — the partner-vs-child distinction is CHIP's whole purpose. |
+| `+cS` | Speaker ID `S` is a child | — | Missing | |
+| `+g` | Enable substitution option | — | Missing | Substitution coding. |
+| `-hF` | File `F` has words to be excluded | — | Missing | Word-list exclusion. |
+| `-nC` | Do not code `C: b` (adult), `c` (child), or `s` (asr/csr) responses | — | Missing | Response-type filter. |
+| `+qN` | Set utterance window to `N` utterances before response | — | Missing | Context-window for response pairing. |
+| `+wN` | Set minimum number of words on source utterance | — | Rewriter only | Collides with the inherited `+wN` context window (see KWAL). |
+| `+xN` | Set minimum repetition index for coding | — | Missing | |
+| `+dN` | Various display modes (full N table omitted here) | — | Rewriter only | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 5 |
+| Partial | 1 |
+| Rewriter only | 6 |
+| Missing | 12 |
+
+CHIP's largest gap is the **adult/child speaker-role tagging**
+(`+bS` / `+cS`) — without these, CHIP cannot determine which
+utterance pair is being analysed (target child speaking, partner
+speaking, both). chatter's CHIP today processes pairs but with
+chatter-side heuristics; CLAN-compatible interaction profiling
+requires the explicit role tags. The collision between CHIP's
+`+wN` (source minimum-word count) and the inherited `+wN`
+(context window from KWAL) is a documented overload trap.
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

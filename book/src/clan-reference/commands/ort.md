@@ -1,7 +1,7 @@
 # ORT -- Orthographic Conversion via Dictionary Lookup
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:11 EDT
+**Last updated:** 2026-05-22 13:07 EDT
 
 ## Purpose
 
@@ -19,6 +19,20 @@ chatter clan ort --dictionary ort.cut file.cha
 |--------|------|---------|-------------|
 | `-d`, `--dictionary` | path | *(required)* | Path to the orthographic conversion dictionary |
 | `-o`, `--output` | path | stdout | Output CHAT file path |
+
+## CLAN `+`-flag coverage audit
+
+ORT is a **transform**. Sources:
+`OSX-CLAN/src/clan/ort.cpp::usage`,
+`crates/talkbank-clan/src/transforms/ort.rs`.
+
+### ORT-specific `+`-flags (from `ort.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+cF` | Homons table file name (default `0canhomo.cut`) | `-d` / `--dictionary <PATH>` | Done | Direct mapping; chatter requires the path explicitly (no default path search). Rewriter routes `+cF` → `--dictionary F` (since 2026-05-22). |
+
+Audit summary: 1 Done, 0 Missing.
 
 ## External Data
 

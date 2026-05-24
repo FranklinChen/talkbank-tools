@@ -1,7 +1,7 @@
 # PRAAT2CHAT -- Praat TextGrid Bidirectional Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:29 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -56,3 +56,20 @@ Praat TextGrid files (`.TextGrid`) containing interval tiers with time-aligned t
 ## Reference
 
 See the [CLAN manual](https://talkbank.org/0info/manuals/CLAN.html#_Toc220409302) for the original PRAAT2CHAT command documentation.
+
+## CLAN `+`-flag coverage audit
+
+PRAAT2CHAT is a **converter** — input Praat `.TextGrid`,
+output CHAT. Sources: `OSX-CLAN/src/clan/Praat2Chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/praat2chat.rs`.
+
+### PRAAT2CHAT-specific `+`-flags (from `Praat2Chat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+b` | Multiple bullets per line | — | Missing |
+| `+dF` | Attribs/tags dependencies file | — | Missing |
+| `+oS` | Code page (utf8, macl, pcl, …) | — | Missing |
+
+Audit summary: 1 Done (default conversion), 3 Missing. Same
+metadata-options gap as ELAN2CHAT and LAB2CHAT.

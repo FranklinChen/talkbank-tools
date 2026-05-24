@@ -4,9 +4,8 @@
 //! CLI can normalize into library-owned analysis models before delegating
 //! defaults and validation back to `talkbank-clan`.
 
-use clap::{ArgGroup, Command, Subcommand};
+use clap::{ArgGroup, Command, Subcommand, ValueEnum};
 use std::path::PathBuf;
-use talkbank_clan::commands::chains::ChainsConfig;
 use talkbank_clan::commands::codes::CodesConfig;
 use talkbank_clan::commands::corelex::CorelexConfig;
 use talkbank_clan::commands::dss::DssConfig;
@@ -17,6 +16,32 @@ use talkbank_clan::commands::rely::RelyConfig;
 use talkbank_clan::commands::trnfix::TrnfixConfig;
 
 use super::clan_common::CommonAnalysisArgs;
+
+/// CLI capitalization-mode argument for FREQ and VOCD.
+///
+/// Maps directly to `talkbank_clan::framework::CapitalizationFilter`
+/// at the dispatch site; clap deliberately stays unaware of the
+/// domain enum so users get a stable kebab-case CLI surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CapitalizationArg {
+    /// CLAN `+c` / `+c0` — first character uppercase.
+    Initial,
+    /// CLAN `+c1` — uppercase letter after position 0.
+    Mid,
+}
+
+/// CLI position-classification argument for FREQPOS.
+///
+/// Maps to `talkbank_clan::commands::freqpos::PositionClassification`
+/// at the dispatch site. `last` is the CLAN default (first/last/
+/// other classification); `second` is CLAN `+d` (first/second/other).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FreqposPositionArg {
+    /// CLAN default: first / last / other classification.
+    Last,
+    /// CLAN `+d`: first / second / other classification.
+    Second,
+}
 
 /// Flat enum of all CLAN analysis and transform commands.
 #[derive(Subcommand)]
@@ -31,6 +56,28 @@ pub enum ClanCommands {
         #[arg(long)]
         mor: bool,
 
+        /// Capitalization filter: `initial` (CLAN `+c` / `+c0` —
+        /// uppercase first letter) or `mid` (CLAN `+c1` — uppercase
+        /// letter after position 0). Default: no filter.
+        #[arg(long = "capitalization", value_enum)]
+        capitalization: Option<CapitalizationArg>,
+
+        /// Sort entries by reverse concordance — groups words by
+        /// suffix. Maps CLAN's FREQ `+o1`.
+        #[arg(long = "reverse-concordance")]
+        reverse_concordance: bool,
+
+        /// Emit only an alphabetized deduped word list, one word per
+        /// line, with no banners, counts, or totals. Output is meant
+        /// as fodder for `kwal +s@FILE`. Maps CLAN's FREQ `+d1`.
+        #[arg(long = "word-list-only")]
+        word_list_only: bool,
+
+        /// Emit only the per-speaker type/token/TTR summary, dropping
+        /// all per-word frequency entries. Maps CLAN's FREQ `+d4`.
+        #[arg(long = "types-tokens-only")]
+        types_tokens_only: bool,
+
         #[command(flatten)]
         common: CommonAnalysisArgs,
     },
@@ -44,6 +91,18 @@ pub enum ClanCommands {
         #[arg(long)]
         words: bool,
 
+        /// Exclude utterances that consist solely of the given word.
+        /// Maps CLAN's command-specific `+gS` (e.g. `mlu +gum`). Repeatable.
+        #[arg(long = "exclude-solo-word")]
+        exclude_solo_word: Vec<String>,
+
+        /// Load solo-word exclusions from a file (one pattern per
+        /// line; blank lines, `# `-comments, and `;%*`-annotation
+        /// lines skipped). Maps CLAN's `+g@FILE`. Repeatable; entries
+        /// extend `--exclude-solo-word`.
+        #[arg(long = "exclude-solo-word-file", value_name = "PATH")]
+        exclude_solo_word_file: Vec<PathBuf>,
+
         #[command(flatten)]
         common: CommonAnalysisArgs,
     },
@@ -52,6 +111,16 @@ pub enum ClanCommands {
     Mlt {
         /// Path to CHAT file(s) or directory
         path: Vec<PathBuf>,
+
+        /// Exclude utterances that consist solely of the given word.
+        /// Maps CLAN's command-specific `+gS` (e.g. `mlt +gum`). Repeatable.
+        #[arg(long = "exclude-solo-word")]
+        exclude_solo_word: Vec<String>,
+
+        /// Load solo-word exclusions from a file (same format as
+        /// `--include-word-file`). Maps CLAN's `+g@FILE`. Repeatable.
+        #[arg(long = "exclude-solo-word-file", value_name = "PATH")]
+        exclude_solo_word_file: Vec<PathBuf>,
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
@@ -75,6 +144,13 @@ pub enum ClanCommands {
         #[arg(long)]
         main_tier: bool,
 
+        /// Length-bounded histogram (CLAN: `+w[>|<|=]N`).
+        /// Format: `<gt|lt|eq>:<N>`. Examples: `gt:4` keeps
+        /// length > 4; `lt:5` keeps length < 5; `eq:3` keeps
+        /// length == 3.
+        #[arg(long = "length-filter", value_name = "COMPARATOR:N")]
+        length_filter: Option<talkbank_clan::commands::wdsize::LengthFilter>,
+
         #[command(flatten)]
         common: CommonAnalysisArgs,
     },
@@ -88,6 +164,16 @@ pub enum ClanCommands {
         #[arg(short = 'n', long, default_value_t = MaxwdConfig::default().limit)]
         limit: talkbank_clan::framework::WordLimit,
 
+        /// Include only words whose length is unique within a
+        /// speaker's lexicon (CLAN: `+a`).
+        #[arg(long = "unique-length-only")]
+        unique_length_only: bool,
+
+        /// Drop words of length N from the output (CLAN: `+xN`,
+        /// repeatable).
+        #[arg(long = "exclude-length", value_name = "N")]
+        exclude_length: Vec<usize>,
+
         #[command(flatten)]
         common: CommonAnalysisArgs,
     },
@@ -96,6 +182,12 @@ pub enum ClanCommands {
     Freqpos {
         /// Path to CHAT file(s) or directory
         path: Vec<PathBuf>,
+
+        /// Position classification: `last` (CLAN default —
+        /// first/last/other) or `second` (CLAN `+d` —
+        /// first/second/other).
+        #[arg(long = "position-classification", value_enum, default_value_t = FreqposPositionArg::Last)]
+        position_classification: FreqposPositionArg,
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
@@ -119,6 +211,29 @@ pub enum ClanCommands {
         #[arg(short, long, required = true)]
         keyword: Vec<String>,
 
+        /// Strict match: keyword must be the only countable word
+        /// on the tier (CLAN: `+b`).
+        #[arg(long = "strict-match")]
+        strict_match: bool,
+
+        /// Emit matching utterances as legal CHAT — drop the
+        /// `---` separator and the `*** File ... Keyword: X`
+        /// location annotation. Maps CLAN's KWAL `+d` (no N).
+        #[arg(long = "legal-chat")]
+        legal_chat: bool,
+
+        /// Pre-context lines: number of utterances immediately
+        /// preceding each match to include with that match. Maps
+        /// CLAN's KWAL `-wN`. Default `0`.
+        #[arg(long = "context-before", default_value_t = 0, value_name = "N")]
+        context_before: u32,
+
+        /// Post-context lines: number of utterances immediately
+        /// following each match to include with that match. Maps
+        /// CLAN's KWAL `+wN`. Default `0`.
+        #[arg(long = "context-after", default_value_t = 0, value_name = "N")]
+        context_after: u32,
+
         #[command(flatten)]
         common: CommonAnalysisArgs,
     },
@@ -138,17 +253,67 @@ pub enum ClanCommands {
         path: Vec<PathBuf>,
 
         /// Search expression(s): use + for AND, comma for OR (can be repeated)
-        #[arg(short = 'S', long = "search", required = true)]
+        #[arg(short = 'S', long = "search", required_unless_present = "search_file")]
         search: Vec<String>,
+
+        /// Exclude expression(s): same syntax as `--search` but
+        /// drops utterances that match any of these (can be
+        /// repeated). Maps CLAN's COMBO `-sS`.
+        #[arg(long = "exclude-search")]
+        exclude_search: Vec<String>,
+
+        /// Load search expressions from FILE (one per line).
+        /// Maps CLAN's COMBO `+s@FILE`. File format matches
+        /// `cutt.cpp::rdexclf`: blank lines, `# `-comments, and
+        /// `;%* `-annotation lines skipped. Repeatable.
+        #[arg(long = "search-file", value_name = "PATH")]
+        search_file: Vec<PathBuf>,
+
+        /// Load exclude search expressions from FILE (one per
+        /// line). Maps CLAN's COMBO `-s@FILE`. Same file format
+        /// as `--search-file`. Repeatable.
+        #[arg(long = "exclude-search-file", value_name = "PATH")]
+        exclude_search_file: Vec<PathBuf>,
+
+        /// Only report the first matching expression per utterance.
+        /// Maps CLAN's COMBO `+g3`.
+        #[arg(long = "first-match-only")]
+        first_match_only: bool,
+
+        /// Deduplicate repeated word matches within an utterance.
+        /// Maps CLAN's COMBO `+g7`.
+        #[arg(long = "dedupe-matches")]
+        dedupe_matches: bool,
+
+        /// Pre-context lines: utterances immediately preceding each
+        /// match to include with that match. Maps CLAN's COMBO `-wN`.
+        #[arg(long = "context-before", default_value_t = 0, value_name = "N")]
+        context_before: u32,
+
+        /// Post-context lines: utterances immediately following each
+        /// match to include with that match. Maps CLAN's COMBO `+wN`.
+        #[arg(long = "context-after", default_value_t = 0, value_name = "N")]
+        context_after: u32,
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
     },
 
-    /// Word co-occurrence counting (pairs of words in same utterance)
+    /// Word co-occurrence counting (N-grams of words in same utterance)
     Cooccur {
         /// Path to CHAT file(s) or directory
         path: Vec<PathBuf>,
+
+        /// Strip frequency-count column from CLAN-format output
+        /// (CLAN: `+d`).
+        #[arg(long = "no-frequency-counts")]
+        no_frequency_counts: bool,
+
+        /// Cluster size: number of adjacent words counted per row.
+        /// Default `2` (bigrams). `+n3` ⇒ trigrams; etc. Maps CLAN's
+        /// COOCCUR `+nN`.
+        #[arg(long = "cluster-size", default_value_t = 2, value_name = "N")]
+        cluster_size: u8,
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
@@ -158,6 +323,10 @@ pub enum ClanCommands {
     Dist {
         /// Path to CHAT file(s) or directory
         path: Vec<PathBuf>,
+
+        /// Count each word at most once per turn (CLAN: `+g`).
+        #[arg(long = "once-per-turn")]
+        once_per_turn: bool,
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
@@ -194,6 +363,12 @@ pub enum ClanCommands {
     Vocd {
         /// Path to CHAT file(s) or directory
         path: Vec<PathBuf>,
+
+        /// Capitalization filter: `initial` (CLAN `+c` / `+c0` —
+        /// uppercase first letter) or `mid` (CLAN `+c1` — uppercase
+        /// letter after position 0). Default: no filter.
+        #[arg(long = "capitalization", value_enum)]
+        capitalization: Option<CapitalizationArg>,
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
@@ -246,6 +421,12 @@ pub enum ClanCommands {
     Sugar {
         /// Path to CHAT file(s) or directory
         path: Vec<PathBuf>,
+
+        /// Minimum number of utterances required for SUGAR to produce
+        /// output (CLAN default 50). Maps CLAN's `+aN`. Files below
+        /// the threshold are reported as "insufficient sample size".
+        #[arg(long = "min-utterances")]
+        min_utterances: Option<talkbank_clan::framework::UtteranceLimit>,
 
         #[command(flatten)]
         common: CommonAnalysisArgs,

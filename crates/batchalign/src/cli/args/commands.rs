@@ -119,6 +119,25 @@ pub enum DiarizationMode {
     Disabled,
 }
 
+/// Translation engine for the `translate` command.
+///
+/// `google` requires reachability to the public Google Translate
+/// endpoint and is unsuitable behind the Great Firewall without VPN.
+/// `seamless` and `nllb` are both local-model alternatives downloaded
+/// from HuggingFace on first use; neither requires outbound network at
+/// inference time. `nllb` is the recommended self-hosted fallback;
+/// `seamless` is retained for back-compat with BA2 callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum TranslateEngine {
+    /// Public Google Translate via the ``googletrans`` library (default).
+    #[default]
+    Google,
+    /// Local Meta SeamlessM4T model (BA2-inherited; low CJK quality).
+    Seamless,
+    /// Local Meta NLLB-200-distilled-1.3B (recommended).
+    Nllb,
+}
+
 /// ASR engine for the `benchmark` command (subset of AsrEngine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum BenchAsrEngine {
@@ -351,6 +370,15 @@ pub struct TranslateArgs {
     /// Shared file I/O options.
     #[command(flatten)]
     pub common: CommonOpts,
+
+    /// Translation engine: `google` (default) or `seamless`.
+    ///
+    /// Google calls the public Google Translate endpoint and requires
+    /// outbound network reachability — unsuitable behind the Great
+    /// Firewall without VPN. Seamless runs a local Meta SeamlessM4T
+    /// model and has no inference-time network requirement.
+    #[arg(long, value_enum, default_value_t)]
+    pub translate_engine: TranslateEngine,
 
     /// Merge abbreviations in output.
     #[arg(long, conflicts_with = "no_merge_abbrev")]

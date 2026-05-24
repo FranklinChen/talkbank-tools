@@ -1,6 +1,8 @@
 # DATACLEAN -- Fix Common CHAT Formatting Errors
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:01 EDT
+
 ## Purpose
 
 Reimplements CLAN's DataCleanUp command, which fixes spacing and formatting issues in CHAT files. Because these are text-level formatting concerns that operate below the AST level, the AST transform is a no-op; the actual logic operates on serialized CHAT text via `clean_chat_text()` and the end-to-end `run_dataclean()` function.
@@ -19,6 +21,33 @@ input path plus the optional shared `-o`/`--output` from
 runs together; there is no `--spacing-only` switch — to apply only the
 text-spacing repairs you would have to pre-filter the input or
 post-edit the output.
+
+## CLAN `+`-flag coverage audit
+
+DATACLEAN is a **transform**. Sources:
+`OSX-CLAN/src/clan/DataCleanUp.cpp::usage`,
+`crates/talkbank-clan/src/transforms/dataclean.rs`.
+
+### DATACLEAN-specific `+`-flags (from `DataCleanUp.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+b` | Work on the BOLD problem only | — | Missing | CLAN isolates one fix-class at a time; chatter always runs the full set. |
+| `+c` | Work on the `++`/`+,` problem only | — | Missing | |
+| `+o` | Work on all other problems only | — | Missing | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 (default full-set) |
+| Missing | 3 |
+
+DATACLEAN's `+b`/`+c`/`+o` partition the fix set into three
+classes that CLAN lets the user run in isolation. chatter
+collapses them into "run everything"; partitioning would require
+splitting the fix passes into named groups with per-flag gating.
+Filed as a Phase 1.7 follow-up; not load-bearing for typical use.
 
 ## Behavior
 

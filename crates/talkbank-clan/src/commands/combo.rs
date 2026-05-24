@@ -85,14 +85,30 @@ impl SearchExpr {
     /// AND takes precedence: if both `+` and `,` appear, the string
     /// is split on `+` first (matching CLAN's behavior).
     pub fn parse(s: &str) -> Self {
+        Self::parse_with_case(s, false)
+    }
+
+    /// Parse a `+s`/`-s` expression, optionally preserving original
+    /// case in the terms. CLAN `+k` (`case_sensitive = true`)
+    /// suppresses the default lowercasing so the search becomes
+    /// exact-case. Default `case_sensitive = false` matches CLAN's
+    /// default and chatter's pre-`+k` behaviour.
+    pub fn parse_with_case(s: &str, case_sensitive: bool) -> Self {
+        let fold = |t: &str| -> String {
+            if case_sensitive {
+                t.trim().to_owned()
+            } else {
+                t.trim().to_lowercase()
+            }
+        };
         if s.contains('+') {
-            let terms: Vec<String> = s.split('+').map(|t| t.trim().to_lowercase()).collect();
+            let terms: Vec<String> = s.split('+').map(fold).collect();
             SearchExpr::And(terms)
         } else if s.contains(',') {
-            let terms: Vec<String> = s.split(',').map(|t| t.trim().to_lowercase()).collect();
+            let terms: Vec<String> = s.split(',').map(fold).collect();
             SearchExpr::Or(terms)
         } else {
-            SearchExpr::And(vec![s.trim().to_lowercase()])
+            SearchExpr::And(vec![fold(s)])
         }
     }
 
@@ -153,8 +169,40 @@ impl SearchExpr {
 /// Configuration for the COMBO command.
 #[derive(Debug, Clone, Default)]
 pub struct ComboConfig {
-    /// Search expressions (multiple are combined with OR).
+    /// Include search expressions. An utterance must match at least
+    /// one of these to be output (any-of semantics; multiple
+    /// `--search` flags act as OR at the expression level).
     pub search: Vec<SearchExpr>,
+    /// Exclude search expressions. An utterance matching *any* of
+    /// these is dropped, even if it would otherwise match an
+    /// include expression. Maps CLAN's `-sS` for COMBO.
+    pub exclude: Vec<SearchExpr>,
+    /// CLAN's `+g3`: when `true`, an utterance that matches multiple
+    /// expressions contributes only its first match to the output —
+    /// remaining expressions are not evaluated. Default `false`
+    /// reports every matching expression per utterance (CLAN's
+    /// default).
+    pub first_match_only: bool,
+    /// CLAN's `+g7`: when `true`, repeated word forms within a
+    /// single utterance contribute at most one entry to each
+    /// expression's `matched_words` list. Mainly affects OR
+    /// expressions (`cookie,milk`) where the same surface form can
+    /// appear multiple times in one utterance. Default `false`
+    /// records every occurrence.
+    pub dedupe_matches: bool,
+    /// CLAN `+k`: case-sensitive matching. Default (`false`)
+    /// lowercases both `+s` terms (at parse time) and the word
+    /// stream (via `NormalizedWord::from_word`). When `true`, neither
+    /// side is lowercased — `Want`/`want`/`WANT` count as distinct
+    /// words. Must agree with `SearchExpr::parse_with_case` at the
+    /// time the search expressions are built.
+    pub case_sensitive: bool,
+    /// CLAN `-wN`: number of utterances immediately preceding each
+    /// match to include as pre-context. Default `0`.
+    pub context_before: u32,
+    /// CLAN `+wN`: number of utterances immediately following each
+    /// match to include as post-context. Default `0`.
+    pub context_after: u32,
 }
 
 /// A single match found during COMBO processing.
@@ -177,6 +225,14 @@ pub struct ComboMatch {
     /// rendering wraps each matched word as `(N)<word>` where `N` is
     /// the expression index.
     pub expr_hits: Vec<MatchedExpr>,
+    /// CLAN `-wN` pre-context: up to `context_before` preceding
+    /// utterance texts, oldest-first. Default empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_context: Vec<String>,
+    /// CLAN `+wN` post-context: up to `context_after` following
+    /// utterance texts, in stream order. Default empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_context: Vec<String>,
 }
 
 /// One search expression's contribution to a `ComboMatch`.
@@ -274,12 +330,18 @@ impl CommandOutput for ComboResult {
             // stdin (chatter follows the same convention for
             // CLAN-format output to match the byte stream).
             writeln!(out, "*** File \"pipeout\": line {}.", m.line_number).ok();
+            for line in &m.pre_context {
+                writeln!(out, "{line}").ok();
+            }
             // utterance_text already carries the `*SPK:\t...` prefix
             // (`Utterance::Main::to_chat_string()` includes it), so
             // we don't add another speaker prefix here. Wrap each
             // matched word as (N)<word> in place.
             let annotated = annotate_combo_matches(&m.utterance_text, &m.expr_hits);
             writeln!(out, "{annotated}").ok();
+            for line in &m.post_context {
+                writeln!(out, "{line}").ok();
+            }
         }
         // Summary line. CLAN emits:
         //   <last match line>\n\n    Strings matched N times\n\n
@@ -364,6 +426,13 @@ pub struct ComboState {
     matches: Vec<ComboMatch>,
     /// Total utterances examined
     total_utterances: u64,
+    /// Ring buffer of recent utterance CHAT texts (capacity =
+    /// `config.context_before`). See KWAL for the design — same
+    /// `-wN` pre-context machinery.
+    recent: std::collections::VecDeque<String>,
+    /// Matches still collecting post-context (`+wN`) lines. Pair
+    /// is `(match_index, remaining_after_lines)`.
+    awaiting_after: Vec<(usize, u32)>,
 }
 
 /// COMBO command implementation.
@@ -388,7 +457,11 @@ impl AnalysisCommand for ComboCommand {
     type State = ComboState;
     type Output = ComboResult;
 
-    /// Evaluate all configured boolean keyword expressions for one utterance.
+    /// Evaluate all configured boolean keyword expressions for one
+    /// utterance. Context-window ordering invariant matches KWAL's
+    /// (see `kwal::process_utterance`): post-context drains for
+    /// earlier matches before the current match is recorded, ring
+    /// updates afterward.
     fn process_utterance(
         &self,
         utterance: &Utterance,
@@ -401,42 +474,96 @@ impl AnalysisCommand for ComboCommand {
 
         state.total_utterances += 1;
 
-        // Collect normalized words using the shared iterator
+        let case_sensitive = self.config.case_sensitive;
         let words: Vec<NormalizedWord> = countable_words(&utterance.main.content.content)
-            .map(NormalizedWord::from_word)
+            .map(|w| NormalizedWord::from_word_cased(w, case_sensitive))
             .collect();
 
-        // Collect per-expression match details for CLAN-format rendering.
-        let expr_hits: Vec<MatchedExpr> = self
-            .config
-            .search
-            .iter()
-            .enumerate()
-            .filter_map(|(i, expr)| {
-                if expr.matches(&words) {
+        // `-sS` excluded utterances still feed the windows — they
+        // count as non-matches for context bookkeeping. Flag rather
+        // than early-return.
+        let excluded = self.config.exclude.iter().any(|expr| expr.matches(&words));
+
+        let mut expr_hits: Vec<MatchedExpr> = Vec::new();
+        if !excluded {
+            let dedupe = self.config.dedupe_matches;
+            let raw = self
+                .config
+                .search
+                .iter()
+                .enumerate()
+                .filter_map(|(i, expr)| {
+                    if !expr.matches(&words) {
+                        return None;
+                    }
+                    let matched_words: Vec<String> = if dedupe {
+                        indexmap::IndexSet::<String>::from_iter(expr.matched_words(&words))
+                            .into_iter()
+                            .collect()
+                    } else {
+                        expr.matched_words(&words)
+                    };
                     Some(MatchedExpr {
                         index: i + 1,
-                        matched_words: expr.matched_words(&words),
+                        matched_words,
                     })
-                } else {
-                    None
-                }
-            })
-            .collect();
+                });
+            expr_hits = if self.config.first_match_only {
+                raw.take(1).collect()
+            } else {
+                raw.collect()
+            };
+        }
+
+        // Skip the allocating CHAT serialization when there's no
+        // window work AND no match to record. Default-config callers
+        // (no `+wN`/`-wN`) pay nothing extra per non-matching
+        // utterance.
+        let needs_text = !expr_hits.is_empty()
+            || !state.awaiting_after.is_empty()
+            || self.config.context_before > 0;
+        if !needs_text {
+            return;
+        }
+        let utterance_text = utterance.main.to_chat_string();
+
+        state.awaiting_after.retain_mut(|(match_idx, remaining)| {
+            state.matches[*match_idx]
+                .post_context
+                .push(utterance_text.clone());
+            *remaining -= 1;
+            *remaining > 0
+        });
 
         if !expr_hits.is_empty() {
-            let utterance_text = utterance.main.to_chat_string();
             let line_number = file_context
                 .line_map
                 .map(|lm| lm.line_of(utterance.main.span.start))
                 .unwrap_or(0);
+            let pre_context: Vec<String> = state.recent.iter().cloned().collect();
+            let match_idx = state.matches.len();
             state.matches.push(ComboMatch {
                 speaker: utterance.main.speaker.as_str().to_owned(),
-                utterance_text,
+                utterance_text: utterance_text.clone(),
                 filename: file_context.filename.to_owned(),
                 line_number,
                 expr_hits,
+                pre_context,
+                post_context: Vec::new(),
             });
+            if self.config.context_after > 0 {
+                state
+                    .awaiting_after
+                    .push((match_idx, self.config.context_after));
+            }
+        }
+
+        let cap = self.config.context_before as usize;
+        if cap > 0 {
+            if state.recent.len() == cap {
+                state.recent.pop_front();
+            }
+            state.recent.push_back(utterance_text);
         }
     }
 
@@ -480,6 +607,8 @@ mod tests {
     fn combo_and_both_present() {
         let command = ComboCommand::new(ComboConfig {
             search: vec![SearchExpr::parse("want+cookie")],
+            exclude: vec![],
+            ..ComboConfig::default()
         });
         let mut state = ComboState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
@@ -491,11 +620,60 @@ mod tests {
         assert_eq!(state.matches.len(), 1);
     }
 
+    /// CLAN COMBO `+k` / `--case-sensitive`: search expressions and
+    /// word stream both stop lowercasing. A lowercase keyword no
+    /// longer matches an uppercase word, and vice versa.
+    #[test]
+    fn combo_case_sensitive_uppercase_keyword_misses_lowercase_word() {
+        // Parse the search expression in case-sensitive mode so
+        // "Want" stays "Want" instead of being lowercased.
+        let expr = SearchExpr::parse_with_case("Want", true);
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![expr],
+            exclude: vec![],
+            case_sensitive: true,
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        // utterance has lowercase "want" — should NOT match the
+        // case-sensitive "Want" expression.
+        let u = make_utterance("CHI", &["I", "want", "cookie"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 0);
+    }
+
+    /// Companion regression: case-sensitive search expression
+    /// matches when the casing aligns.
+    #[test]
+    fn combo_case_sensitive_matches_when_case_aligned() {
+        let expr = SearchExpr::parse_with_case("Want", true);
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![expr],
+            exclude: vec![],
+            case_sensitive: true,
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u = make_utterance("CHI", &["I", "Want", "cookie"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+    }
+
     /// AND expressions should fail when any required term is missing.
     #[test]
     fn combo_and_missing_one() {
         let command = ComboCommand::new(ComboConfig {
             search: vec![SearchExpr::parse("want+cookie")],
+            exclude: vec![],
+            ..ComboConfig::default()
         });
         let mut state = ComboState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
@@ -513,6 +691,8 @@ mod tests {
     fn combo_or_either_present() {
         let command = ComboCommand::new(ComboConfig {
             search: vec![SearchExpr::parse("cookie,milk")],
+            exclude: vec![],
+            ..ComboConfig::default()
         });
         let mut state = ComboState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
@@ -538,6 +718,8 @@ mod tests {
                 SearchExpr::parse("want+cookie"),
                 SearchExpr::parse("need+milk"),
             ],
+            exclude: vec![],
+            ..ComboConfig::default()
         });
         let mut state = ComboState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
@@ -554,10 +736,169 @@ mod tests {
         assert_eq!(state.matches.len(), 2);
     }
 
+    /// Exclude expressions drop utterances even when an include
+    /// expression would match. CLAN's `-sS` semantic for COMBO.
+    #[test]
+    fn combo_exclude_drops_matching_utterance() {
+        // include: utterance contains "want"
+        // exclude: utterance contains "cookie"
+        // → "want milk" matches; "want cookie" is dropped
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![SearchExpr::parse("want")],
+            exclude: vec![SearchExpr::parse("cookie")],
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u1 = make_utterance("CHI", &["I", "want", "cookie"]);
+        let u2 = make_utterance("CHI", &["I", "want", "milk"]);
+        let u3 = make_utterance("CHI", &["I", "have", "cookie"]);
+
+        command.process_utterance(&u1, &ctx, &mut state);
+        command.process_utterance(&u2, &ctx, &mut state);
+        command.process_utterance(&u3, &ctx, &mut state);
+
+        // Only u2 makes it through (matches include, doesn't match exclude).
+        // u1 matches include but is dropped by exclude.
+        // u3 doesn't match include.
+        assert_eq!(state.matches.len(), 1);
+        assert_eq!(state.matches[0].utterance_text.contains("milk"), true);
+    }
+
+    /// CLAN `+g3` (`first_match_only`) short-circuits per utterance:
+    /// when multiple expressions could match, only the first hit is
+    /// recorded in `expr_hits`.
+    #[test]
+    fn combo_first_match_only_records_only_first_expr() {
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![
+                SearchExpr::parse("cookie"),
+                SearchExpr::parse("milk"),
+                SearchExpr::parse("want"),
+            ],
+            exclude: vec![],
+            first_match_only: true,
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        // Utterance has all three keywords; without +g3 we'd record
+        // three matched expressions, with +g3 only the first one.
+        let u = make_utterance("CHI", &["I", "want", "cookie", "and", "milk"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+        let m = &state.matches[0];
+        assert_eq!(m.expr_hits.len(), 1);
+        assert_eq!(m.expr_hits[0].index, 1);
+        assert_eq!(m.expr_hits[0].matched_words, vec!["cookie"]);
+    }
+
+    /// CLAN `+g7` (`dedupe_matches`) drops repeated word forms
+    /// from `matched_words` while preserving first-encounter order.
+    /// OR expressions over an utterance with repeated keywords are
+    /// the natural exercise.
+    #[test]
+    fn combo_dedupe_matches_removes_repeated_words() {
+        // OR expression "cookie,milk" against utterance
+        // "cookie cookie milk cookie" produces matched_words
+        // ["cookie", "cookie", "milk", "cookie"] without +g7; with
+        // +g7 it collapses to ["cookie", "milk"] (first-encounter
+        // order).
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![SearchExpr::parse("cookie,milk")],
+            exclude: vec![],
+            dedupe_matches: true,
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u = make_utterance("CHI", &["cookie", "cookie", "milk", "cookie"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+        let m = &state.matches[0];
+        assert_eq!(m.expr_hits.len(), 1);
+        assert_eq!(m.expr_hits[0].matched_words, vec!["cookie", "milk"]);
+    }
+
+    /// Without `dedupe_matches` the same utterance preserves every
+    /// occurrence, including duplicates.
+    #[test]
+    fn combo_without_dedupe_matches_keeps_duplicates() {
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![SearchExpr::parse("cookie,milk")],
+            exclude: vec![],
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u = make_utterance("CHI", &["cookie", "cookie", "milk", "cookie"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+        assert_eq!(
+            state.matches[0].expr_hits[0].matched_words,
+            vec!["cookie", "cookie", "milk", "cookie"]
+        );
+    }
+
+    /// Without `first_match_only` the same utterance records all
+    /// three matching expressions. Companion to the +g3 test above —
+    /// they share the same input to make the regression obvious.
+    #[test]
+    fn combo_without_first_match_only_records_every_expr() {
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![
+                SearchExpr::parse("cookie"),
+                SearchExpr::parse("milk"),
+                SearchExpr::parse("want"),
+            ],
+            exclude: vec![],
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u = make_utterance("CHI", &["I", "want", "cookie", "and", "milk"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+        assert_eq!(state.matches[0].expr_hits.len(), 3);
+    }
+
+    /// Empty exclude config should be a no-op (every include match
+    /// passes through, matching pre-2026-05-22 behaviour).
+    #[test]
+    fn combo_empty_exclude_is_noop() {
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![SearchExpr::parse("want")],
+            exclude: vec![],
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        let u = make_utterance("CHI", &["I", "want", "cookie"]);
+        command.process_utterance(&u, &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+    }
+
     /// Empty search config should produce no matches.
     #[test]
     fn combo_empty_search() {
-        let command = ComboCommand::new(ComboConfig { search: vec![] });
+        let command = ComboCommand::new(ComboConfig::default());
         let mut state = ComboState::default();
         let chat_file = talkbank_model::ChatFile::new(vec![]);
         let ctx = file_ctx(&chat_file);
@@ -567,6 +908,81 @@ mod tests {
 
         let result = command.finalize(state);
         assert!(result.matches.is_empty());
+    }
+
+    /// CLAN COMBO `+wN` / `--context-after`: emit N utterances
+    /// immediately following each match as post-context. Same
+    /// shape as KWAL's context-window machinery — feeds via the
+    /// `awaiting_after` Vec as later utterances stream by.
+    #[test]
+    fn combo_context_after_captures_post_match_lines() {
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![SearchExpr::parse("cookie")],
+            context_after: 2,
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        command.process_utterance(&make_utterance("CHI", &["hello"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["milk"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["cookie"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["thanks"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["bye"]), &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+        let m = &state.matches[0];
+        assert_eq!(m.post_context.len(), 2);
+        assert!(m.post_context[0].contains("thanks"));
+        assert!(m.post_context[1].contains("bye"));
+    }
+
+    /// CLAN COMBO `-wN` / `--context-before`: emit N utterances
+    /// immediately preceding each match as pre-context. The
+    /// `ComboState`'s sliding-window ring buffer captures them.
+    #[test]
+    fn combo_context_before_captures_pre_match_lines() {
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![SearchExpr::parse("cookie")],
+            context_before: 2,
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        command.process_utterance(&make_utterance("CHI", &["hello"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["world"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["milk"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["cookie"]), &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+        let m = &state.matches[0];
+        assert_eq!(m.pre_context.len(), 2);
+        assert!(m.pre_context[0].contains("world"));
+        assert!(m.pre_context[1].contains("milk"));
+    }
+
+    /// Default (no `+wN`/`-wN`) carries no context — regression
+    /// companion to the two tests above.
+    #[test]
+    fn combo_default_no_context_window() {
+        let command = ComboCommand::new(ComboConfig {
+            search: vec![SearchExpr::parse("cookie")],
+            ..ComboConfig::default()
+        });
+        let mut state = ComboState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let ctx = file_ctx(&chat_file);
+
+        command.process_utterance(&make_utterance("CHI", &["hello"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["cookie"]), &ctx, &mut state);
+        command.process_utterance(&make_utterance("CHI", &["bye"]), &ctx, &mut state);
+
+        assert_eq!(state.matches.len(), 1);
+        assert!(state.matches[0].pre_context.is_empty());
+        assert!(state.matches[0].post_context.is_empty());
     }
 
     /// Parsing should map `+` to AND, `,` to OR, and bare terms to single AND.

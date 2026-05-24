@@ -1,7 +1,7 @@
 # morphotag
 
 **Status:** Current
-**Last updated:** 2026-05-11 11:24 EDT
+**Last updated:** 2026-05-23 09:20 EDT
 
 Add morphosyntactic analysis (`%mor` POS/lemma tiers and `%gra` dependency
 tiers) to existing CHAT transcripts. Text-only — no audio involved.
@@ -298,6 +298,25 @@ adding a `[- LANG]` precode without clearing the shortcut would *flip*
 the filler's resolved language to the precode target. (A previous
 version of the tool skipped fillers and corrupted a corpus this way;
 the fix-s predicate now walks all word-bearing items.)
+
+---
+
+## Failure modes
+
+morphotag fails fast on engine failures rather than emitting partial
+output. When the Stanza worker reports a per-utterance error (model
+runtime error, Stanza output parse failure, protocol violation), the
+affected file is marked failed with a typed `ItemErrors` message
+naming the first few offending items and the total count. Other
+files in the same batch continue normally — one bad file does not
+poison the rest (BA2-parity multi-file semantics). The output `.cha`
+for a failed file is **not** written; there is no silent path where
+the job appears successful but the `%mor` tier is missing.
+
+Note: items in languages Stanza does not support (code-switches into
+`@s:<lang>` for unsupported languages) are an intentional fallback,
+not a failure — those items keep their `L2|xxx` placeholders in
+`%mor` and the file still succeeds.
 
 ---
 

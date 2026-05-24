@@ -1,7 +1,7 @@
 # CHAINS -- Clause Chain Analysis
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:30 EDT
+**Last updated:** 2026-05-22 09:45 EDT
 
 ## Purpose
 
@@ -21,13 +21,50 @@ chatter clan chains --speaker CHI file.cha
 chatter clan chains --tier cod file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
-| Option | Description |
-|--------|-------------|
-| `--speaker <CODE>` | Include speaker |
-| `--tier <NAME>` | Tier label to read codes from (default: `cod`) |
-| `--format <FMT>` | Output format: text, json, csv, clan |
+| Option | CLAN flag | Description |
+|--------|-----------|-------------|
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--tier <NAME>` | `+t%X` (rewriter target) | Tier label to read codes from (default: `cod`) |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `chains` flag. Sources:
+
+* `OSX-CLAN/src/clan/chains.cpp` — `usage()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` CHAINS branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Chains` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+CHAINS is a **required-flag refusal** command in chatter — emits
+the exact CLAN refusal when `+t%X` (or `--tier X`) is absent.
+
+### CHAINS-specific `+`-flags (from `chains.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+cS` / `+c@S` | Clause-marker delimiter `S` (or markers in file `@S`) | — | Missing | Clause-unit detection. |
+| `+d` | Change zeroes to spaces in output | — | Rewriter only | |
+| `+d1` | `+d` + display every input line in output | — | Rewriter only | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 6 |
+| Partial | 1 |
+| Rewriter only | 5 |
+| Missing | 5 |
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

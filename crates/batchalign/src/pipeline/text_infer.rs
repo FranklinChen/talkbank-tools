@@ -56,7 +56,7 @@ where
         &WorkerPool,
         &[(usize, Item)],
         &LanguageCode3,
-    ) -> Result<Vec<Response>, ServerError>,
+    ) -> Result<Vec<Result<Response, String>>, ServerError>,
 {
     let parser = crate::chat_parser();
     let (mut chat_file, parse_errors) = parse_lenient(&parser, chat_text);
@@ -86,7 +86,9 @@ where
         return Ok(to_chat_string(&chat_file));
     }
 
-    let responses = infer(services.pool, &batch_items, lang).await?;
+    let item_results = infer(services.pool, &batch_items, lang).await?;
+    let responses = crate::text_batch::unwrap_per_item_results(hooks.command, item_results)
+        .map_err(|err| ServerError::Validation(err.to_string()))?;
     let mut state_map: HashMap<usize, State> = HashMap::new();
     (hooks.integrate)(&mut state_map, &batch_items, &responses);
 
@@ -162,11 +164,12 @@ pub(crate) async fn run_text_batch_pipeline<Item, Response, Infer>(
     infer: Infer,
 ) -> TextBatchFileResults
 where
+    Response: Clone,
     Infer: AsyncFnOnce(
         &WorkerPool,
         &[(usize, Item)],
         &LanguageCode3,
-    ) -> Result<Vec<Response>, ServerError>,
+    ) -> Result<Vec<Result<Response, String>>, ServerError>,
 {
     let parser = crate::chat_parser();
     let mut results: TextBatchFileResults = Vec::with_capacity(files.len());
@@ -241,7 +244,7 @@ where
     }
 
     // 3. Single batch_infer across all files' pooled payloads.
-    let all_responses = if all_items.is_empty() {
+    let all_item_results = if all_items.is_empty() {
         Vec::new()
     } else {
         match infer(pool, &all_items, lang).await {
@@ -273,6 +276,13 @@ where
     };
 
     // 4. Redistribute responses per file, apply, post-validate, serialize.
+    //
+    // Per-item engine/network/model failures are attributed back to
+    // the file they came from via ``per_file_info``. A file with any
+    // failing item is marked as failed with a typed
+    // ``TextWorkflowFileError::ItemErrors``; other files in the same
+    // cross-file batch continue normally. This matches BA2's
+    // per-file-isolation multi-file failure semantics.
     for (file_idx, file) in files.iter().enumerate() {
         if let Some(ref err) = validation_errors[file_idx] {
             results.push(TextBatchFileResult::err(file.filename.clone(), err.clone()));
@@ -284,8 +294,42 @@ where
         if let Some(ref fm) = per_file_info[file_idx] {
             let end = fm.global_start + fm.item_count;
             let file_items = &all_items[fm.global_start..end];
-            let file_responses = &all_responses[fm.global_start..end];
-            (hooks.apply)(chat_file, file_items, file_responses);
+            let file_item_results = &all_item_results[fm.global_start..end];
+
+            // Collect any per-item failures for this file. If any
+            // failed, mark the entire file as failed without writing
+            // partial output — matches BA2 (one bad utterance abandons
+            // the file).
+            let item_errors: Vec<crate::text_batch::ItemError> = file_item_results
+                .iter()
+                .enumerate()
+                .filter_map(|(local_idx, r)| match r {
+                    Err(message) => Some(crate::text_batch::ItemError {
+                        item_index: local_idx,
+                        message: message.clone(),
+                    }),
+                    Ok(_) => None,
+                })
+                .collect();
+            if !item_errors.is_empty() {
+                results.push(TextBatchFileResult::err(
+                    file.filename.clone(),
+                    crate::text_batch::TextWorkflowFileError::item_errors(
+                        hooks.command,
+                        item_errors,
+                    ),
+                ));
+                continue;
+            }
+
+            // All items succeeded for this file — extract owned
+            // responses and apply them. The unwrap is safe because we
+            // just filtered out any Err above.
+            let file_responses: Vec<Response> = file_item_results
+                .iter()
+                .map(|r| r.as_ref().expect("checked above").clone())
+                .collect();
+            (hooks.apply)(chat_file, file_items, &file_responses);
         }
 
         if let Err(errors) = validate_output(chat_file, hooks.command) {

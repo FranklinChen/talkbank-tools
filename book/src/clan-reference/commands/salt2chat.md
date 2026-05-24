@@ -1,7 +1,7 @@
 # SALT2CHAT -- SALT Transcription to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 13:36 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -56,3 +56,22 @@ A well-formed CHAT file with SALT speakers mapped to standard CHAT speaker codes
 
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
+
+## CLAN `+`-flag coverage audit
+
+SALT2CHAT is a **converter** — input SALT, output CHAT.
+Sources: `OSX-CLAN/src/clan/salt2chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/salt2chat.rs`.
+
+### SALT2CHAT-specific `+`-flags (from `salt2chat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+cS` | Special coding system (a/b/c/g/h/p/r/s for various researcher conventions) | — | Missing |
+| `+h` | Handle `<...>` as `[% ...]` (default: as `["overlap"]`) | — | Missing |
+| `+lF` | Codes-on-separate-tier mapping file | — | Missing |
+
+Audit summary: 1 Done (default conversion), 3 Missing.
+Researcher-specific coding conventions are CLAN's most-elaborate
+SALT2CHAT customization; chatter's converter is one-size-fits-
+all.

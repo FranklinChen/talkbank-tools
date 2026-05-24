@@ -1,6 +1,8 @@
 # COMBTIER -- Combine Duplicate Dependent Tiers
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:00 EDT
+
 ## Purpose
 
 Combines duplicate dependent tiers within an utterance. The legacy manual describes `COMBTIER` narrowly: it corrects the case where transcribers create several `%com` lines, combining two `%com` lines into one by removing the second header and moving its material onto the first `%com` line.
@@ -21,6 +23,30 @@ chatter clan combtier --tier com file.cha
 |--------|------|---------|-------------|
 | `--tier` | string | *(required)* | The tier label to combine (e.g., `com` for `%com:`, `spa` for `%spa:`) |
 | `--separator` | string | `" "` | Separator between combined tier contents |
+
+## CLAN `+`-flag coverage audit
+
+COMBTIER is a **transform**. Sources:
+`OSX-CLAN/src/clan/combtier.cpp::usage`,
+`crates/talkbank-clan/src/transforms/combtier.rs`.
+
+### COMBTIER-specific `+`-flags (from `combtier.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+tS` | Tier to combine (required) | `--tier <NAME>` (required) | Done | Same required-flag refusal shape — CLAN exits with "Please specify tier to combine with +t option." |
+| `--separator` (chatter extension) | Separator between combined contents | `--separator` | Chatter-only | No CLAN analog — CLAN's default is a space, hard-coded. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 |
+| Chatter extension | 1 |
+| Missing | 0 |
+
+COMBTIER's surface is byte-parity complete. `--separator` is a
+chatter convenience.
 
 ## Behavior
 

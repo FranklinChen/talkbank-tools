@@ -72,6 +72,7 @@ async fn live_fixture_runs_translate_job_when_available() {
             ..CommonOptions::default()
         },
         merge_abbrev: false.into(),
+        ..TranslateOptions::default()
     });
 
     let (info, results) = submit_and_complete(

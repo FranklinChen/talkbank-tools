@@ -17,12 +17,85 @@
 //! 4. Word pattern matching (`+s`/`-s`)
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use talkbank_model::{Header, SpeakerCode, Utterance};
 use thiserror::Error;
 
+use std::borrow::Cow;
+
+use super::domain_types::WordPattern;
 use super::word_filter::{countable_words_in_utterance, word_pattern_matches};
+
+/// Failure modes when loading a CLAN-style word-list file
+/// (`+s@FILE` / `-s@FILE`).
+#[derive(Debug, Error)]
+pub enum LoadWordListError {
+    /// The file could not be opened or read.
+    #[error("could not read word-list file {path}: {source}")]
+    Io {
+        /// Path that failed to open.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Read a CLAN-style `@FILE` list: one item per non-comment line,
+/// with the conventions from OSX-CLAN's `cutt.cpp::rdexclf`:
+///
+/// * Leading UTF-8 BOM (`U+FEFF`) on the first line is stripped.
+/// * Lines beginning with `# ` (hash + space) are skipped (human
+///   comments).
+/// * Lines beginning with `;%* ` are skipped (CLAN's annotation
+///   prefix for grep-friendly notes).
+/// * Blank or whitespace-only lines are skipped.
+/// * Trailing whitespace (spaces, tabs) is stripped from each line.
+///
+/// Source order is preserved. Casing is preserved — callers that
+/// want case-folding apply it downstream.
+///
+/// Shared between [`load_word_list_file`] (word patterns) and
+/// [`load_search_expr_file`] (COMBO boolean expressions); the file
+/// format is identical, only the per-line value type differs.
+fn read_clan_list_file_lines(path: &Path) -> Result<Vec<String>, LoadWordListError> {
+    let content = std::fs::read_to_string(path).map_err(|source| LoadWordListError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let body = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    Ok(body
+        .lines()
+        .map(|l| l.trim_end_matches([' ', '\t']))
+        .filter(|l| !l.is_empty() && !l.starts_with("# ") && !l.starts_with(";%* "))
+        .map(|l| l.to_owned())
+        .collect())
+}
+
+/// Load a CLAN-style word-list file (`+s@FILE` / `-s@FILE` for
+/// every command except COMBO and SCRIPT).
+///
+/// Each surviving line becomes one [`WordPattern`]. See
+/// [`read_clan_list_file_lines`] for the file-format conventions.
+pub fn load_word_list_file(path: &Path) -> Result<Vec<WordPattern>, LoadWordListError> {
+    Ok(read_clan_list_file_lines(path)?
+        .into_iter()
+        .map(WordPattern::from)
+        .collect())
+}
+
+/// Load a CLAN-style COMBO search-expression file (`+s@FILE` /
+/// `-s@FILE` for COMBO only).
+///
+/// Each surviving line is returned verbatim — the caller parses
+/// it into a `SearchExpr` (the boolean-expression AST defined in
+/// `commands::combo`) before feeding the analysis runner. See
+/// [`read_clan_list_file_lines`] for the file-format conventions.
+pub fn load_search_expr_file(path: &Path) -> Result<Vec<String>, LoadWordListError> {
+    read_clan_list_file_lines(path)
+}
 
 /// Shared filtering criteria applied before utterances reach a command.
 ///
@@ -54,6 +127,14 @@ pub struct FilterConfig {
     /// runner is responsible for both passes because it owns the parsed
     /// `@ID` headers.
     pub id_filter: Option<super::IdFilter>,
+    /// Filter by participant role (CLAN: `+t#ROLE`).
+    ///
+    /// `FilterConfig::matches` does not consult this field directly;
+    /// the runner reads the speaker's `ParticipantRole` from the
+    /// `@ID:` header map and drops utterances whose role is not in
+    /// the include list. When `include` is empty, role filtering is
+    /// inactive.
+    pub roles: RoleFilter,
 }
 
 /// Inclusive 1-based utterance range within a file.
@@ -164,6 +245,24 @@ pub struct SpeakerFilter {
     pub exclude: Vec<SpeakerCode>,
 }
 
+/// Participant-role inclusion filter (CLAN: `+t#ROLE`).
+///
+/// When `include` is non-empty, only utterances from speakers whose
+/// `@ID:` role field matches one of the listed roles (case-
+/// insensitive) are processed. When `include` is empty, role
+/// filtering is inactive (every speaker passes).
+///
+/// Files with no `@ID:` headers cannot have role filtering applied
+/// — the runner processes them unchanged, matching CLAN's behaviour
+/// (no `@ID` data ⇒ no `+t#ROLE` match information).
+#[derive(Debug, Clone, Default)]
+pub struct RoleFilter {
+    /// Role names to include. Stored as raw user-supplied strings;
+    /// the matcher in `runner.rs` compares case-insensitively against
+    /// the speaker's `ParticipantRole` from `@ID:`.
+    pub include: Vec<String>,
+}
+
 /// Dependent tier inclusion/exclusion filter.
 ///
 /// Controls which dependent tiers are visible to commands.
@@ -181,12 +280,19 @@ pub struct TierFilter {
 /// When `include` is non-empty, only utterances containing at least
 /// one matching word are processed. When `exclude` is non-empty,
 /// utterances containing any matching word are skipped.
+///
+/// `case_sensitive` (CLAN `+k`) defaults to `false` — patterns and
+/// words are lower-cased before matching. When `true`, both sides
+/// keep their original casing and an exact-case match is required.
 #[derive(Debug, Clone, Default)]
 pub struct WordFilter {
     /// Word patterns to include (empty = include all)
     pub include: Vec<super::WordPattern>,
     /// Word patterns to exclude
     pub exclude: Vec<super::WordPattern>,
+    /// Case-sensitive matching (CLAN `+k`). Default `false` =
+    /// case-insensitive (lower-case both sides).
+    pub case_sensitive: bool,
 }
 
 /// Gem segment filter (CUTT: +g/-g).
@@ -261,19 +367,37 @@ impl WordFilter {
             return true;
         }
 
-        // Pre-lowercase include/exclude patterns for matching
-        let include_lower: Vec<String> = self.include.iter().map(|p| p.to_lowercase()).collect();
-        let exclude_lower: Vec<String> = self.exclude.iter().map(|p| p.to_lowercase()).collect();
+        // Normalize both sides identically. Case-insensitive (default,
+        // CLAN's behaviour without `+k`) lower-cases both pattern and
+        // word text; case-sensitive keeps the original casing on both
+        // sides. On the case-sensitive path we skip the per-pattern
+        // `to_lowercase` allocation by borrowing the originals.
+        let include_folded: Vec<Cow<'_, str>> = self
+            .include
+            .iter()
+            .map(|p| fold_case(p, self.case_sensitive))
+            .collect();
+        let exclude_folded: Vec<Cow<'_, str>> = self
+            .exclude
+            .iter()
+            .map(|p| fold_case(p, self.case_sensitive))
+            .collect();
 
-        // Collect lowercased word texts once for both checks
-        let word_texts: Vec<String> = countable_words_in_utterance(utterance)
-            .map(|w| w.cleaned_text().to_lowercase())
+        // The cleaned word text needs to outlive `word_texts`, so we
+        // collect the owned `cleaned_text().to_string()` first, then
+        // borrow from that vector.
+        let words_owned: Vec<String> = countable_words_in_utterance(utterance)
+            .map(|w| w.cleaned_text().to_string())
+            .collect();
+        let word_texts: Vec<Cow<'_, str>> = words_owned
+            .iter()
+            .map(|s| fold_case(s.as_str(), self.case_sensitive))
             .collect();
 
         // If include patterns specified, at least one word must match
-        if !include_lower.is_empty() {
+        if !include_folded.is_empty() {
             let has_match = word_texts.iter().any(|text| {
-                include_lower
+                include_folded
                     .iter()
                     .any(|pattern| word_pattern_matches(text, pattern))
             });
@@ -283,9 +407,9 @@ impl WordFilter {
         }
 
         // If exclude patterns specified, no word may match
-        if !exclude_lower.is_empty() {
+        if !exclude_folded.is_empty() {
             let has_excluded = word_texts.iter().any(|text| {
-                exclude_lower
+                exclude_folded
                     .iter()
                     .any(|pattern| word_pattern_matches(text, pattern))
             });
@@ -295,6 +419,19 @@ impl WordFilter {
         }
 
         true
+    }
+}
+
+/// Apply CLAN's `+k` case-sensitivity rule to a pattern or word.
+///
+/// `case_sensitive = true` returns the input borrowed (matching CLAN's
+/// behaviour with `+k`). `case_sensitive = false` returns a lower-
+/// cased copy.
+fn fold_case(s: &str, case_sensitive: bool) -> Cow<'_, str> {
+    if case_sensitive {
+        Cow::Borrowed(s)
+    } else {
+        Cow::Owned(s.to_lowercase())
     }
 }
 
@@ -437,6 +574,7 @@ mod tests {
         let filter = WordFilter {
             include: vec![WordPattern::from("hello")],
             exclude: vec![],
+            ..WordFilter::default()
         };
         let matching = make_test_utterance(&["hello", "world"]);
         assert!(filter.matches(&matching));
@@ -451,9 +589,26 @@ mod tests {
         let filter = WordFilter {
             include: vec![WordPattern::from("Hello")],
             exclude: vec![],
+            ..WordFilter::default()
         };
         let utterance = make_test_utterance(&["hello", "world"]);
         assert!(filter.matches(&utterance));
+    }
+
+    /// CLAN's `+k` flag flips matching to case-sensitive — a
+    /// lower-case word should NOT match a capitalised pattern.
+    #[test]
+    fn word_filter_case_sensitive_pattern_does_not_match_other_case() {
+        let filter = WordFilter {
+            include: vec![WordPattern::from("Hello")],
+            exclude: vec![],
+            case_sensitive: true,
+        };
+        let lower = make_test_utterance(&["hello", "world"]);
+        assert!(!filter.matches(&lower));
+
+        let mixed = make_test_utterance(&["Hello", "world"]);
+        assert!(filter.matches(&mixed));
     }
 
     /// Word includes use exact match semantics (CLAN parity).
@@ -462,6 +617,7 @@ mod tests {
         let filter = WordFilter {
             include: vec![WordPattern::from("hello")],
             exclude: vec![],
+            ..WordFilter::default()
         };
         let utterance = make_test_utterance(&["hello", "world"]);
         assert!(filter.matches(&utterance));
@@ -470,6 +626,7 @@ mod tests {
         let filter_sub = WordFilter {
             include: vec![WordPattern::from("ell")],
             exclude: vec![],
+            ..WordFilter::default()
         };
         assert!(!filter_sub.matches(&utterance));
     }
@@ -480,6 +637,7 @@ mod tests {
         let filter = WordFilter {
             include: vec![WordPattern::from("hel*")],
             exclude: vec![],
+            ..WordFilter::default()
         };
         let utterance = make_test_utterance(&["hello", "world"]);
         assert!(filter.matches(&utterance));
@@ -491,6 +649,7 @@ mod tests {
         let filter = WordFilter {
             include: vec![],
             exclude: vec![WordPattern::from("world")],
+            ..WordFilter::default()
         };
         let blocked = make_test_utterance(&["hello", "world"]);
         assert!(!filter.matches(&blocked));
@@ -505,6 +664,7 @@ mod tests {
         let filter = WordFilter {
             include: vec![WordPattern::from("hello")],
             exclude: vec![WordPattern::from("world")],
+            ..WordFilter::default()
         };
         // Has include match but also has exclude match → blocked
         let blocked = make_test_utterance(&["hello", "world"]);
@@ -558,6 +718,64 @@ mod tests {
             "9-3".parse::<UtteranceRange>(),
             Err(ParseUtteranceRangeError::InvalidBounds { .. })
         ));
+    }
+
+    /// Reads one pattern per non-comment line; skips blanks,
+    /// `# `-comments, and `;%* `-annotation lines (CLAN's
+    /// `cutt.cpp::rdexclf` conventions).
+    #[test]
+    fn load_word_list_file_strips_comments_and_blanks() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::with_suffix(".cut").expect("tmp file");
+        file.write_all(
+            "\u{feff}# leading comment\n\
+             want\n\
+             \n\
+             cookie   \n\
+             ;%* annotation marker — skipped\n\
+             milk\t\n\
+             # another comment\n\
+             juice"
+                .as_bytes(),
+        )
+        .expect("write tmp word-list");
+        let patterns = super::load_word_list_file(file.path()).expect("load");
+        let texts: Vec<&str> = patterns.iter().map(|p| p.as_str()).collect();
+        assert_eq!(texts, vec!["want", "cookie", "milk", "juice"]);
+    }
+
+    /// Missing files surface as `LoadWordListError::Io` with the
+    /// original path attached — the CLI maps this to a CLAN-style
+    /// stderr message.
+    #[test]
+    fn load_word_list_file_missing_path_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bogus = dir.path().join("never.cut");
+        let err = super::load_word_list_file(&bogus).expect_err("should fail");
+        match err {
+            super::LoadWordListError::Io { path, .. } => assert_eq!(path, bogus),
+        }
+    }
+
+    /// COMBO's `+s@FILE` shares the file format but returns raw
+    /// expression lines (parsed downstream by `SearchExpr::parse`),
+    /// not `WordPattern`s.
+    #[test]
+    fn load_search_expr_file_keeps_expression_lines_intact() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::with_suffix(".cut").expect("tmp file");
+        file.write_all(
+            "\u{feff}# search expressions\n\
+             want+cookie\n\
+             \n\
+             milk,juice\n\
+             ;%* annotated boolean — skipped\n\
+             hello"
+                .as_bytes(),
+        )
+        .expect("write tmp search-list");
+        let exprs = super::load_search_expr_file(file.path()).expect("load");
+        assert_eq!(exprs, vec!["want+cookie", "milk,juice", "hello"]);
     }
 
     /// Build a minimal Utterance with the given words for filter testing.

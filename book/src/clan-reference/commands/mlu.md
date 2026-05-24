@@ -1,7 +1,7 @@
 # MLU -- Mean Length of Utterance
 
 **Status:** Current
-**Last updated:** 2026-05-22 08:32 EDT
+**Last updated:** 2026-05-23 15:20 EDT
 
 ## Purpose
 
@@ -64,11 +64,11 @@ Missing.)
 | `-bc` | Count characters, not morphemes | — | Missing | non-UNX only in CLAN; chatter has no analog. |
 | `+cS` | Clause-marker delimiter `S` | — | Missing | Used to break utterances into clauses for MLU calculation. |
 | `+c@F` | Clause-markers listed in file `F` | — | Missing | File-list workflow. |
-| `+gS` | Exclude utterances consisting solely of word `S` | partial via `--exclude-word` | Partial | chatter's `--exclude-word` drops the word from counting; CLAN's `+gS` drops the whole utterance if it is *just* `S`. Different semantics. |
-| `+g@F` | `+g` from file | — | Missing | |
+| `+gS` | Exclude utterances consisting solely of word `S` | `--exclude-solo-word S` | Done | Fixed 2026-05-22. CLAN's MLU `+gS` overload (vs the inherited gem-segment filter) is now routed via per-subcommand rewriter branch to a new clap field `--exclude-solo-word`. Drops utterances whose every countable word is in the list. Case-insensitive. |
+| `+g@F` | `+g` from file | `--exclude-solo-word-file` | Done | Landed 2026-05-23. Same idiom as COMBO/KWAL `+s@F` — rewriter intercepts `+g@F` before the per-word `+gS` arm, dispatch loads via `load_search_expr_file` and extends `--exclude-solo-word`. File format matches CLAN's `cutt.cpp::rdexclf`: one pattern per line, skip blank lines, `#`-comments, and `;%*`-annotation lines. Repeatable. Pinned by `mlu_solo_word_from_file`. |
 | `+o3` | Combine selected speakers per file | partial via `--per-file` inverse | Partial | chatter's aggregate-vs-per-file model is the inverse choice. |
 | `+t%mor` (implicit) | Switch to `%mor` tier (special handling) | (default) | Done | chatter reads `%mor` by default; `+t%mor` is a CLAN re-confirmation. |
-| `-t%mor` | Exclude `%mor` tier — implies `--words` semantics | — | Missing | CLAN's escape hatch when `%mor` is present but should be ignored. |
+| `-t%mor` | Exclude `%mor` tier — implies `--words` semantics | `--words` | Done | Landed 2026-05-23. Rewriter special-cases `-t%mor` under MLU/MLT to emit `--words` instead of the generic `--exclude-tier mor` (which MLU/MLT's clap doesn't accept). Pinned by `mlu_exclude_mor_tier_maps_to_words`, `mlt_exclude_mor_tier_maps_to_words`, and the fall-through `mlu_exclude_non_mor_tier_falls_through` (which confirms `-t%pho` and other non-`%mor` values still route to the generic `--exclude-tier`). |
 
 ### General `+`-flags MLU inherits (from `cutt.cpp::mainusage`)
 
@@ -77,9 +77,9 @@ Missing.)
 | `+t*X` / `-t*X` | Include/exclude speaker | `--speaker` / `--exclude-speaker` | Done | `+tX` (no `*`) also accepted post-2026-05-21 fix. |
 | `+t%X` / `-t%X` | Include/exclude dependent tier `%X` | `--tier` / `--exclude-tier` (rewriter target) | Rewriter only | No clap field on MLU; only `+t%mor` is handled implicitly by the default-mor logic. Other `%X` errors at parse time. |
 | `+t@ID="..."` | Filter by @ID pattern | `--id-filter` | Done | Banner mapping deferred (PLAN §1.6). |
-| `+t#ROLE` | Filter by role | — | Missing | |
+| `+t#ROLE` | Filter by role | `--role` | Done | Fixed 2026-05-22; see [FREQ](./freq.md) for the shared implementation. |
 | `+s"word"` / `-s"word"` | Include/exclude word in counting | `--include-word` / `--exclude-word` | Partial | MLU's `+s` has command-specific scope (postcode/bracket forms); chatter's word filter is the simple form only. |
-| `+s@F` | Search words from file | — | Missing | |
+| `+s@F` / `-s@F` | Search / exclude words from file | `--include-word-file` / `--exclude-word-file` | Done | Landed 2026-05-22. File format: one pattern per line; blank lines, `# `-comments, and `;%* `-annotation lines skipped. Repeatable. |
 | `+gX` | (in MLU: utterance-elision, see above) | `--gem` (banner default) | Partial | `+g` collides between MLU's elision semantic and the general gem filter. CLAN's MLU `+g` is the *elision* meaning per `getflag`; `--gem` is the general filter (semantics differ). Confusing in CLAN itself. |
 | `+zN-M` | Utterance range | `--range` | Done | |
 | `+rN` | Various retrace / clitic / prosodic-symbol / replacement controls | `--include-retracings` (handles `+r6` only) | Partial | |
@@ -101,10 +101,10 @@ below for the per-N table. All `+d` and `+d1` invocations are
 
 | Bucket | Count |
 |---|---|
-| Done (byte-parity or in scope) | 7 |
+| Done (byte-parity or in scope) | 10 |
 | Partial (chatter abstraction differs) | 5 |
 | Rewriter only (would error at parse time) | 5 |
-| Missing (no rewriter, no clap field) | 8 |
+| Missing (no rewriter, no clap field) | 5 |
 
 The `+g` overload is the most subtle issue: MLU's command-specific
 `+g` means "exclude an utterance if it consists solely of the given

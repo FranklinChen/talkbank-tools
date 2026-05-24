@@ -1,7 +1,7 @@
 # FREQ -- Word Frequency
 
 **Status:** Current
-**Last updated:** 2026-05-21 23:46 EDT
+**Last updated:** 2026-05-23 15:35 EDT
 
 ## Purpose
 
@@ -21,12 +21,15 @@ chatter clan freq --mor file.cha
 chatter clan freq --include-word "the" file.cha
 ```
 
-> **`+k` / `--case-sensitive` is currently non-functional.** The
-> legacy `+k` flag rewrites to `--case-sensitive` (see
-> `crates/talkbank-clan/src/clan_args.rs:104`), but no `clap` field
-> consumes that token in the current `Freq`/`CommonAnalysisArgs`
-> structs, so passing it produces a parse error. Word matching is
-> case-insensitive today.
+> **`+k` / `--case-sensitive` is wired as of 2026-05-22 (pattern
+> matching) + 2026-05-23 (frequency-table keying).** Without the
+> flag, word matching is case-insensitive (CLAN's default and
+> chatter's default). With `+k` (or `--case-sensitive`):
+> - `+s`/`--include-word` patterns and the searched words skip
+>   lower-casing, so an exact-case match is required;
+> - the frequency-table key preserves original case, so `Want`,
+>   `want`, and `WANT` produce three separate entries (each with
+>   count 1) instead of collapsing to one.
 
 ## Options (chatter-native)
 
@@ -40,7 +43,7 @@ chatter clan freq --include-word "the" file.cha
 | `--range <START-END>` | `+z25-125` | Utterance range |
 | `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
 | `--include-retracings` | `+r6` | Include retraced words in counting |
-| ~~`--case-sensitive`~~ | ~~`+k`~~ | **Currently non-functional** — see callout above |
+| `--case-sensitive` | `+k` | Match `+s` / `--include-word` patterns case-sensitively (default: case-insensitive) |
 | `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
 | `--mor` | -- | Count morphemes from `%mor` tier instead of words from main tier |
 
@@ -75,8 +78,8 @@ chatter's coverage. Sources:
 |---|---|---|---|---|
 | `+a` | Compute standard / dialectal / actual forms | — | Missing | No chatter analog. |
 | `+bN` | Frame size for MATTR (Moving-Average TTR) | — | Missing | Sliding-window TTR is unimplemented. |
-| `+c` / `+c0` | Find capitalised words only | — | Missing | |
-| `+c1` | Find words with upper-case letters in the middle | — | Missing | |
+| `+c` / `+c0` | Find capitalised words only | `--capitalization initial` | Done | Landed 2026-05-22. Skips any countable word whose first character is not uppercase before frequency accumulation. Both `+c` and `+c0` are accepted as aliases (CLAN treats them identically); subcommand-guarded so MAXWD/CHECK/IPSYN/DSS keep their existing `+cN` meaning. Shares the `CapitalizationFilter` enum with VOCD. |
+| `+c1` | Find words with upper-case letters in the middle | `--capitalization mid` | Done | Landed 2026-05-22. Keeps only words whose surface form contains an uppercase letter AFTER position 0 (e.g. `McDonald`, `iPhone`). Initial-capital words like `Cookie` are dropped. Shares the `CapitalizationFilter::MidUpper` predicate with VOCD. |
 | `+c2` | Match every string `+s` specifies (not just first) | — | Missing | Multi-word search variant. |
 | `+c3` | Match multi-word groups in any order on a tier | — | Missing | |
 | `+c4` | Match only if tier is *solely* the multi-word group | — | Missing | |
@@ -84,16 +87,16 @@ chatter's coverage. Sources:
 | `+c6` | Count only repeat segments | — | Missing | Repeat-marker `↫` workflow. |
 | `+c7` | For multi-word searches output actual words matched | — | Missing | |
 | `+o` / `+o0` | Sort by descending frequency | (default) | Done | chatter's default sort already matches. |
-| `+o1` | Sort by reverse concordance | — | Missing | |
+| `+o1` | Sort by reverse concordance | `--reverse-concordance` | Done | Landed 2026-05-23. Replaces the default frequency-descending sort with a sort by the reversed character sequence of each word — groups words sharing a suffix. Pinned by `freq_reverse_concordance_groups_by_suffix` (with `cat`/`bat`/`dog`/`log` input, the sorted result reflects reversed-string comparison) and `freq_default_sort_is_alphabetical_when_freqs_equal` (regression companion). End-to-end smoke: `cat bat dog log apple maple` with `+o1` clusters maple/apple, dog/log, bat/cat. `+o2` (reverse concordance + non-CHAT output) is a separate Missing item. |
 | `+o2` | Sort by reverse concordance of first word, preserve full line | — | Missing | Non-CHAT output. |
 | `+o3` | Combine selected speakers per file into one list | partial via `--per-file` inverse | Partial | chatter's aggregate-vs-per-file model is the inverse choice; not byte-identical. |
 | `+d` | All selected words + freq + line numbers | — | Rewriter only | `+dN` rewrites to `--display-mode N`, no consuming field. See "Display Modes" §. |
 | `+d0` | Concordance with frequencies and line text | — | Rewriter only | |
-| `+d1` | One word per line, no frequencies | — | Rewriter only | |
-| `+d2` | Spreadsheet output (Excel-ready) | — | Rewriter only | `--format csv` is closest analog. |
+| `+d1` | One word per line, no frequencies | `--word-list-only` | Done | Rewriter maps bare `+d1`. Emits an alphabetized deduped word list merged across all speakers, suitable as `kwal +s@FILE` input. |
+| `+d2` | Spreadsheet output (Excel-ready) | `--format csv` | Done | Rewriter maps bare `+d2`; existing `render_csv` path already produces the per-speaker per-word CSV. `+d20` (per-speaker+word row variant) is a separate Rewriter-only item. |
 | `+d20` | Spreadsheet with one row per speaker+word | — | Rewriter only | |
-| `+d3` | Spreadsheet, types/tokens/TTR only | — | Rewriter only | |
-| `+d4` | Type/token info only | — | Rewriter only | |
+| `+d3` | Spreadsheet, types/tokens/TTR only | `--types-tokens-only --format csv` | Done | Rewriter emits both flags together: shares the `types_tokens_only` mode with `+d4`, then routes through `render_csv` instead of `render_clan`. |
+| `+d4` | Type/token info only | `--types-tokens-only` | Done | Rewriter maps bare `+d4`. Per-speaker banner + separator + totals + TTR note all kept; per-word frequency lines dropped. `+d3` (same content, CSV/spreadsheet form) is a separate item. |
 | `+d5` | Output `+s` words including those with 0 freq | — | Rewriter only | |
 | `+d6` | Limited search-word surrounding context | — | Rewriter only | |
 | `+d7` | Frequencies linked between dependent tier and speaker | — | Rewriter only | |
@@ -109,10 +112,10 @@ chatter's coverage. Sources:
 | `+t%X` | Include dependent tier `%X` | `--tier X` (rewriter target) | Rewriter only | No `--tier` field on `CommonAnalysisArgs`; tier scope is per-command via `clan_scope_mode()`. |
 | `-t%X` | Exclude dependent tier `%X` | `--exclude-tier X` (rewriter target) | Rewriter only | |
 | `+t@ID="..."` | Filter by @ID pattern | `--id-filter` | Done | Banner mapping deferred (see PLAN §1.6). |
-| `+t#ROLE` | Filter by role | — | Missing | No chatter analog yet. |
+| `+t#ROLE` | Filter by role | `--role` | Done | Fixed 2026-05-22. Rewriter routes `+t#ROLE` → `--role ROLE`; the per-utterance filter checks the speaker's `@ID:` role field case-insensitively; banner-scope renders `ONLY speaker main tiers with role(s): ROLE;`. |
 | `+s"word"` / `+sword` | Search for word | `--include-word` | Done | |
 | `-s"word"` / `-sword` | Exclude word | `--exclude-word` | Done | |
-| `+s@F` | Search words listed in file F | — | Missing | File-list workflow. |
+| `+s@F` / `-s@F` | Search / exclude words listed in file F | `--include-word-file` / `--exclude-word-file` | Done | Landed 2026-05-22. Universal across non-SCRIPT, non-COMBO commands. File format matches CLAN's `cutt.cpp::rdexclf`: one pattern per line; blank lines, `# `-comments, and `;%* `-annotation lines skipped; UTF-8 BOM stripped. Repeatable. |
 | `+gX` | Include gem labelled X | `--gem` | Done | |
 | `-gX` | Exclude gem labelled X | `--exclude-gem` | Done | |
 | `+rN` (N=1..8) | Various retrace / clitic / prosodic-symbol / replacement controls | `--include-retracings` (handles `+r6` only) | Partial | Only `+r6` ↔ `--include-retracings` is wired; `+r1`..`+r5`, `+r50`, `+r7`, `+r8` are missing. |
@@ -123,7 +126,7 @@ chatter's coverage. Sources:
 | `+re` | Recurse subdirectories | (default for directory args) | Done | chatter's path argument accepts a directory and recurses. |
 | `+oS` / `-oS` | Include / exclude extra output tier `S` | — | Missing | |
 | `+x` | Exclude utterances by content | — | Missing | `+x=0w`, `+x>0w`, `+xword` shapes. |
-| `+k` | Case-sensitive matching | `--case-sensitive` (rewriter target) | Rewriter only | See callout near top of this page. |
+| `+k` | Case-sensitive matching | `--case-sensitive` | Done | Two-layer fix. Pattern matching layer (`WordFilter::case_sensitive`) landed 2026-05-22 — `--include-word`/`--exclude-word` patterns skip the default `.to_lowercase()` on both sides. Frequency-table KEYING layer landed 2026-05-23 — `process_utterance` skips `NormalizedWord::from_word`'s lowercasing on the map key (main-tier and `%mor` branches), so `Want`/`want`/`WANT` become three distinct entries instead of collapsing to one. Pinned by `freq_case_sensitive_preserves_case_in_keys` and `freq_default_collapses_case_variants`. |
 | `+wN` / `-wN` | Context window around matched word | `--context-window` (rewriter target, KWAL-style) | Rewriter only | Not on FREQ's clap surface. |
 | `+y` | (CLAN: include all utterances including non-tier) | — | Missing | |
 
@@ -131,10 +134,10 @@ chatter's coverage. Sources:
 
 | Bucket | Count |
 |---|---|
-| Done (byte-parity or in scope) | 9 |
+| Done (byte-parity or in scope) | 17 |
 | Partial (chatter abstraction differs) | 2 |
-| Rewriter only (would error at parse time) | 17 |
-| Missing (no rewriter, no clap field) | 18 |
+| Rewriter only (would error at parse time) | 13 |
+| Missing (no rewriter, no clap field) | 14 |
 
 The 17 "Rewriter only" entries are the single biggest correctness
 hazard today: a user pasting CLAN-style `freq +d2 file.cha` gets

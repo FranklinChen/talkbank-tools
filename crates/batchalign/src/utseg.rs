@@ -128,6 +128,13 @@ pub async fn process_utseg(
 }
 
 /// Infer utterance-boundary assignments for pretokenized word batches.
+///
+/// Per-item engine/network/model failures collapse into a single typed
+/// ``ServerError::Validation`` carrying the rendered list of failing
+/// items (via ``TextWorkflowFileError::item_errors``). Callers that
+/// only need a flat success-or-fail signal can rely on this; callers
+/// that need per-item attribution (the cross-file pipeline driver)
+/// call ``infer_batch`` directly.
 pub async fn infer_utseg_assignments(
     pool: &WorkerPool,
     lang: &LanguageCode3,
@@ -135,7 +142,9 @@ pub async fn infer_utseg_assignments(
     allow_stanza_fallback: bool,
 ) -> Result<Vec<UtsegResponse>, ServerError> {
     let indexed_items: Vec<(usize, UtsegBatchItem)> = items.iter().cloned().enumerate().collect();
-    infer_batch(pool, &indexed_items, lang, allow_stanza_fallback).await
+    let item_results = infer_batch(pool, &indexed_items, lang, allow_stanza_fallback).await?;
+    crate::text_batch::unwrap_per_item_results("utseg", item_results)
+        .map_err(|err| ServerError::Validation(err.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +264,7 @@ async fn infer_batch(
     items: &[(usize, UtsegBatchItem)],
     lang: &LanguageCode3,
     allow_stanza_fallback: bool,
-) -> Result<Vec<UtsegResponse>, ServerError> {
+) -> Result<Vec<Result<UtsegResponse, String>>, ServerError> {
     let payload_items: Vec<_> = items.iter().map(|(_, item)| item.clone()).collect();
     let artifacts = PreparedArtifactRuntimeV2::new("utseg_v2").map_err(|error| {
         ServerError::Validation(format!(
@@ -294,34 +303,31 @@ async fn infer_batch(
     let mut utseg_responses = Vec::with_capacity(result.items.len());
     for (i, item_result) in result.items.iter().enumerate() {
         if let Some(error) = &item_result.error {
-            warn!(item = i, error = %error, "Infer error for item (using empty response)");
-            utseg_responses.push(UtsegResponse {
-                assignments: Vec::new(),
-            });
+            utseg_responses.push(Err(error.clone()));
             continue;
         }
 
         if let Some(assignments) = &item_result.assignments {
-            utseg_responses.push(UtsegResponse {
+            utseg_responses.push(Ok(UtsegResponse {
                 assignments: assignments.clone(),
-            });
+            }));
             continue;
         }
 
         if let Some(trees) = &item_result.trees {
             let num_words = items[i].1.words.len();
             let assignments = utseg_compute::compute_assignments(trees, num_words);
-            utseg_responses.push(UtsegResponse { assignments });
+            utseg_responses.push(Ok(UtsegResponse { assignments }));
             continue;
         }
 
-        warn!(
-            item = i,
-            "Utseg V2 returned no assignments, no trees, and no error (using empty response)"
-        );
-        utseg_responses.push(UtsegResponse {
-            assignments: Vec::new(),
-        });
+        // Protocol violation — worker returned neither error nor any
+        // assignment payload. Treat as a per-item failure so the
+        // affected file fails rather than silently producing empty
+        // utseg assignments.
+        utseg_responses.push(Err(
+            "utseg V2 returned no assignments, no trees, and no error".to_owned(),
+        ));
     }
 
     Ok(utseg_responses)

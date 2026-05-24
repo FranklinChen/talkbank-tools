@@ -104,6 +104,42 @@ pub struct AnalysisOptionsPayload {
     /// Whether `uniq` should sort by frequency.
     #[serde(rename = "sortByFrequency")]
     pub sort_by_frequency: bool,
+    /// Words that — when an utterance consists solely of them —
+    /// cause the utterance to be excluded from `mlu` / `mlt`
+    /// counts. Maps CLAN's command-specific `+gS` overload for
+    /// those subcommands; distinct from the inherited `--gem`
+    /// gem-segment filter.
+    #[serde(default, rename = "soloWordExclusions")]
+    pub solo_word_exclusions: Vec<String>,
+    /// COMBO exclude-search expressions (CLAN: `-sS` for combo).
+    /// Utterances matching any of these compound expressions are
+    /// dropped from COMBO output. Default empty.
+    #[serde(default, rename = "excludeSearch")]
+    pub exclude_search: Vec<String>,
+    /// DIST `+g`: count each word at most once per turn.
+    #[serde(default, rename = "oncePerTurn")]
+    pub once_per_turn: bool,
+    /// FREQ / VOCD `+c` / `+c0` / `+c1` capitalization predicate.
+    /// Serialized as the same kebab-case strings the CLI accepts:
+    /// `"initial"` (CLAN `+c`/`+c0`) or `"mid"` (CLAN `+c1`).
+    #[serde(default, rename = "capitalization")]
+    pub capitalization: Option<String>,
+    /// COMBO `+g3`: only report the first matching expression per
+    /// utterance.
+    #[serde(default, rename = "firstMatchOnly")]
+    pub first_match_only: bool,
+    /// COMBO `+g7`: deduplicate repeated word matches within an
+    /// utterance.
+    #[serde(default, rename = "dedupeMatches")]
+    pub dedupe_matches: bool,
+    /// KWAL `+b`: keyword must be the only countable word on the
+    /// tier (single-word utterance match).
+    #[serde(default, rename = "strictMatch")]
+    pub strict_match: bool,
+    /// MAXWD `+xN` (repeatable): drop words of length N from
+    /// the output.
+    #[serde(default, rename = "excludeLengths")]
+    pub exclude_lengths: Vec<usize>,
 }
 
 /// Canonical object payload for `talkbank/analyze`.

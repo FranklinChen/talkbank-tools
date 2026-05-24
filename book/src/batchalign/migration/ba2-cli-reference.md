@@ -1,7 +1,7 @@
 # Batchalign2 CLI Reference (Baseline)
 
 **Status:** Reference
-**Last updated:** 2026-05-05 13:54 EDT
+**Last updated:** 2026-05-23 09:20 EDT
 
 This document captures the CLI surface of Batchalign2 across **two baselines**:
 
@@ -125,8 +125,32 @@ Translation to English.
 | Flag | Type | Default | Help | BA3 Status |
 |------|------|---------|------|------------|
 | `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
+| `--translate-engine google\|seamless` | enum | `google` | Pick translation engine | BA3-only |
 
 **Pipeline task:** `"translate"`.
+
+**BA2 engine selection.** BA2 had no `--translate-engine` flag.
+Operators picked Seamless by editing `~/.batchalign.ini`:
+
+```ini
+[translate]
+engine = seamless_translate
+```
+
+The `[translate] engine` entry was read by
+`pipelines/dispatch.py:resolve_engine_specs` and silently became the
+engine for every subsequent BA2 invocation on that host until the
+file was edited again — exactly the per-host hidden-state pattern
+that the BA3 design rejects.
+
+**BA3 replacement.** BA3 surfaces the same capability as an explicit
+CLI flag (`--translate-engine google|seamless`) plus the shared
+`--engine-overrides '{"translate":"<engine>"}'` global flag. Default
+remains Google for fleet-wide behavior parity. Hosts where Google is
+unreachable (mainland-China sites behind the GFW) pass
+`--translate-engine seamless` per invocation. BA3 deliberately does
+not honor the BA2 `[translate] engine` config key — engine choice is
+a policy decision that lives at the command line.
 
 ### `coref` (hidden)
 

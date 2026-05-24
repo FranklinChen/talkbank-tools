@@ -575,6 +575,7 @@ mod tests {
         let overrides = EngineOverrides {
             asr: Some(AsrEngineName::HkTencent),
             fa: None,
+            translate: None,
         };
         let common = CommonOptions {
             override_media_cache: true,

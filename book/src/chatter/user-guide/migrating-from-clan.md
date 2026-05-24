@@ -1,7 +1,7 @@
 # Migrating from CLAN to `talkbank-tools`
 
 **Status:** Current
-**Last updated:** 2026-05-11 16:38 EDT
+**Last updated:** 2026-05-23 18:52 EDT
 
 This page is for two audiences:
 
@@ -40,8 +40,8 @@ The table below is the complete list of legacy flags the rewriter currently hand
 | `-glabel` | `--exclude-gem label` | Skip a named gem |
 | `+z25-125` | `--range 25-125` | Utterance index range |
 | `+r6` | `--include-retracings` | Include retraced material (MLU, FREQ) |
-| ~~`+dN`~~ | ~~`--display-mode N`~~ | Numeric display mode — **currently non-functional**: the rewriter at `crates/talkbank-clan/src/clan_args.rs:101` produces `--display-mode`, but no `clap` field consumes it. Per-command N tables are CLAN-historical and need source-grounded specs before the flag can be honoured; tracked in `docs/superpowers/plans/2026-05-11-clan-rewriter-honor-three-flags.md` Phase 3. |
-| ~~`+k`~~ | ~~`--case-sensitive`~~ | Case-sensitive matching — **currently non-functional**: the rewriter at `crates/talkbank-clan/src/clan_args.rs:104` produces `--case-sensitive`, but no `clap` field consumes it, so the flag fails parsing. Word matching is case-insensitive today. |
+| `+dN` | `--display-mode N` *(generic)* / per-command typed flag | Display mode — **partially landed.** Each `+dN` value is rewritten command-by-command. FREQ `+d1`/`+d2`/`+d3`/`+d4`, COOCCUR `+d`, FREQPOS `+d` have specific typed flags; remaining `+dN` values still fall through to the placeholder `--display-mode N` (which clap does not consume yet). Per-command status tables: see each command page under `clan-reference/commands/`. The generic Phase 3 placeholder is tracked in `docs/superpowers/plans/2026-05-11-clan-rewriter-honor-three-flags.md`. |
+| `+k` | `--case-sensitive` | Case-sensitive matching — **fully landed** across the search/frequency family (FREQ, KWAL, VOCD, COMBO, FREQPOS, DIST, MAXWD). Each command honours `--case-sensitive` according to its data shape: FREQ via pattern matching (`WordFilter`) plus frequency-table keying; KWAL via keyword and word comparison both verbatim; VOCD via the pattern-matching layer plus the D-statistic token stream skipping its default `to_lowercase`; COMBO via `SearchExpr::parse_with_case` preserving case in the stored terms and the word stream populating via `cleaned_text()`; FREQPOS / DIST / MAXWD via case-preserving key derivation in `process_utterance` (MAXWD's unique-length and exclude-length filters then count case variants as distinct words). Per-command status: see each command page. Other commands (MLU/MLT/WDLEN/WDSIZE/CHAINS/CODES) inherit `+k` from `cutt.cpp::mainusage` but it's a semantic no-op since they don't word-match. |
 | ~~`+fEXT`~~ | ~~`--output-ext EXT`~~ | Output file extension — **currently non-functional**: the rewriter at `crates/talkbank-clan/src/clan_args.rs:107` produces `--output-ext`, but no `clap` field consumes it. Phase 2 of the rewriter-honor plan adds the clap field with `conflicts_with -o`. |
 | `+wN` | `--context-after N` | KWAL trailing-context lines |
 | `-wN` | `--context-before N` | KWAL leading-context lines |

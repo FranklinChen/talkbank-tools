@@ -1,7 +1,7 @@
 # MORTABLE -- Morphological Category Cross-Tabulation
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:09 EDT
+**Last updated:** 2026-05-22 09:49 EDT
 
 ## Purpose
 
@@ -30,13 +30,39 @@ chatter clan mortable --script eng.cut file.cha
 chatter clan mortable --script eng.cut --speaker CHI file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
-| Option | Description |
-|--------|-------------|
-| `--speaker <CODE>` | Include speaker |
-| `--script <PATH>` | Language script file (.cut) -- required |
-| `--format <FMT>` | Output format: text, json, csv, clan |
+| Option | CLAN flag | Description |
+|--------|-----------|-------------|
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--script <PATH>` | `+lF` | Language script file (.cut) — required |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+MORTABLE is a **required-flag refusal** command in chatter — emits
+the exact CLAN refusal when `+lF` (or `--script F`) is absent.
+
+### MORTABLE-specific `+`-flags (from `mortable.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+lF` | Specify language script file `F` (required) | `--script <PATH>` | Done | Direct mapping; rewriter routes `+lF` → `--script F` for MORTABLE (since the per-subcommand routing batch). |
+| `+o3` | Combine selected speakers per file | partial via `--per-file` inverse | Partial | |
+| `+o4` | Output raw values instead of percentage values | — | Rewriter only | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 6 |
+| Partial | 1 |
+| Rewriter only | 4 |
+| Missing | 4 |
 
 ## Differences from CLAN
 

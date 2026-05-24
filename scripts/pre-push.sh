@@ -30,6 +30,15 @@ make generated-check
 echo "==> pre-push: fuzz workspace isolation"
 make fuzz-check
 
+# Mirrors the "TalkBank Toolchain mdBook" CI workflow. mdbook's
+# linkcheck2 backend exhaustively verifies every relative link
+# against SUMMARY.md — catching SUMMARY-unreachable targets like
+# the 2026-05-22 batchalign/introduction.md regression that broke
+# CI after a 68-commit squash push. Requires mdbook + mdbook-
+# linkcheck + mdbook-mermaid on PATH (make book-check enforces).
+echo "==> pre-push: mdBook build + linkcheck"
+make book-check
+
 if [[ "${TALKBANK_PRE_PUSH_CLIPPY:-0}" == "1" ]]; then
   echo "==> pre-push: affected clippy"
   cargo run -q -p xtask -- affected-rust clippy

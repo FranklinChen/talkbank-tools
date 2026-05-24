@@ -72,21 +72,21 @@ impl AnalysisService {
         match request {
             AnalysisRequest::Freq(config) => self.run_json(&FreqCommand::new(config), files),
             AnalysisRequest::Mlu(config) => self.run_json(&MluCommand::new(config), files),
-            AnalysisRequest::Mlt => self.run_json(&MltCommand, files),
+            AnalysisRequest::Mlt(config) => self.run_json(&MltCommand::new(config), files),
             AnalysisRequest::Wdlen => self.run_json(&WdlenCommand, files),
             AnalysisRequest::Wdsize(config) => self.run_json(&WdsizeCommand::new(config), files),
             AnalysisRequest::Maxwd(config) => self.run_json(&MaxwdCommand::new(config), files),
-            AnalysisRequest::Freqpos => self.run_json(&FreqposCommand, files),
+            AnalysisRequest::Freqpos(config) => self.run_json(&FreqposCommand::new(config), files),
             AnalysisRequest::Timedur => self.run_json(&TimedurCommand, files),
             AnalysisRequest::Kwal(config) => self.run_json(&KwalCommand::new(config), files),
             AnalysisRequest::Gemlist => self.run_json(&GemlistCommand, files),
             AnalysisRequest::Combo(config) => self.run_json(&ComboCommand::new(config), files),
-            AnalysisRequest::Cooccur => self.run_json(&CooccurCommand, files),
-            AnalysisRequest::Dist => self.run_json(&DistCommand, files),
+            AnalysisRequest::Cooccur(config) => self.run_json(&CooccurCommand::new(config), files),
+            AnalysisRequest::Dist(config) => self.run_json(&DistCommand::new(config), files),
             AnalysisRequest::Chip => self.run_json(&ChipCommand, files),
             AnalysisRequest::Phonfreq => self.run_json(&PhonfreqCommand, files),
             AnalysisRequest::Modrep => self.run_json(&ModrepCommand, files),
-            AnalysisRequest::Vocd => self.run_json(&VocdCommand::default(), files),
+            AnalysisRequest::Vocd(config) => self.run_json(&VocdCommand::new(config), files),
             AnalysisRequest::Codes(config) => self.run_json(&CodesCommand::new(config), files),
             AnalysisRequest::Chains(config) => self.run_json(&ChainsCommand::new(config), files),
             AnalysisRequest::Complexity => self.run_json(&ComplexityCommand, files),
@@ -153,7 +153,9 @@ impl AnalysisService {
             AnalysisRequest::Mlu(config) => {
                 self.run_rendered(&MluCommand::new(config), files, format)
             }
-            AnalysisRequest::Mlt => self.run_rendered(&MltCommand, files, format),
+            AnalysisRequest::Mlt(config) => {
+                self.run_rendered(&MltCommand::new(config), files, format)
+            }
             AnalysisRequest::Wdlen => self.run_rendered(&WdlenCommand, files, format),
             AnalysisRequest::Wdsize(config) => {
                 self.run_rendered(&WdsizeCommand::new(config), files, format)
@@ -161,7 +163,9 @@ impl AnalysisService {
             AnalysisRequest::Maxwd(config) => {
                 self.run_rendered(&MaxwdCommand::new(config), files, format)
             }
-            AnalysisRequest::Freqpos => self.run_rendered(&FreqposCommand, files, format),
+            AnalysisRequest::Freqpos(config) => {
+                self.run_rendered(&FreqposCommand::new(config), files, format)
+            }
             AnalysisRequest::Timedur => self.run_rendered(&TimedurCommand, files, format),
             AnalysisRequest::Kwal(config) => {
                 self.run_rendered(&KwalCommand::new(config), files, format)
@@ -170,12 +174,18 @@ impl AnalysisService {
             AnalysisRequest::Combo(config) => {
                 self.run_rendered(&ComboCommand::new(config), files, format)
             }
-            AnalysisRequest::Cooccur => self.run_rendered(&CooccurCommand, files, format),
-            AnalysisRequest::Dist => self.run_rendered(&DistCommand, files, format),
+            AnalysisRequest::Cooccur(config) => {
+                self.run_rendered(&CooccurCommand::new(config), files, format)
+            }
+            AnalysisRequest::Dist(config) => {
+                self.run_rendered(&DistCommand::new(config), files, format)
+            }
             AnalysisRequest::Chip => self.run_rendered(&ChipCommand, files, format),
             AnalysisRequest::Phonfreq => self.run_rendered(&PhonfreqCommand, files, format),
             AnalysisRequest::Modrep => self.run_rendered(&ModrepCommand, files, format),
-            AnalysisRequest::Vocd => self.run_rendered(&VocdCommand::default(), files, format),
+            AnalysisRequest::Vocd(config) => {
+                self.run_rendered(&VocdCommand::new(config), files, format)
+            }
             AnalysisRequest::Codes(config) => {
                 self.run_rendered(&CodesCommand::new(config), files, format)
             }
@@ -257,7 +267,9 @@ impl AnalysisService {
             AnalysisRequest::Mlu(config) => {
                 self.run_rendered_per_file(&MluCommand::new(config), files, format)
             }
-            AnalysisRequest::Mlt => self.run_rendered_per_file(&MltCommand, files, format),
+            AnalysisRequest::Mlt(config) => {
+                self.run_rendered_per_file(&MltCommand::new(config), files, format)
+            }
             AnalysisRequest::Wdlen => self.run_rendered_per_file(&WdlenCommand, files, format),
             AnalysisRequest::Wdsize(config) => {
                 self.run_rendered_per_file(&WdsizeCommand::new(config), files, format)
@@ -265,7 +277,9 @@ impl AnalysisService {
             AnalysisRequest::Maxwd(config) => {
                 self.run_rendered_per_file(&MaxwdCommand::new(config), files, format)
             }
-            AnalysisRequest::Freqpos => self.run_rendered_per_file(&FreqposCommand, files, format),
+            AnalysisRequest::Freqpos(config) => {
+                self.run_rendered_per_file(&FreqposCommand::new(config), files, format)
+            }
             AnalysisRequest::Timedur => self.run_rendered_per_file(&TimedurCommand, files, format),
             AnalysisRequest::Kwal(config) => {
                 self.run_rendered_per_file(&KwalCommand::new(config), files, format)
@@ -274,15 +288,19 @@ impl AnalysisService {
             AnalysisRequest::Combo(config) => {
                 self.run_rendered_per_file(&ComboCommand::new(config), files, format)
             }
-            AnalysisRequest::Cooccur => self.run_rendered_per_file(&CooccurCommand, files, format),
-            AnalysisRequest::Dist => self.run_rendered_per_file(&DistCommand, files, format),
+            AnalysisRequest::Cooccur(config) => {
+                self.run_rendered_per_file(&CooccurCommand::new(config), files, format)
+            }
+            AnalysisRequest::Dist(config) => {
+                self.run_rendered_per_file(&DistCommand::new(config), files, format)
+            }
             AnalysisRequest::Chip => self.run_rendered_per_file(&ChipCommand, files, format),
             AnalysisRequest::Phonfreq => {
                 self.run_rendered_per_file(&PhonfreqCommand, files, format)
             }
             AnalysisRequest::Modrep => self.run_rendered_per_file(&ModrepCommand, files, format),
-            AnalysisRequest::Vocd => {
-                self.run_rendered_per_file(&VocdCommand::default(), files, format)
+            AnalysisRequest::Vocd(config) => {
+                self.run_rendered_per_file(&VocdCommand::new(config), files, format)
             }
             AnalysisRequest::Codes(config) => {
                 self.run_rendered_per_file(&CodesCommand::new(config), files, format)
@@ -459,10 +477,9 @@ mod tests {
 
     #[test]
     fn builder_uses_corelex_library_default() {
-        let plan =
-            AnalysisRequestBuilder::new(AnalysisCommandName::Corelex, AnalysisOptions::default())
-                .build()
-                .expect("corelex should build");
+        let plan = AnalysisRequestBuilder::new(AnalysisOptions::Corelex(Default::default()))
+            .build()
+            .expect("corelex should build");
 
         match plan {
             AnalysisPlan::Service(AnalysisRequest::Corelex(config)) => {
@@ -474,10 +491,9 @@ mod tests {
 
     #[test]
     fn builder_uses_sugar_library_default() {
-        let plan =
-            AnalysisRequestBuilder::new(AnalysisCommandName::Sugar, AnalysisOptions::default())
-                .build()
-                .expect("sugar should build");
+        let plan = AnalysisRequestBuilder::new(AnalysisOptions::Sugar(Default::default()))
+            .build()
+            .expect("sugar should build");
 
         match plan {
             AnalysisPlan::Service(AnalysisRequest::Sugar(config)) => {
@@ -489,14 +505,12 @@ mod tests {
 
     #[test]
     fn builder_uses_default_tiers() {
-        let chains =
-            AnalysisRequestBuilder::new(AnalysisCommandName::Chains, AnalysisOptions::default())
-                .build()
-                .expect("chains should build");
-        let trnfix =
-            AnalysisRequestBuilder::new(AnalysisCommandName::Trnfix, AnalysisOptions::default())
-                .build()
-                .expect("trnfix should build");
+        let chains = AnalysisRequestBuilder::new(AnalysisOptions::Chains(Default::default()))
+            .build()
+            .expect("chains should build");
+        let trnfix = AnalysisRequestBuilder::new(AnalysisOptions::Trnfix(Default::default()))
+            .build()
+            .expect("trnfix should build");
 
         match chains {
             AnalysisPlan::Service(AnalysisRequest::Chains(config)) => {
@@ -517,10 +531,9 @@ mod tests {
 
     #[test]
     fn builder_requires_rely_second_file() {
-        let error =
-            AnalysisRequestBuilder::new(AnalysisCommandName::Rely, AnalysisOptions::default())
-                .build()
-                .expect_err("rely without second file should fail");
+        let error = AnalysisRequestBuilder::new(AnalysisOptions::Rely(Default::default()))
+            .build()
+            .expect_err("rely without second file should fail");
         assert!(matches!(
             error,
             AnalysisServiceError::InvalidRequest(message) if message.contains("secondFile")
@@ -529,11 +542,11 @@ mod tests {
 
     #[test]
     fn builder_uses_rely_default_tier() {
-        let options = AnalysisOptions {
-            second_file: Some(PathBuf::from("/tmp/other.cha")),
-            ..AnalysisOptions::default()
-        };
-        let plan = AnalysisRequestBuilder::new(AnalysisCommandName::Rely, options)
+        let plan =
+            AnalysisRequestBuilder::new(AnalysisOptions::Rely(crate::service_types::RelyOptions {
+                second_file: Some(PathBuf::from("/tmp/other.cha")),
+                ..Default::default()
+            }))
             .build()
             .expect("rely should build");
 

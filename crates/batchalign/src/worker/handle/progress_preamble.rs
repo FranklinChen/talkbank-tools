@@ -152,13 +152,6 @@ mod progress_preamble_tests {
     use std::time::Duration;
     use tokio::io::BufReader;
 
-    /// Build a tokio buffered reader over a static byte slice. The
-    /// reader yields lines verbatim; we never need real async I/O for
-    /// these tests.
-    fn buf(s: &'static str) -> BufReader<&'static [u8]> {
-        BufReader::new(s.as_bytes())
-    }
-
     /// Wall-clock window large enough that no test should ever miss it.
     fn generous_deadline() -> Instant {
         Instant::now() + Duration::from_secs(10)

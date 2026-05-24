@@ -1,7 +1,7 @@
 # REPEAT -- Mark Utterances Containing Revisions
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:31 EDT
+**Last updated:** 2026-05-22 12:57 EDT
 
 ## Purpose
 
@@ -18,6 +18,30 @@ chatter clan repeat --speaker CHI file.cha
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--speaker` | speaker code | *(required)* | Target speaker to process. Only utterances from this speaker are checked. |
+
+## CLAN `+`-flag coverage audit
+
+REPEAT is a **transform**. Sources:
+`OSX-CLAN/src/clan/repeat.cpp::usage`,
+`crates/talkbank-clan/src/transforms/repeat.rs`.
+
+### REPEAT-specific `+`-flags (from `repeat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+tS` | Specify target speaker `S` | `--speaker S` | Done | Direct mapping. The clap field is *required*, matching CLAN's behaviour (no implicit "all speakers" mode). |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 |
+| Missing | 0 |
+
+REPEAT has a single command-specific flag, mapped one-to-one.
+Parity is clean. The revision-marker classifier
+(`is_revision_kind`) is documented above and tracks CLAN's
+default markers verbatim.
 
 ## Revision Markers Detected
 

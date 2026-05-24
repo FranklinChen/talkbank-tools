@@ -1,7 +1,7 @@
 # MOR -- Morphological Analysis (deliberately not implemented)
 
 **Status:** Reference -- stub command
-**Last updated:** 2026-05-21 15:30 EDT
+**Last updated:** 2026-05-22 13:14 EDT
 
 ## Purpose
 
@@ -36,6 +36,16 @@ for the full pipeline.
 Invoking `chatter clan mor` prints an error directing users to
 batchalign and exits with a non-zero status. No CHAT files are
 modified.
+
+## CLAN `+`-flag coverage audit
+
+**Exempt** — MOR is a deliberate non-implementation (see Purpose
+above). Per the workspace policy, the MOR-pipeline commands
+(`mor`, `post`, `postlist`, `postmodrules`, `posttrain`,
+`megrasp`) are stubs that emit a refusal and direct users to
+batchalign's neural pipeline. The CLAN `+`-flag surface for each
+is documented in CLAN's own usage text and is not mirrored here
+because chatter does not consume those flags.
 
 ## See also
 

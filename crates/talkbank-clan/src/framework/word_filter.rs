@@ -146,6 +146,94 @@ pub fn countable_words_in_utterance_with_retracings(
     countable_words_with_retracings(&utterance.main.content.content, include_retracings)
 }
 
+/// Match CLAN's `+c` / `+c0` predicate: the input's first character
+/// is uppercase. Returns `false` for empty input or for first
+/// characters that have no notion of case (digits, punctuation),
+/// matching CLAN's behaviour of dropping non-letter-led tokens from
+/// a capitalised search.
+///
+/// Module-private: the public surface is
+/// [`CapitalizationFilter::includes`], which dispatches to this.
+fn starts_with_uppercase(text: &str) -> bool {
+    text.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// Match CLAN's `+c1` predicate: at least one uppercase letter
+/// appears AFTER position 0 (e.g. `McDonald`, `iPhone`, `eBay`).
+/// Words with only initial capitalization (`Cookie`) do NOT match.
+///
+/// Module-private; reached through [`CapitalizationFilter::includes`].
+fn has_mid_uppercase(text: &str) -> bool {
+    text.chars().skip(1).any(char::is_uppercase)
+}
+
+/// CLAN's `+c` / `+c0` / `+c1` capitalization-mode filter.
+///
+/// Used by FREQ and VOCD; shared so both commands agree on which
+/// words are counted. Stored on each command's `Config` as
+/// `capitalization: CapitalizationFilter`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CapitalizationFilter {
+    /// No filter — every countable word is considered. Default;
+    /// matches CLAN's default behaviour without `+c`/`+c0`/`+c1`.
+    #[default]
+    Any,
+    /// CLAN `+c` / `+c0` — only count words whose first character
+    /// is uppercase (proper nouns and sentence-initial capitals).
+    InitialUpper,
+    /// CLAN `+c1` — only count words with an uppercase letter
+    /// AFTER position 0 (e.g. `McDonald`, `iPhone`, `eBay`). The
+    /// initial character is irrelevant for this predicate.
+    MidUpper,
+}
+
+impl CapitalizationFilter {
+    /// Whether the given text passes this filter.
+    pub fn includes(self, text: &str) -> bool {
+        match self {
+            CapitalizationFilter::Any => true,
+            CapitalizationFilter::InitialUpper => starts_with_uppercase(text),
+            CapitalizationFilter::MidUpper => has_mid_uppercase(text),
+        }
+    }
+}
+
+/// Decide whether an utterance consists *solely* of `solo_words`.
+///
+/// Implements CLAN's command-specific `+gS` semantic for MLU and MLT:
+/// an utterance with at least one countable word, all of which match an
+/// entry in `solo_words`, is excluded from analysis. Distinct from the
+/// inherited `+gX` gem-segment filter (CLAN docs: "exclude utterance
+/// consisting solely of specified word S").
+///
+/// `solo_words` is expected to be **pre-normalized**: lower-cased to the
+/// same form `NormalizedWord::from_word` produces. Callers (typically
+/// `MluCommand::new` / `MltCommand::new`) normalize once at construction
+/// so this per-utterance hot path does no per-call allocation.
+///
+/// # Returns
+///
+/// * `false` if the utterance has no countable words (caller should
+///   reject earlier via [`has_countable_words`] anyway).
+/// * `false` if `solo_words` is empty.
+/// * `true` iff every countable word's normalized form appears in
+///   `solo_words`.
+pub fn utterance_is_solo_excluded(utterance: &Utterance, solo_words: &[String]) -> bool {
+    if solo_words.is_empty() {
+        return false;
+    }
+
+    let mut saw_any = false;
+    for word in countable_words_in_utterance(utterance) {
+        saw_any = true;
+        let normalized = crate::framework::NormalizedWord::from_word(word);
+        if !solo_words.iter().any(|s| s == normalized.as_str()) {
+            return false;
+        }
+    }
+    saw_any
+}
+
 /// Recursively collect countable words from main-tier content into `out`.
 ///
 /// When `include_retracings` is true, `ReplacedWord` yields both the original
@@ -451,6 +539,59 @@ pub fn word_pattern_matches(word: &str, pattern: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Any` (default) admits every input — including empty strings,
+    /// digits-only tokens, and lowercase words.
+    #[test]
+    fn capitalization_any_admits_everything() {
+        let f = CapitalizationFilter::Any;
+        assert!(f.includes(""));
+        assert!(f.includes("cookie"));
+        assert!(f.includes("Cookie"));
+        assert!(f.includes("McDonald"));
+        assert!(f.includes("123"));
+        assert!(f.includes("."));
+    }
+
+    /// `InitialUpper` (CLAN `+c` / `+c0`) admits only inputs whose
+    /// first character has uppercase casing. Digits, punctuation,
+    /// lowercase initials, and empty strings all fail.
+    #[test]
+    fn capitalization_initial_upper_requires_uppercase_first_char() {
+        let f = CapitalizationFilter::InitialUpper;
+        assert!(f.includes("Cookie"));
+        assert!(f.includes("I"));
+        assert!(f.includes("McDonald"));
+        assert!(!f.includes("cookie"));
+        assert!(!f.includes("iPhone")); // initial is lowercase
+        assert!(!f.includes(""));
+        assert!(!f.includes("123"));
+        assert!(!f.includes("."));
+    }
+
+    /// `MidUpper` (CLAN `+c1`) admits only inputs with at least one
+    /// uppercase letter AFTER position 0. `McDonald` and `iPhone`
+    /// pass; `Cookie` (initial-only uppercase) and `cookie` (no
+    /// uppercase at all) both fail.
+    #[test]
+    fn capitalization_mid_upper_requires_uppercase_after_first_char() {
+        let f = CapitalizationFilter::MidUpper;
+        assert!(f.includes("McDonald"));
+        assert!(f.includes("iPhone"));
+        assert!(f.includes("eBay"));
+        assert!(!f.includes("Cookie")); // initial-only uppercase
+        assert!(!f.includes("cookie"));
+        assert!(!f.includes("I")); // only one character
+        assert!(!f.includes(""));
+        assert!(!f.includes("123"));
+    }
+
+    /// `Default` is `Any` — `#[default]` annotation on the enum.
+    #[test]
+    fn capitalization_default_is_any() {
+        let f = CapitalizationFilter::default();
+        assert_eq!(f, CapitalizationFilter::Any);
+    }
 
     /// Plain lexical words should be countable.
     #[test]

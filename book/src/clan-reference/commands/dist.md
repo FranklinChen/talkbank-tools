@@ -1,7 +1,7 @@
 # DIST -- Word Distribution Across Turns
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:33 EDT
+**Last updated:** 2026-05-23 11:40 EDT
 
 ## Purpose
 
@@ -15,13 +15,59 @@ chatter clan dist --speaker CHI file.cha
 chatter clan dist --format json file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN Flag | Description |
 |--------|-----------|-------------|
-| `--speaker <CODE>` | `+t*CHI` | Include speaker |
-| `--exclude-speaker <CODE>` | `-t*CHI` | Exclude speaker |
-| `--format <FMT>` | -- | Output format: text, json, csv |
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `dist` flag. Sources:
+
+* `OSX-CLAN/src/clan/dist.cpp` — `usage()` and `getflag()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` DIST branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Dist` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+### DIST-specific `+`-flags (from `dist.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+bC` | Break apart words at character `C` | — | Missing | Word-segmentation customization. |
+| `+g` | Count only one occurrence of each word per turn | `--once-per-turn` | Done | Landed 2026-05-23. Per-turn word dedup via HashSet; `first_turn` / `last_turn` are unaffected (they only ever update on first/most-recent encounter). The `+g` overload (bare = once-per-turn, `+gLABEL` = gem filter) matches CLAN's: rewriter checks for empty rest before falling through to the gem branch. Pinned by `dist_g_bare_routes_to_once_per_turn` and `dist_g_with_label_still_routes_to_gem`. |
+| `+o` | Only consider words containing the character `C` given in `+bC` | — | Missing | |
+| `+d` | Output sdata in form suitable for statistical analysis | — | Rewriter only | `--display-mode` rewrite. |
+
+### General `+`-flags DIST inherits (from `cutt.cpp::mainusage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+k` | Case-sensitive | `--case-sensitive` | Done | Landed 2026-05-23. Reads `CommonAnalysisArgs::case_sensitive`. `process_utterance` picks the key derivation: default uses `NormalizedWord::from_word` (lowercased), `+k` uses `NormalizedWord(cleaned_text().to_owned())` (case-preserving) so `Want`/`want`/`WANT` get distinct distribution rows. Pinned by `dist_case_sensitive_splits_case_variants` and `dist_default_collapses_case_variants`. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 8 |
+| Partial | 1 |
+| Rewriter only | 4 |
+| Missing | 5 |
+
+DIST's `+g` is another instance of the **`+g` overload** pattern
+documented in MLU/MLT/FREQPOS. Researchers pasting
+`dist +g file.cha` (count once per turn) into chatter get
+chatter's gem-segment filter requirement (and an "empty"-style
+output for files with no matching gem).
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

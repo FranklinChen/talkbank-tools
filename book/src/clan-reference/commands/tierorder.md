@@ -1,7 +1,7 @@
 # TIERORDER -- Reorder Dependent Tiers to Canonical Order
 
 **Status:** Current
-**Last updated:** 2026-05-12 13:40 EDT
+**Last updated:** 2026-05-22 13:04 EDT
 
 ## Purpose
 
@@ -21,6 +21,35 @@ This command has no command-specific flags beyond the shared
 `-o, --output <PATH>` (default: stdout). See
 [Output Formats](../user-guide/output-formats.md#transform-commands--o---output)
 for the transform output flag.
+
+## CLAN `+`-flag coverage audit
+
+TIERORDER is a **transform**. Sources:
+`OSX-CLAN/src/clan/tierorder.cpp::usage`,
+`crates/talkbank-clan/src/transforms/tierorder.rs`.
+
+### TIERORDER-specific `+`-flags (from `tierorder.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+b` | Do not move bullets to a new speaker tier | — | Missing | Bullet-handling toggle. |
+| `+cF` | Dictionary file (default `tierorder.cut`) controlling the canonical order | — | Missing | chatter hard-codes the canonical priority list in `tierorder.rs::tier_order()`. The `+cF` form would let researchers override the order. |
+| `+q` | Sort only header tiers | — | Missing | Restrict scope to header reordering. |
+| `+tS` | Switch speaker tier `S` with the main speaker tier | — | Missing | Speaker-tier promotion. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 (default canonical-order sort) |
+| Missing | 4 |
+
+TIERORDER's gap profile is dominated by **customization** flags
+— `+cF` for user-supplied tier-order files is the most likely
+request from researchers with non-standard tier conventions.
+chatter's built-in `tier_order()` priority list is sufficient
+for the canonical TalkBank/CHILDES corpus but doesn't let users
+override.
 
 ## Behavior
 

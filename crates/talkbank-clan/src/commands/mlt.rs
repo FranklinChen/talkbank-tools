@@ -40,14 +40,25 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use talkbank_model::{SpeakerCode, Utterance};
 
-use crate::framework::word_filter::{countable_words, has_countable_words};
+use crate::framework::word_filter::{
+    countable_words, has_countable_words, utterance_is_solo_excluded,
+};
 use crate::framework::{
     AnalysisCommand, CommandOutput, FileContext, TurnCount, UtteranceCount, WordCount,
 };
 
 /// Configuration for the MLT command.
 #[derive(Debug, Clone, Default)]
-pub struct MltConfig {}
+pub struct MltConfig {
+    /// Words that — when an utterance consists *solely* of them — cause
+    /// the whole utterance to be excluded from the MLT count.
+    /// Maps CLAN's command-specific `+gS` (e.g. `mlt +gum`) which is
+    /// distinct from the inherited general `+gX` gem-segment filter.
+    /// Comparison is by lower-cased word text after `NormalizedWord`
+    /// normalization (same form chatter uses for countable-word
+    /// iteration).
+    pub solo_word_exclusions: Vec<String>,
+}
 
 /// A single completed turn's statistics.
 #[derive(Debug, Default)]
@@ -213,7 +224,28 @@ impl CommandOutput for MltResult {
 /// Tracks turn boundaries by detecting when the speaker changes between
 /// consecutive utterances. Each turn accumulates utterance and word counts.
 #[derive(Debug, Clone, Default)]
-pub struct MltCommand;
+pub struct MltCommand {
+    config: MltConfig,
+    /// `config.solo_word_exclusions` lower-cased once at construction so
+    /// the per-utterance hot path in [`utterance_is_solo_excluded`] does
+    /// not re-allocate.
+    solo_words_normalized: Vec<String>,
+}
+
+impl MltCommand {
+    /// Construct an MLT command with the given configuration.
+    pub fn new(config: MltConfig) -> Self {
+        let solo_words_normalized = config
+            .solo_word_exclusions
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        Self {
+            config,
+            solo_words_normalized,
+        }
+    }
+}
 
 impl AnalysisCommand for MltCommand {
     type Config = MltConfig;
@@ -229,6 +261,13 @@ impl AnalysisCommand for MltCommand {
     ) {
         // Skip utterances with no countable lexical content
         if !has_countable_words(&utterance.main.content.content) {
+            return;
+        }
+
+        // CLAN's `mlt +gS` (filler-word elision) drops an utterance when
+        // every countable word is in the user's solo-word list. Empty
+        // list ⇒ no-op (fast path inside the helper).
+        if utterance_is_solo_excluded(utterance, &self.solo_words_normalized) {
             return;
         }
 
@@ -353,7 +392,7 @@ mod tests {
     /// Consecutive same-speaker utterances should collapse into one turn.
     #[test]
     fn mlt_single_speaker_single_turn() {
-        let command = MltCommand;
+        let command = MltCommand::default();
         let mut state = MltState::default();
 
         let chat_file = talkbank_model::ChatFile::new(vec![]);
@@ -388,7 +427,7 @@ mod tests {
     /// Speaker switches should close the previous turn and start a new one.
     #[test]
     fn mlt_turn_boundaries() {
-        let command = MltCommand;
+        let command = MltCommand::default();
         let mut state = MltState::default();
 
         let chat_file = talkbank_model::ChatFile::new(vec![]);
@@ -434,7 +473,7 @@ mod tests {
     /// Finalizing untouched state should return no speaker rows.
     #[test]
     fn mlt_empty_state() {
-        let command = MltCommand;
+        let command = MltCommand::default();
         let state = MltState::default();
 
         let result = command.finalize(state);

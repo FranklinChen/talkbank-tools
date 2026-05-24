@@ -1,6 +1,8 @@
 # UNIQ -- Report Repeated Lines
 
 **Status:** Current
+**Last updated:** 2026-05-23 13:00 EDT
+
 ## Purpose
 
 Identifies and counts duplicate lines (both `@header` and `*speaker` utterance lines, lowercased) across all input files. Matches CLAN behavior of including all line types in the frequency table.
@@ -15,13 +17,31 @@ chatter clan uniq --sort file.cha
 chatter clan uniq --format json corpus/
 ```
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN Flag | Description |
 |--------|-----------|-------------|
 | `--sort` | `-o` | Sort output by descending frequency |
-| `--speaker <CODE>` | `+t*CHI` | Restrict to specific speaker |
-| `--format <FMT>` | -- | Output format: text, json, csv |
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+UNIQ has the **narrowest flag surface of any analysis command**:
+just `-o` (sort by descending frequency). chatter exposes it as
+`--sort`, and the rewriter routes `-o` → `--sort` under UNIQ
+(pinned by `clan_args::tests::uniq_sort`).
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `-o` | Sort by descending frequency | `--sort` | Done | Rewriter arm in `clan_args.rs` consumes `-o` under UNIQ only; other commands route `-o` differently (FIXBULLETS bullet offset, etc.). |
+
+Inherited general flags: same as [FREQ](./freq.md#general-flags-freq-inherits-from-cutt-cpp-mainusage). Audit summary: 7 Done / 0 Partial / 4 Rewriter only / 3 Missing.
 
 ## Output
 

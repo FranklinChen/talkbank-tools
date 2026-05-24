@@ -1,7 +1,7 @@
 # coref
 
 **Status:** Current
-**Last updated:** 2026-05-11 11:18 EDT
+**Last updated:** 2026-05-23 09:20 EDT
 
 Add sparse coreference annotation tiers (`%xcoref`) to CHAT transcripts.
 English-only. Uses full document context — all utterances in the file are
@@ -103,6 +103,21 @@ because coreference depends on full context.
 **Best suited for local or direct-server execution.** `coref` is a
 document-level workflow that benefits from locality. It is not an interactive
 remote-server command in the same way as `align` or `transcribe`.
+
+---
+
+## Failure modes
+
+coref fails fast on engine failures rather than emitting silent
+no-coref output. When the Stanza coref worker reports a per-file
+error (model runtime error, protocol violation, batch IPC failure),
+the affected file is marked failed with a typed `ItemErrors` message
+carrying the engine error verbatim. A batch-level coref failure
+(worker spawn / IPC) marks every English-eligible file in the same
+batch as failed; non-eligible files (dummy or non-English) pass
+through unchanged. The output `.cha` for a failed file is **not**
+written — there is no path where the file appears successful but
+the `%xcoref` tier is silently missing.
 
 ---
 

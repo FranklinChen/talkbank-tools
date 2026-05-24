@@ -364,9 +364,24 @@ class TestBatchInferUtseg:
 class TestUtsegTreeHelpers:
     """Verify the local constituency helper behavior."""
 
-    def test_leaf_count_and_parse_tree_indices_handle_missing_children(self) -> None:
+    def test_leaf_count_handles_missing_children(self) -> None:
+        # _leaf_count treats a missing-children object as a leaf with
+        # weight 0. This is not the silent-failure pattern we banned —
+        # ``object()`` here is a sentinel-leaf in the test, and
+        # downstream length math depends on the 0-count behavior.
         assert _leaf_count(object()) == 0
-        assert _parse_tree_indices(object(), 0) == []
+
+    def test_parse_tree_indices_raises_on_missing_children(self) -> None:
+        # Pinned because the previous implementation swallowed
+        # AttributeError and silently returned ``[]``, masking
+        # malformed Stanza constituency output as an empty utseg
+        # result. The system-wide graceful-failure invariant requires
+        # this to raise so the caller can attribute the failure back
+        # to the affected file rather than emit empty assignments.
+        import pytest
+
+        with pytest.raises(AttributeError):
+            _parse_tree_indices(object(), 0)
 
     def test_leaf_count_recurses_into_nested_subtrees(self) -> None:
         tree = _FakeTree(

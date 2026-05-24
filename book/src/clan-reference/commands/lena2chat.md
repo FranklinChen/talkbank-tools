@@ -1,6 +1,8 @@
 # LENA2CHAT -- LENA Device XML to CHAT Conversion
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:40 EDT
+
 ## Purpose
 
 Converts LENA (Language Environment Analysis) device output files (`.its` format) into CHAT format. LENA XML contains segment-level annotations with speaker types and timing information but no actual transcribed words.
@@ -44,3 +46,16 @@ A well-formed CHAT file where each LENA segment becomes a timed utterance. Since
 
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
+
+## CLAN `+`-flag coverage audit
+
+LENA2CHAT is a **converter** — input LENA `.its` XML, output
+CHAT. Sources: `OSX-CLAN/src/clan/Lena2Chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/lena2chat.rs`.
+
+CLAN's `Lena2Chat.cpp::usage` documents **no command-specific
+`+`-flags** — the surface is just the inherited general flag
+set (mostly `+re` for recursion). Byte-parity complete for the
+documented surface.
+
+Audit summary: 1 Done, 0 Missing.

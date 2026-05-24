@@ -1,6 +1,8 @@
 # CHAT2PRAAT -- CHAT to Praat TextGrid
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:30 EDT
+
 ## Purpose
 
 Converts CHAT files to Praat TextGrid format for acoustic/phonetic analysis. Each speaker becomes a separate interval tier, with timed utterances mapped to intervals.
@@ -13,6 +15,23 @@ This is the reverse of [PRAAT2CHAT](praat2chat.md). Both conversions are impleme
 chatter clan chat2praat file.cha
 chatter clan chat2praat file.cha -o output.TextGrid
 ```
+
+## CLAN `+`-flag coverage audit
+
+CHAT2PRAAT is a **converter** — input CHAT, output Praat
+TextGrid. Sources: `OSX-CLAN/src/clan/Chat2Praat.cpp::usage`,
+`crates/talkbank-clan/src/converters/chat2praat.rs`.
+
+### CHAT2PRAAT-specific `+`-flags (from `Chat2Praat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+eS` | Media file name extension | — | Missing |
+
+Audit summary: 1 Done (default conversion), 1 Missing. The
+`+eS` media-extension flag is a hint for TextGrid's
+sound-association header; chatter omits this metadata today.
+Filed as a Phase 1.7 follow-up.
 
 ## Behavior
 

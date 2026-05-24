@@ -59,8 +59,9 @@ pub use domain_types::{
     UtteranceLimit, WordLimit, WordPattern,
 };
 pub use filter::{
-    FilterConfig, GemFilter, ParseUtteranceRangeError, SpeakerFilter, TierFilter, UtteranceRange,
-    WordFilter, parse_utterance_range,
+    FilterConfig, GemFilter, LoadWordListError, ParseUtteranceRangeError, RoleFilter,
+    SpeakerFilter, TierFilter, UtteranceRange, WordFilter, load_search_expr_file,
+    load_word_list_file, parse_utterance_range,
 };
 pub use id_filter::{IdFilter, IdPattern, IdPatternField, ParseIdFilterError, parse_id_filter};
 pub use input::DiscoveredChatFiles;
@@ -71,8 +72,9 @@ pub use output::{
 pub use runner::{AnalysisRunner, RunnerError};
 pub use transform::{TransformCommand, TransformError, run_transform};
 pub use word_filter::{
-    countable_words, countable_words_in_utterance, countable_words_in_utterance_with_retracings,
-    countable_words_with_retracings, has_countable_words, is_countable_word, word_pattern_matches,
+    CapitalizationFilter, countable_words, countable_words_in_utterance,
+    countable_words_in_utterance_with_retracings, countable_words_with_retracings,
+    has_countable_words, is_countable_word, utterance_is_solo_excluded, word_pattern_matches,
 };
 
 // ── Shared domain type aliases ──────────────────────────────────────

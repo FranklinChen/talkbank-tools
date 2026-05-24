@@ -1,6 +1,8 @@
 # CODES -- Code Frequency Table
 
 **Status:** Current
+**Last updated:** 2026-05-22 09:46 EDT
+
 ## Purpose
 
 Tabulates the frequency and distribution of coding annotations found on `%cod:` dependent tiers, organized by speaker. This is useful for analyzing hand-coded behavioral or discourse annotations attached to transcripts.
@@ -20,13 +22,26 @@ chatter clan codes --speaker CHI file.cha
 chatter clan codes --format json file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
-| Option | Description |
-|--------|-------------|
-| `--speaker <CODE>` | Include speaker |
-| `--max-depth <N>` | Maximum depth of code parsing (0 = all levels) |
-| `--format <FMT>` | Output format: text, json, csv, clan |
+| Option | CLAN flag | Description |
+|--------|-----------|-------------|
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--max-depth <N>` | — | Maximum depth of code parsing (chatter extension) |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+CODES has **no command-specific `+`-flags** in CLAN's `usage()`
+(its `getflag()` is a default-only delegate to `maingetflag`).
+The entire flag surface is the inherited general set; chatter's
+`--max-depth` is a chatter extension with no CLAN analog.
+
+Inherited general flags: same as [FREQ](./freq.md#general-flags-freq-inherits-from-cutt-cpp-mainusage). Audit summary: 6 Done / 1 Partial / 4 Rewriter only / 3 Missing.
 
 ## Output
 

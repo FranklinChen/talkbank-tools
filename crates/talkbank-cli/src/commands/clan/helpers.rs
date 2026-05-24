@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{ClanOutputFormat, CommonAnalysisArgs};
 use talkbank_clan::framework::{
-    DiscoveredChatFiles, FilterConfig, GemFilter, GemLabel, OutputFormat, SpeakerFilter,
-    TransformCommand, WordFilter, WordPattern, format_clan_banner, run_transform,
+    DiscoveredChatFiles, FilterConfig, GemFilter, GemLabel, LoadWordListError, OutputFormat,
+    SpeakerFilter, TransformCommand, WordFilter, WordPattern, format_clan_banner,
+    load_word_list_file, run_transform,
 };
 use talkbank_clan::service::AnalysisService;
 use talkbank_clan::service_types::{
@@ -170,12 +171,12 @@ pub(super) fn run_converter(
 }
 
 pub(super) fn run_analysis_and_print(
-    command_name: AnalysisCommandName,
     options: AnalysisOptions,
     paths: &[PathBuf],
     common: &CommonAnalysisArgs,
 ) {
-    let plan = build_analysis_plan_or_exit(command_name, options);
+    let command_name = options.command_name();
+    let plan = build_analysis_plan_or_exit(options);
     let AnalysisPlan::Service(request) = plan else {
         exit_with_error(format!(
             "Error: {command_name} requires paired-file execution"
@@ -186,12 +187,12 @@ pub(super) fn run_analysis_and_print(
 }
 
 pub(super) fn run_paired_analysis_and_print(
-    command_name: AnalysisCommandName,
     options: AnalysisOptions,
     primary_file: &Path,
     format: ClanOutputFormat,
 ) {
-    let plan = build_analysis_plan_or_exit(command_name, options);
+    let command_name = options.command_name();
+    let plan = build_analysis_plan_or_exit(options);
     let AnalysisPlan::Rely(request) = plan else {
         exit_with_error(format!(
             "Error: {command_name} does not support paired-file execution"
@@ -205,11 +206,8 @@ pub(super) fn run_paired_analysis_and_print(
     }
 }
 
-fn build_analysis_plan_or_exit(
-    command_name: AnalysisCommandName,
-    options: AnalysisOptions,
-) -> AnalysisPlan {
-    AnalysisRequestBuilder::new(command_name, options)
+fn build_analysis_plan_or_exit(options: AnalysisOptions) -> AnalysisPlan {
+    AnalysisRequestBuilder::new(options)
         .build()
         .unwrap_or_else(|error| exit_with_error(format!("Error: {error}")))
 }
@@ -233,7 +231,9 @@ fn run_request_and_print(
         exit_with_error("Error: no .cha files found".to_owned());
     }
 
-    let filter = build_filter(common);
+    let filter = build_filter(common).unwrap_or_else(|err| {
+        exit_with_error(format!("Error: {err}"));
+    });
     let service = AnalysisService::with_filter(filter);
     let format = convert_format(common.format);
     let want_clan_banner = matches!(format, OutputFormat::Clan);
@@ -305,7 +305,7 @@ fn run_request_and_print(
 /// and `tct`. Per-command selection lives in
 /// [`AnalysisCommandName::clan_scope_mode`].
 fn clan_scope_for(command_name: AnalysisCommandName, common: &CommonAnalysisArgs) -> String {
-    let main_scope = build_main_scope(&common.speaker, &common.exclude_speaker);
+    let main_scope = build_main_scope(&common.speaker, &common.exclude_speaker, &common.role);
     match command_name.clan_scope_mode() {
         ClanScopeMode::MainOnly => main_scope,
         ClanScopeMode::DependentOnly(tier) => {
@@ -323,42 +323,57 @@ fn clan_scope_for(command_name: AnalysisCommandName, common: &CommonAnalysisArgs
 ///
 /// CLAN's wording is tightly fixed; this enumeration is exhaustive
 /// over what chatter's CLI lets the user express today via
-/// `--speaker` / `--exclude-speaker`:
+/// `--speaker` / `--exclude-speaker` / `--role`:
 ///
-/// | Includes | Excludes | Banner sentence |
-/// |---------|----------|---------------------------------------------------------------------|
-/// | empty   | empty    | `ALL speaker tiers` |
-/// | one+    | _any_    | `ONLY speaker main tiers matching: *CHI;` (`+t…` wins over `-t…`) |
-/// | empty   | one+     | `ALL speaker main tiers EXCEPT the ones matching: *MOT;` |
+/// | Includes | Excludes | Roles | Banner sentence |
+/// |---------|----------|-------|---------------------------------------------------------------------|
+/// | empty   | empty    | empty | `ALL speaker tiers` |
+/// | one+    | _any_    | _any_ | `ONLY speaker main tiers matching: *CHI;` (`+t…` wins over `-t…`) |
+/// | empty   | one+     | _any_ | `ALL speaker main tiers EXCEPT the ones matching: *MOT;` |
+/// | empty   | empty    | one+  | `ONLY speaker main tiers with role(s): TARGET_CHILD;` |
 ///
-/// Multiple values are joined with `; ` and each entry trails its own
-/// semicolon (CLAN's per-pattern delimiter). The `*` prefix is the
-/// CLAN speaker-tier sigil; chatter's `clan_args::rewrite_tier_speaker`
-/// strips the `*` when it rewrites `+t*CHI` → `--speaker CHI`, so we
-/// re-prepend it here to match CLAN's banner exactly.
+/// CLAN precedence: speaker codes outrank role names. When both
+/// `+t*CHI` and `+t#Target_Child` are supplied, the banner uses the
+/// speaker-code shape — the role only fires when no `+t*` is
+/// present. Matches the order of precedence in
+/// `clan_args::rewrite_tier_speaker`.
 ///
-/// Two further CLAN scope variants — `… with IDs matching: …` for
-/// `+t@ID="…"` filters and `… with role(s): …` for `+t#ROLE` — are
-/// out of scope for this pass:
-/// * `+t@ID=…` is supported through chatter's `--id-filter`, but
-///   the banner mapping is non-trivial (it lowercases and emits an
-///   extra `*:;` pattern) and is being audited separately.
-/// * `+t#ROLE` has no chatter analog yet; it lands with Phase 1.7
-///   of the CLAN parity plan.
+/// Multiple values are joined with single spaces and each entry
+/// trails its own semicolon (CLAN's per-pattern delimiter). The
+/// `*` prefix is the CLAN speaker-tier sigil; chatter's rewriter
+/// strips the `*` when it rewrites `+t*CHI` → `--speaker CHI`, so
+/// we re-prepend it here. Role names are uppercased.
+///
+/// The `… with IDs matching: …` shape for `+t@ID="…"` filters is
+/// out of scope here — `--id-filter` lives on a separate banner
+/// pass that lowercases the pattern and emits an extra `*:;`
+/// continuation (Phase 1.6 follow-up).
 ///
 /// Pure function for testability — no I/O, no env lookup, no
-/// command-specific branching (the caller's `clan_scope_for` wraps
-/// this with the dep-tier suffix).
-pub(super) fn build_main_scope(includes: &[String], excludes: &[String]) -> String {
+/// command-specific branching (the caller's `clan_scope_for`
+/// wraps this with the dep-tier suffix).
+pub(super) fn build_main_scope(
+    includes: &[String],
+    excludes: &[String],
+    roles: &[String],
+) -> String {
     if !includes.is_empty() {
         let body = clan_speaker_pattern_list(includes);
-        format!("ONLY speaker main tiers matching: {body}")
-    } else if !excludes.is_empty() {
-        let body = clan_speaker_pattern_list(excludes);
-        format!("ALL speaker main tiers EXCEPT the ones matching: {body}")
-    } else {
-        "ALL speaker tiers".to_owned()
+        return format!("ONLY speaker main tiers matching: {body}");
     }
+    if !excludes.is_empty() {
+        let body = clan_speaker_pattern_list(excludes);
+        return format!("ALL speaker main tiers EXCEPT the ones matching: {body}");
+    }
+    if !roles.is_empty() {
+        let body = roles
+            .iter()
+            .map(|r| format!("{};", r.to_uppercase()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return format!("ONLY speaker main tiers with role(s): {body}");
+    }
+    "ALL speaker tiers".to_owned()
 }
 
 /// Render a list of bare speaker codes (no `*` prefix, as
@@ -394,7 +409,38 @@ pub(super) fn run_transform_or_exit<T: TransformCommand>(
     }
 }
 
-pub(super) fn build_filter(common: &CommonAnalysisArgs) -> FilterConfig {
+/// Build the combined list of `WordPattern`s for one side of
+/// the word filter: CLI literals first, then each file's
+/// patterns in argv order (lines preserved).
+fn collect_word_patterns(
+    cli: &[String],
+    files: &[PathBuf],
+) -> Result<Vec<WordPattern>, LoadWordListError> {
+    let mut patterns: Vec<WordPattern> =
+        cli.iter().map(|s| WordPattern::from(s.as_str())).collect();
+    for path in files {
+        patterns.extend(load_word_list_file(path)?);
+    }
+    Ok(patterns)
+}
+
+/// Sibling of [`collect_word_patterns`] for COMBO's
+/// `+s@FILE` / `-s@FILE`. Each surviving line is a search-
+/// expression string (parsed downstream by `SearchExpr::parse`);
+/// returns lines concatenated in argv order. Exits on the first
+/// I/O failure because this loader runs at dispatch time, outside
+/// the `build_filter` error-bubbling path.
+pub(super) fn load_search_expr_files_or_exit(files: &[PathBuf]) -> Vec<String> {
+    files
+        .iter()
+        .flat_map(|file| {
+            talkbank_clan::framework::load_search_expr_file(file)
+                .unwrap_or_else(|err| exit_with_error(format!("Error: {err}")))
+        })
+        .collect()
+}
+
+pub(super) fn build_filter(common: &CommonAnalysisArgs) -> Result<FilterConfig, LoadWordListError> {
     let speaker_filter = SpeakerFilter {
         include: common.speaker.iter().map(SpeakerCode::new).collect(),
         exclude: common
@@ -417,27 +463,30 @@ pub(super) fn build_filter(common: &CommonAnalysisArgs) -> FilterConfig {
             .collect(),
     };
 
+    // `--include-word-file` / `--exclude-word-file` load patterns
+    // from disk and append to whatever `--include-word` /
+    // `--exclude-word` already accumulated. Order: CLI patterns
+    // first, then file patterns in `--…-file` argv order, with
+    // each file's lines in source order.
     let word_filter = WordFilter {
-        include: common
-            .include_word
-            .iter()
-            .map(|s| WordPattern::from(s.as_str()))
-            .collect(),
-        exclude: common
-            .exclude_word
-            .iter()
-            .map(|s| WordPattern::from(s.as_str()))
-            .collect(),
+        include: collect_word_patterns(&common.include_word, &common.include_word_file)?,
+        exclude: collect_word_patterns(&common.exclude_word, &common.exclude_word_file)?,
+        case_sensitive: common.case_sensitive,
     };
 
-    FilterConfig {
+    let role_filter = talkbank_clan::framework::RoleFilter {
+        include: common.role.clone(),
+    };
+
+    Ok(FilterConfig {
         speakers: speaker_filter,
         gems: gem_filter,
         words: word_filter,
         utterance_range: common.range,
         id_filter: common.id_filter.clone(),
+        roles: role_filter,
         ..FilterConfig::default()
-    }
+    })
 }
 
 pub(super) fn convert_format(format: ClanOutputFormat) -> OutputFormat {
@@ -538,13 +587,13 @@ mod tests {
 
     #[test]
     fn main_scope_no_filter() {
-        assert_eq!(super::build_main_scope(&[], &[]), "ALL speaker tiers");
+        assert_eq!(super::build_main_scope(&[], &[], &[]), "ALL speaker tiers");
     }
 
     #[test]
     fn main_scope_single_include() {
         assert_eq!(
-            super::build_main_scope(&["CHI".into()], &[]),
+            super::build_main_scope(&["CHI".into()], &[], &[]),
             "ONLY speaker main tiers matching: *CHI;"
         );
     }
@@ -552,7 +601,7 @@ mod tests {
     #[test]
     fn main_scope_multi_include() {
         assert_eq!(
-            super::build_main_scope(&["CHI".into(), "MOT".into()], &[]),
+            super::build_main_scope(&["CHI".into(), "MOT".into()], &[], &[]),
             "ONLY speaker main tiers matching: *CHI; *MOT;"
         );
     }
@@ -560,7 +609,7 @@ mod tests {
     #[test]
     fn main_scope_single_exclude() {
         assert_eq!(
-            super::build_main_scope(&[], &["MOT".into()]),
+            super::build_main_scope(&[], &["MOT".into()], &[]),
             "ALL speaker main tiers EXCEPT the ones matching: *MOT;"
         );
     }
@@ -568,7 +617,7 @@ mod tests {
     #[test]
     fn main_scope_multi_exclude() {
         assert_eq!(
-            super::build_main_scope(&[], &["MOT".into(), "FAT".into()]),
+            super::build_main_scope(&[], &["MOT".into(), "FAT".into()], &[]),
             "ALL speaker main tiers EXCEPT the ones matching: *MOT; *FAT;"
         );
     }
@@ -579,9 +628,41 @@ mod tests {
         // banner reports only the include side (exclude still filters
         // output, but the scope line stays silent about it).
         assert_eq!(
-            super::build_main_scope(&["CHI".into()], &["MOT".into()]),
+            super::build_main_scope(&["CHI".into()], &["MOT".into()], &[]),
             "ONLY speaker main tiers matching: *CHI;"
         );
+    }
+
+    #[test]
+    fn role_scope_single() {
+        assert_eq!(
+            super::build_main_scope(&[], &[], &["Target_Child".into()]),
+            "ONLY speaker main tiers with role(s): TARGET_CHILD;"
+        );
+    }
+
+    #[test]
+    fn role_scope_multi() {
+        assert_eq!(
+            super::build_main_scope(&[], &[], &["Target_Child".into(), "Mother".into()]),
+            "ONLY speaker main tiers with role(s): TARGET_CHILD; MOTHER;"
+        );
+    }
+
+    /// CLAN precedence: speaker codes outrank role names. When both
+    /// `+t*CHI` and `+t#Target_Child` are supplied, the banner uses
+    /// the speaker shape.
+    #[test]
+    fn role_scope_yields_to_speaker_include() {
+        assert_eq!(
+            super::build_main_scope(&["CHI".into()], &[], &["Target_Child".into()]),
+            "ONLY speaker main tiers matching: *CHI;"
+        );
+    }
+
+    #[test]
+    fn role_scope_empty_falls_back_to_all() {
+        assert_eq!(super::build_main_scope(&[], &[], &[]), "ALL speaker tiers");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # POST -- POS Disambiguation (deliberately not implemented)
 
 **Status:** Reference -- stub command
-**Last updated:** 2026-05-21 15:30 EDT
+**Last updated:** 2026-05-22 13:14 EDT
 
 ## Purpose
 
@@ -32,3 +32,11 @@ CHAT files are modified.
   [POSTTRAIN](posttrain.md) -- companion commands, all stubs
 - [POSTMORTEM](postmortem.md) -- the `%mor`-tier post-processing
   command that **is** implemented
+
+## CLAN `+`-flag coverage audit
+
+**Exempt** — see [MOR](mor.md#clan-flag-coverage-audit) for the
+shared MOR-pipeline policy: chatter does not consume CLAN's
+`+`-flags for any command in this family. CLAN's own usage text
+documents the legacy flag surface; chatter emits a refusal that
+points users to batchalign.

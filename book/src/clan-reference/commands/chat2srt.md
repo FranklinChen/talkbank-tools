@@ -1,6 +1,8 @@
 # CHAT2SRT -- CHAT to Subtitle Conversion
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:31 EDT
+
 ## Purpose
 
 Converts CHAT files to subtitle format for captioned video. The legacy manual describes `CHAT2SRT` as converting a CHAT file to SRT for video captioning and then walks through a GUI workflow using external subtitle software.
@@ -25,6 +27,33 @@ chatter clan chat2srt input.cha
 | Option | Default | Description |
 |--------|---------|-------------|
 | *(none)* | | This converter operates on a parsed `ChatFile` and has no additional configuration options. |
+
+## CLAN `+`-flag coverage audit
+
+CHAT2SRT is a **converter** — input CHAT, output SRT or WebVTT.
+Sources: `OSX-CLAN/src/clan/Chat2Srt.cpp::usage`,
+`crates/talkbank-clan/src/converters/chat2srt.rs` (paired with
+`chat2vtt.rs`).
+
+### CHAT2SRT-specific `+`-flags (from `Chat2Srt.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+d` | Clean output without codes/replacements (default: keep all) | (default in chatter) | Partial | chatter's converter strips most CHAT annotations by default. The exact CLAN "everything" vs "clean" distinction is not user-toggleable. |
+| `+v` | Create WebVTT instead of SRT | Use the `chat2vtt` subcommand | Done | Different shape: chatter splits SRT vs WebVTT into two subcommands, each with its own clap surface; CLAN unifies them with `+v`. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 (default + WebVTT split) |
+| Partial | 1 |
+| Missing | 0 |
+
+CHAT2SRT's CLAN flag for VTT-vs-SRT is replaced by chatter's
+two-subcommand split. `+d` clean-output toggle is a UI gap;
+chatter's default is "clean" with no opt-out to "include
+everything."
 
 ## Input Format
 

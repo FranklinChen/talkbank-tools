@@ -94,6 +94,7 @@ fn build_options(_global: &GlobalOpts, args: &BenchArgs) -> CommandOptions {
         BenchTarget::Translate => CommandOptions::Translate(TranslateOptions {
             common,
             merge_abbrev: false.into(),
+            ..TranslateOptions::default()
         }),
         BenchTarget::Utseg => CommandOptions::Utseg(UtsegOptions {
             common,

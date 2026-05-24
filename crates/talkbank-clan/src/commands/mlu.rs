@@ -47,7 +47,9 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use talkbank_model::{Mor, SpeakerCode, Utterance};
 
-use crate::framework::word_filter::{countable_words_in_utterance, has_countable_words};
+use crate::framework::word_filter::{
+    countable_words_in_utterance, has_countable_words, utterance_is_solo_excluded,
+};
 use crate::framework::{
     AnalysisCommand, CommandOutput, FileContext, MorphemeCount, UtteranceCount,
 };
@@ -57,6 +59,14 @@ use crate::framework::{
 pub struct MluConfig {
     /// Use word count from main tier instead of morpheme count from %mor
     pub words_only: bool,
+    /// Words that — when an utterance consists *solely* of them — cause
+    /// the whole utterance to be excluded from the MLU count.
+    /// Maps CLAN's command-specific `+gS` (e.g. `mlu +gum`) which is
+    /// distinct from the inherited general `+gX` gem-segment filter.
+    /// Comparison is by lower-cased word text after `NormalizedWord`
+    /// normalization (same form chatter uses for countable-word
+    /// iteration).
+    pub solo_word_exclusions: Vec<String>,
 }
 
 /// Per-speaker MLU data accumulated during processing.
@@ -196,12 +206,25 @@ impl CommandOutput for MluResult {
 #[derive(Debug, Clone, Default)]
 pub struct MluCommand {
     config: MluConfig,
+    /// `config.solo_word_exclusions` lower-cased once at construction so
+    /// the per-utterance hot path in [`utterance_is_solo_excluded`] does
+    /// not re-allocate. Empty when the user did not pass
+    /// `--exclude-solo-word`.
+    solo_words_normalized: Vec<String>,
 }
 
 impl MluCommand {
     /// Create an MLU command with the given configuration.
     pub fn new(config: MluConfig) -> Self {
-        Self { config }
+        let solo_words_normalized = config
+            .solo_word_exclusions
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        Self {
+            config,
+            solo_words_normalized,
+        }
     }
 }
 
@@ -222,6 +245,13 @@ impl AnalysisCommand for MluCommand {
         // denominator. CLAN achieves this by string-prefix exclusion; we use
         // the AST's semantic word classification instead.
         if !has_countable_words(&utterance.main.content.content) {
+            return;
+        }
+
+        // CLAN's `mlu +gS` (filler-word elision) drops an utterance when
+        // every countable word is in the user's solo-word list. Empty
+        // list ⇒ no-op (fast path inside the helper).
+        if utterance_is_solo_excluded(utterance, &self.solo_words_normalized) {
             return;
         }
 
@@ -421,7 +451,10 @@ mod tests {
     /// In words_only mode, without %mor, word counting is used as fallback.
     #[test]
     fn mlu_words_only_counts_words() {
-        let config = MluConfig { words_only: true };
+        let config = MluConfig {
+            words_only: true,
+            ..MluConfig::default()
+        };
         let command = MluCommand::new(config);
         let mut state = MluState::default();
 
@@ -451,6 +484,80 @@ mod tests {
         assert!((chi.mlu - 3.0).abs() < 1e-10);
     }
 
+    /// Solo-word exclusion drops utterances that consist *only* of
+    /// listed filler words, matching CLAN's `mlu +gum` semantics.
+    /// Utterances containing the filler plus other words are kept
+    /// (with the filler counted normally).
+    #[test]
+    fn mlu_solo_word_exclusion_drops_solo_um() {
+        let config = MluConfig {
+            words_only: true,
+            solo_word_exclusions: vec!["um".into()],
+        };
+        let command = MluCommand::new(config);
+        let mut state = MluState::default();
+
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: &chat_file,
+            filename: "test",
+            line_map: None,
+        };
+
+        // u1: "um" alone — should be dropped (matches `+gum` elision)
+        // u2: 3 words including a non-filler — counted, includes "um"
+        // u3: 2 words — counted normally
+        let u1 = make_utterance("CHI", &["um"]);
+        let u2 = make_utterance("CHI", &["um", "I", "see"]);
+        let u3 = make_utterance("CHI", &["me", "too"]);
+
+        command.process_utterance(&u1, &file_ctx, &mut state);
+        command.process_utterance(&u2, &file_ctx, &mut state);
+        command.process_utterance(&u3, &file_ctx, &mut state);
+
+        let result = command.finalize(state);
+        assert_eq!(result.speakers.len(), 1);
+
+        let chi = &result.speakers[0];
+        // Without the solo-word filter we'd count all 3 utterances.
+        // With it, u1 is elided ⇒ 2 utterances, 3 + 2 = 5 words.
+        assert_eq!(chi.utterances, 2);
+        assert_eq!(chi.morphemes, 5);
+    }
+
+    /// Solo-word exclusion is case-insensitive (matches CLAN's
+    /// case-insensitive default for `+gS`).
+    #[test]
+    fn mlu_solo_word_exclusion_is_case_insensitive() {
+        let config = MluConfig {
+            words_only: true,
+            solo_word_exclusions: vec!["UM".into()],
+        };
+        let command = MluCommand::new(config);
+        let mut state = MluState::default();
+
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: &chat_file,
+            filename: "test",
+            line_map: None,
+        };
+
+        let u1 = make_utterance("CHI", &["um"]); // lower-case input
+        let u2 = make_utterance("CHI", &["hello"]); // not elided
+        command.process_utterance(&u1, &file_ctx, &mut state);
+        command.process_utterance(&u2, &file_ctx, &mut state);
+
+        let result = command.finalize(state);
+        // Only u2 was kept ⇒ 1 utterance, 1 word. Proves the case-
+        // insensitive match elided u1 ("um" vs config "UM").
+        let chi = &result.speakers[0];
+        assert_eq!(chi.utterances, 1);
+        assert_eq!(chi.morphemes, 1);
+    }
+
     /// Finalizing empty state should produce no speaker entries.
     #[test]
     fn mlu_handles_empty_speaker() {
@@ -464,7 +571,10 @@ mod tests {
     /// Utterance lengths should be tracked independently per speaker (words_only mode).
     #[test]
     fn mlu_per_speaker_separation() {
-        let config = MluConfig { words_only: true };
+        let config = MluConfig {
+            words_only: true,
+            ..MluConfig::default()
+        };
         let command = MluCommand::new(config);
         let mut state = MluState::default();
 

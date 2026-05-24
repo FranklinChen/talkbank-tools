@@ -49,6 +49,23 @@ pub struct MaxwdConfig {
     /// Maximum number of words to show in the output table.
     /// Default: 20
     pub limit: WordLimit,
+    /// CLAN `+a`: include only words whose length is unique within
+    /// a speaker's lexicon. Words sharing a length with another
+    /// word in the same speaker's data are dropped from the
+    /// output table, and `max_length` is recomputed over the
+    /// surviving entries.
+    pub unique_length_only: bool,
+    /// CLAN `+xN`: word character lengths to drop from output.
+    /// Repeatable on the command line (`+x5 +x7` excludes both
+    /// lengths). Applied per-speaker before sorting, after
+    /// `unique_length_only`.
+    pub exclude_lengths: Vec<usize>,
+    /// CLAN `+k`: case-sensitive word keying. Default (`false`)
+    /// lowercases via `NormalizedWord::from_word`; when `true`,
+    /// the key preserves original case so `Want`/`want`/`WANT`
+    /// are treated as three distinct words for the unique-length
+    /// and exclude-length filters.
+    pub case_sensitive: bool,
 }
 
 impl Default for MaxwdConfig {
@@ -56,6 +73,9 @@ impl Default for MaxwdConfig {
     fn default() -> Self {
         Self {
             limit: WordLimit::new(20),
+            unique_length_only: false,
+            exclude_lengths: Vec::new(),
+            case_sensitive: false,
         }
     }
 }
@@ -247,8 +267,9 @@ impl AnalysisCommand for MaxwdCommand {
             .map(|lm| lm.line_of(utterance.main.span.start))
             .unwrap_or(0);
 
+        let case_sensitive = self.config.case_sensitive;
         for word in countable_words(&utterance.main.content.content) {
-            let text = NormalizedWord::from_word(word);
+            let text = NormalizedWord::from_word_cased(word, case_sensitive);
             let len = text.as_str().chars().count();
             let display = clan_display_form(word);
             let clan_len = clan_char_count(&display);
@@ -278,6 +299,26 @@ impl AnalysisCommand for MaxwdCommand {
             }
 
             let mut entries: Vec<(NormalizedWord, usize)> = data.words.into_iter().collect();
+
+            // `+a` (`unique_length_only`) drops words whose length
+            // is shared with another word in the same speaker's
+            // lexicon. Done before sorting so the length-count
+            // bucket can be built in one pass.
+            if self.config.unique_length_only {
+                let mut length_count: std::collections::HashMap<usize, usize> =
+                    std::collections::HashMap::new();
+                for (_, len) in &entries {
+                    *length_count.entry(*len).or_insert(0) += 1;
+                }
+                entries.retain(|(_, len)| length_count.get(len).copied() == Some(1));
+            }
+
+            // `+xN` (`exclude_lengths`) drops words whose length
+            // matches any entry in the exclusion list.
+            if !self.config.exclude_lengths.is_empty() {
+                entries.retain(|(_, len)| !self.config.exclude_lengths.contains(len));
+            }
+
             entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
             let max_length = entries.first().map(|(_, len)| *len).unwrap_or(0);
@@ -392,6 +433,7 @@ mod tests {
     fn maxwd_respects_limit() {
         let config = MaxwdConfig {
             limit: crate::framework::WordLimit::new(2),
+            ..MaxwdConfig::default()
         };
         let command = MaxwdCommand::new(config);
         let mut state = MaxwdState::default();
@@ -413,6 +455,106 @@ mod tests {
         assert_eq!(chi.top_words.len(), 2);
         assert_eq!(chi.top_words[0].1, "eeeee");
         assert_eq!(chi.top_words[1].1, "dddd");
+    }
+
+    /// `+xN` (`exclude_lengths`) drops words whose character
+    /// length is in the exclusion set. Excluding `[2, 4]` from
+    /// `[a(1), bb(2), ccc(3), dddd(4), eeeee(5)]` leaves `a`,
+    /// `ccc`, `eeeee`.
+    #[test]
+    fn maxwd_exclude_lengths_drops_listed_lengths() {
+        let config = MaxwdConfig {
+            limit: crate::framework::WordLimit::new(20),
+            exclude_lengths: vec![2, 4],
+            ..MaxwdConfig::default()
+        };
+        let command = MaxwdCommand::new(config);
+        let mut state = MaxwdState::default();
+
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: &chat_file,
+            filename: "test",
+            line_map: None,
+        };
+
+        let u = make_utterance("CHI", &["a", "bb", "ccc", "dddd", "eeeee"]);
+        command.process_utterance(&u, &file_ctx, &mut state);
+
+        let result = command.finalize(state);
+        let chi = &result.speakers[0];
+        let words: Vec<&str> = chi.top_words.iter().map(|(_, w)| w.as_str()).collect();
+        assert_eq!(words, vec!["eeeee", "ccc", "a"]);
+        // max_length reflects surviving entries; `dddd` (4) and
+        // `bb` (2) are gone, so the longest is `eeeee` (5).
+        assert_eq!(chi.max_length, 5);
+    }
+
+    /// `+a` (`unique_length_only`) drops words whose length is
+    /// shared with another word in the same speaker's lexicon.
+    /// Words `eeeee`/`fffff` both have length 5 — both excluded;
+    /// `dddd` (4) and `ccc` (3) and `bb` (2) and `a` (1) all
+    /// have unique lengths in this input.
+    #[test]
+    fn maxwd_unique_length_only_drops_shared_length_words() {
+        let config = MaxwdConfig {
+            limit: crate::framework::WordLimit::new(20),
+            unique_length_only: true,
+            ..MaxwdConfig::default()
+        };
+        let command = MaxwdCommand::new(config);
+        let mut state = MaxwdState::default();
+
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: &chat_file,
+            filename: "test",
+            line_map: None,
+        };
+
+        let u = make_utterance("CHI", &["a", "bb", "ccc", "dddd", "eeeee", "fffff"]);
+        command.process_utterance(&u, &file_ctx, &mut state);
+
+        let result = command.finalize(state);
+        let chi = &result.speakers[0];
+        let lengths: Vec<usize> = chi.top_words.iter().map(|(len, _)| *len).collect();
+        // eeeee and fffff (length 5) both filtered out — they share
+        // the same length. dddd/ccc/bb/a all unique-length, kept.
+        assert!(
+            !lengths.contains(&5),
+            "length-5 words should be dropped, got {lengths:?}"
+        );
+        assert_eq!(chi.top_words.len(), 4);
+        assert_eq!(chi.top_words[0].1, "dddd");
+        assert_eq!(chi.top_words[0].0, 4);
+        // max_length should now report 4 (longest remaining), not 5.
+        assert_eq!(chi.max_length, 4);
+    }
+
+    /// Default (without +a) keeps every length, including shared
+    /// ones. Companion to the +a test for an obvious diff.
+    #[test]
+    fn maxwd_default_keeps_shared_length_words() {
+        let command = MaxwdCommand::default();
+        let mut state = MaxwdState::default();
+
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: &chat_file,
+            filename: "test",
+            line_map: None,
+        };
+
+        let u = make_utterance("CHI", &["a", "bb", "ccc", "dddd", "eeeee", "fffff"]);
+        command.process_utterance(&u, &file_ctx, &mut state);
+
+        let result = command.finalize(state);
+        let chi = &result.speakers[0];
+        assert_eq!(chi.top_words.len(), 6);
+        assert_eq!(chi.max_length, 5);
     }
 
     /// Repeated tokens should increment totals but keep one unique-word entry.
@@ -448,5 +590,61 @@ mod tests {
 
         let result = command.finalize(state);
         assert!(result.speakers.is_empty());
+    }
+
+    /// CLAN MAXWD `+k` / `--case-sensitive`: case variants are
+    /// treated as distinct words, so the deduplicated word table
+    /// preserves all three.
+    #[test]
+    fn maxwd_case_sensitive_splits_case_variants() {
+        let command = MaxwdCommand::new(MaxwdConfig {
+            case_sensitive: true,
+            ..MaxwdConfig::default()
+        });
+        let mut state = MaxwdState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: &chat_file,
+            filename: "test",
+            line_map: None,
+        };
+
+        let u = make_utterance("CHI", &["Want", "want", "WANT"]);
+        command.process_utterance(&u, &file_ctx, &mut state);
+
+        let result = command.finalize(state);
+        let chi = result
+            .speakers
+            .iter()
+            .find(|s| s.speaker == "CHI")
+            .expect("CHI speaker");
+        // Three distinct case variants → three deduplicated entries.
+        assert_eq!(chi.unique_words, 3);
+    }
+
+    /// Default lowercases, collapsing the three case variants.
+    #[test]
+    fn maxwd_default_collapses_case_variants() {
+        let command = MaxwdCommand::default();
+        let mut state = MaxwdState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: &chat_file,
+            filename: "test",
+            line_map: None,
+        };
+
+        let u = make_utterance("CHI", &["Want", "want", "WANT"]);
+        command.process_utterance(&u, &file_ctx, &mut state);
+
+        let result = command.finalize(state);
+        let chi = result
+            .speakers
+            .iter()
+            .find(|s| s.speaker == "CHI")
+            .expect("CHI speaker");
+        assert_eq!(chi.unique_words, 1);
     }
 }

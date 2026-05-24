@@ -1,7 +1,7 @@
 # TEXT2CHAT -- Plain Text to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 13:39 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -38,3 +38,23 @@ A well-formed CHAT file where each sentence becomes an utterance. Sentence termi
 
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
+
+## CLAN `+`-flag coverage audit
+
+TEXT2CHAT is a **converter** — input plain text, output CHAT.
+Sources: `OSX-CLAN/src/clan/text2chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/text2chat.rs`.
+
+### TEXT2CHAT-specific `+`-flags (from `text2chat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+c0` | Insert `@Blank`/`@Indent` headers when appropriate | — | Missing |
+| `+c1` | Each line is an utterance regardless of delimiter | — | Missing |
+| `+c2` | Convert first capitalized word of utterance/quotation to lowercase | — | Missing |
+| `+c3` | Convert `[...]` lines to `*INV: ...` | — | Missing |
+
+Audit summary: 1 Done (default line-per-utterance conversion),
+4 Missing. The `+cN` family is a tokenization-policy switch
+ladder; chatter implements one fixed policy. Filed as a Phase
+1.7 follow-up.

@@ -1,7 +1,7 @@
 # Summary
 
 **Status:** Current
-**Last updated:** 2026-04-30 19:25 EDT
+**Last updated:** 2026-05-22 09:30 EDT
 
 [Introduction](introduction.md)
 [Install](install/index.md)
@@ -24,6 +24,7 @@
 
 # Batchalign3 — User Guide
 
+- [Introduction](batchalign/introduction.md)
 - [Installation](batchalign/user-guide/installation.md)
 - [Model Downloads and Caching](batchalign/user-guide/model-downloads.md)
 - [Batchalign Desktop (Experimental)](batchalign/user-guide/desktop-app.md)
@@ -78,6 +79,7 @@
 - [Validation](architecture/errors-and-validation/validation.md)
 - [Errors — Batchalign Runtime](architecture/errors-and-validation/batchalign-errors.md)
 - [Errors at the Python ↔ Rust Boundary](architecture/errors-and-validation/python-rust-errors.md)
+- [Graceful-Failure Invariant](batchalign/architecture/graceful-failure-invariant.md)
 - [Command Contracts](batchalign/architecture/command-contracts.md)
 - [NLP Pipeline Decision Architecture](batchalign/architecture/pipeline-decisions.md)
 - [Morphotag Reconciliation Invariants](batchalign/architecture/morphotag-invariants.md)
@@ -481,6 +483,7 @@
 - [Flag Translation Guide](clan-reference/appendices/flag-mapping.md)
 - [CLAN Manual Audit](clan-reference/appendices/clan-manual-audit.md)
 - [Command Status Matrix](clan-reference/appendices/status-matrix.md)
+- [Parity Roadmap](clan-reference/appendices/parity-roadmap.md)
 - [Dependent Tier Semantics](clan-reference/appendices/dependent-tier-semantics.md)
 - [Transform Taxonomy](clan-reference/appendices/transform-taxonomy.md)
 - [Glossary](clan-reference/appendices/glossary.md)

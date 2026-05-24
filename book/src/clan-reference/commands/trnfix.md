@@ -1,6 +1,8 @@
 # TRNFIX — Compare Two Dependent Tiers
 
 **Status:** Current
+**Last updated:** 2026-05-22 09:49 EDT
+
 ## Purpose
 
 Compares two dependent tiers (default: `%mor` and `%trn`) word-by-word across all utterances, reporting unique mismatch pairs with frequency counts and an overall accuracy percentage. Useful for verifying tier consistency after automatic annotation or manual correction.
@@ -14,14 +16,42 @@ chatter clan trnfix file.cha
 chatter clan trnfix file.cha --tier1 mor --tier2 gra
 ```
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN flag | Description |
 |--------|-----------|-------------|
-| `--tier1 <name>` | — | First tier to compare (default: `mor`) |
-| `--tier2 <name>` | — | Second tier to compare (default: `trn`) |
-| `--speaker <code>` | `+t*CODE` | Restrict to specific speaker |
-| `--format <fmt>` | — | Output format: text, json, csv |
+| `--tier1 <name>` | `+bS` (first instance) | First tier to compare (default: `mor`) |
+| `--tier2 <name>` | `+bS` (second instance) | Second tier to compare (default: `trn`) |
+| `--speaker <code>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <code>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--format <fmt>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+### TRNFIX-specific `+`-flags (from `trnfix.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+a` | Disambiguate words before compare (default: compare whole words) | — | Missing | Affects mismatch resolution semantics. |
+| `+bS` | Specify a tier to compare (repeatable; first → tier1, second → tier2) | `--tier1` / `--tier2` | Partial | chatter splits into two explicit fields rather than positional `+b` semantics. |
+| `+d` | Include speaker tier in output | — | Rewriter only | |
+| `+d1` | `+d` + include utterances in mismatches summary file | — | Rewriter only | |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 5 |
+| Partial | 2 |
+| Rewriter only | 4 |
+| Missing | 3 |
+
+TRNFIX's `+a` disambiguate-before-compare is the most semantically
+significant gap: it changes whether multi-analysis `%mor` tokens
+like `det|the^pro|the` are compared by their first analysis only
+or by full text.
 
 ## Output
 

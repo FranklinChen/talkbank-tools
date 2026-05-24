@@ -1,6 +1,8 @@
 # FIXBULLETS -- Fix Timing Bullet Consistency
 
 **Status:** Current
+**Last updated:** 2026-05-22 12:58 EDT
+
 ## Purpose
 
 Repairs timing bullets that link CHAT to audio or video. The legacy manual describes `FIXBULLETS` more broadly: converting old-format bullets to new format, inserting `@Media`, merging multiple bullets, adding language tags, and shifting global timing offsets.
@@ -24,6 +26,36 @@ chatter clan fixbullets file.cha --exclude-tier com
   Restrict processing to selected tier kinds such as `cod`, `%cod`, or `*` for main tiers.
 - `--exclude-tier S`
   Exclude selected tier kinds from processing.
+
+## CLAN `+`-flag coverage audit
+
+FIXBULLETS is a **transform**. Sources:
+`OSX-CLAN/src/clan/fixbullets.cpp::usage`,
+`crates/talkbank-clan/src/transforms/fixbullets.rs`.
+
+### FIXBULLETS-specific `+`-flags (from `fixbullets.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+b` | Merge multiple bullets per line into one bullet per tier | (default) | Partial | chatter's monotonic-bullet repair already collapses overlapping ranges on the main tier. The semantics differ slightly — file a follow-up if a round-trip test surfaces a discrepancy. |
+| `+g` | Zero out first bullet and offset the rest (per-file gem) | — | Missing | Gem-based offset reset. |
+| `+m` | Merge all files into one file with offsets progressively offset | — | Missing | Multi-file merge with timing chaining. |
+| `+oN` | Add N ms to all bullet timings | `--offset N` | Done | Direct mapping; rewriter routes `+oN` → `--offset N` (since 2026-05-22). |
+| `-oN` | Subtract N ms | `--offset -N` (negative) | Done | Negative-value form; rewriter routes `-oN` → `--offset -N` (since 2026-05-22). The numeric-only guard prevents `+oS` non-numeric from accidentally matching. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 2 |
+| Partial | 1 |
+| Missing | 2 |
+
+FIXBULLETS's `+g`/`+m` multi-file workflows are out of scope for
+the AST-safe subset; the audit notes them as legacy
+batch-processing workflows. The `+oN` ↔ `--offset N` mapping
+should get a rewriter route (same shape as the recent
+MAXWD `+cN` → `--limit N` fix); filed as a Phase 1.7 follow-up.
 
 ## Behavior
 

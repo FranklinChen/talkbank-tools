@@ -15,8 +15,8 @@ mod logging;
 mod run;
 
 pub use args::{
-    AlignmentTier, CacheCommands, ClanCommands, ClanOutputFormat, Cli, Commands,
-    CommonAnalysisArgs, DebugCommands, LogFormat, OutputFormat, ParserBackend,
+    AlignmentTier, CacheCommands, CapitalizationArg, ClanCommands, ClanOutputFormat, Cli, Commands,
+    CommonAnalysisArgs, DebugCommands, FreqposPositionArg, LogFormat, OutputFormat, ParserBackend,
     apply_clan_help_grouping,
 };
 pub use logging::init_tracing;

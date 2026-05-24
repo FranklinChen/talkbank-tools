@@ -1,7 +1,7 @@
 # utseg
 
 **Status:** Current
-**Last updated:** 2026-05-21 16:10 EDT
+**Last updated:** 2026-05-23 09:20 EDT
 
 Re-segment utterance boundaries in an existing CHAT transcript. Text-only
 — no audio involved. The model selected per language is either a trained
@@ -131,6 +131,20 @@ See [Utterance Segmentation](../../reference/utterance-segmentation.md)
 for the algorithm details and the
 [Stanza Capability Registry](../../architecture/stanza-capability-registry.md)
 for the per-language processor availability table.
+
+---
+
+## Failure modes
+
+utseg fails fast on engine failures rather than emitting partial
+output. When the BERT or Stanza worker reports a per-utterance error
+(model runtime error, malformed constituency tree, protocol
+violation), the affected file is marked failed with a typed
+`ItemErrors` message naming the first few offending items and the
+total count. Per-file dispatch (`utseg`-specific, BA3 utseg
+deliberately does NOT cross-file-batch) means one failing file has
+no effect on the next file in a multi-file run. The output `.cha`
+for a failed file is **not** written.
 
 ---
 

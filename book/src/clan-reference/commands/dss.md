@@ -1,6 +1,8 @@
 # DSS -- Developmental Sentence Scoring
 
 **Status:** Current
+**Last updated:** 2026-05-22 09:23 EDT
+
 ## Purpose
 
 Assigns point values to utterances based on grammatical complexity, using a configurable rule file that defines pattern-matching rules for morphosyntactic categories. DSS is a clinical tool developed by Laura Lee and Susan Canter for evaluating children's grammatical development by scoring complete sentences on eight grammatical categories.
@@ -18,15 +20,59 @@ chatter clan dss --max-utterances 100 file.cha
 chatter clan dss --format json file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
-| Option | Description |
-|--------|-------------|
-| `--speaker <CODE>` | Include speaker |
-| `--exclude-speaker <CODE>` | Exclude speaker |
-| `--rules <PATH>` | Custom DSS rules file (.scr) |
-| `--max-utterances <N>` | Maximum utterances to score (default: 50) |
-| `--format <FMT>` | Output format: text, json, csv, clan |
+| Option | CLAN flag | Description |
+|--------|-----------|-------------|
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--rules <PATH>` | `+lF` | Custom DSS rules file (.scr) |
+| `--max-utterances <N>` | `+cN` | Maximum utterances to score (default: 50) |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `dss` flag. Sources:
+
+* `OSX-CLAN/src/clan/dss.cpp` — `usage()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` DSS branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Dss` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+DSS is a **required-flag refusal** command in chatter — same
+refusal byte-parity as EVAL/KIDEVAL/IPSYN/SUGAR.
+
+### DSS-specific `+`-flags (from `dss.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+aN` | Debug DSS rules level N (1–3) | — | Missing | Rule-tracing diagnostic. |
+| `+cN` | Analyse N complete unique utterances (default 50) | `--max-utterances N` | Partial | Same rewriter-routing gap as IPSYN. |
+| `+d` | Output in spreadsheet format | — | Rewriter only | |
+| `+d1` | Spreadsheet format with one TOTAL line per file | — | Rewriter only | |
+| `+lF` | Specify language script file `F` (eng, engu, bss, jpn) | `--rules <PATH>` | Done | Same rewriter-routing gap as IPSYN. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 6 |
+| Partial | 2 |
+| Rewriter only | 4 |
+| Missing | 5 |
+
+DSS's gap pattern mirrors IPSYN's. The two cleanest one-line
+follow-ups: rewriter routing of `+cN` → `--max-utterances N` and
+`+lF` → `--rules F` for the DSS subcommand specifically. Both
+filed as Phase 1.7 follow-ups, batched with IPSYN's equivalents
+and the existing MAXWD `+cN` → `--limit N` precedent.
 
 ## Scoring Categories
 

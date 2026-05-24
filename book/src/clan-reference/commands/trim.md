@@ -1,6 +1,8 @@
 # TRIM — Remove Dependent Tiers
 
 **Status:** Current
+**Last updated:** 2026-05-22 12:55 EDT
+
 ## Purpose
 
 Removes selected dependent tiers from a CHAT file while preserving headers,
@@ -23,6 +25,30 @@ chatter clan trim file.cha --tier cod
 |--------|-----------|-------------|
 | `--tier <NAME>` | `+t%NAME` | Keep only selected dependent tier(s) |
 | `--exclude-tier <NAME>` | `-t%NAME` | Remove selected dependent tier(s) |
+
+## CLAN `+`-flag coverage audit
+
+TRIM has **no dedicated `*.cpp` in the CLAN source tree** — CLAN
+documents it as a `KWAL`-style invocation that produces text
+output rather than as a discrete command. chatter exposes
+`trim` as a first-class subcommand operating on the typed AST.
+
+* Inherited flags applicable here: `+t%NAME` / `-t%NAME` for
+  tier selection (both routed via `clan_args::rewrite_tier_speaker`
+  to `--tier` / `--exclude-tier`).
+* `*` wildcard for "all dependent tiers" is a chatter extension.
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 3 (default, `+t%X`, `-t%X`) |
+| Chatter extension | 1 (`*` wildcard) |
+| Missing | 0 |
+
+TRIM is a chatter-first interpretation of CLAN's legacy
+workaround. Parity is "as documented" rather than "as
+implemented in CLAN" — by design.
 
 ## Differences from CLAN
 

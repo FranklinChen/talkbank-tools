@@ -299,11 +299,18 @@ def _leaf_count(tree: ConstituencyTree) -> int:
 
 
 def _parse_tree_indices(subtree: ConstituencyTree, offset: int) -> list[list[int]]:
-    """Recursively extract S-level phrase leaf-index ranges from a constituency tree."""
-    try:
-        children = subtree.children
-    except AttributeError:
-        return []
+    """Recursively extract S-level phrase leaf-index ranges from a constituency tree.
+
+    Raises ``AttributeError`` (re-raised) if ``subtree`` is missing the
+    ``children`` attribute. The previous behavior of swallowing the
+    error and returning ``[]`` masked malformed Stanza constituency
+    output as empty utseg assignments — a silent-failure pattern that
+    the system-wide graceful-failure invariant rules out. Any caller
+    that genuinely wants to tolerate a missing-children subtree must
+    catch the error explicitly and decide what to do, rather than
+    relying on this function to invent an empty result.
+    """
+    children = subtree.children
 
     result: list[list[int]] = []
     subtree_labels = [

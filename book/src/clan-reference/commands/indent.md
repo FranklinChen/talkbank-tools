@@ -1,6 +1,8 @@
 # INDENT -- Align CA Overlap Markers
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:03 EDT
+
 ## Purpose
 
 Aligns overlap markers in Conversation Analysis (CA) transcripts. The legacy manual describes `INDENT` simply as a program for realigning overlap marks in CA files, and notes that the files must use a fixed-width font such as CAFont.
@@ -13,6 +15,29 @@ Aligns overlap markers in Conversation Analysis (CA) transcripts. The legacy man
 chatter clan indent file.cha
 chatter clan indent file.cha -o aligned.cha
 ```
+
+## CLAN `+`-flag coverage audit
+
+INDENT is a **transform**. Sources:
+`OSX-CLAN/src/clan/indent.cpp::usage`,
+`crates/talkbank-clan/src/transforms/indent.rs`.
+
+CLAN's `indent.cpp::usage` exposes **no command-specific `+`-flags**
+— the surface is just the inherited general flag set (none of
+which apply to a pure CA-overlap aligner).
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 1 (default align) |
+| Missing | 0 |
+
+INDENT is byte-parity complete by virtue of having no
+command-specific surface. The only legitimate concern is the
+fixed-width-font dependency CLAN mentions — chatter doesn't care
+about font metrics since it aligns by column count, not visual
+width.
 
 ## Algorithm
 

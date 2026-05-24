@@ -1,7 +1,7 @@
 # POSTLIST -- List POST Database Contents (deliberately not implemented)
 
 **Status:** Reference -- stub command
-**Last updated:** 2026-05-21 15:30 EDT
+**Last updated:** 2026-05-22 13:14 EDT
 
 ## Purpose
 
@@ -30,3 +30,11 @@ Invoking `chatter clan postlist` prints an error and exits non-zero.
 
 - [MOR](mor.md), [POST](post.md), [POSTMODRULES](postmodrules.md),
   [POSTTRAIN](posttrain.md) -- companion stubs
+
+## CLAN `+`-flag coverage audit
+
+**Exempt** — see [MOR](mor.md#clan-flag-coverage-audit) for the
+shared MOR-pipeline policy: chatter does not consume CLAN's
+`+`-flags for any command in this family. CLAN's own usage text
+documents the legacy flag surface; chatter emits a refusal that
+points users to batchalign.

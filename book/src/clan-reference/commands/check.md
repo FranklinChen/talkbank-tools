@@ -1,7 +1,7 @@
 # CHECK — CHAT File Validation
 
 **Status:** Current
-**Last updated:** 2026-05-11 17:22 EDT
+**Last updated:** 2026-05-22 13:13 EDT
 
 CHECK validates CHAT files for structural correctness, checking headers, tier
 formatting, bracket matching, bullet consistency, speaker declarations, and more.
@@ -34,6 +34,42 @@ chatter clan check +u file.cha           # Check UD features on %mor
 | `+g4` | `--check-id` | Check for missing @ID tiers (on by default) |
 | `+g5` | `--check-unused` | Check for unused speakers |
 | `+u` | `--check-ud` | Validate UD features on %mor tier |
+
+## CLAN `+`-flag coverage audit
+
+CHECK is a **validator** — and the audit shape differs from
+every other command by design. Per the
+`chatter-clan-check-is-exception` memory rule (saved 2026-05-21):
+
+> chatter `check` deliberately improves on CLAN's CHECK; track
+> divergences as documented improvements, not regressions. Use
+> CLAN check as a find-missing-rules oracle, not a byte-level
+> reference.
+
+The Options table above is therefore the **authoritative
+mapping** for chatter's CHECK surface — not a parity scorecard.
+Where CLAN's flag has a chatter equivalent, the row says so.
+Where CLAN's behaviour is a documented improvement target (e.g.
+161 named error codes vs CLAN's smaller fixed set), chatter
+leads. Where chatter validates something CLAN does not (e.g.
+UD-grade `%mor` features, expansive header-coherence checks),
+those validations are chatter extensions with no CLAN
+counterpart.
+
+### Audit summary (CHECK is exempt from parity buckets)
+
+CHECK is exempted from the "Done / Partial / Rewriter only /
+Missing" buckets used elsewhere in this catalog. The CLAN-bug
+divergence ledger
+([framework.md](../divergences/framework.md)) is the canonical
+home for CHECK-specific divergences when chatter improves on
+the legacy behaviour.
+
+The one CLAN `+`-flag explicitly **not** mapped here is `+dN`
+warning-suppression (see Display Modes section below), which is
+semantically distinct from FREQ/KWAL/COMBO's `+d` output-format
+selector and would need its own warning-tagging
+infrastructure.
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

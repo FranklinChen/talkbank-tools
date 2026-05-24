@@ -1,6 +1,8 @@
 # GEMLIST — List Gem Segments
 
 **Status:** Current
+**Last updated:** 2026-05-22 13:45 EDT
+
 ## Purpose
 
 Lists all gem segments (`@Bg`/`@Eg` bracketed regions) found in CHAT files, reporting the label, utterance count, and participating speakers for each gem.
@@ -20,6 +22,23 @@ chatter clan gemlist file.cha --speaker CHI
 |--------|-----------|-------------|
 | `--speaker <code>` | `+t*CODE` | Restrict to specific speaker |
 | `--format <fmt>` | — | Output format: text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+GEMLIST is an **analysis** command. Sources:
+`OSX-CLAN/src/clan/gemlist.cpp::usage`,
+`crates/talkbank-clan/src/commands/gemlist.rs`.
+
+### GEMLIST-specific `+`-flags (from `gemlist.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `-wS` | Exclude tiers with postcodes `S` | — | Missing |
+
+Audit summary: 1 Done (default gem listing), 1 Missing.
+chatter's GEMLIST surfaces gem labels and per-gem statistics
+without a postcode-exclusion filter. The general
+`CommonAnalysisArgs` set is inherited.
 
 ## Output
 

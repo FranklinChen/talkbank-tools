@@ -221,6 +221,7 @@ mod tests {
                 options: CommandOptions::Translate(TranslateOptions {
                     common: CommonOptions::default(),
                     merge_abbrev: false.into(),
+                    ..TranslateOptions::default()
                 }),
                 runtime_state: BTreeMap::new(),
                 debug_traces: false,

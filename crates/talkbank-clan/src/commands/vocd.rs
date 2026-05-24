@@ -57,7 +57,7 @@ use rand::rngs::StdRng;
 use serde::Serialize;
 use talkbank_model::{SpeakerCode, Utterance, WriteChat};
 
-use crate::framework::word_filter::countable_words;
+use crate::framework::word_filter::{CapitalizationFilter, countable_words};
 use crate::framework::{
     AnalysisCommand, AnalysisScore, CommandOutput, FileContext, TypeCount, WordCount,
 };
@@ -88,6 +88,17 @@ pub struct VocdConfig {
     pub sample_to: usize,
     /// Number of random samples per sample size (default: 100).
     pub num_samples: usize,
+    /// CLAN's `+c` / `+c0` / `+c1`: restrict the token stream fed
+    /// to the D-statistic sampler to words whose surface form
+    /// matches a capitalization predicate. `Any` (default) feeds
+    /// every countable word.
+    pub capitalization: CapitalizationFilter,
+    /// CLAN `+k`: case-sensitive token keying. Default (`false`)
+    /// lowercases each token before pushing it onto the speaker
+    /// sequence, collapsing case variants. When `true`, tokens
+    /// keep their original case so `Want`/`want`/`WANT` count as
+    /// three distinct types in the D-statistic computation.
+    pub case_sensitive: bool,
 }
 
 impl Default for VocdConfig {
@@ -97,6 +108,8 @@ impl Default for VocdConfig {
             sample_from: DEFAULT_SAMPLE_FROM,
             sample_to: DEFAULT_SAMPLE_TO,
             num_samples: DEFAULT_NUM_SAMPLES,
+            capitalization: CapitalizationFilter::Any,
+            case_sensitive: false,
         }
     }
 }
@@ -223,11 +236,22 @@ impl AnalysisCommand for VocdCommand {
             .entry(utterance.main.speaker.clone())
             .or_default();
 
-        // Collect lowercased tokens from main tier countable words
+        // `+c` (`capitalization`) gates entry into the token stream;
+        // `+k` (`case_sensitive`) toggles the lower-case fold.
+        let cap_filter = self.config.capitalization;
+        let case_sensitive = self.config.case_sensitive;
         for word in countable_words(&utterance.main.content.content) {
+            if !cap_filter.includes(word.cleaned_text()) {
+                continue;
+            }
             let text = word.to_chat_string();
             if !text.is_empty() {
-                speaker_data.tokens.push(text.to_lowercase());
+                let token = if case_sensitive {
+                    text
+                } else {
+                    text.to_lowercase()
+                };
+                speaker_data.tokens.push(token);
             }
         }
 
@@ -800,6 +824,154 @@ mod tests {
         assert_eq!(result.warnings[0].token_count, 3);
     }
 
+    /// `+c1` (`CapitalizationFilter::MidUpper`) keeps only words
+    /// with an uppercase letter past position 0 in the VOCD token
+    /// stream — proper-noun initial caps don't qualify.
+    #[test]
+    fn vocd_mid_upper_filter_admits_only_mid_uppercase() {
+        use talkbank_model::Span;
+        use talkbank_model::{MainTier, Terminator, Utterance, UtteranceContent, Word};
+
+        let cmd = VocdCommand::new(VocdConfig {
+            sample_from: 5,
+            sample_to: 10,
+            num_samples: 20,
+            capitalization: CapitalizationFilter::MidUpper,
+            case_sensitive: false,
+        });
+        let mut state = VocdState::default();
+
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let leaked: &'static talkbank_model::ChatFile = Box::leak(Box::new(chat_file));
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: leaked,
+            filename: "test",
+            line_map: None,
+        };
+
+        let content: Vec<UtteranceContent> = ["I", "Cookie", "McDonald", "iPhone"]
+            .iter()
+            .map(|w| UtteranceContent::Word(Box::new(Word::simple(*w))))
+            .collect();
+        let main = MainTier::new("CHI", content, Terminator::Period { span: Span::DUMMY });
+        let utt = Utterance::new(main);
+        cmd.process_utterance(&utt, &file_ctx, &mut state);
+
+        let speaker = state.by_speaker.get("CHI").expect("CHI speaker data");
+        let tokens: Vec<&str> = speaker.tokens.iter().map(String::as_str).collect();
+        assert_eq!(tokens, vec!["mcdonald", "iphone"]);
+    }
+
+    /// `+c` / `+c0` (`CapitalizationFilter::InitialUpper`) drops
+    /// non-initial-upper words before the token stream reaches the
+    /// sampler. A mixed utterance with two capitalized words yields
+    /// exactly two tokens in the speaker token sequence.
+    #[test]
+    fn vocd_capitalized_only_filters_lowercase_words() {
+        use talkbank_model::Span;
+        use talkbank_model::{MainTier, Terminator, Utterance, UtteranceContent, Word};
+
+        let cmd = VocdCommand::new(VocdConfig {
+            sample_from: 5,
+            sample_to: 10,
+            num_samples: 20,
+            capitalization: CapitalizationFilter::InitialUpper,
+            case_sensitive: false,
+        });
+        let mut state = VocdState::default();
+
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let leaked: &'static talkbank_model::ChatFile = Box::leak(Box::new(chat_file));
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: leaked,
+            filename: "test",
+            line_map: None,
+        };
+
+        // "I" and "Cookie" pass; "want", "a", "and" do not.
+        let content: Vec<UtteranceContent> = ["I", "want", "a", "Cookie", "and"]
+            .iter()
+            .map(|w| UtteranceContent::Word(Box::new(Word::simple(*w))))
+            .collect();
+        let main = MainTier::new("CHI", content, Terminator::Period { span: Span::DUMMY });
+        let utt = Utterance::new(main);
+        cmd.process_utterance(&utt, &file_ctx, &mut state);
+
+        let speaker = state.by_speaker.get("CHI").expect("CHI speaker data");
+        let tokens: Vec<&str> = speaker.tokens.iter().map(String::as_str).collect();
+        assert_eq!(tokens, vec!["i", "cookie"]);
+    }
+
+    /// CLAN VOCD `+k` / `--case-sensitive`: token-stream keying
+    /// preserves original case. Without `+k` (default), tokens are
+    /// lowercased before reaching the D-statistic sampler, so
+    /// `Want`/`want`/`WANT` collapse to a single type. With `+k`,
+    /// each case variant is its own type.
+    #[test]
+    fn vocd_case_sensitive_preserves_case_in_tokens() {
+        use talkbank_model::Span;
+        use talkbank_model::{MainTier, Terminator, Utterance, UtteranceContent, Word};
+
+        let cmd = VocdCommand::new(VocdConfig {
+            case_sensitive: true,
+            ..VocdConfig::default()
+        });
+        let mut state = VocdState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let leaked: &'static talkbank_model::ChatFile = Box::leak(Box::new(chat_file));
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: leaked,
+            filename: "test",
+            line_map: None,
+        };
+
+        let content: Vec<UtteranceContent> = ["Want", "want", "WANT"]
+            .iter()
+            .map(|w| UtteranceContent::Word(Box::new(Word::simple(*w))))
+            .collect();
+        let main = MainTier::new("CHI", content, Terminator::Period { span: Span::DUMMY });
+        let utt = Utterance::new(main);
+        cmd.process_utterance(&utt, &file_ctx, &mut state);
+
+        let speaker = state.by_speaker.get("CHI").expect("CHI speaker data");
+        let tokens: Vec<&str> = speaker.tokens.iter().map(String::as_str).collect();
+        assert_eq!(tokens, vec!["Want", "want", "WANT"]);
+    }
+
+    /// Companion regression: default (`case_sensitive: false`)
+    /// collapses the three case variants into one token type.
+    #[test]
+    fn vocd_default_lowercases_tokens() {
+        use talkbank_model::Span;
+        use talkbank_model::{MainTier, Terminator, Utterance, UtteranceContent, Word};
+
+        let cmd = VocdCommand::new(VocdConfig::default());
+        let mut state = VocdState::default();
+        let chat_file = talkbank_model::ChatFile::new(vec![]);
+        let leaked: &'static talkbank_model::ChatFile = Box::leak(Box::new(chat_file));
+        let file_ctx = FileContext {
+            path: std::path::Path::new("test.cha"),
+            chat_file: leaked,
+            filename: "test",
+            line_map: None,
+        };
+
+        let content: Vec<UtteranceContent> = ["Want", "want", "WANT"]
+            .iter()
+            .map(|w| UtteranceContent::Word(Box::new(Word::simple(*w))))
+            .collect();
+        let main = MainTier::new("CHI", content, Terminator::Period { span: Span::DUMMY });
+        let utt = Utterance::new(main);
+        cmd.process_utterance(&utt, &file_ctx, &mut state);
+
+        let speaker = state.by_speaker.get("CHI").expect("CHI speaker data");
+        let tokens: Vec<&str> = speaker.tokens.iter().map(String::as_str).collect();
+        assert_eq!(tokens, vec!["want", "want", "want"]);
+    }
+
     /// Adequate token counts should produce full trial output and positive D.
     #[test]
     fn vocd_with_enough_tokens() {
@@ -810,6 +982,8 @@ mod tests {
             sample_from: 5,
             sample_to: 10,
             num_samples: 20,
+            capitalization: CapitalizationFilter::Any,
+            case_sensitive: false,
         });
         let mut state = VocdState::default();
 

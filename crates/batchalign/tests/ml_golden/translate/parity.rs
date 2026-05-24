@@ -10,6 +10,7 @@ fn translate_opts() -> CommandOptions {
             ..CommonOptions::default()
         },
         merge_abbrev: false.into(),
+        ..TranslateOptions::default()
     })
 }
 

@@ -1,6 +1,8 @@
 # IPSYN -- Index of Productive Syntax
 
 **Status:** Current
+**Last updated:** 2026-05-22 09:23 EDT
+
 ## Purpose
 
 Computes a syntactic complexity score by awarding points for distinct syntactic structures observed in a child's utterances. Each structure type (rule) can earn at most 2 points -- one per distinct utterance in which the structure appears. The total across all rules yields the IPSyn score.
@@ -16,15 +18,60 @@ chatter clan ipsyn --rules ipsyn.rules file.cha
 chatter clan ipsyn --max-utterances 100 file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
-| Option | Description |
-|--------|-------------|
-| `--speaker <CODE>` | Include speaker |
-| `--exclude-speaker <CODE>` | Exclude speaker |
-| `--rules <PATH>` | Custom IPSYN rules file |
-| `--max-utterances <N>` | Maximum utterances to analyze (default: 100) |
-| `--format <FMT>` | Output format: text, json, csv, clan |
+| Option | CLAN flag | Description |
+|--------|-----------|-------------|
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--rules <PATH>` | `+lF` | Custom IPSYN rules file |
+| `--max-utterances <N>` | `+cN` | Maximum utterances to analyze (default: 100) |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `ipsyn` flag. Sources:
+
+* `OSX-CLAN/src/clan/ipsyn.cpp` — `usage()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` IPSYN branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Ipsyn` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+IPSYN is a **required-flag refusal** command in chatter — same
+refusal byte-parity as EVAL/KIDEVAL/DSS/SUGAR. The rules file is
+also required for non-default analysis.
+
+### IPSYN-specific `+`-flags (from `ipsyn.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+cN` | Analyse N complete unique utterances (default 100) | `--max-utterances N` | Done | Direct mapping; rewriter routes `+cN` → `--max-utterances N` for IPSYN (since the per-subcommand routing batch). |
+| `+d` | Do not show file and line number where points are found | — | Rewriter only | |
+| `+d1` | Output in spreadsheet format | — | Rewriter only | |
+| `+lF` | Specify IPSYN rules file name `F` | `--rules <PATH>` | Done | Direct mapping; rewriter routes `+lF` → `--rules F` for IPSYN (since the per-subcommand routing batch). |
+| `+o` | Use the original rule set (100 utterances) | — | Missing | |
+| `-sS` | Ignore `[+ ip]` / `[+ ipe]` postcodes | partial via `--exclude-word` | Partial | Different semantic — chatter filters by word, CLAN's IPSYN `-sS` skips postcoded utterances. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 6 |
+| Partial | 3 |
+| Rewriter only | 4 |
+| Missing | 5 |
+
+IPSYN's two cleanest one-line follow-ups (rewriter routing of
+`+cN` → `--max-utterances N` and `+lF` → `--rules F`) landed
+together with the per-subcommand flag-routing batch
+(commit 9d34a10b).
 
 ## Rule Categories
 

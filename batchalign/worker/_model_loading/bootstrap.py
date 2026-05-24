@@ -237,8 +237,6 @@ def _load_single_task(task: str, bootstrap: WorkerBootstrapRuntime) -> None:
     - ``"speaker"``, ``"opensmile"``, ``"avqi"`` → no-ops here; these use
       lazy loading at request time inside their execute_v2 handlers.
     """
-    engine_overrides = bootstrap.engine_overrides or None
-
     if task in (InferTask.MORPHOSYNTAX.value, InferTask.COREF.value):
         # The IPC wire format is `--lang STRING`, so Python sees a plain
         # string. The Rust side may pass the typed `WorkerLanguage::Auto`
@@ -276,7 +274,7 @@ def _load_single_task(task: str, bootstrap: WorkerBootstrapRuntime) -> None:
             build_utseg_batch_infer_handler(),
         )
     elif task == InferTask.TRANSLATE.value:
-        load_translation_engine(engine_overrides)
+        load_translation_engine(bootstrap)
         _state.register_batch_infer_handler(
             InferTask.TRANSLATE,
             build_translate_batch_infer_handler(),

@@ -5,6 +5,8 @@
 //! [`talkbank_clan::framework::UtteranceRange`] model so the CLI stops carrying
 //! raw `start-end` strings past argument parsing.
 
+use std::path::PathBuf;
+
 use clap::{Args, ValueEnum};
 use talkbank_clan::framework::{IdFilter, UtteranceRange, parse_id_filter, parse_utterance_range};
 
@@ -35,6 +37,20 @@ pub struct CommonAnalysisArgs {
     #[arg(short = 'W', long)]
     pub exclude_word: Vec<String>,
 
+    /// Load `--include-word` patterns from one or more files.
+    /// One pattern per line; blank lines, lines starting with
+    /// `# `, and lines starting with `;%* ` are skipped. Maps
+    /// CLAN's `+s@FILE` flag. Loaded patterns are appended to
+    /// the (possibly empty) `--include-word` list. Repeatable.
+    #[arg(long = "include-word-file", value_name = "PATH")]
+    pub include_word_file: Vec<PathBuf>,
+
+    /// Load `--exclude-word` patterns from one or more files
+    /// (same file format as `--include-word-file`). Maps
+    /// CLAN's `-s@FILE` flag. Repeatable.
+    #[arg(long = "exclude-word-file", value_name = "PATH")]
+    pub exclude_word_file: Vec<PathBuf>,
+
     /// Restrict to a 1-based utterance range within each file (e.g., "25-125")
     #[arg(long, value_parser = parse_utterance_range)]
     pub range: Option<UtteranceRange>,
@@ -50,6 +66,15 @@ pub struct CommonAnalysisArgs {
     #[arg(long, value_parser = parse_id_filter)]
     pub id_filter: Option<IdFilter>,
 
+    /// Filter by participant role — only process utterances from
+    /// speakers whose `@ID:` role field matches one of these names
+    /// (can be repeated). Case-insensitive. Maps CLAN's `+t#ROLE`
+    /// flag. Example: `--role Target_Child --role Mother`. Files
+    /// with no `@ID:` headers are processed unchanged (no role
+    /// information ⇒ no role filtering applied per-speaker).
+    #[arg(long = "role")]
+    pub role: Vec<String>,
+
     /// Output results per file instead of aggregated across all files
     #[arg(long)]
     pub per_file: bool,
@@ -57,6 +82,14 @@ pub struct CommonAnalysisArgs {
     /// Include retraced words in counting (CLAN +r6 equivalent)
     #[arg(long)]
     pub include_retracings: bool,
+
+    /// Match `+s`/`-s` / `--include-word`/`--exclude-word` patterns
+    /// case-sensitively. CLAN's `+k` flag. Default is case-
+    /// insensitive matching (both pattern and word are lower-cased
+    /// before comparison) — matching legacy CLAN's behaviour
+    /// without `+k`.
+    #[arg(long = "case-sensitive")]
+    pub case_sensitive: bool,
 
     /// Output format: clan (default — character-for-character match with legacy CLAN), text, json, or csv
     #[arg(short, long, value_enum, default_value_t = ClanOutputFormat::Clan)]

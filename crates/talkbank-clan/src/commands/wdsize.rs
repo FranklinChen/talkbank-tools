@@ -31,11 +31,69 @@ use crate::framework::{
     WordCount,
 };
 
+/// Length-comparison used by WDSIZE's `+w[>|<|=]N` filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthComparator {
+    /// CLAN `+w>N` — include only words with length > N.
+    GreaterThan,
+    /// CLAN `+w<N` — include only words with length < N.
+    LessThan,
+    /// CLAN `+w=N` — include only words with length == N.
+    Equal,
+}
+
+/// Optional per-word length predicate for WDSIZE (CLAN `+w[>|<|=]N`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LengthFilter {
+    /// Comparison applied to each word's character length.
+    pub comparator: LengthComparator,
+    /// Threshold; the right-hand side of the comparison.
+    pub threshold: usize,
+}
+
+impl LengthFilter {
+    /// Whether the given length passes this filter.
+    pub fn includes(self, length: usize) -> bool {
+        match self.comparator {
+            LengthComparator::GreaterThan => length > self.threshold,
+            LengthComparator::LessThan => length < self.threshold,
+            LengthComparator::Equal => length == self.threshold,
+        }
+    }
+}
+
+/// Parse `gt:N` / `lt:N` / `eq:N` into a `LengthFilter`. Returns
+/// `None` for any other shape.
+impl std::str::FromStr for LengthFilter {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (tag, n) = s
+            .split_once(':')
+            .ok_or_else(|| format!("expected `<gt|lt|eq>:<N>`, got {s:?}"))?;
+        let comparator = match tag {
+            "gt" => LengthComparator::GreaterThan,
+            "lt" => LengthComparator::LessThan,
+            "eq" => LengthComparator::Equal,
+            other => return Err(format!("unknown length comparator: {other:?}")),
+        };
+        let threshold = n
+            .parse::<usize>()
+            .map_err(|_| format!("invalid threshold: {n:?}"))?;
+        Ok(LengthFilter {
+            comparator,
+            threshold,
+        })
+    }
+}
+
 /// Configuration for the WDSIZE command.
 #[derive(Debug, Clone, Default)]
 pub struct WdsizeConfig {
     /// Use main tier words instead of `%mor` stems.
     pub use_main_tier: bool,
+    /// CLAN `+w[>|<|=]N`: include only words whose character
+    /// length satisfies the comparison. `None` ⇒ no filter.
+    pub length_filter: Option<LengthFilter>,
 }
 
 /// Per-speaker word size distribution.
@@ -211,29 +269,38 @@ impl AnalysisCommand for WdsizeCommand {
         let speaker = utterance.main.speaker.to_string();
         let accum = state.by_speaker.entry(speaker).or_default();
 
+        // `+w[>|<|=]N` (`length_filter`) gates each character
+        // length before it enters the histogram. `None` ⇒ accept.
+        let length_filter = self.config.length_filter;
+        let record_if_passes = |accum: &mut SpeakerAccum, char_len: usize| {
+            if length_filter.is_none_or(|f| f.includes(char_len)) {
+                accum.record(char_len);
+            }
+        };
+
         if self.config.use_main_tier {
             // Count main tier word character lengths
             for word in countable_words(&utterance.main.content.content) {
                 let char_len = word.cleaned_text().chars().count();
-                accum.record(char_len);
+                record_if_passes(accum, char_len);
             }
         } else if let Some(mor_tier) = utterance.mor_tier() {
             // Count %mor lemma character lengths (default behavior)
             for mor_item in mor_tier.items().iter() {
                 let char_len = mor_item.main.lemma.as_str().chars().count();
-                accum.record(char_len);
+                record_if_passes(accum, char_len);
 
                 // Count clitic lemmas separately
                 for clitic in &mor_item.post_clitics {
                     let char_len = clitic.lemma.as_str().chars().count();
-                    accum.record(char_len);
+                    record_if_passes(accum, char_len);
                 }
             }
         } else {
             // Fallback to main tier if no %mor
             for word in countable_words(&utterance.main.content.content) {
                 let char_len = word.cleaned_text().chars().count();
-                accum.record(char_len);
+                record_if_passes(accum, char_len);
             }
         }
     }
@@ -279,6 +346,7 @@ mod tests {
     fn main_tier_word_sizes() {
         let cmd = WdsizeCommand::new(WdsizeConfig {
             use_main_tier: true,
+            ..WdsizeConfig::default()
         });
         let mut state = WdsizeState::default();
         let (_cf, ctx) = file_ctx();
@@ -295,6 +363,139 @@ mod tests {
         assert_eq!(sp.distribution[&4], 1);
         assert_eq!(sp.distribution[&6], 1);
         assert!((sp.mean() - 3.667).abs() < 0.01);
+    }
+
+    /// `+w>4` (`LengthFilter::GreaterThan`, threshold 4) drops
+    /// `"I"` (1) and `"want"` (4); only `"cookie"` (6) enters
+    /// the histogram.
+    #[test]
+    fn length_filter_greater_than() {
+        let cmd = WdsizeCommand::new(WdsizeConfig {
+            use_main_tier: true,
+            length_filter: Some(LengthFilter {
+                comparator: LengthComparator::GreaterThan,
+                threshold: 4,
+            }),
+        });
+        let mut state = WdsizeState::default();
+        let (_cf, ctx) = file_ctx();
+
+        let u = make_utterance("CHI", &["I", "want", "cookie"]);
+        cmd.process_utterance(&u, &ctx, &mut state);
+
+        let result = cmd.finalize(state);
+        let sp = &result.speakers[0];
+        assert_eq!(sp.total_words, 1);
+        assert_eq!(sp.distribution.get(&6).copied(), Some(1));
+        assert!(sp.distribution.get(&1).is_none());
+        assert!(sp.distribution.get(&4).is_none());
+    }
+
+    /// `+w<5` keeps lengths strictly less than 5: `"I"` (1) and
+    /// `"want"` (4) pass; `"cookie"` (6) does not.
+    #[test]
+    fn length_filter_less_than() {
+        let cmd = WdsizeCommand::new(WdsizeConfig {
+            use_main_tier: true,
+            length_filter: Some(LengthFilter {
+                comparator: LengthComparator::LessThan,
+                threshold: 5,
+            }),
+        });
+        let mut state = WdsizeState::default();
+        let (_cf, ctx) = file_ctx();
+
+        let u = make_utterance("CHI", &["I", "want", "cookie"]);
+        cmd.process_utterance(&u, &ctx, &mut state);
+
+        let result = cmd.finalize(state);
+        let sp = &result.speakers[0];
+        assert_eq!(sp.total_words, 2);
+        assert_eq!(sp.distribution.get(&1).copied(), Some(1));
+        assert_eq!(sp.distribution.get(&4).copied(), Some(1));
+        assert!(sp.distribution.get(&6).is_none());
+    }
+
+    /// `+w=4` keeps only length-4 words: `"want"` passes.
+    #[test]
+    fn length_filter_equal() {
+        let cmd = WdsizeCommand::new(WdsizeConfig {
+            use_main_tier: true,
+            length_filter: Some(LengthFilter {
+                comparator: LengthComparator::Equal,
+                threshold: 4,
+            }),
+        });
+        let mut state = WdsizeState::default();
+        let (_cf, ctx) = file_ctx();
+
+        let u = make_utterance("CHI", &["I", "want", "cookie"]);
+        cmd.process_utterance(&u, &ctx, &mut state);
+
+        let result = cmd.finalize(state);
+        let sp = &result.speakers[0];
+        assert_eq!(sp.total_words, 1);
+        assert_eq!(sp.distribution.get(&4).copied(), Some(1));
+    }
+
+    /// `LengthFilter::includes` direct unit-tests for the three
+    /// comparators. Edge cases: `>0` admits everything positive;
+    /// `<0` admits nothing; `=0` admits only zero-length input.
+    #[test]
+    fn length_filter_includes_predicate() {
+        let gt5 = LengthFilter {
+            comparator: LengthComparator::GreaterThan,
+            threshold: 5,
+        };
+        assert!(!gt5.includes(5));
+        assert!(gt5.includes(6));
+        assert!(!gt5.includes(0));
+
+        let lt5 = LengthFilter {
+            comparator: LengthComparator::LessThan,
+            threshold: 5,
+        };
+        assert!(lt5.includes(4));
+        assert!(!lt5.includes(5));
+
+        let eq3 = LengthFilter {
+            comparator: LengthComparator::Equal,
+            threshold: 3,
+        };
+        assert!(eq3.includes(3));
+        assert!(!eq3.includes(2));
+        assert!(!eq3.includes(4));
+    }
+
+    /// `FromStr` parses the `gt:N` / `lt:N` / `eq:N` shape that
+    /// the rewriter emits.
+    #[test]
+    fn length_filter_from_str_parses_rewriter_output() {
+        use std::str::FromStr;
+        assert_eq!(
+            LengthFilter::from_str("gt:4").unwrap(),
+            LengthFilter {
+                comparator: LengthComparator::GreaterThan,
+                threshold: 4,
+            }
+        );
+        assert_eq!(
+            LengthFilter::from_str("lt:5").unwrap(),
+            LengthFilter {
+                comparator: LengthComparator::LessThan,
+                threshold: 5,
+            }
+        );
+        assert_eq!(
+            LengthFilter::from_str("eq:3").unwrap(),
+            LengthFilter {
+                comparator: LengthComparator::Equal,
+                threshold: 3,
+            }
+        );
+        assert!(LengthFilter::from_str("garbage").is_err());
+        assert!(LengthFilter::from_str("xx:4").is_err());
+        assert!(LengthFilter::from_str("gt:notanumber").is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # PLAY2CHAT -- PLAY Annotation to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:15 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -45,3 +45,20 @@ A well-formed CHAT file with headers and participants. Unique speakers are autom
 
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
+
+## CLAN `+`-flag coverage audit
+
+PLAY2CHAT is a **converter** — input Datavyu text, output CHAT.
+Sources: `OSX-CLAN/src/clan/Play2Chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/play2chat.rs`.
+
+### PLAY2CHAT-specific `+`-flags (from `Play2Chat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+d` | Check utterances for illegal overlaps | — | Missing |
+
+Audit summary: 1 Done (default conversion), 1 Missing. The
+overlap-check is a validation pass that chatter does not run;
+researchers wanting that check can pipe the output to
+`chatter clan check`.

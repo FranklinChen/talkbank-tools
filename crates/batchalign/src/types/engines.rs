@@ -311,6 +311,103 @@ impl<'de> Deserialize<'de> for AsrEngineName {
     }
 }
 
+/// Typed translation engine selector.
+///
+/// The wire format uses the lowercase tokens ``"google"``,
+/// ``"seamless"``, and ``"nllb"``; the Python worker's
+/// ``resolve_translate_engine``
+/// (``batchalign/worker/_model_loading/translation.py``) matches on
+/// those exact strings. Any change here must be mirrored on the Python
+/// side or dispatch breaks silently.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TranslateEngineName {
+    /// Public Google Translate via the ``googletrans`` library. Requires
+    /// outbound reachability to ``translate.google.com`` — unsuitable
+    /// behind the Great Firewall without a VPN.
+    Google,
+    /// Local Meta SeamlessM4T model, loaded from HuggingFace and run
+    /// in-process in the Python worker. No outbound network at
+    /// inference time. Retained for back-compat with BA2 callers;
+    /// short-CJK quality is poor, prefer ``Nllb`` for new work.
+    Seamless,
+    /// Local Meta NLLB-200-distilled-1.3B (~5 GB), text-MT-native.
+    /// No outbound network at inference time. Recommended self-hosted
+    /// fallback for hosts where Google Translate is unreachable.
+    Nllb,
+}
+
+impl EngineBackend for TranslateEngineName {
+    fn wire_name(&self) -> &str {
+        match self {
+            Self::Google => "google",
+            Self::Seamless => "seamless",
+            Self::Nllb => "nllb",
+        }
+    }
+
+    fn is_rust_owned(&self) -> bool {
+        // All backends run in the Python worker. No Rust-owned
+        // translate path exists today.
+        false
+    }
+
+    fn try_from_wire_name(name: &str) -> Option<Self> {
+        match name {
+            "google" => Some(Self::Google),
+            "seamless" => Some(Self::Seamless),
+            "nllb" => Some(Self::Nllb),
+            _ => None,
+        }
+    }
+}
+
+impl TranslateEngineName {
+    /// The override name used in worker pool keys for dispatch.
+    ///
+    /// Identical to ``wire_name`` — translate has no legacy alias
+    /// divergence between dispatch and wire today. Provided for
+    /// shape-parity with ``AsrEngineName`` and ``FaEngineName``.
+    pub fn dispatch_override_name(&self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Seamless => "seamless",
+            Self::Nllb => "nllb",
+        }
+    }
+
+    /// Parse one persisted wire-format token.
+    pub fn from_wire_name(name: &str) -> Result<Self, UnknownEngineName> {
+        Self::try_from_wire_name(name).ok_or_else(|| UnknownEngineName {
+            name: name.to_owned(),
+            category: "translate",
+        })
+    }
+
+    /// Borrow the wire-format token for JSON/SQLite.
+    pub fn as_wire_name(&self) -> &str {
+        self.wire_name()
+    }
+}
+
+impl Serialize for TranslateEngineName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_wire_name())
+    }
+}
+
+impl<'de> Deserialize<'de> for TranslateEngineName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Self::from_wire_name(&name).map_err(serde::de::Error::custom)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EngineOverrides — typed engine override selection
 // ---------------------------------------------------------------------------
@@ -325,12 +422,14 @@ pub struct EngineOverrides {
     pub asr: Option<AsrEngineName>,
     /// FA engine override (e.g., `FaEngineName::Wav2vecCanto`).
     pub fa: Option<FaEngineName>,
+    /// Translate engine override (e.g., `TranslateEngineName::Seamless`).
+    pub translate: Option<TranslateEngineName>,
 }
 
 impl EngineOverrides {
     /// Return `true` when no overrides are set.
     pub fn is_empty(&self) -> bool {
-        self.asr.is_none() && self.fa.is_none()
+        self.asr.is_none() && self.fa.is_none() && self.translate.is_none()
     }
 
     /// Serialize to a JSON string for pool worker keying and CLI pass-through.
@@ -351,13 +450,18 @@ impl Serialize for EngineOverrides {
         S: serde::Serializer,
     {
         use serde::ser::SerializeMap;
-        let count = self.asr.is_some() as usize + self.fa.is_some() as usize;
+        let count = self.asr.is_some() as usize
+            + self.fa.is_some() as usize
+            + self.translate.is_some() as usize;
         let mut map = serializer.serialize_map(Some(count))?;
         if let Some(ref asr) = self.asr {
             map.serialize_entry("asr", asr.as_wire_name())?;
         }
         if let Some(ref fa) = self.fa {
             map.serialize_entry("fa", fa.as_wire_name())?;
+        }
+        if let Some(ref translate) = self.translate {
+            map.serialize_entry("translate", translate.as_wire_name())?;
         }
         map.end()
     }
@@ -381,6 +485,12 @@ impl<'de> Deserialize<'de> for EngineOverrides {
                 "fa" => {
                     overrides.fa = Some(
                         FaEngineName::from_wire_name(value).map_err(serde::de::Error::custom)?,
+                    );
+                }
+                "translate" => {
+                    overrides.translate = Some(
+                        TranslateEngineName::from_wire_name(value)
+                            .map_err(serde::de::Error::custom)?,
                     );
                 }
                 other => {
@@ -434,5 +544,116 @@ mod tests {
             AsrEngineName::WhisperHub.dispatch_override_name(),
             Some("whisper_hub"),
         );
+    }
+
+    // ---- TranslateEngineName ----
+    //
+    // Pinned because the Python worker's `resolve_translate_engine`
+    // (`batchalign/worker/_model_loading/translation.py`) matches on the
+    // exact strings "google" and "seamless". A typo here would
+    // silently fall through to the default engine on the Python side.
+
+    #[test]
+    fn translate_engine_google_wire_roundtrip() {
+        assert_eq!(TranslateEngineName::Google.wire_name(), "google");
+        assert_eq!(
+            TranslateEngineName::try_from_wire_name("google"),
+            Some(TranslateEngineName::Google),
+        );
+    }
+
+    #[test]
+    fn translate_engine_seamless_wire_roundtrip() {
+        assert_eq!(TranslateEngineName::Seamless.wire_name(), "seamless");
+        assert_eq!(
+            TranslateEngineName::try_from_wire_name("seamless"),
+            Some(TranslateEngineName::Seamless),
+        );
+    }
+
+    #[test]
+    fn translate_engine_nllb_wire_roundtrip() {
+        assert_eq!(TranslateEngineName::Nllb.wire_name(), "nllb");
+        assert_eq!(
+            TranslateEngineName::try_from_wire_name("nllb"),
+            Some(TranslateEngineName::Nllb),
+        );
+    }
+
+    #[test]
+    fn translate_engine_unknown_wire_name_is_rejected() {
+        assert_eq!(TranslateEngineName::try_from_wire_name("gogle"), None);
+        let err = TranslateEngineName::from_wire_name("gogle").unwrap_err();
+        assert_eq!(err.category, "translate");
+        assert_eq!(err.name, "gogle");
+    }
+
+    #[test]
+    fn translate_engine_no_variant_is_rust_owned() {
+        // All backends run in the Python worker — none talk to a
+        // provider directly from the Rust server.
+        assert!(!TranslateEngineName::Google.is_rust_owned());
+        assert!(!TranslateEngineName::Seamless.is_rust_owned());
+        assert!(!TranslateEngineName::Nllb.is_rust_owned());
+    }
+
+    #[test]
+    fn translate_engine_serializes_as_wire_string() {
+        let json = serde_json::to_string(&TranslateEngineName::Seamless).unwrap();
+        assert_eq!(json, "\"seamless\"");
+    }
+
+    #[test]
+    fn translate_engine_deserializes_from_wire_string() {
+        let parsed: TranslateEngineName = serde_json::from_str("\"seamless\"").unwrap();
+        assert_eq!(parsed, TranslateEngineName::Seamless);
+    }
+
+    #[test]
+    fn translate_engine_deserialize_rejects_unknown_variant() {
+        let err = serde_json::from_str::<TranslateEngineName>("\"gogle\"").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("gogle"),
+            "expected error to mention the bad name, got: {message}"
+        );
+    }
+
+    // ---- EngineOverrides translate field ----
+
+    #[test]
+    fn engine_overrides_serializes_translate_field() {
+        let overrides = EngineOverrides {
+            asr: None,
+            fa: None,
+            translate: Some(TranslateEngineName::Seamless),
+        };
+        let json = overrides.to_json_string();
+        assert_eq!(json, "{\"translate\":\"seamless\"}");
+    }
+
+    #[test]
+    fn engine_overrides_deserializes_translate_field() {
+        let parsed: EngineOverrides = serde_json::from_str("{\"translate\":\"seamless\"}").unwrap();
+        assert_eq!(parsed.translate, Some(TranslateEngineName::Seamless));
+        assert!(parsed.asr.is_none());
+        assert!(parsed.fa.is_none());
+    }
+
+    #[test]
+    fn engine_overrides_translate_only_is_not_empty() {
+        let overrides = EngineOverrides {
+            asr: None,
+            fa: None,
+            translate: Some(TranslateEngineName::Seamless),
+        };
+        assert!(!overrides.is_empty());
+    }
+
+    #[test]
+    fn engine_overrides_all_none_is_still_empty() {
+        let overrides = EngineOverrides::default();
+        assert!(overrides.is_empty());
+        assert_eq!(overrides.to_json_string(), "");
     }
 }

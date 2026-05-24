@@ -47,6 +47,19 @@ fn default_asr_engine() -> AsrEngineName {
     AsrEngineName::RevAi
 }
 
+/// Default translation engine for serialized command options.
+///
+/// Google preserves the fleet's historical behavior. Operators on
+/// hosts where Google Translate is unreachable (mainland-China sites
+/// behind the Great Firewall) pass `--translate-engine seamless`
+/// explicitly — there is no per-host config-file default by design,
+/// because hidden host-specific behavior is the failure mode this
+/// project rules out (see the no-config-junk discussion in
+/// `book/src/batchalign/user-guide/commands/translate.md`).
+fn default_translate_engine() -> TranslateEngineName {
+    TranslateEngineName::Google
+}
+
 /// Default Whisper batch size.
 fn default_batch_size() -> i32 {
     8
@@ -345,9 +358,41 @@ pub struct TranslateOptions {
     #[serde(flatten)]
     pub common: CommonOptions,
 
+    /// Translation engine selector. Default Google preserves the
+    /// fleet's historical behavior; pass `--translate-engine seamless`
+    /// to opt into the local Meta SeamlessM4T model.
+    #[serde(default = "default_translate_engine")]
+    pub translate_engine: TranslateEngineName,
+
     /// Merge abbreviated forms during processing.
     #[serde(default)]
     pub merge_abbrev: MergeAbbrevPolicy,
+}
+
+impl Default for TranslateOptions {
+    fn default() -> Self {
+        Self {
+            common: CommonOptions::default(),
+            translate_engine: default_translate_engine(),
+            merge_abbrev: MergeAbbrevPolicy::default(),
+        }
+    }
+}
+
+impl TranslateOptions {
+    /// Return the effective translation engine after applying any
+    /// shared `translate` override.
+    ///
+    /// Precedence mirrors `AlignOptions::effective_fa_engine`:
+    /// `--engine-overrides '{"translate":"..."}'` beats the dedicated
+    /// `--translate-engine` flag.
+    pub fn effective_translate_engine(&self) -> TranslateEngineName {
+        self.common
+            .engine_overrides
+            .translate
+            .clone()
+            .unwrap_or_else(|| self.translate_engine.clone())
+    }
 }
 
 /// Options for the `coref` command.
@@ -587,6 +632,11 @@ impl CommandOptions {
                     overrides.insert("asr", name);
                 }
             }
+            Self::Translate(o) => {
+                // Google and Seamless workers are different pool keys
+                // (different models loaded), so always emit a value.
+                overrides.insert("translate", o.translate_engine.dispatch_override_name());
+            }
             _ => {}
         }
         if overrides.is_empty() {
@@ -768,6 +818,7 @@ mod tests {
         let overrides = EngineOverrides {
             asr: Some(AsrEngineName::HkTencent),
             fa: Some(FaEngineName::Wav2vecCanto),
+            translate: None,
         };
 
         let opts = CommandOptions::Align(AlignOptions {
@@ -809,6 +860,7 @@ mod tests {
         let overrides = EngineOverrides {
             asr: Some(AsrEngineName::HkTencent),
             fa: None,
+            translate: None,
         };
         let opts = TranscribeOptions {
             common: CommonOptions {
@@ -831,6 +883,7 @@ mod tests {
         let overrides = EngineOverrides {
             asr: Some(AsrEngineName::HkAliyun),
             fa: None,
+            translate: None,
         };
         let opts = BenchmarkOptions {
             common: CommonOptions {
@@ -884,11 +937,88 @@ mod tests {
     fn translate_roundtrip() {
         let opts = CommandOptions::Translate(TranslateOptions {
             common: CommonOptions::default(),
+            translate_engine: TranslateEngineName::Google,
             merge_abbrev: true.into(),
         });
         let json = serde_json::to_string(&opts).unwrap();
         let back: CommandOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(opts, back);
+    }
+
+    #[test]
+    fn translate_options_default_engine_is_google() {
+        // Default preserves the fleet's historical behavior. Operators
+        // who want Seamless pass `--translate-engine seamless`
+        // explicitly — there is no per-host config-file default.
+        let opts = TranslateOptions::default();
+        assert_eq!(opts.translate_engine, TranslateEngineName::Google);
+    }
+
+    #[test]
+    fn translate_options_effective_engine_prefers_explicit_field() {
+        let opts = TranslateOptions {
+            common: CommonOptions::default(),
+            translate_engine: TranslateEngineName::Seamless,
+            merge_abbrev: false.into(),
+        };
+        assert_eq!(
+            opts.effective_translate_engine(),
+            TranslateEngineName::Seamless,
+        );
+    }
+
+    #[test]
+    fn translate_options_effective_engine_override_wins() {
+        // Shared --engine-overrides '{"translate":"seamless"}' beats
+        // the dedicated --translate-engine flag, mirroring
+        // effective_fa_engine / effective_asr_engine.
+        let mut common = CommonOptions::default();
+        common.engine_overrides.translate = Some(TranslateEngineName::Seamless);
+        let opts = TranslateOptions {
+            common,
+            translate_engine: TranslateEngineName::Google,
+            merge_abbrev: false.into(),
+        };
+        assert_eq!(
+            opts.effective_translate_engine(),
+            TranslateEngineName::Seamless,
+        );
+    }
+
+    #[test]
+    fn translate_dispatch_engine_overrides_json_emits_seamless() {
+        let opts = CommandOptions::Translate(TranslateOptions {
+            common: CommonOptions::default(),
+            translate_engine: TranslateEngineName::Seamless,
+            merge_abbrev: false.into(),
+        });
+        assert_eq!(
+            opts.dispatch_engine_overrides_json(),
+            "{\"translate\":\"seamless\"}",
+        );
+    }
+
+    #[test]
+    fn translate_dispatch_engine_overrides_json_emits_google_by_default() {
+        let opts = CommandOptions::Translate(TranslateOptions::default());
+        assert_eq!(
+            opts.dispatch_engine_overrides_json(),
+            "{\"translate\":\"google\"}",
+        );
+    }
+
+    #[test]
+    fn translate_options_serializes_seamless_engine() {
+        let opts = TranslateOptions {
+            common: CommonOptions::default(),
+            translate_engine: TranslateEngineName::Seamless,
+            merge_abbrev: false.into(),
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(
+            json.contains("\"translate_engine\":\"seamless\""),
+            "expected serialized form to contain the Seamless wire token, got: {json}"
+        );
     }
 
     #[test]
@@ -1062,6 +1192,7 @@ mod tests {
                 engine_overrides: EngineOverrides {
                     asr: None,
                     fa: Some(FaEngineName::Whisper),
+                    translate: None,
                 },
                 ..CommonOptions::default()
             },

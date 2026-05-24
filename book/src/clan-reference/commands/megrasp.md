@@ -1,7 +1,7 @@
 # MEGRASP -- Grammar Relation Parsing (deliberately not implemented)
 
 **Status:** Reference -- stub command
-**Last updated:** 2026-05-21 15:30 EDT
+**Last updated:** 2026-05-22 13:14 EDT
 
 ## Purpose
 
@@ -39,3 +39,11 @@ modified.
   legacy grammar family
 - [batchalign morphosyntax reference](../../batchalign/reference/morphosyntax.md)
   -- the UD-to-CHAT mapping that replaces this pipeline
+
+## CLAN `+`-flag coverage audit
+
+**Exempt** — see [MOR](mor.md#clan-flag-coverage-audit) for the
+shared MOR-pipeline policy: chatter does not consume CLAN's
+`+`-flags for any command in this family. CLAN's own usage text
+documents the legacy flag surface; chatter emits a refusal that
+points users to batchalign.

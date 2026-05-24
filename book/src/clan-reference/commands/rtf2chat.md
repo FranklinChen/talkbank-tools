@@ -1,7 +1,7 @@
 # RTF2CHAT -- Rich Text Format to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 13:35 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -43,3 +43,22 @@ A well-formed CHAT file. If the RTF contains CHAT-style speaker codes (`*CHI:`, 
 
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
+
+## CLAN `+`-flag coverage audit
+
+RTF2CHAT is a **converter** — input RTF, output CHAT. Sources:
+`OSX-CLAN/src/clan/rtf2chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/rtf2chat.rs`.
+
+### RTF2CHAT-specific `+`-flags (from `rtf2chat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+a` | Pretty-print RTF structure (diagnostic) | — | Missing |
+| `+b` | Post-process legal CHAT output | — | Missing |
+| `+re` | Recurse subdirectories | (default for directory input) | Done |
+| `+oS` | Code page | — | Missing |
+
+Audit summary: 2 Done (default conversion + `+re`), 3 Missing.
+The `+a` diagnostic and `+b` post-process variants are
+power-user features; chatter handles the default conversion.

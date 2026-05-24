@@ -160,14 +160,18 @@ async fn run_coref_impl(
         return Ok(to_chat_string(&chat_file));
     }
 
-    // 4. Infer via worker
-    let mut coref_responses = infer_batch(
+    // 4. Infer via worker. Per-item failure surfaces as a typed
+    //    ServerError carrying the rendered failure list — no silent
+    //    no-coref fallback.
+    let coref_responses = infer_batch(
         pool,
         std::slice::from_ref(&coref_item),
         &LanguageCode3::eng(),
     )
     .await?;
-    let coref_response = coref_responses.pop().unwrap_or(CorefResponse {
+    let mut unwrapped = crate::text_batch::unwrap_per_item_results("coref", coref_responses)
+        .map_err(|err| ServerError::Validation(err.to_string()))?;
+    let coref_response = unwrapped.pop().unwrap_or(CorefResponse {
         annotations: Vec::new(),
     });
 
@@ -314,7 +318,10 @@ async fn run_coref_batch_impl(
         ));
     }
 
-    // 3. Single batched execute_v2 call across all files
+    // 3. Single batched execute_v2 call across all files. Outer Err
+    //    (worker spawn / IPC / schema) marks every eligible file as
+    //    failed — silently emitting no-coref output would mask the
+    //    failure as success.
     let all_responses = if batch_items.is_empty() {
         Vec::new()
     } else {
@@ -327,33 +334,54 @@ async fn run_coref_batch_impl(
             Ok(responses) => responses,
             Err(e) => {
                 warn!(error = %e, "Batch coref execute_v2 failed for all files");
-                // Return all files serialized without coref
                 for (file_idx, file) in files.iter().enumerate() {
-                    results.push(TextBatchFileResult::ok(
-                        file.filename.clone(),
-                        to_chat_string(&parsed_files[file_idx]),
-                    ));
+                    if let Some(ref err) = validation_errors[file_idx] {
+                        results.push(TextBatchFileResult::err(file.filename.clone(), err.clone()));
+                    } else if eligible_files.iter().any(|(idx, _)| *idx == file_idx) {
+                        results.push(TextBatchFileResult::err(
+                            file.filename.clone(),
+                            format!("coref batch infer failed: {e}"),
+                        ));
+                    } else {
+                        // Non-eligible files (dummy / non-English) had
+                        // no payload in the batch, so the batch
+                        // failure does not affect them.
+                        results.push(TextBatchFileResult::ok(
+                            file.filename.clone(),
+                            to_chat_string(&parsed_files[file_idx]),
+                        ));
+                    }
                 }
                 return results;
             }
         }
     };
 
-    // 4. Distribute responses back to files and apply
+    // 4. Per-file outcome map driven by per-item engine errors.
+    //    Files whose item came back Err are marked failed; files whose
+    //    item came back Ok have annotations applied. ``per_file_failures``
+    //    is indexed by file_idx so step 5 can take ownership of the
+    //    error message via ``.take()`` without a HashMap lookup.
+    let mut per_file_failures: Vec<Option<String>> = vec![None; files.len()];
     for &(file_idx, ref info) in &eligible_files {
-        if info.batch_idx < all_responses.len() {
-            let coref_resp = &all_responses[info.batch_idx];
-
-            let mut annotation_map: HashMap<usize, String> = HashMap::new();
-            for ann in &coref_resp.annotations {
-                if ann.sentence_idx < info.line_indices.len() {
-                    let line_idx = info.line_indices[ann.sentence_idx];
-                    annotation_map.insert(line_idx, ann.annotation.clone());
-                }
+        if info.batch_idx >= all_responses.len() {
+            continue;
+        }
+        match &all_responses[info.batch_idx] {
+            Err(message) => {
+                per_file_failures[file_idx] = Some(message.clone());
             }
-
-            if !annotation_map.is_empty() {
-                apply_coref_results(&mut parsed_files[file_idx], &annotation_map);
+            Ok(coref_resp) => {
+                let mut annotation_map: HashMap<usize, String> = HashMap::new();
+                for ann in &coref_resp.annotations {
+                    if ann.sentence_idx < info.line_indices.len() {
+                        let line_idx = info.line_indices[ann.sentence_idx];
+                        annotation_map.insert(line_idx, ann.annotation.clone());
+                    }
+                }
+                if !annotation_map.is_empty() {
+                    apply_coref_results(&mut parsed_files[file_idx], &annotation_map);
+                }
             }
         }
     }
@@ -364,6 +392,22 @@ async fn run_coref_batch_impl(
         // Skip files that failed pre-validation
         if let Some(ref err) = validation_errors[file_idx] {
             results.push(TextBatchFileResult::err(file.filename.clone(), err.clone()));
+            continue;
+        }
+
+        // Per-item engine failure: file marked failed with typed
+        // ItemErrors variant so the user sees the engine reason.
+        if let Some(message) = per_file_failures[file_idx].take() {
+            results.push(TextBatchFileResult::err(
+                file.filename.clone(),
+                crate::text_batch::TextWorkflowFileError::item_errors(
+                    "coref",
+                    vec![crate::text_batch::ItemError {
+                        item_index: 0,
+                        message,
+                    }],
+                ),
+            ));
             continue;
         }
 
@@ -388,11 +432,16 @@ async fn run_coref_batch_impl(
 
 /// Send one or more documents to a worker for coref inference via batched
 /// `execute_v2`.
+///
+/// Returns one `Result<CorefResponse, String>` per item. Per-item engine
+/// failures are propagated as `Err(message)` so callers can attribute the
+/// failure back to the affected file rather than silently emitting an
+/// empty (no-coref) response that looks like success.
 async fn infer_batch(
     pool: &WorkerPool,
     items: &[CorefBatchItem],
     lang: &LanguageCode3,
-) -> Result<Vec<CorefResponse>, ServerError> {
+) -> Result<Vec<Result<CorefResponse, String>>, ServerError> {
     let artifacts = PreparedArtifactRuntimeV2::new("coref_v2").map_err(|error| {
         ServerError::Validation(format!(
             "failed to create coref V2 artifact runtime: {error}"
@@ -416,16 +465,13 @@ async fn infer_batch(
     }
 
     let mut responses = Vec::with_capacity(result.items.len());
-    for (index, item_result) in result.items.iter().enumerate() {
+    for item_result in result.items.iter() {
         if let Some(error) = &item_result.error {
-            warn!(item = index, error = %error, "Coref infer error (using empty response)");
-            responses.push(CorefResponse {
-                annotations: Vec::new(),
-            });
+            responses.push(Err(error.clone()));
             continue;
         }
 
-        responses.push(coref_response_from_v2_item(item_result));
+        responses.push(Ok(coref_response_from_v2_item(item_result)));
     }
 
     Ok(responses)

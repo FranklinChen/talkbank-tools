@@ -1,7 +1,7 @@
 # LAB2CHAT -- LAB Timing Labels to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-12 11:25 EDT
+**Last updated:** 2026-05-22 13:40 EDT
 
 ## Purpose
 
@@ -50,3 +50,26 @@ A well-formed CHAT file where each non-silence label becomes a separate utteranc
 
 - Uses typed AST for CHAT generation
 - Produces valid, well-formed CHAT output
+
+## CLAN `+`-flag coverage audit
+
+LAB2CHAT is a **converter** — input WaveSurfer `.lab` files,
+output CHAT. Sources: `OSX-CLAN/src/clan/lab2chat.cpp::usage`,
+`crates/talkbank-clan/src/converters/lab2chat.rs`.
+
+### LAB2CHAT-specific `+`-flags (from `lab2chat.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status |
+|---|---|---|---|
+| `+dF` | Tags-dependencies file `F` | — | Missing |
+| `+fN` | (CLAN-internal) | — | Missing |
+| `+mF` | Movie file name `F` (default: input file name) | — | Missing |
+| `+p` | Plain file conversion (default: merge per attribute file) | — | Missing |
+| `+oS` | Code page selection | — | Missing |
+| `+tN` | Movie segment start time offset | — | Missing |
+| `+re` | Recurse subdirectories | (default for directory input) | Done |
+
+Audit summary: 1 Done, 6 Missing. LAB2CHAT's metadata-rich
+options (tags, movie association, code-page) are the biggest
+gap; chatter handles the timing-label → utterance core but
+not the surrounding metadata machinery.

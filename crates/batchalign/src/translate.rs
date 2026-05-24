@@ -21,7 +21,7 @@ use talkbank_transform::translate::{
     collect_translate_payloads, postprocess_translation, preprocess_for_translate,
 };
 use talkbank_transform::validate::ValidityLevel;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::error::ServerError;
 use crate::infer_retry::dispatch_execute_v2_with_retry;
@@ -209,7 +209,7 @@ async fn infer_batch(
     pool: &WorkerPool,
     items: &[(usize, TranslateBatchItem)],
     lang: &LanguageCode3,
-) -> Result<Vec<TranslateResponse>, ServerError> {
+) -> Result<Vec<Result<TranslateResponse, String>>, ServerError> {
     let src_lang_code = LanguageCode::new(lang.as_ref());
 
     // Pre-process text before sending to Python
@@ -249,43 +249,55 @@ async fn infer_batch(
     let result = parse_translate_result_v2(&response).map_err(|error| {
         ServerError::Validation(format!("invalid translate V2 result: {error}"))
     })?;
-    if result.items.len() != items.len() {
+
+    let punct_strings = chat_punct_chars();
+    let punct_refs: Vec<&str> = punct_strings.iter().map(|s| s.as_str()).collect();
+    parse_translate_item_results(&result.items, items.len(), &punct_refs)
+}
+
+/// Convert one batch of `TranslationItemResultV2` into per-item
+/// `Result<TranslateResponse, String>`.
+///
+/// Per-item engine failures (network error, rate-limit, model error)
+/// and protocol violations (worker returned neither error nor raw
+/// translation) are propagated as the inner `Err(String)` so the
+/// driver can attribute them back to the source file and mark only
+/// that file as failed. Length mismatches are surfaced as the outer
+/// `Err(ServerError)` because they're a batch-level protocol bug,
+/// not a per-item failure.
+fn parse_translate_item_results(
+    items: &[crate::types::worker_v2::TranslationItemResultV2],
+    request_count: usize,
+    punct_refs: &[&str],
+) -> Result<Vec<Result<TranslateResponse, String>>, ServerError> {
+    if items.len() != request_count {
         return Err(ServerError::Validation(format!(
-            "translate V2 returned {} items for {} requests",
-            result.items.len(),
-            items.len()
+            "translate V2 returned {} items for {request_count} requests",
+            items.len(),
         )));
     }
 
-    // Get punctuation chars for post-processing
-    let punct_strings = chat_punct_chars();
-    let punct_refs: Vec<&str> = punct_strings.iter().map(|s| s.as_str()).collect();
-
-    let mut translate_responses = Vec::with_capacity(result.items.len());
-    for (i, item_result) in result.items.iter().enumerate() {
+    let mut translate_responses = Vec::with_capacity(items.len());
+    for item_result in items.iter() {
         if let Some(error) = &item_result.error {
-            warn!(item = i, error = %error, "Infer error for item (using empty response)");
-            translate_responses.push(TranslateResponse {
-                translation: String::new(),
-            });
+            translate_responses.push(Err(error.clone()));
             continue;
         }
 
         if let Some(raw_translation) = &item_result.raw_translation {
-            let processed = postprocess_translation(raw_translation, &punct_refs);
-            translate_responses.push(TranslateResponse {
+            let processed = postprocess_translation(raw_translation, punct_refs);
+            translate_responses.push(Ok(TranslateResponse {
                 translation: processed,
-            });
+            }));
             continue;
         }
 
-        warn!(
-            item = i,
-            "Translate V2 returned no raw_translation and no error (using empty response)"
-        );
-        translate_responses.push(TranslateResponse {
-            translation: String::new(),
-        });
+        // Protocol violation — Python worker returned neither error nor
+        // raw_translation. Treat as a per-item failure so the affected
+        // file fails rather than silently producing missing %xtra tiers.
+        translate_responses.push(Err(
+            "translate V2 returned neither error nor raw_translation".to_owned(),
+        ));
     }
 
     Ok(translate_responses)
@@ -296,9 +308,136 @@ fn integrate_translations(
     misses: &[(usize, TranslateBatchItem)],
     responses: &[TranslateResponse],
 ) {
+    // ``infer_batch`` only emits successful translations now (per-item
+    // engine failures are propagated up the call chain as typed errors,
+    // not silently dropped as empty strings). Any caller that reaches
+    // this point with an empty translation indicates a programmer error
+    // in the success-path construction, so we simply insert as-is.
     for ((line_idx, _item), resp) in misses.iter().zip(responses.iter()) {
-        if !resp.translation.is_empty() {
-            translation_map.insert(*line_idx, resp.translation.clone());
+        translation_map.insert(*line_idx, resp.translation.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::worker_v2::TranslationItemResultV2;
+
+    fn punct_strings() -> Vec<String> {
+        chat_punct_chars()
+    }
+
+    fn punct_refs<'a>(strs: &'a [String]) -> Vec<&'a str> {
+        strs.iter().map(|s| s.as_str()).collect()
+    }
+
+    /// Helper to keep the test signature concise.
+    fn parse_items(
+        items: &[TranslationItemResultV2],
+        request_count: usize,
+    ) -> Result<Vec<Result<TranslateResponse, String>>, ServerError> {
+        let strs = punct_strings();
+        let refs = punct_refs(&strs);
+        parse_translate_item_results(items, request_count, &refs)
+    }
+
+    #[test]
+    fn parse_items_all_success_returns_one_ok_per_item() {
+        // Note: CHAT punctuation-spacing postprocessing inserts a
+        // space before terminator punctuation; see chat_punct_chars
+        // and the parse_items_applies_postprocessing test below.
+        let items = vec![
+            TranslationItemResultV2 {
+                raw_translation: Some("Hello world.".into()),
+                error: None,
+            },
+            TranslationItemResultV2 {
+                raw_translation: Some("How are you?".into()),
+                error: None,
+            },
+        ];
+        let parsed = parse_items(&items, 2).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].is_ok());
+        assert!(parsed[1].is_ok());
+        assert_eq!(parsed[0].as_ref().unwrap().translation, "Hello world .");
+        assert_eq!(parsed[1].as_ref().unwrap().translation, "How are you ?");
+    }
+
+    #[test]
+    fn parse_items_per_item_error_propagates_as_inner_err() {
+        // The bug the whole Option-C fix targets: Google fails for one
+        // utterance, the worker reports it via item_result.error, and
+        // the Rust side must NOT silently emit an empty translation.
+        // It must surface the failure as an inner Err so the driver
+        // can attribute it to the source file and mark that file
+        // failed.
+        let items = vec![
+            TranslationItemResultV2 {
+                raw_translation: Some("Hello world.".into()),
+                error: None,
+            },
+            TranslationItemResultV2 {
+                raw_translation: None,
+                error: Some("Translation failed: ConnectionResetError".into()),
+            },
+        ];
+        let parsed = parse_items(&items, 2).unwrap();
+        assert!(parsed[0].is_ok());
+        match &parsed[1] {
+            Err(message) => assert!(
+                message.contains("ConnectionResetError"),
+                "expected error string to carry the engine reason, got: {message}"
+            ),
+            Ok(_) => panic!("per-item engine failure must propagate as inner Err"),
         }
+    }
+
+    #[test]
+    fn parse_items_protocol_violation_propagates_as_inner_err() {
+        // Worker returned neither error NOR raw_translation. That is
+        // a protocol bug, not user input — but the orchestrator still
+        // must surface it as a failure rather than emit an empty
+        // translation that quietly drops out of the output.
+        let items = vec![TranslationItemResultV2 {
+            raw_translation: None,
+            error: None,
+        }];
+        let parsed = parse_items(&items, 1).unwrap();
+        match &parsed[0] {
+            Err(message) => assert!(
+                message.contains("neither")
+                    || message.contains("no raw_translation")
+                    || message.contains("protocol"),
+                "expected protocol-violation error message, got: {message}"
+            ),
+            Ok(_) => panic!("protocol violation must propagate as inner Err"),
+        }
+    }
+
+    #[test]
+    fn parse_items_count_mismatch_is_outer_err() {
+        let items = vec![TranslationItemResultV2 {
+            raw_translation: Some("Hello.".into()),
+            error: None,
+        }];
+        let err = parse_items(&items, 2).unwrap_err();
+        assert!(format!("{err}").contains("returned 1 items for 2 requests"));
+    }
+
+    #[test]
+    fn parse_items_applies_postprocessing_to_successful_translations() {
+        let items = vec![TranslationItemResultV2 {
+            raw_translation: Some("Hello world.".into()),
+            error: None,
+        }];
+        let parsed = parse_items(&items, 1).unwrap();
+        let translation = &parsed[0].as_ref().unwrap().translation;
+        // Postprocessing inserts a space before the period (CHAT
+        // punctuation-spacing convention).
+        assert!(
+            translation.ends_with(" ."),
+            "expected postprocessed punctuation spacing, got: {translation:?}"
+        );
     }
 }

@@ -8,14 +8,14 @@ use crate::chat_ops::fa::CaMarkerPolicy as AppCaMarkerPolicy;
 use crate::options::{
     AlignOptions, AsrEngineName, AvqiOptions, BenchmarkOptions, CommandOptions, CommonOptions,
     CompareOptions, CorefOptions, EngineOverrides, FaEngineName, MorphotagOptions,
-    OpensmileOptions, TranscribeOptions, TranslateOptions, UtrEngine as AppUtrEngine,
-    UtrOverlapStrategy as AppUtrOverlapStrategy, UtsegOptions,
+    OpensmileOptions, TranscribeOptions, TranslateEngineName, TranslateOptions,
+    UtrEngine as AppUtrEngine, UtrOverlapStrategy as AppUtrOverlapStrategy, UtsegOptions,
 };
 use crate::params::{CacheOverrides, MergeAbbrevPolicy, WorTierPolicy};
 
 use super::{
     AsrEngine, BenchAsrEngine, CaMarkerPolicy as CliCaMarkerPolicy, Commands, CommonOpts,
-    DiarizationMode, FaEngine, GlobalOpts, UtrEngine as CliUtrEngine,
+    DiarizationMode, FaEngine, GlobalOpts, TranslateEngine, UtrEngine as CliUtrEngine,
     UtrOverlapStrategy as CliUtrOverlapStrategy,
 };
 
@@ -244,6 +244,11 @@ pub fn build_typed_options(cmd: &Commands, global: &GlobalOpts) -> Option<Comman
         }
         Commands::Translate(a) => Some(CommandOptions::Translate(TranslateOptions {
             common,
+            translate_engine: match a.translate_engine {
+                TranslateEngine::Google => TranslateEngineName::Google,
+                TranslateEngine::Seamless => TranslateEngineName::Seamless,
+                TranslateEngine::Nllb => TranslateEngineName::Nllb,
+            },
             merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
         })),
         Commands::Morphotag(a) => Some(CommandOptions::Morphotag(MorphotagOptions {

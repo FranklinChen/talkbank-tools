@@ -161,24 +161,25 @@ impl AnalysisRunner {
                 }
             };
 
-            // --id-filter prefilter + speaker-lookup. Single header pass:
-            // build a `SpeakerCode → &IDHeader` map and check whether at
-            // least one entry matches the pattern. When `id_filter` is
-            // unset the map is empty (and not consulted later either).
-            let id_by_speaker: HashMap<SpeakerCode, &IDHeader> = match self
-                .filter
-                .id_filter
-                .as_ref()
-            {
-                None => HashMap::new(),
-                Some(filter) => {
-                    let (admits, map) = scan_id_headers(&chat_file, filter);
-                    if !admits {
+            // Single `@ID:` header pass builds the speaker-lookup map
+            // when either `--id-filter` or `--role` is active, and
+            // applies the `--id-filter` prefilter when present.
+            // When neither flag is set, the map stays empty and the
+            // per-utterance role / id checks short-circuit on
+            // `role_include.is_empty()` / `filter.is_none()`.
+            let want_id_map =
+                self.filter.id_filter.is_some() || !self.filter.roles.include.is_empty();
+            let id_by_speaker: HashMap<SpeakerCode, &IDHeader> = if want_id_map {
+                let (admits, map) = scan_id_headers(&chat_file, self.filter.id_filter.as_ref());
+                if !admits {
+                    if let Some(filter) = self.filter.id_filter.as_ref() {
                         debug!(path = %path.display(), pattern = %filter, "Skipping file: no @ID matches --id-filter");
-                        continue;
                     }
-                    map
+                    continue;
                 }
+                map
+            } else {
+                HashMap::new()
             };
 
             let filename = path
@@ -220,6 +221,18 @@ impl AnalysisRunner {
                     continue;
                 }
 
+                // --role speaker-level filter (only when at least one
+                // role was requested; otherwise no work). Files
+                // without `@ID:` headers pass through — see
+                // `speaker_passes_role_filter` for rationale.
+                if !speaker_passes_role_filter(
+                    &self.filter.roles.include,
+                    &id_by_speaker,
+                    &utterance.main.speaker,
+                ) {
+                    continue;
+                }
+
                 command.process_utterance(utterance, &file_ctx, state);
             }
 
@@ -230,21 +243,26 @@ impl AnalysisRunner {
 
 /// Single pass over the file's `@ID` headers, returning both:
 ///
-/// - whether the file passes the `--id-filter` prefilter (at least one
-///   `@ID` matches the pattern), and
-/// - a `SpeakerCode → &IDHeader` lookup for the per-utterance speaker
-///   filter.
+/// - whether the file passes the optional `--id-filter` prefilter
+///   (at least one `@ID` matches the pattern, or `true` when no
+///   filter is supplied), and
+/// - a `SpeakerCode → &IDHeader` lookup for the per-utterance
+///   speaker filter (`--id-filter` or `--role`). First `@ID:` row
+///   per speaker code wins.
 ///
-/// A file with no `@ID` headers is not admitted — the filter encodes a
-/// positive requirement, and absence cannot satisfy a positive match.
+/// A file with no `@ID` headers fails the `id-filter` prefilter
+/// (absence cannot satisfy a positive match), but passes the
+/// no-filter case (empty map, all speakers permitted).
 fn scan_id_headers<'a, S: ValidationState>(
     chat_file: &'a ChatFile<S>,
-    filter: &IdFilter,
+    filter: Option<&IdFilter>,
 ) -> (bool, HashMap<SpeakerCode, &'a IDHeader>) {
-    let mut admits = false;
+    let mut admits = filter.is_none();
     let mut map: HashMap<SpeakerCode, &'a IDHeader> = HashMap::new();
     for id in chat_file.id_headers() {
-        if filter.matches(id) {
+        if let Some(filter) = filter
+            && filter.matches(id)
+        {
             admits = true;
         }
         map.entry(id.speaker.clone()).or_insert(id);
@@ -266,6 +284,32 @@ fn speaker_passes_id_filter(
         Some(id_header) => filter.matches(id_header),
         None => false,
     }
+}
+
+/// Decide whether a speaker's `@ID:` role is in the user's role-
+/// include list (case-insensitive). Returns `true` when the filter
+/// is empty (pass-through), when the speaker has no `@ID` (we can't
+/// determine the role, so don't drop — matches CLAN's behaviour on
+/// files without `@ID` headers), or when the role matches one of
+/// the included names.
+fn speaker_passes_role_filter(
+    role_include: &[String],
+    id_by_speaker: &HashMap<SpeakerCode, &IDHeader>,
+    speaker: &SpeakerCode,
+) -> bool {
+    if role_include.is_empty() {
+        return true;
+    }
+    let Some(id_header) = id_by_speaker.get(speaker) else {
+        // No `@ID:` for this speaker — role unknown. Pass through to
+        // avoid silently dropping utterances when role data is just
+        // missing.
+        return true;
+    };
+    let role_str = id_header.role.as_str();
+    role_include
+        .iter()
+        .any(|wanted| wanted.eq_ignore_ascii_case(role_str))
 }
 
 impl Default for AnalysisRunner {

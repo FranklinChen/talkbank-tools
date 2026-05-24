@@ -1,6 +1,8 @@
 # EVAL -- Language Sample Evaluation
 
 **Status:** Current
+**Last updated:** 2026-05-22 09:21 EDT
+
 ## Purpose
 
 Comprehensive morphosyntactic analysis computing lexical diversity, grammatical category counts, error rates, and MLU. EVAL was originally designed for clinical evaluation of adult aphasic speech samples (Saffran, Berndt & Schwartz, 1989) and produces a detailed profile of morphosyntactic abilities.
@@ -17,13 +19,65 @@ chatter clan eval --speaker CHI file.cha
 chatter clan eval --format json file.cha
 ```
 
-## Options
+## Options (chatter-native)
 
 | Option | CLAN Flag | Description |
 |--------|-----------|-------------|
-| `--speaker <CODE>` | `+t*CHI` | Include speaker |
-| `--exclude-speaker <CODE>` | `-t*CHI` | Exclude speaker |
-| `--format <FMT>` | -- | Output format: text, json, csv, clan |
+| `--speaker <CODE>` | `+t*CHI` (or `+tCHI`) | Include speaker |
+| `--exclude-speaker <CODE>` | `-t*CHI` (or `-tCHI`) | Exclude speaker |
+| `--gem <LABEL>` | `+g"label"` | Restrict to gem segment |
+| `--range <START-END>` | `+z25-125` | Utterance range |
+| `--id-filter <PATTERN>` | `+t@ID="..."` | Filter by @ID pattern |
+| `--include-retracings` | `+r6` | Include retraced words in counting |
+| `--format <FMT>` | -- | Output format: clan (default), text, json, csv |
+
+## CLAN `+`-flag coverage audit
+
+Authoritative enumeration of every CLAN `eval` flag, mapped
+against chatter's coverage. Sources:
+
+* `OSX-CLAN/src/clan/eval.cpp` — `usage()` and `getflag()`.
+* `OSX-CLAN/src/clan/cutt.cpp` — `mainusage()` EVAL branches.
+* `crates/talkbank-clan/src/clan_args.rs` — chatter's rewriter.
+* `crates/talkbank-cli/src/cli/args/clan_commands.rs::Eval` plus
+  `clan_common.rs::CommonAnalysisArgs`.
+
+(Status legend: same as [FREQ](./freq.md#status-legend).)
+
+EVAL is a **required-flag refusal** command in chatter — invoking
+without `+t*X` (or `--speaker X`) emits CLAN's exact `Please
+specify at least one speaker tier code with "+t" option on command
+line.` to stderr and exits 1. That refusal byte-parity is verified.
+
+### EVAL-specific `+`-flags (from `eval.cpp::usage`)
+
+| CLAN flag | Meaning | Chatter | Status | Notes |
+|---|---|---|---|---|
+| `+bS` / `-bS` | Morpheme-delimiter customization | — | Missing | Shared with WDLEN/MAXWD/KIDEVAL. |
+| `+dS` | Database keyword (Anomic, Global, Broca, Wernicke, control, Fluent, Nonfluent, AllAphasia, …) | — | Missing | EVAL's whole reason for existing — AphasiaBank normative comparison. |
+| `+e1` | Create list of database files used | — | Missing | Database-side. |
+| `+e2` | Create proposition word list per file | — | Missing | |
+| `+g` (no S) | Gem tier should contain all words specified by `+gS` | — | Missing | EVAL-specific override of the inherited gem semantic. |
+| `-g` | Look for gems in database only | — | Missing | |
+| `+gS` | Select gems labelled `S` | `--gem` | Done | |
+| `+lF` | Language database file (eng, fra) | — | Missing | |
+| `+n` / `-n` | Gem termination semantics | — | Missing | |
+| `+o4` | Output raw values instead of percentages | — | Rewriter only | Falls to `--display-mode` rewrite. |
+
+### Audit summary
+
+| Bucket | Count |
+|---|---|
+| Done | 5 |
+| Partial | 0 |
+| Rewriter only | 5 |
+| Missing | 14 |
+
+EVAL's largest gap is the **AphasiaBank database-comparison
+engine** (`+dS`, `+lF`, `+e1`, `+e2`). Without `+dS` filters,
+chatter's EVAL produces a self-contained morphosyntactic profile
+without the clinical-norm overlay that is EVAL's purpose. Filed
+as a Phase 1.7 follow-up alongside KIDEVAL's database engine.
 
 EVAL has no command-specific flags beyond the shared `CommonAnalysisArgs`
 set; the per-speaker normative-comparison aspect lives in EVAL-D
