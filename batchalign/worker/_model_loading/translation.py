@@ -190,16 +190,14 @@ def _load_nllb_translate() -> None:
         artifacts=HF_ARTIFACTS_NLLB,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call]
-        model_id
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
     # torch.nn.Module.eval() — sets the module to inference mode
     # (disables dropout/BN training behavior). Without this, the 1.3B
     # encoder-decoder stays in training mode and generation is
     # non-deterministic + lower quality.
     if hasattr(model, "eval"):
-        model.eval()  # type: ignore[no-untyped-call]
+        model.eval()
     eng_token_id = tokenizer.convert_tokens_to_ids("eng_Latn")
 
     def nllb_fn(text: str, src_lang: LanguageCode) -> str:
