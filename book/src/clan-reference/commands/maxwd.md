@@ -1,7 +1,7 @@
 # MAXWD -- Longest Words
 
 **Status:** Current
-**Last updated:** 2026-05-23 14:35 EDT
+**Last updated:** 2026-05-26 08:21 EDT
 
 ## Purpose
 
@@ -68,16 +68,16 @@ against chatter's coverage. Sources:
 | `+u` | Combine across files | (default) | Done | |
 | `+re` | Recurse | (default) | Done | |
 | `+k` | Case-sensitive | `--case-sensitive` | Done | Landed 2026-05-23. Reads `CommonAnalysisArgs::case_sensitive`. `process_utterance` picks the key derivation: default uses `NormalizedWord::from_word` (lowercased), `+k` uses `NormalizedWord(cleaned_text().to_owned())` (case-preserving) so case variants count as distinct words for the unique-length and exclude-length filters. Pinned by `maxwd_case_sensitive_splits_case_variants` and `maxwd_default_collapses_case_variants`. |
-| `+wN` / `-wN` | Context window | `--context-window` (rewriter target) | Rewriter only | |
+| `+wN` / `-wN` | Context window | `--context-after` / `--context-before` (via `InheritedContextArgs`) | Done (no-op per CLAN) | MAXWD emits a longest-words list per speaker; no per-match emission to surround. CLAN accepts and silently ignores; chatter does the same via the hidden `InheritedContextArgs` flatten on `ClanCommands::Maxwd`. |
 | `+f` / `+fEXT` | Output to file | `--output-ext` (rewriter target) | Rewriter only | |
 
 ### Audit summary
 
 | Bucket | Count |
 |---|---|
-| Done | 11 |
+| Done | 12 |
 | Partial | 1 |
-| Rewriter only | 4 |
+| Rewriter only | 3 |
 | Missing | 5 |
 
 `+cN` ↔ `--limit N` was a one-line rewriter follow-up — closed

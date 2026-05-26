@@ -1,7 +1,7 @@
 # FREQ -- Word Frequency
 
 **Status:** Current
-**Last updated:** 2026-05-23 15:35 EDT
+**Last updated:** 2026-05-26 08:21 EDT
 
 ## Purpose
 
@@ -127,16 +127,16 @@ chatter's coverage. Sources:
 | `+oS` / `-oS` | Include / exclude extra output tier `S` | — | Missing | |
 | `+x` | Exclude utterances by content | — | Missing | `+x=0w`, `+x>0w`, `+xword` shapes. |
 | `+k` | Case-sensitive matching | `--case-sensitive` | Done | Two-layer fix. Pattern matching layer (`WordFilter::case_sensitive`) landed 2026-05-22 — `--include-word`/`--exclude-word` patterns skip the default `.to_lowercase()` on both sides. Frequency-table KEYING layer landed 2026-05-23 — `process_utterance` skips `NormalizedWord::from_word`'s lowercasing on the map key (main-tier and `%mor` branches), so `Want`/`want`/`WANT` become three distinct entries instead of collapsing to one. Pinned by `freq_case_sensitive_preserves_case_in_keys` and `freq_default_collapses_case_variants`. |
-| `+wN` / `-wN` | Context window around matched word | `--context-window` (rewriter target, KWAL-style) | Rewriter only | Not on FREQ's clap surface. |
+| `+wN` / `-wN` | Context window around matched word | `--context-after` / `--context-before` (via `InheritedContextArgs`) | Done (no-op per CLAN) | FREQ emits per-word frequency totals; no per-match emission to surround. CLAN accepts and silently ignores; chatter does the same via the hidden `InheritedContextArgs` flatten on `ClanCommands::Freq`. |
 | `+y` | (CLAN: include all utterances including non-tier) | — | Missing | |
 
 ### Audit summary
 
 | Bucket | Count |
 |---|---|
-| Done (byte-parity or in scope) | 17 |
+| Done (byte-parity or in scope) | 18 |
 | Partial (chatter abstraction differs) | 2 |
-| Rewriter only (would error at parse time) | 13 |
+| Rewriter only (would error at parse time) | 12 |
 | Missing (no rewriter, no clap field) | 14 |
 
 The 17 "Rewriter only" entries are the single biggest correctness

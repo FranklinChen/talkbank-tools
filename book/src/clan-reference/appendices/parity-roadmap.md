@@ -1,7 +1,7 @@
 # CLAN Parity Roadmap
 
 **Status:** Current
-**Last updated:** 2026-05-23 23:42 EDT
+**Last updated:** 2026-05-26 08:21 EDT
 
 Planning doc for the remaining CLAN flag-parity work. Source of truth
 for "how much is left" so future sessions don't have to re-derive it
@@ -282,6 +282,31 @@ Tests: 966 → 1006 (+40 over the batch).
 Three new rewriter tests (`mlu_minus_bw_to_words`,
 `mlt_minus_bw_to_words`, `freq_minus_bw_unchanged`,
 `recurse_flag_dropped`) shipped with the second and third commits.
+
+**Tier-2 follow-on (2026-05-26, 2 commits):**
+
+- **`+wN` / `-wN` inherited context window on the six aggregate
+  commands** (MLU, MLT, WDLEN, MAXWD, FREQPOS, FREQ). CLAN exposes
+  the post-/pre-context flags on every analysis command via shared
+  common-args; on aggregate commands (means, totals, histograms)
+  they are runtime no-ops, but CLAN's parser still accepts them.
+  Chatter's rewriter at `clan_args.rs:411-412` already converts
+  `+w3` / `-w2` to `--context-after 3` / `--context-before 2`
+  globally; only the clap-side consumer was missing on the six
+  aggregate commands, so the rewritten flag arrived as
+  `error: unexpected argument '--context-after' found`. Landed via
+  a shared `InheritedContextArgs` sub-args group flattened into
+  each of the six command variants. KWAL/COMBO are deliberately
+  excluded — they have real consumers driving per-match context
+  emission. 6 audit-table rows flipped from `Rewriter only` to
+  `Done (no-op per CLAN)`.
+
+One feat commit (`feat(clan): InheritedContextArgs accept-and-ignore
+on 6 aggregate commands`) plus a docs commit (audit-page flips +
+this roadmap entry). 7 new clap-acceptance tests
+(`mlu_accepts_inherited_context_after` + 6 parameterized
+`<cmd>_inherits_context_both_directions`); 12 end-to-end smokes
+against `corpus/reference/core/basic-conversation.cha`.
 
 ## Next-up candidates
 

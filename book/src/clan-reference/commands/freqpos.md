@@ -1,7 +1,7 @@
 # FREQPOS — Word Frequency by Position
 
 **Status:** Current
-**Last updated:** 2026-05-23 15:55 EDT
+**Last updated:** 2026-05-26 08:21 EDT
 
 ## Purpose
 
@@ -73,16 +73,16 @@ analysis tool: just two flags beyond the general inherited set.
 | `+re` | Recurse | (default) | Done | |
 | `+pS` | Word delimiter | — | Missing | |
 | `+k` | Case-sensitive | `--case-sensitive` | Done | Landed 2026-05-23. Reads `CommonAnalysisArgs::case_sensitive`. `process_utterance` picks the key derivation: default uses `NormalizedWord::from_word` (lowercased), `+k` uses `NormalizedWord(cleaned_text().to_owned())` (case-preserving) so `Want`/`want`/`WANT` land in separate by-word entries. Pinned by `freqpos_case_sensitive_splits_case_variants` and `freqpos_default_collapses_case_variants`. |
-| `+wN` / `-wN` | Context window | `--context-window` (rewriter target) | Rewriter only | |
+| `+wN` / `-wN` | Context window | `--context-after` / `--context-before` (via `InheritedContextArgs`) | Done (no-op per CLAN) | FREQPOS emits a per-position frequency table; no per-match emission to surround. CLAN accepts and silently ignores; chatter does the same via the hidden `InheritedContextArgs` flatten on `ClanCommands::Freqpos`. |
 | `+f` / `+fEXT` | Output to file | `--output-ext` (rewriter target) | Rewriter only | Phase 1.1. |
 
 ### Audit summary
 
 | Bucket | Count |
 |---|---|
-| Done (byte-parity or in scope) | 9 |
+| Done (byte-parity or in scope) | 10 |
 | Partial | 2 |
-| Rewriter only | 3 |
+| Rewriter only | 2 |
 | Missing | 3 |
 
 The `+gS` overload (FREQPOS: vocabulary filter; inherited: gem

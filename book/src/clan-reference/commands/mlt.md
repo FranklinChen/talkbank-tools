@@ -1,7 +1,7 @@
 # MLT -- Mean Length of Turn
 
 **Status:** Current
-**Last updated:** 2026-05-23 23:09 EDT
+**Last updated:** 2026-05-26 08:21 EDT
 
 ## Purpose
 
@@ -84,16 +84,16 @@ Missing.)
 | `+re` | Recurse subdirectories | (default for directory args) | Done | |
 | `+pS` | Add `S` to word delimiters | — | Missing | |
 | `+k` | Case-sensitive matching | `--case-sensitive` (via `CommonAnalysisArgs`) | Done (no-op per CLAN) | MLT does no word-keying; `+k` is silently accepted per CLAN's `cutt.cpp::mainusage` no-op semantic. Covered by `CommonAnalysisArgs.case_sensitive` flatten on `ClanCommands::Mlt`. |
-| `+wN` / `-wN` | Context window | `--context-window` (rewriter target) | Rewriter only | |
+| `+wN` / `-wN` | Context window | `--context-after` / `--context-before` (via `InheritedContextArgs`) | Done (no-op per CLAN) | MLT emits per-speaker turn/utterance totals — no per-match emission to surround. CLAN accepts and silently ignores; chatter does the same via the hidden `InheritedContextArgs` flatten on `ClanCommands::Mlt`. |
 | `+f` / `+fEXT` | Output to file | `--output-ext` (rewriter target) | Rewriter only | Phase 1.1. |
 
 ### Audit summary
 
 | Bucket | Count |
 |---|---|
-| Done (byte-parity or in scope) | 8 |
+| Done (byte-parity or in scope) | 9 |
 | Partial (chatter abstraction differs) | 6 |
-| Rewriter only (would error at parse time) | 4 |
+| Rewriter only (would error at parse time) | 3 |
 | Missing (no rewriter, no clap field) | 5 |
 
 The `+a` / `+at` empty-utterance switch and the clause-delimiter

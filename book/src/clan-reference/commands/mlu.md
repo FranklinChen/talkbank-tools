@@ -1,7 +1,7 @@
 # MLU -- Mean Length of Utterance
 
 **Status:** Current
-**Last updated:** 2026-05-23 23:09 EDT
+**Last updated:** 2026-05-26 08:21 EDT
 
 ## Purpose
 
@@ -87,7 +87,7 @@ Missing.)
 | `+re` | Recurse subdirectories | (default for directory args) | Done | |
 | `+pS` | Add `S` to word delimiters | — | Missing | |
 | `+k` | Case-sensitive matching | `--case-sensitive` (via `CommonAnalysisArgs`) | Done (no-op per CLAN) | MLU does no word-keying; `+k` is silently accepted per CLAN's `cutt.cpp::mainusage` no-op semantic. Covered by `CommonAnalysisArgs.case_sensitive` flatten on `ClanCommands::Mlu`. |
-| `+wN` / `-wN` | Context window | `--context-window` (rewriter target) | Rewriter only | KWAL-style. |
+| `+wN` / `-wN` | Context window | `--context-after` / `--context-before` (via `InheritedContextArgs`) | Done (no-op per CLAN) | MLU emits aggregate output (mean per speaker) with no per-match emission to surround. CLAN accepts and silently ignores; chatter does the same via the hidden `InheritedContextArgs` flatten on `ClanCommands::Mlu`. |
 | `+f` / `+fEXT` | Output to file | `--output-ext` (rewriter target) | Rewriter only | Phase 1.1 sidecar work. |
 
 ### MLU `+d` display modes
@@ -101,9 +101,9 @@ below for the per-N table. All `+d` and `+d1` invocations are
 
 | Bucket | Count |
 |---|---|
-| Done (byte-parity or in scope) | 11 |
+| Done (byte-parity or in scope) | 12 |
 | Partial (chatter abstraction differs) | 5 |
-| Rewriter only (would error at parse time) | 4 |
+| Rewriter only (would error at parse time) | 3 |
 | Missing (no rewriter, no clap field) | 5 |
 
 The `+g` overload is the most subtle issue: MLU's command-specific
