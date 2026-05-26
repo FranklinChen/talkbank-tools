@@ -535,6 +535,28 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // consumer. Pass through.
         (b'+', b'd') if subcommand == Flo => None,
 
+        // MAXWD `+d`/`+dN` — `onlydata`-level via shared
+        // `maingetflag` path at `cutt.cpp:9382` with non-empty
+        // per-program body at `cutt.cpp:9475` (`onlydata == 1` →
+        // `puredata = 0`). chatter has no `--display-mode`
+        // consumer for MAXWD; pass through.
+        (b'+', b'd') if subcommand == Maxwd => None,
+
+        // MLU/MLUMOR `+d`/`+dN` — `onlydata`-level via shared
+        // `maingetflag` path at `cutt.cpp:9382` with non-empty
+        // per-program body at `cutt.cpp:9485` (CLAN_SRV-only
+        // rejection of `onlydata == 1 || 3`; otherwise pure
+        // level effect). chatter has no `--display-mode`
+        // consumer for MLU; pass through.
+        (b'+', b'd') if subcommand == Mlu => None,
+
+        // MLT `+d`/`+dN` — `onlydata`-level via shared
+        // `maingetflag` path at `cutt.cpp:9382` with non-empty
+        // per-program body at `cutt.cpp:9478` (CLAN_SRV-only
+        // rejection of `onlydata == 1`). chatter has no
+        // `--display-mode` consumer for MLT; pass through.
+        (b'+', b'd') if subcommand == Mlt => None,
+
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
 
@@ -1433,6 +1455,67 @@ mod tests {
     #[test]
     fn flo_dn_passes_through() {
         let input = args("clan flo +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// MAXWD has no local `case 'd'`; consumption via shared
+    /// `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382`
+    /// with non-empty per-program body at `cutt.cpp:9475`
+    /// (`onlydata == 1` → `puredata = 0`). Same `onlydata`-level
+    /// semantic; chatter has no `--display-mode` consumer for
+    /// MAXWD. Per-MAXWD arm passes through.
+    #[test]
+    fn maxwd_d_bare_passes_through() {
+        let input = args("clan maxwd +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare MAXWD `+dN` (strict-RED case).
+    #[test]
+    fn maxwd_dn_passes_through() {
+        let input = args("clan maxwd +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// MLU/MLUMOR have no local `case 'd'`; consumption via shared
+    /// `maingetflag` path at `cutt.cpp:9382` with non-empty
+    /// per-program body at `cutt.cpp:9485` (`onlydata == 1 || 3`
+    /// rejected only under CLAN_SRV; otherwise pure level effect).
+    /// chatter has no `--display-mode` consumer for MLU.
+    #[test]
+    fn mlu_d_bare_passes_through() {
+        let input = args("clan mlu +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare MLU `+dN` (strict-RED case).
+    #[test]
+    fn mlu_dn_passes_through() {
+        let input = args("clan mlu +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// MLT has no local `case 'd'`; consumption via shared
+    /// `maingetflag` path at `cutt.cpp:9382` with non-empty
+    /// per-program body at `cutt.cpp:9478` (`onlydata == 1`
+    /// rejected only under CLAN_SRV). chatter has no
+    /// `--display-mode` consumer for MLT.
+    #[test]
+    fn mlt_d_bare_passes_through() {
+        let input = args("clan mlt +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare MLT `+dN` (strict-RED case).
+    #[test]
+    fn mlt_dn_passes_through() {
+        let input = args("clan mlt +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }

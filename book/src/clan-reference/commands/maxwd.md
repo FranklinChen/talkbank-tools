@@ -1,7 +1,7 @@
 # MAXWD -- Longest Words
 
 **Status:** Current
-**Last updated:** 2026-05-26 08:21 EDT
+**Last updated:** 2026-05-26 11:50 EDT
 
 ## Purpose
 
@@ -51,7 +51,7 @@ against chatter's coverage. Sources:
 | `+cN` | Display the `N` longest items | `--limit N` (or `-n N`) | Done | Rewriter handles this since 2026-05-22: `+c50` → `--limit 50` for the MAXWD subcommand specifically (CHECK still gets `--bullets N`). |
 | `+gN` | Find longest utterance instead of longest word; N selects metric (1=morph, 2=word, 3=char) | — | Missing | A different domain (utterances vs words). |
 | `+xN` | Exclude lengths | `--exclude-length N` (repeatable) | Done | Landed 2026-05-23. Drops words whose character length matches any value in `exclude_lengths`. Repeatable on the CLI (`+x5 +x7` or `--exclude-length 5 --exclude-length 7`). `max_length` is recomputed over surviving entries. Applied per-speaker after `+a`. Pinned by `maxwd_exclude_lengths_drops_listed_lengths` plus rewriter tests `maxwd_exclude_length_single` and `maxwd_exclude_length_multiple`. End-to-end smoke: input `["I", "go", "bye", "hi", "hello", "world", "cookie"]` with `+x6` reports max_length 5 instead of 6 (cookie dropped). |
-| `+d` | Display modes (see "Display Modes" below) | — | Rewriter only | |
+| `+d` | Display modes (see "Display Modes" below) | — | Missing | MAXWD has no local `case 'd'`; consumption via the shared `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382` with non-empty per-program body at `cutt.cpp:9475` (`onlydata == 1` → `puredata = 0`). chatter has no `--display-mode` consumer for MAXWD. Per-MAXWD rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+d`/`+dN` argument rather than the misleading `--display-mode` rewrite. |
 
 ### General `+`-flags MAXWD inherits (from `cutt.cpp::mainusage`)
 
@@ -77,8 +77,8 @@ against chatter's coverage. Sources:
 |---|---|
 | Done | 12 |
 | Partial | 1 |
-| Rewriter only | 3 |
-| Missing | 5 |
+| Rewriter only | 2 |
+| Missing | 6 |
 
 `+cN` ↔ `--limit N` was a one-line rewriter follow-up — closed
 2026-05-22. The rewriter now distinguishes the MAXWD subcommand

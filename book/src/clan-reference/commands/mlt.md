@@ -1,7 +1,7 @@
 # MLT -- Mean Length of Turn
 
 **Status:** Current
-**Last updated:** 2026-05-26 08:21 EDT
+**Last updated:** 2026-05-26 11:50 EDT
 
 ## Purpose
 
@@ -86,6 +86,7 @@ Missing.)
 | `+k` | Case-sensitive matching | `--case-sensitive` (via `CommonAnalysisArgs`) | Done (no-op per CLAN) | MLT does no word-keying; `+k` is silently accepted per CLAN's `cutt.cpp::mainusage` no-op semantic. Covered by `CommonAnalysisArgs.case_sensitive` flatten on `ClanCommands::Mlt`. |
 | `+wN` / `-wN` | Context window | `--context-after` / `--context-before` (via `InheritedContextArgs`) | Done (no-op per CLAN) | MLT emits per-speaker turn/utterance totals — no per-match emission to surround. CLAN accepts and silently ignores; chatter does the same via the hidden `InheritedContextArgs` flatten on `ClanCommands::Mlt`. |
 | `+f` / `+fEXT` | Output to file | `--output-ext` (rewriter target) | Rewriter only | Phase 1.1. |
+| `+dN` | `onlydata` output-detail level | — | Missing | MLT has no local `case 'd'`; consumption is via the shared `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382` with non-empty per-program body at `cutt.cpp:9478` (CLAN_SRV-only rejection of `onlydata == 1`; otherwise pure level effect). chatter has no `--display-mode` consumer for MLT. Per-MLT rewriter arm in `clan_args.rs` passes the token through. |
 
 ### Audit summary
 
@@ -94,7 +95,7 @@ Missing.)
 | Done (byte-parity or in scope) | 9 |
 | Partial (chatter abstraction differs) | 6 |
 | Rewriter only (would error at parse time) | 3 |
-| Missing (no rewriter, no clap field) | 5 |
+| Missing (no rewriter, no clap field) | 6 |
 
 The `+a` / `+at` empty-utterance switch and the clause-delimiter
 flags (`+cS`, `+c@F`) are MLT's most distinctive omissions: they

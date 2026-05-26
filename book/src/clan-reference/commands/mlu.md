@@ -1,7 +1,7 @@
 # MLU -- Mean Length of Utterance
 
 **Status:** Current
-**Last updated:** 2026-05-26 08:21 EDT
+**Last updated:** 2026-05-26 11:50 EDT
 
 ## Purpose
 
@@ -93,9 +93,16 @@ Missing.)
 ### MLU `+d` display modes
 
 See the "Display Modes (`+dN` / `--display-mode N`) — DRAFT" section
-below for the per-N table. All `+d` and `+d1` invocations are
-**Rewriter only** today — the rewriter rewrites to
-`--display-mode N` but the `Mlu` clap struct has no consuming field.
+below for the per-N table. All `+d` / `+d1` invocations are
+**Missing** as of 2026-05-26: MLU has no local `case 'd'`;
+consumption is via the shared `maingetflag` path at
+`OSX-CLAN/src/clan/cutt.cpp:9382` with non-empty per-program body
+at `cutt.cpp:9485` (CLAN_SRV-only rejection of `onlydata == 1 ||
+3`; otherwise pure `onlydata`-level effect). chatter has no
+`--display-mode` consumer for MLU. The per-MLU rewriter arm in
+`clan_args.rs` passes the token through so clap reports the
+literal `+d`/`+dN` argument rather than the misleading
+`--display-mode` rewrite.
 
 ### Audit summary
 
@@ -103,8 +110,8 @@ below for the per-N table. All `+d` and `+d1` invocations are
 |---|---|
 | Done (byte-parity or in scope) | 12 |
 | Partial (chatter abstraction differs) | 5 |
-| Rewriter only (would error at parse time) | 3 |
-| Missing (no rewriter, no clap field) | 5 |
+| Rewriter only (would error at parse time) | 2 |
+| Missing (no rewriter, no clap field) | 6 |
 
 The `+g` overload is the most subtle issue: MLU's command-specific
 `+g` means "exclude an utterance if it consists solely of the given
