@@ -37,6 +37,17 @@ class TestResolveTranslateEngine:
             is TranslationBackend.NLLB
         )
 
+    def test_tencent_override_wins(self) -> None:
+        # Tencent Cloud TMT (Text Translation). Cloud-API engine that
+        # outperforms NLLB on short Mandarin greetings (verified
+        # 2026-05-26 against the same fixture set). Cantonese (`yue`)
+        # is NOT supported by Tencent — those routes still go through
+        # NLLB. See ``docs/investigations/2026-05-23-translate-engine-comparison.md``.
+        assert (
+            resolve_translate_engine({"translate": "tencent"})
+            is TranslationBackend.TENCENT
+        )
+
     def test_default_without_overrides_is_google(self) -> None:
         assert resolve_translate_engine(None) is TranslationBackend.GOOGLE
 
@@ -56,7 +67,7 @@ class TestResolveTranslateEngine:
             resolve_translate_engine({"translate": "gogle"})
 
     def test_unknown_engine_error_mentions_supported_options(self) -> None:
-        with pytest.raises(ValueError, match="google, seamless, nllb"):
+        with pytest.raises(ValueError, match="google, seamless, nllb, tencent"):
             resolve_translate_engine({"translate": "whisper"})
 
 

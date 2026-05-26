@@ -1851,6 +1851,28 @@ fn translate_engine_flag_nllb_is_parsed() {
 }
 
 #[test]
+fn translate_engine_flag_tencent_is_parsed() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "translate",
+        "--translate-engine",
+        "tencent",
+        "corpus/",
+    ]);
+    let opts = build_typed_options(&cli.command, &cli.global).unwrap();
+    match opts {
+        CommandOptions::Translate(t) => {
+            assert_eq!(t.translate_engine, TranslateEngineName::Tencent);
+            assert_eq!(
+                t.effective_translate_engine(),
+                TranslateEngineName::Tencent,
+            );
+        }
+        other => panic!("expected Translate variant, got: {other:?}"),
+    }
+}
+
+#[test]
 fn translate_engine_global_override_beats_explicit_flag() {
     // --engine-overrides is the shared cross-command override mechanism;
     // it must take precedence over the per-command --translate-engine

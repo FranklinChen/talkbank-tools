@@ -1,7 +1,7 @@
 # translate — Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-05-23 21:39 EDT
+**Last updated:** 2026-05-26 12:48 EDT
 
 Implementation guide for the `translate` command. For user-facing
 documentation, see [User Guide: translate](../../user-guide/commands/translate.md).
@@ -18,9 +18,9 @@ documentation, see [User Guide: translate](../../user-guide/commands/translate.m
 | Translate orchestration | `crates/batchalign/src/translate.rs` | Cross-file batching, cache, `%xtra` injection |
 | Batch dispatch | `crates/batchalign/src/runner/dispatch/infer_batched.rs` | Shared with morphotag and utseg |
 | Injection | `crates/batchalign/src/translate.rs` | Writes `%xtra:` tiers from translation strings |
-| Engine type | `crates/batchalign/src/types/engines.rs` — `TranslateEngineName` | Wire-format enum (`google` / `seamless` / `nllb`), `EngineBackend` impl, `EngineOverrides.translate` field |
+| Engine type | `crates/batchalign/src/types/engines.rs` — `TranslateEngineName` | Wire-format enum (`google` / `seamless` / `nllb` / `tencent`), `EngineBackend` impl, `EngineOverrides.translate` field |
 | Engine resolution (server) | `crates/batchalign/src/types/options.rs` — `TranslateOptions::effective_translate_engine` | Precedence: shared `--engine-overrides` `{"translate":"..."}` > `--translate-engine` flag > Google default |
-| Engine bootstrap | `batchalign/worker/_model_loading/translation.py::load_translation_engine(bootstrap)` | Reads `bootstrap.engine_overrides["translate"]`, dispatches via exhaustive match to `_load_google_translate`, `_load_seamless_translate`, or `_load_nllb_translate`. Unknown engine names raise `ValueError` |
+| Engine bootstrap | `batchalign/worker/_model_loading/translation.py::load_translation_engine(bootstrap)` | Reads `bootstrap.engine_overrides["translate"]`, dispatches via exhaustive match to `_load_google_translate`, `_load_seamless_translate`, `_load_nllb_translate`, or `_load_tencent_translate`. Unknown engine names raise `ValueError` |
 | Engine resolution (worker) | `batchalign/worker/_model_loading/translation.py::resolve_translate_engine` | Pure function from `engine_overrides` dict → `TranslationBackend`; default Google |
 | Worker IPC | `batchalign/inference/translate.py` — `batch_infer_translate()` | Iterates batch items, calls the resolved `translate_fn(text, src_lang)`, returns `raw_translation` per item. Sleeps 1.5s per item when backend is `GOOGLE` (rate limit). Pre-processing (Chinese space removal) happens in Rust before the call; post-processing in Rust after |
 
@@ -79,8 +79,8 @@ lowest:
 1. `common.engine_overrides.translate` — set by
    `--engine-overrides '{"translate":"<engine>"}'`.
 2. `TranslateOptions.translate_engine: TranslateEngineName` — set by
-   `--translate-engine google|nllb|seamless`. Defaults to Google via
-   `default_translate_engine()`.
+   `--translate-engine google|tencent|nllb|seamless`. Defaults to
+   Google via `default_translate_engine()`.
 
 There is deliberately no `server.yaml` knob for engine selection.
 Translation engine is a policy choice, not a host fact, and policy
@@ -90,8 +90,38 @@ a config file. See the no-config-junk principle in
 
 The worker pool key includes the resolved translate engine
 (`dispatch_engine_overrides_json` always emits a `translate` entry).
-Google, Seamless, and NLLB workers are not interchangeable, so they
-end up in separate pools.
+Google, Tencent, Seamless, and NLLB workers are not interchangeable,
+so they end up in separate pools.
+
+## Tencent backend specifics
+
+The Tencent loader reads CAM credentials from `~/.batchalign.ini`
+`[asr]` section at engine-load time:
+
+- `engine.tencent.id` → `TencentSecretId`
+- `engine.tencent.key` → `TencentSecretKey`
+- `engine.tencent.region` → `TencentRegion`
+
+These are the same CAM credentials used by the Tencent ASR backend
+(the `[asr]` section name is historical; the SecretId/SecretKey pair
+authorizes any product the CAM user has permission for). The user
+must have `tmt:TextTranslate` policy attached (e.g.,
+`QcloudTMTFullAccess`), and the TMT product must be "opened" at the
+Tencent Cloud account level — both are root-account / admin actions
+on the Tencent side.
+
+Language-code handling: `_ISO_639_3_TO_TENCENT_LANG` (in
+`batchalign/worker/_model_loading/translation.py`) maps the ISO-639-3
+codes BA3 emits to Tencent's ISO-639-1 codes (`spa→es`, `cmn→zh`,
+etc.). Unmapped source languages raise a clear `ValueError`
+recommending `--translate-engine nllb`. Tencent does NOT list
+`yue→en` in its supported pairs — Cantonese requests are rejected at
+the table lookup, not at the API call.
+
+Empty `SourceText` would be rejected by the Tencent API with a typed
+`InvalidParameter` error. The loader short-circuits empty input
+(returns the empty string) so a stray empty utterance doesn't surface
+as a SDK exception that looks like a credentials problem.
 
 ## BA2 → BA3 migration notes
 

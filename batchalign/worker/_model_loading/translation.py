@@ -1,17 +1,22 @@
 """Translation-engine bootstrap helpers for worker startup.
 
-Three backends are supported:
+Four backends are supported:
 
 * ``TranslationBackend.GOOGLE`` — public Google Translate via the
   ``googletrans`` library. Requires reachability to
   ``translate.google.com``; unusable behind the Great Firewall.
+* ``TranslationBackend.TENCENT`` — Tencent Cloud TMT (Text Translation).
+  Cloud-API engine; CAM credentials in ``~/.batchalign.ini`` `[asr]`
+  section (``engine.tencent.id``/``key``/``region``). Free tier
+  5M chars/month. Best empirical quality on Mandarin (zh→en); does
+  NOT support Cantonese (yue→en) — those routes must use NLLB.
 * ``TranslationBackend.SEAMLESS`` — Meta's SeamlessM4T, loaded locally
   from HuggingFace. No outbound network at inference time. Known to
   produce poor CJK quality on short utterances; retained for back-compat.
 * ``TranslationBackend.NLLB`` — Meta's NLLB-200-distilled-1.3B,
   text-MT-native, ~5 GB model. No outbound network at inference time.
-  Recommended self-hosted fallback. Short CJK greetings (≤ 5 chars) are
-  a known weakness of neural text-MT models in general.
+  Self-hosted fallback that handles Cantonese first-class. Short CJK
+  greetings (≤ 5 chars) are a known weakness.
 
 Selection is driven by the same ``engine_overrides`` dict ASR and FA use
 (see ``asr.py::resolve_asr_engine``). The Rust control plane decides which
@@ -51,6 +56,8 @@ def load_translation_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         _load_seamless_translate()
     elif backend is TranslationBackend.NLLB:
         _load_nllb_translate()
+    elif backend is TranslationBackend.TENCENT:
+        _load_tencent_translate()
     else:
         # Exhaustive — if a new TranslationBackend variant is added and
         # not wired in here, we raise rather than leaving translate_fn
@@ -222,6 +229,127 @@ def _load_nllb_translate() -> None:
 
     _state.translate_backend = TranslationBackend.NLLB
     _state.translate_fn = nllb_fn
+
+
+# Mapping from the ISO-639-3 codes BA3 emits per CHAT @Languages header
+# to the ISO-639-1 codes Tencent TMT expects (e.g. ``"es"``, ``"zh"``,
+# ``"ja"``). Only languages Tencent TMT supports + we have empirically
+# validated are listed; an unmapped source language raises ValueError
+# at inference time directing the operator to ``--translate-engine
+# nllb`` for that language. NOTE: Tencent does NOT support Cantonese
+# (``yue``) — verified 2026-05-26, returns InvalidParameterValue
+# ("不支持的语种：yue_to_en"). Use NLLB for Cantonese.
+_ISO_639_3_TO_TENCENT_LANG: dict[LanguageCode, str] = {
+    LanguageCode("eng"): "en",
+    LanguageCode("spa"): "es",
+    LanguageCode("fra"): "fr",
+    LanguageCode("deu"): "de",
+    LanguageCode("ita"): "it",
+    LanguageCode("por"): "pt",
+    LanguageCode("rus"): "ru",
+    LanguageCode("cmn"): "zh",
+    LanguageCode("zho"): "zh",
+    LanguageCode("jpn"): "ja",
+    LanguageCode("kor"): "kor",
+    LanguageCode("ara"): "ar",
+    LanguageCode("tha"): "th",
+    LanguageCode("vie"): "vi",
+    LanguageCode("tur"): "tr",
+    LanguageCode("ind"): "id",
+    LanguageCode("msa"): "ms",
+}
+
+
+def _load_tencent_translate() -> None:
+    """Bind ``_state.translate_fn`` to a Tencent Cloud TMT translator.
+
+    Credentials are read from ``~/.batchalign.ini`` ``[asr]`` section
+    (``engine.tencent.id``, ``engine.tencent.key``,
+    ``engine.tencent.region``) — the same credential bundle used by
+    the Tencent ASR backend. The ``[asr]`` section name is a
+    historical artifact; the CAM SecretId/SecretKey pair authorizes
+    both ASR and TMT once the CAM user has ``tmt:TextTranslate``
+    permission and the TMT service is "opened" at the Tencent Cloud
+    account level (one-time setup per account).
+
+    Free tier: 5M characters/month, ample for typical research-corpus
+    workloads. Empty ``SourceText`` is rejected by the Tencent API
+    with ``InvalidParameter`` — the inference closure short-circuits
+    empty input upstream to avoid spurious failures.
+    """
+    import configparser
+    from pathlib import Path
+
+    from batchalign.inference._domain_types import (
+        TencentSecretId,
+        TencentSecretKey,
+        TencentRegion,
+    )
+
+    ini_path = Path.home() / ".batchalign.ini"
+    cp = configparser.ConfigParser()
+    cp.read(ini_path)
+    if "asr" not in cp:
+        raise RuntimeError(
+            f"Tencent translate backend requires credentials in {ini_path} "
+            f"[asr] section (engine.tencent.id, engine.tencent.key, "
+            f"engine.tencent.region); the file has no [asr] section"
+        )
+    asr = cp["asr"]
+    secret_id = TencentSecretId(asr.get("engine.tencent.id", "").strip())
+    secret_key = TencentSecretKey(asr.get("engine.tencent.key", "").strip())
+    region = TencentRegion(asr.get("engine.tencent.region", "").strip())
+    if not (secret_id and secret_key and region):
+        raise RuntimeError(
+            f"Tencent translate backend requires engine.tencent.id, .key, "
+            f"and .region in {ini_path} [asr]; at least one is missing"
+        )
+
+    from tencentcloud.common import credential
+    from tencentcloud.common.exception.tencent_cloud_sdk_exception import (
+        TencentCloudSDKException,
+    )
+    from tencentcloud.common.profile.client_profile import ClientProfile
+    from tencentcloud.common.profile.http_profile import HttpProfile
+    from tencentcloud.tmt.v20180321 import models, tmt_client
+
+    cred = credential.Credential(secret_id, secret_key)
+    http_profile = HttpProfile()
+    http_profile.endpoint = "tmt.tencentcloudapi.com"
+    client_profile = ClientProfile()
+    client_profile.httpProfile = http_profile
+    client = tmt_client.TmtClient(cred, region, client_profile)
+
+    def tencent_fn(text: str, src_lang: LanguageCode) -> str:
+        """Translate one text payload through Tencent TMT."""
+        if not text:
+            # Tencent rejects empty SourceText with InvalidParameter.
+            # Upstream batch infer should already skip empties, but
+            # short-circuit here so a slip doesn't surface as a typed
+            # SDK exception that looks like a credential failure.
+            return ""
+        tencent_src = _ISO_639_3_TO_TENCENT_LANG.get(src_lang)
+        if tencent_src is None:
+            raise ValueError(
+                f"Tencent TMT does not support source language "
+                f"{src_lang!r}; use --translate-engine nllb for this "
+                f"language (Cantonese in particular requires nllb)"
+            )
+        req = models.TextTranslateRequest()
+        req.SourceText = text
+        req.Source = tencent_src
+        req.Target = "en"
+        req.ProjectId = 0
+        try:
+            resp = client.TextTranslate(req)
+        except TencentCloudSDKException as exc:
+            raise RuntimeError(
+                f"Tencent TMT translation failed: {exc}"
+            ) from exc
+        return str(resp.TargetText)
+
+    _state.translate_backend = TranslationBackend.TENCENT
+    _state.translate_fn = tencent_fn
 
 
 __all__ = [

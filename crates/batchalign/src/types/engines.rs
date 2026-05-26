@@ -356,7 +356,7 @@ impl<'de> Deserialize<'de> for AsrEngineName {
 /// Typed translation engine selector.
 ///
 /// The wire format uses the lowercase tokens ``"google"``,
-/// ``"seamless"``, and ``"nllb"``; the Python worker's
+/// ``"seamless"``, ``"nllb"``, and ``"tencent"``; the Python worker's
 /// ``resolve_translate_engine``
 /// (``batchalign/worker/_model_loading/translation.py``) matches on
 /// those exact strings. Any change here must be mirrored on the Python
@@ -370,12 +370,19 @@ pub enum TranslateEngineName {
     /// Local Meta SeamlessM4T model, loaded from HuggingFace and run
     /// in-process in the Python worker. No outbound network at
     /// inference time. Retained for back-compat with BA2 callers;
-    /// short-CJK quality is poor, prefer ``Nllb`` for new work.
+    /// short-CJK quality is poor, prefer ``Nllb`` or ``Tencent`` for
+    /// new work.
     Seamless,
     /// Local Meta NLLB-200-distilled-1.3B (~5 GB), text-MT-native.
-    /// No outbound network at inference time. Recommended self-hosted
-    /// fallback for hosts where Google Translate is unreachable.
+    /// No outbound network at inference time. Self-hosted fallback
+    /// that handles Cantonese first-class (Tencent does not).
     Nllb,
+    /// Tencent Cloud TMT (Text Translation) — cloud-API engine.
+    /// Best empirical quality on Mandarin (zh→en) verified
+    /// 2026-05-26; does NOT support Cantonese (``yue``). Requires
+    /// CAM credentials with ``tmt:TextTranslate`` permission in
+    /// ``~/.batchalign.ini``. Free tier 5M chars/month.
+    Tencent,
 }
 
 impl EngineBackend for TranslateEngineName {
@@ -384,6 +391,7 @@ impl EngineBackend for TranslateEngineName {
             Self::Google => "google",
             Self::Seamless => "seamless",
             Self::Nllb => "nllb",
+            Self::Tencent => "tencent",
         }
     }
 
@@ -398,6 +406,7 @@ impl EngineBackend for TranslateEngineName {
             "google" => Some(Self::Google),
             "seamless" => Some(Self::Seamless),
             "nllb" => Some(Self::Nllb),
+            "tencent" => Some(Self::Tencent),
             _ => None,
         }
     }
@@ -414,6 +423,7 @@ impl TranslateEngineName {
             Self::Google => "google",
             Self::Seamless => "seamless",
             Self::Nllb => "nllb",
+            Self::Tencent => "tencent",
         }
     }
 
@@ -443,7 +453,9 @@ impl TranslateEngineName {
     /// (``batchalign/worker/_progress.py::_HF_SIZE_HINTS_GB``).
     pub fn resident_memory_mb(&self) -> u64 {
         match self {
-            Self::Google => HTTP_CLIENT_BASELINE_RSS_MB,
+            // googletrans + Tencent TMT are both thin HTTP-client
+            // engines with no local model loaded — same baseline.
+            Self::Google | Self::Tencent => HTTP_CLIENT_BASELINE_RSS_MB,
             Self::Seamless => SEAMLESS_M4T_MEDIUM_RSS_MB,
             Self::Nllb => NLLB_200_DISTILLED_1_3B_RSS_MB,
         }
@@ -668,6 +680,15 @@ mod tests {
     }
 
     #[test]
+    fn translate_engine_tencent_wire_roundtrip() {
+        assert_eq!(TranslateEngineName::Tencent.wire_name(), "tencent");
+        assert_eq!(
+            TranslateEngineName::try_from_wire_name("tencent"),
+            Some(TranslateEngineName::Tencent),
+        );
+    }
+
+    #[test]
     fn translate_engine_unknown_wire_name_is_rejected() {
         assert_eq!(TranslateEngineName::try_from_wire_name("gogle"), None);
         let err = TranslateEngineName::from_wire_name("gogle").unwrap_err();
@@ -748,12 +769,31 @@ mod tests {
     }
 
     #[test]
+    fn translate_engine_tencent_matches_http_client_baseline() {
+        // Tencent TMT is a thin HTTP-client engine — no local model
+        // loaded — so its resident footprint is the same as Google's
+        // and Seamless's lightweight baseline. Pinned to prevent
+        // accidental inflation (which would over-reserve memory and
+        // refuse spawns on hosts that can comfortably run Tencent
+        // translate workers).
+        assert_eq!(
+            TranslateEngineName::Tencent.resident_memory_mb(),
+            HTTP_CLIENT_BASELINE_RSS_MB
+        );
+        assert_eq!(
+            TranslateEngineName::Tencent.resident_memory_mb(),
+            TranslateEngineName::Google.resident_memory_mb()
+        );
+    }
+
+    #[test]
     fn translate_engine_no_variant_is_rust_owned() {
         // All backends run in the Python worker — none talk to a
         // provider directly from the Rust server.
         assert!(!TranslateEngineName::Google.is_rust_owned());
         assert!(!TranslateEngineName::Seamless.is_rust_owned());
         assert!(!TranslateEngineName::Nllb.is_rust_owned());
+        assert!(!TranslateEngineName::Tencent.is_rust_owned());
     }
 
     #[test]

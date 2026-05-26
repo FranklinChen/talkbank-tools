@@ -53,6 +53,29 @@ Never logged or included in error messages. Only used at the worker/SDK
 boundary where the Rev.AI client is constructed.
 """
 
+TencentSecretId: TypeAlias = str
+"""Tencent Cloud CAM SecretId (AKID-prefixed identifier).
+
+Loaded from ``~/.batchalign.ini`` `[asr]` `engine.tencent.id`. The
+CAM user must hold both ASR product permissions and (when used by
+the translate backend) ``tmt:TextTranslate``. Never logged or
+echoed.
+"""
+
+TencentSecretKey: TypeAlias = str
+"""Tencent Cloud CAM SecretKey paired with ``TencentSecretId``.
+
+Loaded from ``~/.batchalign.ini`` `[asr]` `engine.tencent.key`.
+Treated as a secret — never logged or echoed.
+"""
+
+TencentRegion: TypeAlias = str
+"""Tencent Cloud region identifier (e.g. ``"ap-guangzhou"``,
+``"ap-shanghai"``). Loaded from ``~/.batchalign.ini`` `[asr]`
+`engine.tencent.region`. Affects API endpoint latency but not
+product authorization.
+"""
+
 TcpPort: TypeAlias = int
 """TCP port number in the range 1–65535."""
 
@@ -63,3 +86,4 @@ class TranslationBackend(Enum):
     GOOGLE = "google"
     SEAMLESS = "seamless"
     NLLB = "nllb"
+    TENCENT = "tencent"

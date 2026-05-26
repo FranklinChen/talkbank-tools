@@ -123,10 +123,14 @@ pub enum DiarizationMode {
 ///
 /// `google` requires reachability to the public Google Translate
 /// endpoint and is unsuitable behind the Great Firewall without VPN.
-/// `seamless` and `nllb` are both local-model alternatives downloaded
-/// from HuggingFace on first use; neither requires outbound network at
-/// inference time. `nllb` is the recommended self-hosted fallback;
-/// `seamless` is retained for back-compat with BA2 callers.
+/// `tencent` uses Tencent Cloud TMT (cloud API, China-friendly,
+/// best empirical quality on Mandarin but does NOT support Cantonese
+/// — requires CAM credentials with ``tmt:TextTranslate``). `seamless`
+/// and `nllb` are local-model alternatives downloaded from HuggingFace
+/// on first use; neither requires outbound network at inference time.
+/// `nllb` is the recommended self-hosted fallback and handles
+/// Cantonese first-class; `seamless` is retained for back-compat with
+/// BA2 callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum TranslateEngine {
     /// Public Google Translate via the ``googletrans`` library (default).
@@ -134,8 +138,10 @@ pub enum TranslateEngine {
     Google,
     /// Local Meta SeamlessM4T model (BA2-inherited; low CJK quality).
     Seamless,
-    /// Local Meta NLLB-200-distilled-1.3B (recommended).
+    /// Local Meta NLLB-200-distilled-1.3B (recommended self-hosted).
     Nllb,
+    /// Tencent Cloud TMT cloud API (best Mandarin; no Cantonese).
+    Tencent,
 }
 
 /// ASR engine for the `benchmark` command (subset of AsrEngine).
@@ -371,17 +377,20 @@ pub struct TranslateArgs {
     #[command(flatten)]
     pub common: CommonOpts,
 
-    /// Translation engine: `google` (default), `nllb`, or `seamless`.
+    /// Translation engine: `google` (default), `tencent`, `nllb`, or `seamless`.
     ///
     /// `google` calls the public Google Translate endpoint and
     /// requires outbound network reachability — unsuitable behind
-    /// the Great Firewall without VPN. `nllb` is the recommended
-    /// self-hosted fallback (Meta NLLB-200-distilled-1.3B,
-    /// text-MT-native, ~5 GB local model, no inference-time
-    /// network requirement). `seamless` is the BA2-inherited
-    /// local-model fallback retained for back-compat; its CJK
-    /// quality on short utterances is poor — prefer `nllb` for
-    /// new work.
+    /// the Great Firewall without VPN. `tencent` uses Tencent Cloud
+    /// TMT (China-friendly cloud API, best empirical quality on
+    /// Mandarin — but does NOT support Cantonese; requires CAM
+    /// credentials with `tmt:TextTranslate`). `nllb` is the
+    /// recommended self-hosted fallback (Meta NLLB-200-distilled-1.3B,
+    /// text-MT-native, ~5 GB local model, no inference-time network
+    /// requirement, handles Cantonese first-class). `seamless` is the
+    /// BA2-inherited local-model fallback retained for back-compat;
+    /// its CJK quality on short utterances is poor — prefer `nllb` or
+    /// `tencent` for new work.
     #[arg(long, value_enum, default_value_t)]
     pub translate_engine: TranslateEngine,
 
