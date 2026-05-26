@@ -1,7 +1,7 @@
 # CHSTRING -- String Replacement Using a Changes File
 
 **Status:** Current
-**Last updated:** 2026-05-22 12:50 EDT
+**Last updated:** 2026-05-26 11:43 EDT
 
 ## Purpose
 
@@ -41,7 +41,7 @@ Sources: `OSX-CLAN/src/clan/chstring.cpp::usage`,
 |---|---|---|---|---|
 | `+b` | Work only on text right of the colon (CHAT format) | (default) | Done | chatter only mutates the main-tier word content; speaker codes are preserved. |
 | `+cF` / `-c` | Dictionary file path / do not change inside `[...]` codes | `--changes <PATH>` (file form only) | Partial | chatter requires the path explicitly (no `changes.cut`-in-cwd default). The `-c` inside-codes guard is implicit — chatter's AST-based replacement only touches word leaves, never code-bracket content. |
-| `+d` | Do not re-wrap tiers | — | Missing | Output line-wrapping is a separate concern; chatter never wraps on output. |
+| `+d` | Do not re-wrap tiers | — | Missing | Bare-only per `OSX-CLAN/src/clan/chstring.cpp:1087` (`NO_CHANGE = TRUE` + `no_arg_option(f)`). chatter never wraps on output, so semantically a no-op. Per-CHSTRING rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+d` argument rather than the misleading `--display-mode` rewrite. |
 | `+l` | Work only on codes left of colon (speaker tag) | — | Missing | |
 | `+lx` | Do not show the list of changes | (default) | Done | chatter operates silently. |
 | `+q` | Clean up tiers (add tabs after colons, remove blank spaces) | — | Missing | Tier-cleanup pass. |

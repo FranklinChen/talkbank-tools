@@ -74,6 +74,9 @@ enum ClanSubcommandKind {
     Trnfix,
     Gem,
     Gemfreq,
+    Chstring,
+    Chip,
+    Flo,
     Other,
 }
 
@@ -115,6 +118,9 @@ impl ClanSubcommandKind {
                 "trnfix" => return Self::Trnfix,
                 "gem" => return Self::Gem,
                 "gemfreq" => return Self::Gemfreq,
+                "chstring" => return Self::Chstring,
+                "chip" => return Self::Chip,
+                "flo" => return Self::Flo,
                 _ => {}
             }
         }
@@ -505,6 +511,29 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // chatter has no `--display-mode` consumer for VOCD; pass
         // through.
         (b'+', b'd') if subcommand == Vocd => None,
+
+        // CHSTRING `+d` — bare-only "do not re-wrap tiers" per
+        // `OSX-CLAN/src/clan/chstring.cpp:1087` (`NO_CHANGE =
+        // TRUE`, `no_arg_option(f)`). chatter never wraps on
+        // output; semantically a no-op. Pass through.
+        (b'+', b'd') if subcommand == Chstring => None,
+
+        // CHIP `+d`/`+dN` — `onlydata`-level via shared
+        // `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382`
+        // with non-empty per-program body at `cutt.cpp:9427`
+        // (`onlydata == 2` → `puredata = 0`; CLAN_SRV rejects
+        // `onlydata == 3`). chatter has no `--display-mode`
+        // consumer for CHIP; pass through.
+        (b'+', b'd') if subcommand == Chip => None,
+
+        // FLO `+d` — multi-value local at
+        // `OSX-CLAN/src/clan/flo.cpp:197`: bare `+d` or `+d0` sets
+        // `substitute_flag = 1` (flo line replaces main line);
+        // `+d1` sets it to 2; `+d2` is a no-op; anything else
+        // errors. chatter emits `%flo:` as a new dependent tier
+        // alongside the main line — no main-line-substitute
+        // consumer. Pass through.
+        (b'+', b'd') if subcommand == Flo => None,
 
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
@@ -1334,6 +1363,76 @@ mod tests {
     #[test]
     fn vocd_dn_passes_through() {
         let input = args("clan vocd +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// CHSTRING `+d` is bare-only per
+    /// `OSX-CLAN/src/clan/chstring.cpp:1087` (sets
+    /// `NO_CHANGE = TRUE`, "do not re-wrap tiers"; calls
+    /// `no_arg_option(f)` so anything following errors).
+    /// chatter never wraps on output — semantically a no-op.
+    /// Per-CHSTRING arm passes through.
+    #[test]
+    fn chstring_d_bare_passes_through() {
+        let input = args("clan chstring +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Malformed CHSTRING `+dN` (CLAN errors per `no_arg_option`)
+    /// passes through unchanged via the per-CHSTRING arm rather
+    /// than hitting the misleading `--display-mode` rewrite.
+    #[test]
+    fn chstring_dn_passes_through() {
+        let input = args("clan chstring +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// CHIP has no local `case 'd'`; `+d`/`+dN` is consumed via the
+    /// shared `maingetflag` path at `cutt.cpp:9382` with non-empty
+    /// per-program body at `cutt.cpp:9427` (`onlydata == 2` →
+    /// `puredata = 0`; CLAN_SRV rejects `onlydata == 3`). Same
+    /// `onlydata`-level semantic as the empty-body commands;
+    /// chatter has no `--display-mode` consumer for CHIP. Per-CHIP
+    /// arm passes through.
+    #[test]
+    fn chip_d_bare_passes_through() {
+        let input = args("clan chip +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare CHIP `+dN` (strict-RED case).
+    #[test]
+    fn chip_dn_passes_through() {
+        let input = args("clan chip +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// FLO `+d` has multi-value local semantics at
+    /// `OSX-CLAN/src/clan/flo.cpp:197`:
+    /// - bare `+d` or `+d0` → `substitute_flag = 1` (flo line
+    ///   replaces main line)
+    /// - `+d1` → `substitute_flag = 2`
+    /// - `+d2` → no-op (empty branch)
+    /// - anything else → CLAN errors
+    /// chatter emits `%flo:` as a new dependent tier alongside the
+    /// main line; no main-line-substitute consumer. Per-FLO arm
+    /// passes through.
+    #[test]
+    fn flo_d_bare_passes_through() {
+        let input = args("clan flo +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare FLO `+dN` (strict-RED case).
+    #[test]
+    fn flo_dn_passes_through() {
+        let input = args("clan flo +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }

@@ -1,7 +1,7 @@
 # CHIP -- Child/Parent Interaction Profile
 
 **Status:** Current
-**Last updated:** 2026-05-22 09:42 EDT
+**Last updated:** 2026-05-26 11:43 EDT
 
 ## Purpose
 
@@ -51,7 +51,7 @@ Authoritative enumeration of every CLAN `chip` flag. Sources:
 | `+qN` | Set utterance window to `N` utterances before response | — | Missing | Context-window for response pairing. |
 | `+wN` | Set minimum number of words on source utterance | — | Rewriter only | Collides with the inherited `+wN` context window (see KWAL). |
 | `+xN` | Set minimum repetition index for coding | — | Missing | |
-| `+dN` | Various display modes (full N table omitted here) | — | Rewriter only | |
+| `+dN` | Various display modes (full N table omitted here) | — | Missing | CHIP has no local `case 'd'`; consumption is via the shared `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382` with non-empty per-program body at `cutt.cpp:9427` (`onlydata == 2` → `puredata = 0`; CLAN_SRV rejects `onlydata == 3`). Same `onlydata`-level semantic as the empty-body commands. chatter has no `--display-mode` consumer for CHIP. Per-CHIP rewriter arm in `clan_args.rs` passes the token through. |
 
 ### Audit summary
 
@@ -59,8 +59,8 @@ Authoritative enumeration of every CLAN `chip` flag. Sources:
 |---|---|
 | Done | 5 |
 | Partial | 1 |
-| Rewriter only | 6 |
-| Missing | 12 |
+| Rewriter only | 5 |
+| Missing | 13 |
 
 CHIP's largest gap is the **adult/child speaker-role tagging**
 (`+bS` / `+cS`) — without these, CHIP cannot determine which

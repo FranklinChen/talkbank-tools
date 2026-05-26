@@ -1,7 +1,7 @@
 # FLO -- Simplified Fluent Output
 
 **Status:** Current
-**Last updated:** 2026-05-22 12:50 EDT
+**Last updated:** 2026-05-26 11:43 EDT
 
 ## Purpose
 
@@ -40,9 +40,9 @@ Sources: `OSX-CLAN/src/clan/flo.cpp::usage`,
 | `+cjC` | Filter main tier for JSON comparison (`C-`/`p-`/`s-` strip variants) | — | Missing | Pipeline-internal mode. |
 | `+ca` | Create output for MFA aligner | — | Missing | Niche format. |
 | `+cb` | Keep bullets in output | — | Missing | Bullet-preservation toggle. |
-| `+d` | Replace main tier with simplified `%flo` in output | — | Missing | chatter emits `%flo:` as a new dependent tier alongside the original main tier. |
-| `+d1` | FAVE-formatted output | — | Missing | Niche output format. |
-| `+d2` | AntConc-formatted `.txt` with BOM | — | Missing | Niche output format. |
+| `+d` | Replace main tier with simplified `%flo` in output | — | Missing | `OSX-CLAN/src/clan/flo.cpp:197`: bare `+d` (or `+d0`) sets `substitute_flag = 1` (flo line replaces main line). chatter emits `%flo:` as a new dependent tier alongside the original main tier — no substitute-flag consumer. Per-FLO rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+d` argument rather than the misleading `--display-mode` rewrite. |
+| `+d1` | FAVE-formatted output | — | Missing | Same `flo.cpp:197` switch sets `substitute_flag = 2`. Per-FLO rewriter arm passes the token through. |
+| `+d2` | AntConc-formatted `.txt` with BOM | — | Missing | Same `flo.cpp:197` switch — `+d2` is an empty branch (no `substitute_flag` change). Per-FLO rewriter arm passes the token through. |
 
 ### Audit summary
 
