@@ -1,7 +1,7 @@
 # DIST -- Word Distribution Across Turns
 
 **Status:** Current
-**Last updated:** 2026-05-23 11:40 EDT
+**Last updated:** 2026-05-26 10:59 EDT
 
 ## Purpose
 
@@ -46,7 +46,7 @@ Authoritative enumeration of every CLAN `dist` flag. Sources:
 | `+bC` | Break apart words at character `C` | — | Missing | Word-segmentation customization. |
 | `+g` | Count only one occurrence of each word per turn | `--once-per-turn` | Done | Landed 2026-05-23. Per-turn word dedup via HashSet; `first_turn` / `last_turn` are unaffected (they only ever update on first/most-recent encounter). The `+g` overload (bare = once-per-turn, `+gLABEL` = gem filter) matches CLAN's: rewriter checks for empty rest before falling through to the gem branch. Pinned by `dist_g_bare_routes_to_once_per_turn` and `dist_g_with_label_still_routes_to_gem`. |
 | `+o` | Only consider words containing the character `C` given in `+bC` | — | Missing | |
-| `+d` | Output sdata in form suitable for statistical analysis | — | Rewriter only | `--display-mode` rewrite. |
+| `+d` | Output sdata in form suitable for statistical analysis | — | Missing | DIST routes `+d` through the shared `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382` (via `dist.cpp::getflag` `default:` at line 545); DIST appears with empty per-program body at `cutt.cpp:9437`, confirming it consumes `+d` for an `onlydata` output-detail level. chatter has no `--only-data` flag for DIST. Per-DIST rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+d`/`+dN` argument rather than the misleading `--display-mode` rewrite. |
 
 ### General `+`-flags DIST inherits (from `cutt.cpp::mainusage`)
 
@@ -60,8 +60,8 @@ Authoritative enumeration of every CLAN `dist` flag. Sources:
 |---|---|
 | Done | 8 |
 | Partial | 1 |
-| Rewriter only | 4 |
-| Missing | 5 |
+| Rewriter only | 3 |
+| Missing | 6 |
 
 DIST's `+g` is another instance of the **`+g` overload** pattern
 documented in MLU/MLT/FREQPOS. Researchers pasting

@@ -462,6 +462,22 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // surface as a misleading `--display-mode` error).
         (b'+', b'd') if subcommand == Keymap => None,
 
+        // DIST `+d`/`+dN` — `onlydata` output-detail level routed
+        // through the shared `maingetflag` path at
+        // `OSX-CLAN/src/clan/cutt.cpp:9382` via
+        // `dist.cpp::getflag`'s `default:` (line 545). DIST is in
+        // the per-program list at `cutt.cpp:9437` with an empty
+        // body, confirming it consumes `+d` for the level effect.
+        // chatter has no `--only-data` flag for DIST; pass through.
+        (b'+', b'd') if subcommand == Dist => None,
+
+        // DSS `+d` — spreadsheet-output toggle with its own
+        // `case 'd'` at `OSX-CLAN/src/clan/dss.cpp:2520` (bare `+d`
+        // → `IsOutputSpreadsheet = 1`; `+d1` → `IsOutputSpreadsheet
+        // = 2`). chatter has no `--format csv` for DSS; pass
+        // through.
+        (b'+', b'd') if subcommand == Dss => None,
+
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
 
@@ -1178,6 +1194,53 @@ mod tests {
     #[test]
     fn keymap_dn_passes_through() {
         let input = args("clan keymap +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// DIST `+d`/`+dN` are `onlydata` output-detail levels routed
+    /// through the shared `maingetflag` path at
+    /// `OSX-CLAN/src/clan/cutt.cpp:9382` — `dist.cpp::getflag`'s
+    /// `default:` branch (line 545) delegates unknown flags to
+    /// `maingetflag`, which consumes `+d` when `option_flags[DIST] &
+    /// D_OPTION` is set (DIST appears in the per-program branch list
+    /// at `cutt.cpp:9437` with empty body, confirming DIST consumes
+    /// `+d` for its `onlydata` level effect). chatter has no
+    /// `--only-data` flag for DIST; per-DIST arm passes the token
+    /// through.
+    #[test]
+    fn dist_d_bare_passes_through() {
+        let input = args("clan dist +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare DIST `+dN` also passes through unchanged (currently
+    /// the catch-all rewrites it misleadingly to `--display-mode N`).
+    #[test]
+    fn dist_dn_passes_through() {
+        let input = args("clan dist +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// DSS `+d` is a spreadsheet-output toggle with its own
+    /// `case 'd'` at `OSX-CLAN/src/clan/dss.cpp:2520` (bare `+d` →
+    /// `IsOutputSpreadsheet = 1`; `+d1` → `IsOutputSpreadsheet = 2`).
+    /// chatter has no `--format csv` for DSS; per-DSS arm passes
+    /// the token through.
+    #[test]
+    fn dss_d_bare_passes_through() {
+        let input = args("clan dss +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare DSS `+dN` (the `IsOutputSpreadsheet = 2` branch) also
+    /// passes through unchanged.
+    #[test]
+    fn dss_dn_passes_through() {
+        let input = args("clan dss +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }
