@@ -72,6 +72,8 @@ enum ClanSubcommandKind {
     Chains,
     Modrep,
     Trnfix,
+    Gem,
+    Gemfreq,
     Other,
 }
 
@@ -111,6 +113,8 @@ impl ClanSubcommandKind {
                 "chains" => return Self::Chains,
                 "modrep" => return Self::Modrep,
                 "trnfix" => return Self::Trnfix,
+                "gem" => return Self::Gem,
+                "gemfreq" => return Self::Gemfreq,
                 _ => {}
             }
         }
@@ -477,6 +481,23 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // = 2`). chatter has no `--format csv` for DSS; pass
         // through.
         (b'+', b'd') if subcommand == Dss => None,
+
+        // GEM `+d` — hybrid: `+d2` is a local override at
+        // `OSX-CLAN/src/clan/gem.cpp:130` (sets
+        // `onlySelectedBG_EGHeaders = TRUE`); every other `+dN`
+        // value falls through to `maingetflag` at `cutt.cpp:9382`
+        // (empty per-program body at `cutt.cpp:9470`), setting the
+        // shared `onlydata` level. chatter has neither consumer;
+        // pass through.
+        (b'+', b'd') if subcommand == Gem => None,
+
+        // GEMFREQ `+d` — no local `case 'd'` in `gemfreq.cpp`;
+        // `+d`/`+dN` is consumed entirely via `maingetflag` at
+        // `cutt.cpp:9382` (empty per-program body at
+        // `cutt.cpp:9471`), setting the shared `onlydata` level.
+        // chatter has no `--display-mode` consumer on the `gemfreq`
+        // clap surface; pass through.
+        (b'+', b'd') if subcommand == Gemfreq => None,
 
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
@@ -1241,6 +1262,49 @@ mod tests {
     #[test]
     fn dss_dn_passes_through() {
         let input = args("clan dss +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// GEM `+d2` is a local override at
+    /// `OSX-CLAN/src/clan/gem.cpp:130` (sets
+    /// `onlySelectedBG_EGHeaders = TRUE`); every other `+dN` value
+    /// falls through to the shared `maingetflag` path at
+    /// `cutt.cpp:9382` with empty per-program body (`cutt.cpp:9470`),
+    /// setting the `onlydata` level. chatter has neither
+    /// consumer; per-GEM arm passes through both forms.
+    #[test]
+    fn gem_d_bare_passes_through() {
+        let input = args("clan gem +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare GEM `+dN` (including the `+d2` local override and
+    /// the maingetflag-routed `+d0`/`+d1`) passes through unchanged.
+    #[test]
+    fn gem_dn_passes_through() {
+        let input = args("clan gem +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// GEMFREQ has no local `case 'd'`; `+d`/`+dN` is consumed
+    /// entirely via the shared `maingetflag` path
+    /// (`cutt.cpp:9382`) with empty per-program body
+    /// (`cutt.cpp:9471`). chatter's `gemfreq` clap surface has no
+    /// `--display-mode` consumer; per-GEMFREQ arm passes through.
+    #[test]
+    fn gemfreq_d_bare_passes_through() {
+        let input = args("clan gemfreq +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare GEMFREQ `+dN` also passes through.
+    #[test]
+    fn gemfreq_dn_passes_through() {
+        let input = args("clan gemfreq +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }

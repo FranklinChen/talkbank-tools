@@ -1,7 +1,7 @@
 # GEMFREQ -- Word Frequency Within Gem Segments
 
 **Status:** Current
-**Last updated:** 2026-05-22 09:40 EDT
+**Last updated:** 2026-05-26 11:24 EDT
 
 ## Purpose
 
@@ -62,6 +62,7 @@ Authoritative enumeration of every CLAN `gemfreq` flag. Sources:
 | `+wS` / `+w@S` | Search for word `S` (or words in file `@S`) | `--include-word` | Partial | File-list form missing. |
 | `-wS` | Exclude word `S` | `--exclude-word` | Partial | |
 | `+yN` | Display whole tier unchanged (1) or cleaned up (0) | — | Missing | |
+| `+dN` | `onlydata` output-detail level (manual lists `+d0` legal CHAT, `+d1` with line/file/`@ID` info) | — | Missing | `OSX-CLAN/src/clan/gemfreq.cpp` has no local `case 'd'`; consumption is entirely via the shared `maingetflag` path at `cutt.cpp:9382` (empty per-program body at `cutt.cpp:9471`) setting the `onlydata` level. chatter's `gemfreq` clap surface has no `--display-mode` consumer. Per-GEMFREQ rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+dN` argument rather than the misleading `--display-mode` rewrite. |
 
 ### Audit summary
 
@@ -70,7 +71,7 @@ Authoritative enumeration of every CLAN `gemfreq` flag. Sources:
 | Done | 6 |
 | Partial | 2 |
 | Rewriter only | 4 |
-| Missing | 8 |
+| Missing | 9 |
 
 The `+g` / `+n` / `+yN` cluster are GEMFREQ's most distinctive
 gaps: they control gem-segment scoping (nested gems, termination

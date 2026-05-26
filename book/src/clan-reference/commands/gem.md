@@ -1,7 +1,7 @@
 # GEM -- Extract Gem Segments
 
 **Status:** Current
-**Last updated:** 2026-05-22 12:56 EDT
+**Last updated:** 2026-05-26 11:24 EDT
 
 ## Purpose
 
@@ -47,15 +47,15 @@ gem segments). Sources: `OSX-CLAN/src/clan/gem.cpp::usage`,
 | `+g` (no S) | Marker tier should contain all words specified by `+s` | — | Missing | EVAL-style `+g` overload. |
 | `+gS` | Restrict to gem labelled `S` | `--gem <LABEL>` | Done | |
 | `+n` | Each gem terminated by next `@G` | — | Missing | Same gem-termination semantic as in EVAL/COREELEX/FLUCALC. |
-| `+dN` | Output-format variants (from manual §7.13) | — | Rewriter only | |
+| `+dN` | Output-format variants (from manual §7.13) | — | Missing | Hybrid consumption per `OSX-CLAN/src/clan/gem.cpp:130`: `+d2` is a local override (`onlySelectedBG_EGHeaders = TRUE`); every other `+dN` value delegates to `maingetflag` at `cutt.cpp:9382` (empty per-program body at `cutt.cpp:9470`) setting the shared `onlydata` output-detail level. chatter has neither consumer. Per-GEM rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+dN` argument rather than the misleading `--display-mode` rewrite. |
 
 ### Audit summary
 
 | Bucket | Count |
 |---|---|
 | Done | 1 |
-| Rewriter only | 4 |
-| Missing | 6 |
+| Rewriter only | 3 |
+| Missing | 7 |
 
 GEM's command-specific gaps overlap heavily with GEMFREQ's: both
 the `+e` nested-gem and `+n` termination toggles are missing in
