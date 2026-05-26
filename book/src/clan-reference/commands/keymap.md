@@ -1,7 +1,7 @@
 # KEYMAP — Contingency Tables for Coded Data
 
 **Status:** Current
-**Last updated:** 2026-05-22 09:48 EDT
+**Last updated:** 2026-05-26 10:36 EDT
 
 ## Purpose
 
@@ -39,7 +39,7 @@ chatter clan keymap file.cha -k code1 -k code2          # short form
 |---|---|---|---|---|
 | `+bS` / `+b@F` | Set key code(s) to `S` (or codes in file `@F`) | `-k / --keyword` (only the inline `S` form) | Partial | Inline `+bS` is now routed (since 2026-05-22) — rewriter sends `--keyword S`. File-list form `+b@F` still missing; it passes through unrewritten so clap rejects loudly. |
 | `+cS` / `+c@F` | Set complimentary key code to `S` (or file `@F`) | — | Missing | Pair-completion key for the contingency table. |
-| `+d` | Output in spreadsheet format | — | Rewriter only | |
+| `+d` | Output in spreadsheet format | — | Missing | `OSX-CLAN/src/clan/keymap.cpp:834` no-arg Excel/CSV toggle (`no_arg_option(f)` + `isExcel = TRUE`). Per-KEYMAP rewriter arm passes the token through so clap rejects loudly; no `--format csv` consumer for KEYMAP today. |
 | `+o` | Include codes that precede target code(s) | — | Missing | Two-sided contingency (before + after). |
 
 ### Audit summary
@@ -48,8 +48,8 @@ chatter clan keymap file.cha -k code1 -k code2          # short form
 |---|---|
 | Done | 5 |
 | Partial | 1 |
-| Rewriter only | 4 |
-| Missing | 5 |
+| Rewriter only | 3 |
+| Missing | 6 |
 
 KEYMAP's largest gap is the **complimentary code** (`+cS`):
 without it, the contingency table is one-sided — chatter tracks

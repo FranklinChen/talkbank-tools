@@ -453,6 +453,15 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // catch-all below.
         (b'+', b'd') if subcommand == Trnfix => None,
 
+        // KEYMAP `+d` — no-arg Excel/spreadsheet toggle per
+        // `OSX-CLAN/src/clan/keymap.cpp:834` (`no_arg_option(f)`
+        // + `isExcel = TRUE`), identical shape to MODREP `+d`.
+        // chatter has no `--format csv` for KEYMAP; pass through
+        // so clap rejects the literal token (including malformed
+        // `+dN` forms that would otherwise hit the catch-all and
+        // surface as a misleading `--display-mode` error).
+        (b'+', b'd') if subcommand == Keymap => None,
+
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
 
@@ -1143,6 +1152,32 @@ mod tests {
     #[test]
     fn trnfix_dn_passes_through() {
         let input = args("clan trnfix +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// KEYMAP `+d` is a no-arg Excel/spreadsheet toggle per
+    /// `OSX-CLAN/src/clan/keymap.cpp:834` (`no_arg_option(f)` +
+    /// `isExcel = TRUE`) — identical shape to MODREP `+d`. chatter
+    /// has no `--format csv` for KEYMAP; the per-KEYMAP rewriter
+    /// arm passes the token through so clap rejects the literal
+    /// flag.
+    #[test]
+    fn keymap_d_bare_passes_through() {
+        let input = args("clan keymap +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// `+d1` for KEYMAP is malformed input — CLAN errors because
+    /// `no_arg_option` rejects any character following `+d`. Without
+    /// the per-KEYMAP arm, the generic catch-all rewrites `+d1` to
+    /// `--display-mode 1` and clap produces the misleading
+    /// "unexpected argument '--display-mode'" error. The per-KEYMAP
+    /// arm intercepts so the literal token survives to clap.
+    #[test]
+    fn keymap_dn_passes_through() {
+        let input = args("clan keymap +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }
