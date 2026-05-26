@@ -85,6 +85,11 @@ def batch_infer_translate(
 
         if backend == TranslationBackend.GOOGLE:
             time.sleep(1.5)
+        elif backend == TranslationBackend.TENCENT:
+            # Tencent TMT's standard free-tier QPS limit is 5 req/sec
+            # for ``TextTranslate``; a tight loop hits
+            # ``RequestLimitExceeded``. 0.2s/req caps us at ≤5 QPS.
+            time.sleep(0.2)
 
     elapsed = time.monotonic() - t0
     if results:

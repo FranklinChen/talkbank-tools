@@ -95,8 +95,11 @@ so they end up in separate pools.
 
 ## Tencent backend specifics
 
-The Tencent loader reads CAM credentials from `~/.batchalign.ini`
-`[asr]` section at engine-load time:
+The Tencent loader reuses the shared `read_asr_config()` helper at
+`batchalign/inference/languages/cantonese/_common.py:77`, which
+prefers `BATCHALIGN_TENCENT_{ID,KEY,REGION}` environment variables
+(injected by the Rust control plane at worker spawn) and falls back
+to `~/.batchalign.ini` `[asr]` section:
 
 - `engine.tencent.id` → `TencentSecretId`
 - `engine.tencent.key` → `TencentSecretKey`
@@ -109,6 +112,12 @@ must have `tmt:TextTranslate` policy attached (e.g.,
 `QcloudTMTFullAccess`), and the TMT product must be "opened" at the
 Tencent Cloud account level — both are root-account / admin actions
 on the Tencent side.
+
+Rate-limit handling: the inference closure in
+`batchalign/inference/translate.py` sleeps 0.2 s per item when the
+backend is Tencent (5 QPS standard free-tier limit on
+`TextTranslate`). This is the analogue of the existing 1.5 s
+per-item sleep for Google.
 
 Language-code handling: `_ISO_639_3_TO_TENCENT_LANG` (in
 `batchalign/worker/_model_loading/translation.py`) maps the ISO-639-3

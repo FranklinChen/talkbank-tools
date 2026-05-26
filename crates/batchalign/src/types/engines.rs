@@ -378,10 +378,11 @@ pub enum TranslateEngineName {
     /// that handles Cantonese first-class (Tencent does not).
     Nllb,
     /// Tencent Cloud TMT (Text Translation) — cloud-API engine.
-    /// Best empirical quality on Mandarin (zh→en) verified
-    /// 2026-05-26; does NOT support Cantonese (``yue``). Requires
-    /// CAM credentials with ``tmt:TextTranslate`` permission in
-    /// ``~/.batchalign.ini``. Free tier 5M chars/month.
+    /// Strong quality on Mandarin (``zh→en``); does NOT support
+    /// Cantonese (``yue``). Requires CAM credentials with
+    /// ``tmt:TextTranslate`` permission in ``~/.batchalign.ini``
+    /// or via ``BATCHALIGN_TENCENT_{ID,KEY,REGION}`` environment
+    /// variables. Free tier 5M chars/month.
     Tencent,
 }
 

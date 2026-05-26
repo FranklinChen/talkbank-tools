@@ -14,13 +14,16 @@ Four backends are available:
   endpoint. Requires outbound reachability to `translate.google.com`;
   unsuitable for hosts behind the Great Firewall unless a VPN is active.
   Rate-limited to one item per 1.5 seconds inside the worker. **Default.**
-- **Tencent Cloud TMT** (`tencent`) — China-friendly cloud API. Best
-  empirical quality on Mandarin (`zh→en`) of any engine probed
-  2026-05-26 — produces correct "Hello world" for `你好世界` where NLLB
-  produces "Good day". **Does NOT support Cantonese** (`yue→en`); route
-  Cantonese through `nllb` instead. Requires CAM credentials with
-  `tmt:TextTranslate` permission in `~/.batchalign.ini` `[asr]` section
-  (`engine.tencent.id` / `key` / `region`). Free tier: 5M characters/month.
+- **Tencent Cloud TMT** (`tencent`) — China-friendly cloud API. Strong
+  quality on Mandarin (`zh→en`); produces correct "Hello world" for
+  `你好世界` where NLLB renders it "Good day". **Does NOT support
+  Cantonese** (`yue→en`); route Cantonese through `nllb` instead.
+  Requires CAM credentials with `tmt:TextTranslate` permission in
+  `~/.batchalign.ini` `[asr]` section (`engine.tencent.id` / `key` /
+  `region`), or via the `BATCHALIGN_TENCENT_{ID,KEY,REGION}`
+  environment variables that the Rust control plane uses to inject
+  fleet-managed credentials. Free tier: 5M characters/month;
+  throttled to 5 QPS in-worker (0.2 s/item).
 - **Meta NLLB-200-distilled-1.3B** (`nllb`) — runs locally in the Python
   worker. Model downloaded from HuggingFace on first use (~5 GB) and
   cached thereafter; no outbound network at inference time. **Best
