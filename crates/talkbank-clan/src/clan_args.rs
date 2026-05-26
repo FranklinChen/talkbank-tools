@@ -68,6 +68,7 @@ enum ClanSubcommandKind {
     Freqpos,
     Cooccur,
     Lowcase,
+    Combtier,
     Other,
 }
 
@@ -103,6 +104,7 @@ impl ClanSubcommandKind {
                 "freqpos" => return Self::Freqpos,
                 "cooccur" => return Self::Cooccur,
                 "lowcase" => return Self::Lowcase,
+                "combtier" => return Self::Combtier,
                 _ => {}
             }
         }
@@ -166,6 +168,27 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         (b'-', b't') if matches!(subcommand, Mlu | Mlt) && rest == "%mor" => {
             Some(vec!["--words".into()])
         }
+
+        // COMBTIER `+tS` (bare-prefix form) — tier label to combine.
+        // CLAN COMBTIER overloads `+tS` away from the analysis-
+        // command convention (`+tCHI` = speaker filter) — here it
+        // means "tier label" (e.g. `+tcom` combines all `%com` lines
+        // per `OSX-CLAN/src/clan/combtier.cpp` usage). chatter's
+        // COMBTIER clap struct has `--tier <NAME>` for this; route
+        // the bareword form there instead of the generic
+        // `+t<bareword> → --speaker <bareword>` rewrite that
+        // `rewrite_tier_speaker` would otherwise produce. The
+        // `+t%X` form falls through unchanged to the generic `%`
+        // branch (also emits `--tier X`), so only the bare-prefix
+        // case needs interception.
+        (b'+', b't')
+            if subcommand == Combtier
+                && !rest.is_empty()
+                && !matches!(rest.as_bytes()[0], b'*' | b'%' | b'@' | b'#') =>
+        {
+            Some(vec!["--tier".into(), rest.to_string()])
+        }
+
         (b'+', b't') | (b'-', b't') => rewrite_tier_speaker(polarity, rest),
 
         // MLU / MLT `-bw` — switch the counting unit from morphemes
@@ -1002,6 +1025,45 @@ mod tests {
             result,
             args("clan analyze freq --reverse-concordance file.cha")
         );
+    }
+
+    #[test]
+    fn combtier_bare_tier_routes_to_tier_not_speaker() {
+        // CLAN COMBTIER `+tS` selects the tier label to combine
+        // (where S is `com` for %com, `spa` for %spa, etc.) per
+        // `OSX-CLAN/src/clan/combtier.cpp` usage:
+        // "+tS: Combine all tiers S into one tier."
+        //
+        // The generic `rewrite_tier_speaker` helper's bareword
+        // fallback (no `*` / `%` / `@` / `#` prefix) treats `+tS`
+        // as an implicit speaker code (`+tCHI` → `--speaker CHI`),
+        // matching CLAN's general convention for analysis commands.
+        // COMBTIER overrides that convention — its `+tS` is the
+        // tier name, not a speaker code — so chatter needs a per-
+        // Combtier intercept routing `+tcom` → `--tier com` instead
+        // of `--speaker com`.
+        //
+        // Without this intercept, `combtier +tcom` rewrites to
+        // `combtier --speaker com`, which clap rejects with
+        // `error: unexpected argument '--speaker' found` because
+        // combtier's clap struct has `--tier` (the chatter-side
+        // counterpart) but no `--speaker`.
+        let input = args("clan analyze combtier +tcom file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan analyze combtier --tier com file.cha"));
+    }
+
+    #[test]
+    fn combtier_percent_tier_form_still_works() {
+        // Regression guard: the existing `+t%X → --tier X` rewrite
+        // (via the `%` branch in `rewrite_tier_speaker`) must
+        // continue to fire for COMBTIER too, so `combtier +t%com`
+        // produces the same `--tier com` as the bareword form.
+        // The combtier-specific intercept added for the bareword
+        // case must not shadow the `%`-prefix path.
+        let input = args("clan analyze combtier +t%com file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan analyze combtier --tier com file.cha"));
     }
 
     #[test]

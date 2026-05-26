@@ -1,7 +1,7 @@
 # CLAN Parity Roadmap
 
 **Status:** Current
-**Last updated:** 2026-05-26 09:05 EDT
+**Last updated:** 2026-05-26 09:15 EDT
 
 Planning doc for the remaining CLAN flag-parity work. Source of truth
 for "how much is left" so future sessions don't have to re-derive it
@@ -283,7 +283,32 @@ Three new rewriter tests (`mlu_minus_bw_to_words`,
 `mlt_minus_bw_to_words`, `freq_minus_bw_unchanged`,
 `recurse_flag_dropped`) shipped with the second and third commits.
 
-**Audit-vs-runtime sweep, second pass (2026-05-26, 4 commits):**
+**Audit-vs-runtime sweep, second pass (2026-05-26, 5 commits):**
+
+- **COMBTIER `+tS` bare-prefix intercept + `Combtier` enum variant.**
+  Same root cause as the LOWCASE fix below: `combtier` was missing
+  from `ClanSubcommandKind`, so the generic
+  `+t<bareword> → --speaker <bareword>` rewrite at
+  `rewrite_tier_speaker`'s fallback branch fired for `combtier
+  +tcom`, producing `--speaker com`. combtier's required clap
+  field is `--tier <NAME>`, so clap rejected with
+  `error: unexpected argument '--speaker' found`. Added
+  `Combtier` to the enum + detect arm + a per-Combtier intercept
+  routing bareword `+tS` to `--tier S` (the percent-prefix form
+  `+t%com` already worked via the existing `%`-branch in
+  `rewrite_tier_speaker`, which emits `--tier com`). Pinned by
+  `combtier_bare_tier_routes_to_tier_not_speaker` and the
+  regression guard `combtier_percent_tier_form_still_works`.
+
+  This is the second per-command intercept added this session via
+  the "Lowcase enum-variant pattern" — `lowcase` and `combtier`
+  are both transforms missing from `ClanSubcommandKind`. A
+  diagnostic this session revealed ~40 chatter commands are
+  absent from the enum (the rewriter's per-command gatekeeper).
+  Most don't have audit-Done flags that need per-command
+  intercepts, but a future focused enum-population sweep should
+  walk the remaining Category-B candidates (chstring, chat2elan,
+  chat2srt, lab2chat) and decide which need enum variants.
 
 - **LOWCASE `+d2` no-op rewriter arm + `Lowcase` enum variant.**
   `lowcase` was missing from `ClanSubcommandKind`, so the rewriter
