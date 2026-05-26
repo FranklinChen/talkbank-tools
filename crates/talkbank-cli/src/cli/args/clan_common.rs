@@ -96,6 +96,41 @@ pub struct CommonAnalysisArgs {
     pub format: ClanOutputFormat,
 }
 
+/// Inherited `+wN` / `-wN` context-window flags for aggregate CLAN
+/// commands.
+///
+/// CLAN exposes the post-context (`+wN`) and pre-context (`-wN`)
+/// flags on every analysis command via shared common-args, but on
+/// commands that produce aggregate output (means, totals, histograms)
+/// — MLU, MLT, WDLEN, MAXWD, FREQPOS, FREQ — they have no per-match
+/// emission to surround and are therefore runtime no-ops on the CLAN
+/// side. The flags still parse, so chatter must too.
+///
+/// The rewriter in `talkbank_clan::clan_args` converts `+w3` / `-w2`
+/// into `--context-after 3` / `--context-before 2` globally; this
+/// sub-args group is the clap-side consumer that lets the rewritten
+/// flag land on the six aggregate commands without an `unexpected
+/// argument` rejection. Fields are flagged `hide = true` so the
+/// chatter `--help` surface stays uncluttered, and they are NOT
+/// consulted by any command's dispatch — they exist for legacy CLAN
+/// CLI parity only.
+///
+/// KWAL and COMBO are deliberately excluded: they have real
+/// `context_before` / `context_after` consumers on their own command
+/// structs that drive per-match pre/post-context emission. Flattening
+/// `InheritedContextArgs` there would produce duplicate clap field
+/// definitions.
+#[derive(Args, Debug, Clone, Default)]
+pub struct InheritedContextArgs {
+    /// CLAN `+wN`. Accepted for parity on aggregate commands; no-op.
+    #[arg(long = "context-after", hide = true)]
+    pub context_after: Option<u32>,
+
+    /// CLAN `-wN`. Accepted for parity on aggregate commands; no-op.
+    #[arg(long = "context-before", hide = true)]
+    pub context_before: Option<u32>,
+}
+
 /// Output format for CLAN analysis commands.
 ///
 /// `Clan` is the default — the TalkBank mandate is faithful

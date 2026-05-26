@@ -12,7 +12,7 @@ mod core;
 pub use clan_commands::{
     CapitalizationArg, ClanCommands, FreqposPositionArg, apply_clan_help_grouping,
 };
-pub use clan_common::{ClanOutputFormat, CommonAnalysisArgs};
+pub use clan_common::{ClanOutputFormat, CommonAnalysisArgs, InheritedContextArgs};
 pub use core::{
     AlignmentTier, CacheCommands, Cli, Commands, DebugCommands, LogFormat, OutputFormat,
     ParserBackend,

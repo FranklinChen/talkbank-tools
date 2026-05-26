@@ -15,7 +15,7 @@ use talkbank_clan::commands::maxwd::MaxwdConfig;
 use talkbank_clan::commands::rely::RelyConfig;
 use talkbank_clan::commands::trnfix::TrnfixConfig;
 
-use super::clan_common::CommonAnalysisArgs;
+use super::clan_common::{CommonAnalysisArgs, InheritedContextArgs};
 
 /// CLI capitalization-mode argument for FREQ and VOCD.
 ///
@@ -80,6 +80,9 @@ pub enum ClanCommands {
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
+
+        #[command(flatten)]
+        inherited_context: InheritedContextArgs,
     },
 
     /// Mean length of utterance (morphemes or words)
@@ -105,6 +108,9 @@ pub enum ClanCommands {
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
+
+        #[command(flatten)]
+        inherited_context: InheritedContextArgs,
     },
 
     /// Mean length of turn (utterances and words per turn)
@@ -124,6 +130,9 @@ pub enum ClanCommands {
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
+
+        #[command(flatten)]
+        inherited_context: InheritedContextArgs,
     },
 
     /// Word length distribution
@@ -133,6 +142,9 @@ pub enum ClanCommands {
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
+
+        #[command(flatten)]
+        inherited_context: InheritedContextArgs,
     },
 
     /// Word size (character length) histogram from %mor stems
@@ -176,6 +188,9 @@ pub enum ClanCommands {
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
+
+        #[command(flatten)]
+        inherited_context: InheritedContextArgs,
     },
 
     /// Word frequency grouped by part of speech from %mor tier
@@ -191,6 +206,9 @@ pub enum ClanCommands {
 
         #[command(flatten)]
         common: CommonAnalysisArgs,
+
+        #[command(flatten)]
+        inherited_context: InheritedContextArgs,
     },
 
     /// Time duration statistics from bullet timing marks
@@ -1445,5 +1463,76 @@ mod tests {
             assert!(list_errors);
             assert!(paths.is_empty());
         });
+    }
+
+    // ----------------------------------------------------------------
+    // Inherited `+wN` / `-wN` context-window flags on aggregate commands.
+    //
+    // CLAN inherits the `+wN` (post-context) and `-wN` (pre-context)
+    // flags onto every analysis command via shared common-args. Six of
+    // those — MLU, MLT, WDLEN, MAXWD, FREQPOS, FREQ — produce aggregate
+    // output (means, totals, histograms) with no per-match emission, so
+    // the context flags are runtime no-ops on the CLAN side. The
+    // rewriter at `talkbank_clan::clan_args::rewrite_context_window`
+    // already converts the legacy `+w3` / `-w2` syntax to
+    // `--context-after 3` / `--context-before 2`; what was missing was
+    // a clap consumer on the aggregate commands, so the rewritten flag
+    // arrived as an `error: unexpected argument` rejection.
+    //
+    // These tests pin the clap-acceptance side: each aggregate command
+    // must accept both flags silently. The fields themselves are not
+    // consulted downstream — the InheritedContextArgs flatten exists
+    // for byte-level CLAN-CLI parity, not for semantic effect.
+    // ----------------------------------------------------------------
+
+    /// Parameterized helper: asserts the aggregate `<cmd>` accepts
+    /// both `--context-after N` and `--context-before N` (the
+    /// long-form output of the legacy `+wN` / `-wN` rewriter).
+    fn assert_aggregate_accepts_inherited_context(cmd: &'static str) {
+        for flag in ["--context-after", "--context-before"] {
+            TestCli::try_parse_from(["test-cli", cmd, flag, "3", "sample.cha"]).unwrap_or_else(
+                |err| {
+                    panic!("{cmd} must accept {flag} for CLAN parity: {err}");
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn mlu_accepts_inherited_context_after() {
+        run_with_large_stack(|| {
+            TestCli::try_parse_from(["test-cli", "mlu", "--context-after", "3", "sample.cha"])
+                .expect("mlu must accept --context-after for CLAN parity");
+        });
+    }
+
+    #[test]
+    fn mlu_inherits_context_both_directions() {
+        run_with_large_stack(|| assert_aggregate_accepts_inherited_context("mlu"));
+    }
+
+    #[test]
+    fn mlt_inherits_context_both_directions() {
+        run_with_large_stack(|| assert_aggregate_accepts_inherited_context("mlt"));
+    }
+
+    #[test]
+    fn wdlen_inherits_context_both_directions() {
+        run_with_large_stack(|| assert_aggregate_accepts_inherited_context("wdlen"));
+    }
+
+    #[test]
+    fn maxwd_inherits_context_both_directions() {
+        run_with_large_stack(|| assert_aggregate_accepts_inherited_context("maxwd"));
+    }
+
+    #[test]
+    fn freqpos_inherits_context_both_directions() {
+        run_with_large_stack(|| assert_aggregate_accepts_inherited_context("freqpos"));
+    }
+
+    #[test]
+    fn freq_inherits_context_both_directions() {
+        run_with_large_stack(|| assert_aggregate_accepts_inherited_context("freq"));
     }
 }
