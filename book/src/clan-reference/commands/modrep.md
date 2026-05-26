@@ -1,7 +1,7 @@
 # MODREP — Model/Replica Comparison
 
 **Status:** Current
-**Last updated:** 2026-05-26 08:47 EDT
+**Last updated:** 2026-05-26 10:20 EDT
 
 ## Purpose
 
@@ -44,7 +44,7 @@ chatter clan modrep file.cha --speaker CHI
 | `+a` | Sort output by descending frequency | — | Missing | CLAN's `modrep.cpp:1431` sets `isSort = TRUE`, gating a frequency-sorted output path at line 659. chatter's `finalize` step at `commands/modrep.rs:174-203` iterates `BTreeMap<String, ModelWordData>` in alphabetical-ascending key order; the result struct has no sort mode. A prior version of this row claimed Done-by-default; that was a mis-classification surfaced by the 2026-05-26 audit-vs-runtime sweep. Real Tier-4 feature work: add a sort-mode enum to `ModrepConfig`, the rewriter arm, and a frequency-sorted output path. |
 | `+bS` | Set model tier name to `S` (e.g. `+b*CHI` or `+b%hes`); `S = "*"` to use `+t@ID=` | — | Missing | chatter hard-codes `%mod` as the model tier. |
 | `+cS` | Set replica tier name to `S` | — | Missing | chatter hard-codes `%pho` as the replica tier. |
-| `+d` | Spreadsheet output | — | Rewriter only | |
+| `+d` | Spreadsheet output | — | Missing | Per `OSX-CLAN/src/clan/modrep.cpp:1492`, CLAN's `+d` is a no-arg toggle (`no_arg_option(f)`; `isExcel = TRUE`). chatter has no `--format csv` for MODREP. Per-MODREP arm in `clan_args.rs` passes the token through so clap reports the literal `+d` argument. |
 | `+nS` / `+n@F` | Word `S` (or file `@F`) included in output associated with `+c` | — | Missing | Replica-side word allowlist. |
 | `+oS` / `+o@F` | Word `S` (or file `@F`) included in output associated with `+b` | — | Missing | Model-side word allowlist. |
 | `+o3` | Combine selected speakers per file | partial via `--per-file` inverse | Partial | |
@@ -56,8 +56,8 @@ chatter clan modrep file.cha --speaker CHI
 |---|---|
 | Done | 5 |
 | Partial | 1 |
-| Rewriter only | 4 |
-| Missing | 6 |
+| Rewriter only | 3 |
+| Missing | 7 |
 
 MODREP's biggest gap is the **tier-name customization** (`+bS`,
 `+cS`): researchers using non-default model/replica tier names

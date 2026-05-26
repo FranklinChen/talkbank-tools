@@ -69,6 +69,8 @@ enum ClanSubcommandKind {
     Cooccur,
     Lowcase,
     Combtier,
+    Chains,
+    Modrep,
     Other,
 }
 
@@ -105,6 +107,8 @@ impl ClanSubcommandKind {
                 "cooccur" => return Self::Cooccur,
                 "lowcase" => return Self::Lowcase,
                 "combtier" => return Self::Combtier,
+                "chains" => return Self::Chains,
+                "modrep" => return Self::Modrep,
                 _ => {}
             }
         }
@@ -417,6 +421,25 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // `+d`/`+d0`/`+d1` (dict-using modes) are documented Missing
         // and intentionally still fall through to fail clap.
         (b'+', b'd') if subcommand == Lowcase && rest == "2" => Some(vec![]),
+
+        // CHAINS `+d`/`+dN` — `onlydata` output-detail level (0-1
+        // per `OSX-CLAN/src/clan/chains.cpp:1089`: `+d` → 1,
+        // `+d0` → 1, `+d1` → 2). chatter has no `--only-data`
+        // flag; pass through so clap rejects the literal token
+        // rather than the misleading `--display-mode` rewrite from
+        // the catch-all below.
+        (b'+', b'd') if subcommand == Chains => None,
+
+        // MODREP `+d` — no-arg Excel/spreadsheet toggle per
+        // `OSX-CLAN/src/clan/modrep.cpp:1492` (`no_arg_option(f)`
+        // + `isExcel = TRUE`). chatter has no `--format csv` for
+        // MODREP; pass through.
+        (b'+', b'd') if subcommand == Modrep => None,
+
+        // IPSYN `+d`/`+dN` — `onlydata` output-detail level
+        // bounded by `OnlydataLimit` per `OSX-CLAN/src/clan/ipsyn.cpp:3945`.
+        // chatter has no `--only-data` flag; pass through.
+        (b'+', b'd') if subcommand == Ipsyn => None,
 
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
@@ -1046,6 +1069,47 @@ mod tests {
         let input = args("clan analyze lowcase +d2 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, args("clan analyze lowcase file.cha"));
+    }
+
+    /// CHAINS `+d`/`+d0`/`+d1` are `onlydata` output-detail levels
+    /// per `OSX-CLAN/src/clan/chains.cpp:1089` — real CLAN behavior
+    /// chatter does not implement. The per-CHAINS rewriter arm
+    /// passes the token through unchanged so clap reports a clean
+    /// "unexpected argument '+d1'" error instead of the misleading
+    /// "--display-mode" rewrite from the catch-all.
+    #[test]
+    fn chains_dn_passes_through() {
+        let input = args("clan chains +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Bare `+d` on CHAINS also passes through.
+    #[test]
+    fn chains_d_bare_passes_through() {
+        let input = args("clan chains +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// MODREP `+d` is a no-arg Excel toggle per
+    /// `OSX-CLAN/src/clan/modrep.cpp:1492`. Per-MODREP arm passes
+    /// it through; no `--format csv` for MODREP in chatter.
+    #[test]
+    fn modrep_d_passes_through() {
+        let input = args("clan modrep +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// IPSYN `+d`/`+dN` are `onlydata` levels per
+    /// `OSX-CLAN/src/clan/ipsyn.cpp:3945`. Per-IPSYN arm passes
+    /// them through; no `--only-data` flag in chatter.
+    #[test]
+    fn ipsyn_dn_passes_through() {
+        let input = args("clan ipsyn +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # IPSYN -- Index of Productive Syntax
 
 **Status:** Current
-**Last updated:** 2026-05-22 09:23 EDT
+**Last updated:** 2026-05-26 10:20 EDT
 
 ## Purpose
 
@@ -53,8 +53,8 @@ also required for non-default analysis.
 | CLAN flag | Meaning | Chatter | Status | Notes |
 |---|---|---|---|---|
 | `+cN` | Analyse N complete unique utterances (default 100) | `--max-utterances N` | Done | Direct mapping; rewriter routes `+cN` → `--max-utterances N` for IPSYN (since the per-subcommand routing batch). |
-| `+d` | Do not show file and line number where points are found | — | Rewriter only | |
-| `+d1` | Output in spreadsheet format | — | Rewriter only | |
+| `+d` | Do not show file and line number where points are found | — | Missing | Per `OSX-CLAN/src/clan/ipsyn.cpp:3945`, CLAN sets `onlydata = atoi(getfarg(...)) + 1` (bounded by `OnlydataLimit`); `+d` → level 1. chatter has no `--only-data` flag. Per-IPSYN arm in `clan_args.rs` passes the token through so clap reports the literal `+d` argument rather than the misleading `--display-mode` rewrite. |
+| `+d1` | Output in spreadsheet format | — | Missing | Same `onlydata` toggle as `+d` (CLAN: `+d1` → level 2). chatter not implemented; passthrough arm. |
 | `+lF` | Specify IPSYN rules file name `F` | `--rules <PATH>` | Done | Direct mapping; rewriter routes `+lF` → `--rules F` for IPSYN (since the per-subcommand routing batch). |
 | `+o` | Use the original rule set (100 utterances) | — | Missing | |
 | `-sS` | Ignore `[+ ip]` / `[+ ipe]` postcodes | partial via `--exclude-word` | Partial | Different semantic — chatter filters by word, CLAN's IPSYN `-sS` skips postcoded utterances. |
@@ -65,8 +65,8 @@ also required for non-default analysis.
 |---|---|
 | Done | 6 |
 | Partial | 3 |
-| Rewriter only | 4 |
-| Missing | 5 |
+| Rewriter only | 2 |
+| Missing | 7 |
 
 IPSYN's two cleanest one-line follow-ups (rewriter routing of
 `+cN` → `--max-utterances N` and `+lF` → `--rules F`) landed

@@ -1,7 +1,7 @@
 # CHAINS -- Clause Chain Analysis
 
 **Status:** Current
-**Last updated:** 2026-05-22 09:45 EDT
+**Last updated:** 2026-05-26 10:20 EDT
 
 ## Purpose
 
@@ -54,8 +54,8 @@ the exact CLAN refusal when `+t%X` (or `--tier X`) is absent.
 | CLAN flag | Meaning | Chatter | Status | Notes |
 |---|---|---|---|---|
 | `+cS` / `+c@S` | Clause-marker delimiter `S` (or markers in file `@S`) | — | Missing | Clause-unit detection. |
-| `+d` | Change zeroes to spaces in output | — | Rewriter only | |
-| `+d1` | `+d` + display every input line in output | — | Rewriter only | |
+| `+d` | Change zeroes to spaces in output | — | Missing | Per `OSX-CLAN/src/clan/chains.cpp:1089`, CLAN sets `chains_onlydata = atoi(getfarg(...)) + 1` (range 0-1); `+d` → level 1. chatter has no `--only-data` flag. Per-CHAINS arm in `clan_args.rs` passes the token through so clap reports the literal `+d` argument rather than the misleading `--display-mode` rewrite. |
+| `+d1` | `+d` + display every input line in output | — | Missing | Same `onlydata` level toggle as `+d` (CLAN: `+d1` → level 2). chatter not implemented; passthrough arm. |
 
 ### Audit summary
 
@@ -63,8 +63,8 @@ the exact CLAN refusal when `+t%X` (or `--tier X`) is absent.
 |---|---|
 | Done | 6 |
 | Partial | 1 |
-| Rewriter only | 5 |
-| Missing | 5 |
+| Rewriter only | 3 |
+| Missing | 7 |
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 
