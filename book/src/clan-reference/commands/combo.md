@@ -1,7 +1,7 @@
 # COMBO -- Boolean Keyword Search
 
 **Status:** Current
-**Last updated:** 2026-05-23 14:50 EDT
+**Last updated:** 2026-05-26 13:30 EDT
 
 ## Purpose
 
@@ -58,7 +58,7 @@ against chatter's coverage. Sources:
 | `+sS` / `-sS` | Pattern (required) — output tiers matching / not matching | `-S` / `--search` plus `--exclude-search` | Done | Both polarities mapped 2026-05-22. The rewriter routes `+sS` → `--search S` and `-sS` → `--exclude-search S` for COMBO specifically (other commands keep the per-word `+s`/`-s` semantic). Utterances matching any `--exclude-search` expression are dropped even if they match an `--search` expression. |
 | `+s@F` / `-s@F` | Load search expressions from file F (one per line) | `--search-file` / `--exclude-search-file` | Done | Landed 2026-05-22. Each surviving line is parsed by `SearchExpr::parse`, so AND (`+`) and OR (`,`) operators work per line, just like inline `--search`. File format matches `cutt.cpp::rdexclf`: blank lines, `# `-comments, `;%* `-annotation lines skipped; UTF-8 BOM stripped. Repeatable. Pinned by `combo_search_at_sigil_routes_to_search_file` and `combo_exclude_search_at_sigil_routes_to_exclude_search_file` in `clan_args.rs`. |
 | `+dv` | Display all parsed individual parts of the search pattern | — | Missing | Search-debug output. |
-| `+d`, `+d1`..`+d5` | Display modes (CHAT, line numbers, file names, matched-only, etc.) | — | Rewriter only | Same `--display-mode N` rewriter as KWAL. |
+| `+d`, `+d1`..`+d5` | Display modes (CHAT, line numbers, file names, matched-only, etc.) | — | Missing | Full local handler at `OSX-CLAN/src/clan/combo.cpp:2858`: `+dv` → search-debug echo (separate `+dv` row above); `+d7` → `linkDep2Other` cross-tier linkage; `+d8` → `onlydata = 9` override; `+d`/`+d0`..`+d6` → `onlydata = atoi+1` with `+d2` (onlydata==3) also resetting `puredata = 0`. Per-COMBO passthrough arm lands the literal-flag error rather than the misleading `--display-mode` rewrite. |
 
 ### General `+`-flags COMBO inherits (from `cutt.cpp::mainusage`)
 
@@ -83,8 +83,8 @@ against chatter's coverage. Sources:
 |---|---|
 | Done | 13 |
 | Partial | 2 |
-| Rewriter only | 7 |
-| Missing | 7 |
+| Rewriter only | 6 |
+| Missing | 8 |
 
 COMBO has the second-largest "Rewriter only" bucket after KWAL,
 driven by the same `+dN` display-mode story. The COMBO-specific

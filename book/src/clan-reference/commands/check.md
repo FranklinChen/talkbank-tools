@@ -1,7 +1,7 @@
 # CHECK — CHAT File Validation
 
 **Status:** Current
-**Last updated:** 2026-05-22 13:13 EDT
+**Last updated:** 2026-05-26 13:30 EDT
 
 CHECK validates CHAT files for structural correctness, checking headers, tier
 formatting, bracket matching, bullet consistency, speaker declarations, and more.
@@ -69,7 +69,15 @@ The one CLAN `+`-flag explicitly **not** mapped here is `+dN`
 warning-suppression (see Display Modes section below), which is
 semantically distinct from FREQ/KWAL/COMBO's `+d` output-format
 selector and would need its own warning-tagging
-infrastructure.
+infrastructure. CHECK has no local `case 'd'`; consumption is via
+the shared `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382`
+with the CHECK-specific per-program body at `cutt.cpp:9422`
+(`onlydata == 3` → `puredata = 2`; else `puredata = 0`), and an
+additional short-circuit at `check.cpp:852` (`check_adderror`
+returns early when `onlydata == 0 || 3`, skipping the error).
+chatter's per-CHECK passthrough arm in `clan_args.rs` keeps
+`+d`/`+dN` literal so clap names the actual flag rather than the
+catch-all's misleading `--display-mode` rewrite.
 
 ## Display Modes (`+dN` / `--display-mode N`) — DRAFT, awaiting PI review
 

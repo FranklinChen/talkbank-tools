@@ -557,6 +557,34 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // `--display-mode` consumer for MLT; pass through.
         (b'+', b'd') if subcommand == Mlt => None,
 
+        // CHECK `+d`/`+dN` — no local `case 'd'` in
+        // `OSX-CLAN/src/clan/check.cpp`; consumption via shared
+        // `maingetflag` path at `cutt.cpp:9382` (CHECK_P has
+        // `D_OPTION` per `cutt.cpp:8722`) with the CHECK-specific
+        // per-program body at `cutt.cpp:9422` (`onlydata == 3` →
+        // `puredata = 2`; else `puredata = 0`). The `onlydata`
+        // level additionally short-circuits `check_adderror` at
+        // `check.cpp:852` (`onlydata == 0 || 3` returns early,
+        // skipping the error). chatter has no `--display-mode` or
+        // `--suppress-repeats` consumer for CHECK; the existing
+        // CHECK audit page documents the gap. Pass through so
+        // clap rejects with the literal token rather than the
+        // misleading `--display-mode` rewrite from the catch-all
+        // below.
+        (b'+', b'd') if subcommand == Check => None,
+
+        // COMBO `+d`/`+dN`/`+d7`/`+d8`/`+dv` — full local handler
+        // at `OSX-CLAN/src/clan/combo.cpp:2858`. Four distinct
+        // branches: `+dv`/`+dV` → `isEchoFlatmac = TRUE` (search
+        // debug echo); `+d7` → `linkDep2Other = TRUE` (cross-tier
+        // linkage); `+d8` → `onlydata = 9` (special override);
+        // `+d`/`+d0`..`+d6` → `onlydata = atoi+1` with `+d2`
+        // (onlydata==3) also resetting `puredata = 0`. chatter has
+        // no consumer for any branch. Pass through so clap rejects
+        // with the literal token rather than the misleading
+        // `--display-mode` rewrite from the catch-all below.
+        (b'+', b'd') if subcommand == Combo => None,
+
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
 
@@ -1516,6 +1544,52 @@ mod tests {
     #[test]
     fn mlt_dn_passes_through() {
         let input = args("clan mlt +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// COMBO has a full local `case 'd'` at `combo.cpp:2858` with
+    /// four branches (`+dv`, `+d7`, `+d8`, and the generic
+    /// `+d`/`+dN` onlydata-level path). chatter has no consumer
+    /// for any branch. Per-COMBO arm passes them all through.
+    /// Bare `+d` is the regression guard (catch-all already
+    /// returns None for empty rest, so this passes pre-arm too).
+    #[test]
+    fn combo_d_bare_passes_through() {
+        let input = args("clan combo +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare COMBO `+dN` (strict-RED). Pre-arm, this rewrites
+    /// to `["--display-mode", "1"]` which clap then mis-suggests
+    /// as `--tui-mode` (no `--display-mode` consumer exists). The
+    /// arm restores the literal-flag error path.
+    #[test]
+    fn combo_dn_passes_through() {
+        let input = args("clan combo +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// CHECK has no local `case 'd'`; consumption via shared
+    /// `maingetflag` path at `cutt.cpp:9382` with the CHECK-
+    /// specific per-program body at `cutt.cpp:9422`
+    /// (`onlydata == 3` → `puredata = 2`; else `puredata = 0`)
+    /// and additional short-circuit at `check.cpp:852`. chatter
+    /// has no `--display-mode` / `--suppress-repeats` consumer
+    /// for CHECK. Per-CHECK arm passes through.
+    #[test]
+    fn check_d_bare_passes_through() {
+        let input = args("clan check +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare CHECK `+dN` (strict-RED).
+    #[test]
+    fn check_dn_passes_through() {
+        let input = args("clan check +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }
