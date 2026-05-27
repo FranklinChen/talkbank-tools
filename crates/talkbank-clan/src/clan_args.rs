@@ -84,6 +84,7 @@ enum ClanSubcommandKind {
     Dates,
     Flucalc,
     Kideval,
+    Rely,
     Other,
 }
 
@@ -135,6 +136,7 @@ impl ClanSubcommandKind {
                 "dates" => return Self::Dates,
                 "flucalc" => return Self::Flucalc,
                 "kideval" => return Self::Kideval,
+                "rely" => return Self::Rely,
                 _ => {}
             }
         }
@@ -674,6 +676,43 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // string-arg shape as EVAL, just with internal `~`
         // structure. chatter has no consumer; pass through.
         (b'+', b'd') if subcommand == Kideval => None,
+
+        // RELY `+d`/`+dm[N]`/`+dN` — multi-mode local `case 'd'`
+        // at `OSX-CLAN/src/clan/rely.cpp:243`. Three distinct
+        // sub-modes in one switch arm:
+        //   * bare `+d` → `isComputeAphasia = TRUE`
+        //   * `+dm` / `+dm1` / `+dm2` → `isComputeStudent-
+        //     Correctness` (1 for bare/`m1`, 2 for `m2`; any
+        //     other `+dmX` errors)
+        //   * `+dN` (digit) → `KappaCats = atoi(N)` with
+        //     `KappaCats > 1` validation; `+d1` in CLAN would
+        //     trigger the validation error.
+        // chatter has no consumer for any of the three sub-modes.
+        // Pass through.
+        (b'+', b'd') if subcommand == Rely => None,
+
+        // SUGAR `+d` — no-arg debug toggle, local `case 'd'` at
+        // `OSX-CLAN/src/clan/sugar.cpp:756`:
+        // `no_arg_option(f); isDebug = TRUE`. Only bare `+d` is
+        // valid in CLAN; `+dN` (non-empty rest) would fail
+        // `no_arg_option`. The simplest `case 'd'` shape across
+        // P-3 — pure boolean flag. chatter has no `--debug`
+        // consumer for SUGAR (the workflow already runs in CLI
+        // debug context); pass through.
+        (b'+', b'd') if subcommand == Sugar => None,
+
+        // UNIQ `+d5`/`+dN` — local `case 'd'` at
+        // `OSX-CLAN/src/clan/uniq.cpp:238` with one special-cased
+        // branch and a fallthrough:
+        //   * `+d5` → `zeroMatch = TRUE` (special, suppresses
+        //     fallthrough)
+        //   * any other `+d` form → `maingetflag(f-2, f1, i)`
+        //     for the `onlydata`-level effect via `cutt.cpp:9382`.
+        // Same fallthrough family as WDSIZE/WDLEN, but with the
+        // `+d5` intercept before the fallthrough. chatter has no
+        // `--zero-match` or `--display-mode` consumer; pass
+        // through.
+        (b'+', b'd') if subcommand == Uniq => None,
 
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
@@ -1782,6 +1821,74 @@ mod tests {
     #[test]
     fn kideval_dn_passes_through() {
         assert_passthrough("clan kideval +d1 file.cha");
+    }
+
+    /// RELY has a multi-mode local `case 'd'` at
+    /// `OSX-CLAN/src/clan/rely.cpp:243`. Three distinct sub-modes
+    /// in one switch arm:
+    ///   * bare `+d` (EOS)        → `isComputeAphasia = TRUE`
+    ///   * `+dm` / `+dm1` / `+dm2` → `isComputeStudentCorrectness`
+    ///     (1 for bare/`m1`, 2 for `m2`; any other `+dmX` errors)
+    ///   * `+dN` (digit)          → `KappaCats = atoi(N)` with a
+    ///     `KappaCats > 1` validation; otherwise errors.
+    /// chatter has no `--compute-aphasia`/`--student-correctness`/
+    /// `--kappa-categories` consumer for any of the three sub-
+    /// modes. Bare `+d` is the regression guard.
+    #[test]
+    fn rely_d_bare_passes_through() {
+        assert_passthrough("clan rely +d file.cha");
+    }
+
+    /// Non-bare RELY `+dN` (strict-RED). In CLAN this would
+    /// be `KappaCats = 1` → validation error; `--display-mode 1`
+    /// rewrite would be doubly wrong (wrong semantics + no
+    /// chatter consumer).
+    #[test]
+    fn rely_dn_passes_through() {
+        assert_passthrough("clan rely +d1 file.cha");
+    }
+
+    /// SUGAR has the simplest possible local `case 'd'` at
+    /// `OSX-CLAN/src/clan/sugar.cpp:756`:
+    /// `no_arg_option(f); isDebug = TRUE`. Pure no-arg debug
+    /// toggle — only bare `+d` is valid in CLAN; `+dN` (non-
+    /// empty rest) would fail `no_arg_option`. chatter has no
+    /// `--debug` consumer for SUGAR (the workflow already runs
+    /// in CLI debug context); pass through. Bare `+d` is the
+    /// regression guard.
+    #[test]
+    fn sugar_d_bare_passes_through() {
+        assert_passthrough("clan sugar +d file.cha");
+    }
+
+    /// Non-bare SUGAR `+dN` (strict-RED). In CLAN this errors
+    /// at `no_arg_option`; the catch-all's `--display-mode 1`
+    /// rewrite would mask the real "no-arg flag with arg"
+    /// rejection behind a misleading `--tui-mode` suggestion.
+    #[test]
+    fn sugar_dn_passes_through() {
+        assert_passthrough("clan sugar +d1 file.cha");
+    }
+
+    /// UNIQ has a local `case 'd'` at
+    /// `OSX-CLAN/src/clan/uniq.cpp:238` with one special-cased
+    /// branch and a fallthrough:
+    ///   * `+d5` → `zeroMatch = TRUE`
+    ///   * any other `+d` form → `maingetflag(f-2, f1, i)`,
+    ///     i.e. the `onlydata`-level path via `cutt.cpp:9382`.
+    /// Same fallthrough family as WDSIZE/WDLEN but with a `+d5`
+    /// intercept before the fallthrough. chatter has no
+    /// `--zero-match` or `--display-mode` consumer; pass
+    /// through. Bare `+d` is the regression guard.
+    #[test]
+    fn uniq_d_bare_passes_through() {
+        assert_passthrough("clan uniq +d file.cha");
+    }
+
+    /// Non-bare UNIQ `+dN` (strict-RED).
+    #[test]
+    fn uniq_dn_passes_through() {
+        assert_passthrough("clan uniq +d1 file.cha");
     }
 
     #[test]
