@@ -916,11 +916,18 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // the general "include extra output tier" semantic; the
         // numeric guard distinguishes the two — `+oS` with a non-
         // numeric `S` (extra tier code) falls through unchanged.
+        //
+        // Both forms emit `--offset=N` (`=` syntax) rather than two
+        // tokens `["--offset", "N"]`. The `=` form is mandatory for
+        // the negative case: clap parses a free-standing `-3` as a
+        // short-flag attempt and rejects it before reading it as
+        // `--offset`'s value. The positive case uses `=` purely for
+        // symmetry — `["--offset", "3"]` would also work.
         (b'+', b'o') if subcommand == Fixbullets && rest.parse::<u32>().is_ok() => {
-            Some(vec!["--offset".into(), rest.to_string()])
+            Some(vec![format!("--offset={rest}")])
         }
         (b'-', b'o') if subcommand == Fixbullets && rest.parse::<u32>().is_ok() => {
-            Some(vec!["--offset".into(), format!("-{rest}")])
+            Some(vec![format!("--offset=-{rest}")])
         }
         // +eN — include error / +e — list errors
         (b'+', b'e') => rewrite_check_error(rest),
@@ -2763,20 +2770,29 @@ mod tests {
         assert_eq!(result, args("clan script --template @list.cha file.cha"));
     }
 
-    /// FIXBULLETS' `+oN` adds N ms to all bullet timings.
+    /// FIXBULLETS' `+oN` adds N ms to all bullet timings. The
+    /// rewriter emits `--offset=N` (`=` syntax) as a single token —
+    /// symmetric with the negative-form rewrite which requires `=`
+    /// to keep clap from interpreting `-N` as a short-flag attempt.
     #[test]
     fn fixbullets_offset_positive() {
         let input = args("clan fixbullets +o800 file.cha");
         let result = rewrite_clan_args(&input);
-        assert_eq!(result, args("clan fixbullets --offset 800 file.cha"));
+        assert_eq!(result, args("clan fixbullets --offset=800 file.cha"));
     }
 
-    /// FIXBULLETS' `-oN` subtracts N ms.
+    /// FIXBULLETS' `-oN` subtracts N ms. The rewriter emits
+    /// `--offset=-N` (`=` syntax) rather than two tokens
+    /// `["--offset", "-N"]`; the `=` form is mandatory because clap
+    /// parses a free-standing `-N` as a short-flag attempt and
+    /// rejects it before reading it as `--offset`'s value.
+    /// Subprocess-level regression guard:
+    /// `legacy_fixbullets_negative_offset_runs_via_subprocess`.
     #[test]
     fn fixbullets_offset_negative() {
         let input = args("clan fixbullets -o800 file.cha");
         let result = rewrite_clan_args(&input);
-        assert_eq!(result, args("clan fixbullets --offset -800 file.cha"));
+        assert_eq!(result, args("clan fixbullets --offset=-800 file.cha"));
     }
 
     /// `+oS` with a non-numeric value should NOT rewrite under

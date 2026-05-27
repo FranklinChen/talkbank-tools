@@ -1,7 +1,7 @@
 # FIXBULLETS -- Fix Timing Bullet Consistency
 
 **Status:** Current
-**Last updated:** 2026-05-22 12:58 EDT
+**Last updated:** 2026-05-27 10:12 EDT
 
 ## Purpose
 
@@ -40,8 +40,8 @@ FIXBULLETS is a **transform**. Sources:
 | `+b` | Merge multiple bullets per line into one bullet per tier | (default) | Partial | chatter's monotonic-bullet repair already collapses overlapping ranges on the main tier. The semantics differ slightly — file a follow-up if a round-trip test surfaces a discrepancy. |
 | `+g` | Zero out first bullet and offset the rest (per-file gem) | — | Missing | Gem-based offset reset. |
 | `+m` | Merge all files into one file with offsets progressively offset | — | Missing | Multi-file merge with timing chaining. |
-| `+oN` | Add N ms to all bullet timings | `--offset N` | Done | Direct mapping; rewriter routes `+oN` → `--offset N` (since 2026-05-22). |
-| `-oN` | Subtract N ms | `--offset -N` (negative) | Done | Negative-value form; rewriter routes `-oN` → `--offset -N` (since 2026-05-22). The numeric-only guard prevents `+oS` non-numeric from accidentally matching. |
+| `+oN` | Add N ms to all bullet timings | `--offset=N` | Done | Direct mapping. Rewriter routes `+oN` → `--offset=N` (`=` syntax, symmetric with the negative form below). The numeric-only guard prevents `+oS` non-numeric from accidentally matching. |
+| `-oN` | Subtract N ms | `--offset=-N` (negative) | Done | Negative-value form. Rewriter routes `-oN` → `--offset=-N` (`=` syntax mandatory: clap parses a free-standing `-N` as a short-flag attempt and rejects it before reading it as the value of `--offset`). Subprocess regression guard: `legacy_fixbullets_negative_offset_runs_via_subprocess`. |
 
 ### Audit summary
 

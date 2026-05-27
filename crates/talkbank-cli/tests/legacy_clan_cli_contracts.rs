@@ -286,6 +286,28 @@ fn mor_placeholder_stays_deliberately_unimplemented() -> Result<(), TestError> {
     Ok(())
 }
 
+/// FIXBULLETS `-oN` rewrites to `--offset -N` (negative milliseconds).
+/// The legacy unit test on the rewriter alone (in `clan_args.rs::tests`)
+/// passes because it only asserts the rewriter's `Vec<String>` output,
+/// but the subprocess seam fails: clap interprets a free-standing
+/// `-3` as a short-flag attempt, not as the value of `--offset`. The
+/// rewriter must use the `--offset=-N` (`=` syntax) form to
+/// disambiguate. This test pins the actual user-visible behavior.
+#[test]
+fn legacy_fixbullets_negative_offset_runs_via_subprocess() -> Result<(), TestError> {
+    let harness = CliHarness::new()?;
+    let file = corpus_file("core/basic-conversation.cha");
+
+    let output = harness.run_output(&["clan", "fixbullets", "-o3", file.as_str()])?;
+
+    assert_exit_code(
+        &output,
+        0,
+        "fixbullets -o3 should run successfully (negative offset)",
+    );
+    Ok(())
+}
+
 #[test]
 fn clan_output_format_matches_legacy_freq_when_available() -> Result<(), TestError> {
     if !common::require_clan_command("freq", "skipping legacy CLAN compatibility contract") {
