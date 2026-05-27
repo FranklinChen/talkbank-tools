@@ -1,7 +1,7 @@
 # GEMFREQ -- Word Frequency Within Gem Segments
 
 **Status:** Current
-**Last updated:** 2026-05-27 09:56 EDT
+**Last updated:** 2026-05-27 10:45 EDT
 
 ## Purpose
 
@@ -60,7 +60,7 @@ Authoritative enumeration of every CLAN `gemfreq` flag. Sources:
 | `+n` | Each gem terminated by the next `@G` | — | Missing | Gem-termination semantic switch. |
 | `+o` | Sort output by descending frequency | (default) | Done | CLAN: `gemfreq.cpp:260` (`isSort = TRUE; no_arg_option(f)`). chatter's `gemfreq` (compatibility alias for `freq --gem`) already sorts by descending frequency by default, so `+o` is semantically a no-op. Per-GEMFREQ rewriter arm in `clan_args.rs` consumes-and-drops `+o` so it doesn't fall through to the positional `<PATH>` slot. |
 | `+wS` / `+w@S` | Search for word `S` (or words in file `@S`) | `--include-word` | Partial | File-list form missing. |
-| `-wS` | Exclude word `S` | `--exclude-word` | Partial | |
+| `-wS` | Exclude word `S` | `--exclude-word` | Done | CLAN: `gemfreq.cpp:296` (`case 'w': *(f-1) = 's'` rewrites the flag from `w` to `s` then calls `maingetflag`, so CLAN's `-wS` is the standard exclude-word semantic). Per-GEMFREQ rewriter arm in `clan_args.rs` routes `-wS` → `--exclude-word S` to match CLAN's polarity. Without this arm, chatter's clap `-w` short (`--include-word`) would silently mis-route the flag to include-word (OPPOSITE polarity from CLAN). Pinned by `gemfreq_minus_w_routes_to_exclude_word`. |
 | `+yN` | Display whole tier unchanged (1) or cleaned up (0) | — | Missing | |
 | `+dN` | `onlydata` output-detail level (manual lists `+d0` legal CHAT, `+d1` with line/file/`@ID` info) | — | Missing | `OSX-CLAN/src/clan/gemfreq.cpp` has no local `case 'd'`; consumption is entirely via the shared `maingetflag` path at `cutt.cpp:9382` (empty per-program body at `cutt.cpp:9471`) setting the `onlydata` level. chatter's `gemfreq` clap surface has no `--display-mode` consumer. Per-GEMFREQ rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+dN` argument rather than the misleading `--display-mode` rewrite. |
 

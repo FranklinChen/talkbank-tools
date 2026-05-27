@@ -373,6 +373,24 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         (b'+', b'g') if subcommand == Combo && rest == "4" => Some(Vec::new()),
         (b'+', b'g') if subcommand == Combo && rest == "5" => Some(Vec::new()),
         (b'+', b'g') if subcommand == Combo && rest == "7" => Some(vec!["--dedupe-matches".into()]),
+        // GEMFREQ `-wS` — exclude-word polarity per
+        // `OSX-CLAN/src/clan/gemfreq.cpp:296` (`case 'w': *(f-1) =
+        // 's'` rewrites the flag char from `w` to `s` then calls
+        // `maingetflag`, so CLAN's `-wS` becomes `-sS` which is the
+        // standard exclude-word semantic). chatter's clap `-w`
+        // short is `--include-word` (OPPOSITE polarity), so
+        // without this arm the `-wS` token is silently mis-routed
+        // to include-word — chatter shows only utterances
+        // containing S, while CLAN excludes them. Per-GEMFREQ arm
+        // emits `--exclude-word S` to match CLAN's intent. Same
+        // pattern is needed for any command where CLAN's `case
+        // 'w'` redirects to `case 's'` exclude semantics (e.g.
+        // freq, freqpos — left as P-4 follow-ups since their
+        // audit-page rows already document the polarity correctly).
+        (b'-', b'w') if subcommand == Gemfreq && !rest.is_empty() => {
+            Some(vec!["--exclude-word".into(), rest.to_string()])
+        }
+
         // MAXWD `+gN` (N in 1..=3) is the utterance-mode metric
         // selector ("find longest utterance instead of longest
         // word; N selects metric: 1=morph, 2=word, 3=char") per
@@ -1703,6 +1721,24 @@ mod tests {
     #[test]
     fn gemfreq_dn_passes_through() {
         assert_passthrough("clan gemfreq +d1 file.cha");
+    }
+
+    /// GEMFREQ `-wS` is the exclude-word polarity per CLAN's
+    /// `gemfreq.cpp:296` (`case 'w': *(f-1) = 's'` then
+    /// `maingetflag` — i.e. CLAN rewrites `w` to `s` literally,
+    /// so `-wS` becomes `-sS` which is the exclude-word semantic).
+    /// chatter's clap `-w` short is `--include-word` (OPPOSITE
+    /// polarity), so without a per-gemfreq rewriter arm `-wS` is
+    /// silently mis-routed to include-word. Per-GEMFREQ arm routes
+    /// `-wS` → `--exclude-word S` to match CLAN's intent.
+    #[test]
+    fn gemfreq_minus_w_routes_to_exclude_word() {
+        let input = args("clan gemfreq --gem TEST -wfoo file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(
+            result,
+            args("clan gemfreq --gem TEST --exclude-word foo file.cha")
+        );
     }
 
     /// FLUCALC `+u` enables per-utterance output in CLAN
