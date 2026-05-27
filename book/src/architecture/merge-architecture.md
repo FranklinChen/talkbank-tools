@@ -118,7 +118,7 @@ directory is not a Cargo crate.
 Adds a top-level `merge` module under
 `crates/talkbank-model/src/`. Layout:
 
-```
+```text
 crates/talkbank-model/src/merge/
     mod.rs                 — pub re-exports
     scoring.rs             — JaccardScore, ConfidenceThreshold, Margin
@@ -167,7 +167,7 @@ pinned at workspace level. The merge module pulls them in via
 Two sibling top-level modules, mirroring the user-facing
 distinction between the two subcommands:
 
-```
+```text
 crates/talkbank-transform/src/speaker_id/
     mod.rs                 — identify_mapping, apply_mapping
     text_cleaner.rs        — content-token extraction from ChatFile
@@ -207,7 +207,7 @@ operation modes (speaker-id has reference / explicit / override-file
 modes; merge has the main merge path plus probably a future
 `merge --check` mode).
 
-```
+```text
 crates/talkbank-cli/src/commands/speaker_id/
     mod.rs                 — clap subcommand dispatch
     args.rs                — flag parsing, mode disambiguation
@@ -247,7 +247,7 @@ respective `commands::*::run` entry points.
 
 Per the [Test Plan](./merge-test-plan.md):
 
-```
+```text
 crates/talkbank-transform/tests/
     speaker_id_tests.rs       — L2 tests for identify_mapping / apply_mapping
     transcript_merge_tests.rs — L2 tests for merge invariants

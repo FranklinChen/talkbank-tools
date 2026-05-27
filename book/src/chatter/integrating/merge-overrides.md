@@ -28,7 +28,7 @@ see [`chatter speaker-id`](../user-guide/speaker-id.md).
 The file's location is **caller-chosen**. The convention is one
 file per donor batch, named for the batch:
 
-```
+```text
 batch-2026-05-27-childes-eng.overrides.toml
 batch-2026-06-15-fluency-pilot.overrides.toml
 batch-2026-08-22-aphasiabank-bilingual.overrides.toml

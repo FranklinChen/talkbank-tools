@@ -121,7 +121,7 @@ in override-file mode for those sessions.
 
 ## CLI contract
 
-```
+```text
 chatter speaker-id <INPUT> [OPTIONS]
 
 ARGUMENTS:
@@ -259,7 +259,7 @@ reference corpus under `spec/constructs/speaker-id/token-cleaner/`.
 
 For two bags-of-words `A` and `B` (counted multisets):
 
-```
+```text
 J(A, B) = sum_w min(A[w], B[w])  /  sum_w max(A[w], B[w])
 ```
 
@@ -269,7 +269,7 @@ not just speakers whose vocabulary happens to intersect.
 
 ### Decision
 
-```
+```text
 scores  = { speaker: J(anchor_bag, speaker_bag) for speaker in input }
 winner  = argmax(scores)
 loser   = argmax(scores - {winner})

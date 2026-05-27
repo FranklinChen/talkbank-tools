@@ -217,7 +217,7 @@ A new chatter subcommand in `talkbank-cli`. Its job is to walk
 a pending-adjudications file and write decisions to an override
 file.
 
-```
+```text
 chatter adjudicate <PENDING_FILE> --override-file <OVERRIDE_FILE> [OPTIONS]
 
 ARGUMENTS:
@@ -397,7 +397,7 @@ error (`AdjudicationError::DecisionKindMismatch`).
 What the operator sees when running `chatter adjudicate
 pending.toml --override-file overrides.toml --interactive`:
 
-```
+```text
 ═══════════════════════════════════════════════════════════════
 ADJUDICATION  [1 / 14]  session-102-t1   kind = speaker-id-low-confidence
 ═══════════════════════════════════════════════════════════════
@@ -461,7 +461,7 @@ contains `parent`-suffix conventionally, or contributor data
 sheet says so). The merged output needs an inserted-role code
 of `MOT`, `FAT`, or `PAR`. The operator picks.
 
-```
+```text
 Session: session-103-t1-parent
 Kind: parent-role-lookup
 

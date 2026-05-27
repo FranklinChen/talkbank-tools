@@ -69,7 +69,7 @@ flowchart LR
 
 ## CLI contract
 
-```
+```text
 chatter merge <FILE1> <FILE2> --retain <SPEAKER_LIST> [OPTIONS]
 
 ARGUMENTS:

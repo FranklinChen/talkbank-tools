@@ -59,7 +59,7 @@ them.
 A multiset-Jaccard similarity value, by construction in the closed
 range `[0.0, 1.0]`.
 
-```rust
+```rust,ignore
 /// Multiset Jaccard similarity between two bags of tokens.
 ///
 /// By construction in [0.0, 1.0]. `JaccardScore::zero()` is the
@@ -98,7 +98,7 @@ winner, which can't happen). Default 2.0 per the empirical
 calibration recorded in
 [`chatter speaker-id`](../chatter/user-guide/speaker-id.md).
 
-```rust
+```rust,ignore
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema)]
 #[serde(try_from = "f64", into = "f64")]
 pub struct ConfidenceThreshold(f64);
@@ -126,7 +126,7 @@ divide-by-zero case (runner-up has zero Jaccard) cleanly. Avoids
 the `f64::INFINITY` sentinel that doesn't round-trip through
 all serializers.
 
-```rust
+```rust,ignore
 /// Ratio of winning speaker's score to runner-up's score.
 ///
 /// `Finite(r)` for `r >= 1.0`. `Unbounded` when the runner-up
@@ -158,7 +158,7 @@ signatures of merge functions communicate intent. Empty is
 allowed (means "no speakers come from File 1; File 1 contributes
 only headers" — a degenerate but legal case).
 
-```rust
+```rust,ignore
 /// Speakers whose utterances come from the first input to
 /// `chatter merge`. All other speakers come from the second
 /// input.
@@ -187,7 +187,7 @@ the speaker-id stage. A struct rather than two function arguments
 because the pair is meaningful as a unit (in TOML override files
 it serializes as a nested table; in CLI it parses as `CODE:TAG`).
 
-```rust
+```rust,ignore
 /// The CHAT identity to assign to non-anchor speakers in the
 /// speaker-id stage. Example: `INV:Investigator`, `MOT:Mother`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -224,7 +224,7 @@ SpeakerMapping. Enum (not boolean) to avoid blindness and to
 leave room for future variants (e.g. `RenameTo { code, tag }`
 when multi-role renaming becomes a need).
 
-```rust
+```rust,ignore
 /// Action to apply to one speaker in a SpeakerMapping.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -249,7 +249,7 @@ The decision record produced by the speaker-id stage and
 consumed by the speaker-id apply step. Carries enough information
 to apply deterministically to a `ChatFile`.
 
-```rust
+```rust,ignore
 /// A decision about how to relabel a ChatFile's speakers.
 ///
 /// Produced by `identify_mapping` (reference mode, auto), by the
@@ -284,7 +284,7 @@ rather than changing this struct's shape.
 How a `MergeOverride` entry came to exist. Three variants matching
 the three speaker-id operation modes.
 
-```rust
+```rust,ignore
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DecisionMode {
@@ -302,7 +302,7 @@ pub enum DecisionMode {
 Extensible operator-supplied flags on an override entry. Closed
 variants for known cases plus a `Custom(String)` escape hatch.
 
-```rust
+```rust,ignore
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum MergeFlag {
@@ -324,7 +324,7 @@ pub enum MergeFlag {
 
 Who made the decision. String newtype.
 
-```rust
+```rust,ignore
 string_newtype!(
     /// Identifier of the operator who created an override entry.
     /// Free-form; typically a username or initials. Recorded as
@@ -341,7 +341,7 @@ schema doesn't constrain its shape — contributors may use any
 stable identifier they like (`<participant>-<timepoint>`,
 `<recording-id>`, etc.).
 
-```rust
+```rust,ignore
 string_newtype!(
     /// Identifies a session within an override file. Free-form
     /// stable string; typically the CHAT-file basename stem.
@@ -354,7 +354,7 @@ string_newtype!(
 A single per-session decision record. The unit of operator
 adjudication.
 
-```rust
+```rust,ignore
 /// One per-session decision in an override file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MergeOverride {
@@ -393,7 +393,7 @@ preserves this format faithfully.
 The top-level container. Holds schema version + per-session
 entries. Read from / written to disk as TOML.
 
-```rust
+```rust,ignore
 /// Top-level override-file container.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OverrideFile {
@@ -451,7 +451,7 @@ behavior.
 
 ### `SpeakerIdError`
 
-```rust
+```rust,ignore
 #[derive(Debug, thiserror::Error)]
 pub enum SpeakerIdError {
     #[error("reference file has no utterances for anchor speaker {anchor}")]
@@ -491,7 +491,7 @@ contract.
 
 ### `MergeError`
 
-```rust
+```rust,ignore
 #[derive(Debug, thiserror::Error)]
 pub enum MergeError {
     #[error("File 1 declares no utterances for retain set {retain:?}")]
@@ -520,7 +520,7 @@ Independent enum because override-file I/O is also called by
 non-speaker-id code paths (the orchestrator, future
 adjudication UIs).
 
-```rust
+```rust,ignore
 #[derive(Debug, thiserror::Error)]
 pub enum OverrideFileError {
     #[error("override file not found at {path}")]
@@ -558,7 +558,7 @@ pub enum OverrideFileError {
 
 ## Module layout
 
-```
+```text
 talkbank-model/src/merge/
     mod.rs                — pub re-exports
     scoring.rs            — JaccardScore, ConfidenceThreshold, Margin
