@@ -135,6 +135,83 @@ pub fn strip_boundary_quotes(words: Vec<AsrWord>) -> Vec<AsrWord> {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 3d: CHAT-illegal character sanitization
+// ---------------------------------------------------------------------------
+
+/// Strip CHAT-illegal characters from ASR word tokens.
+///
+/// Real ASR engines occasionally emit characters the CHAT grammar
+/// rejects (Whisper's post-segment `:` leak, Tencent's `~`, exotic
+/// Unicode glued to word content). Without this pass, the downstream
+/// `transcript_from_asr_utterances` gate fails the entire utterance.
+/// Uses `ChatWordText::try_from` as the oracle: if the token validates
+/// as-is, keep it; otherwise greedily rebuild a valid prefix
+/// character by character and drop the token if the rebuilt string
+/// is empty. The oracle-driven approach is robust to the full Unicode
+/// space without enumerating CHAT-legal codepoints. Language-agnostic.
+///
+/// Logs sanitization at `debug!` (mutate) / `warn!` (drop entirely).
+/// Origin: `docs/investigations/2026-05-26-cantonese-asr-benchmark-v2.md`.
+pub fn sanitize_chat_illegal_word_chars(words: Vec<AsrWord>) -> Vec<AsrWord> {
+    words
+        .into_iter()
+        .filter_map(|word| sanitize_chat_illegal_word(word))
+        .collect()
+}
+
+/// Apply [`sanitize_chat_illegal_word_chars`] to every word in every
+/// utterance and drop utterances that lose all their words (they
+/// would otherwise serialize as empty main-tier lines).
+pub fn sanitize_chat_illegal_chars_in_utterances(utterances: &mut Vec<Utterance>) {
+    for utt in utterances.iter_mut() {
+        let original = std::mem::take(&mut utt.words);
+        utt.words = original
+            .into_iter()
+            .filter_map(sanitize_chat_illegal_word)
+            .collect();
+    }
+    // Drop utterances that lost every word — they would serialize as
+    // empty main-tier lines, which CHAT rejects.
+    utterances.retain(|u| !u.words.is_empty());
+}
+
+fn sanitize_chat_illegal_word(mut word: AsrWord) -> Option<AsrWord> {
+    let original = word.text.as_str();
+    if super::ChatWordText::try_from(original).is_ok() {
+        return Some(word);
+    }
+
+    // Greedy rebuild: push each char, validate; pop if it broke the
+    // accumulated prefix. Bounded by token length (typically <30
+    // chars); each iteration parses through tree-sitter via
+    // `ChatWordText::try_from`, which dominates the cost.
+    let mut sanitized = String::with_capacity(original.len());
+    for c in original.chars() {
+        sanitized.push(c);
+        if super::ChatWordText::try_from(sanitized.as_str()).is_err() {
+            sanitized.pop();
+        }
+    }
+
+    if sanitized.is_empty() {
+        tracing::warn!(
+            original = %original,
+            "ASR token is entirely CHAT-illegal; dropping"
+        );
+        return None;
+    }
+    if sanitized != original {
+        tracing::debug!(
+            original = %original,
+            sanitized = %sanitized,
+            "ASR token contained CHAT-illegal characters; sanitized"
+        );
+        word.text = AsrNormalizedText::new(&sanitized);
+    }
+    Some(word)
+}
+
+// ---------------------------------------------------------------------------
 // Disfluency replacement
 // ---------------------------------------------------------------------------
 

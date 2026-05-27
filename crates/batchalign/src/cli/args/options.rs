@@ -397,10 +397,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_engine_overrides_rejects_unknown_key() {
-        let error = parse_engine_overrides_json(r#"{"mor": "custom_mor"}"#)
-            .expect_err("unknown engine category should be rejected");
-        assert!(error.contains("unknown engine override key"));
+    fn parse_engine_overrides_preserves_unknown_keys_as_extras() {
+        // Unknown keys route to extras for the Python worker; known
+        // keys (asr/fa/translate) still validate engine NAMES strictly
+        // — see `engine_overrides_known_engine_validation_still_fires`.
+        let overrides = parse_engine_overrides_json(r#"{"mor": "custom_mor"}"#)
+            .expect("unknown KEYS now flow through as extras");
+        assert_eq!(overrides.asr, None);
+        assert_eq!(overrides.fa, None);
+        assert_eq!(overrides.translate, None);
+        assert_eq!(
+            overrides.extras.get("mor").map(String::as_str),
+            Some("custom_mor")
+        );
     }
 
     /// `--debug-dir` is interpreted by the server (not the client). When the

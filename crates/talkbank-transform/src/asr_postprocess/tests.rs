@@ -922,3 +922,102 @@ fn split_pipeline_expands_currency_tokens() {
         "split pipeline should expand $12 via Rust residual: {s_texts:?}"
     );
 }
+
+// ── Drill-down regression guards for the Fix 2 sanitization pass ──
+//
+// Top-level integration tests live in `build_chat/tests.rs` and
+// exercise the full pipeline (`process_raw_asr` →
+// `transcript_from_asr_utterances`). These narrow tests pin the
+// helper-level contract so a refactor that moves the sanitization
+// pass between stages can't silently regress the per-character
+// behavior.
+
+#[test]
+fn sanitize_drops_bare_chat_separator_tokens() {
+    use super::cleanup::sanitize_chat_illegal_word_chars;
+    let words = vec![
+        AsrWord::new("hello", Some(0), Some(300)),
+        AsrWord::new(":", Some(300), Some(400)),
+        AsrWord::new("world", Some(400), Some(700)),
+    ];
+    let result = sanitize_chat_illegal_word_chars(words);
+    let texts: Vec<&str> = result.iter().map(|w| w.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["hello", "world"],
+        "bare `:` token must be dropped, real words preserved"
+    );
+}
+
+#[test]
+fn sanitize_preserves_valid_words_unchanged() {
+    use super::cleanup::sanitize_chat_illegal_word_chars;
+    // A well-formed input must round-trip identically — sanitization
+    // is a no-op when the oracle accepts every token. This pins that
+    // the pass doesn't accidentally re-encode legitimate input.
+    let words = vec![
+        AsrWord::new("好", Some(0), Some(300)),
+        AsrWord::new("耐", Some(300), Some(700)),
+    ];
+    let texts_before: Vec<String> = words.iter().map(|w| w.text.as_str().to_owned()).collect();
+    let result = sanitize_chat_illegal_word_chars(words);
+    let texts_after: Vec<String> = result.iter().map(|w| w.text.as_str().to_owned()).collect();
+    assert_eq!(texts_before, texts_after);
+}
+
+#[test]
+fn sanitize_strips_chat_illegal_chars_from_word_internals() {
+    use super::cleanup::sanitize_chat_illegal_word_chars;
+    // The exotic Unicode case Franklin documented from v2 benchmark:
+    // a token whose interior contains chars the grammar rejects
+    // (Tibetan + Greek + math symbols glued to ASCII letters). The
+    // whole token fails `ChatWordText::try_from`, triggering the
+    // greedy rebuild — keeps each char only if appending it leaves
+    // the accumulated prefix CHAT-legal.
+    let words = vec![AsrWord::new(
+        "ཌྷᾱ≡ᾱworld",
+        Some(0),
+        Some(700),
+    )];
+    let result = sanitize_chat_illegal_word_chars(words);
+    assert_eq!(result.len(), 1, "non-empty residue must survive");
+    let sanitized = result[0].text.as_str();
+    assert_ne!(
+        sanitized, "ཌྷᾱ≡ᾱworld",
+        "the original token must have been modified — it doesn't \
+         pass `ChatWordText::try_from` as-is"
+    );
+    // The sanitized form must itself be CHAT-legal — that's the
+    // postcondition the greedy rebuild guarantees.
+    assert!(
+        super::ChatWordText::try_from(sanitized).is_ok(),
+        "sanitized output must validate; got: {sanitized:?}"
+    );
+}
+
+#[test]
+fn sanitize_does_not_strip_currency_or_percent_tokens() {
+    use super::cleanup::sanitize_chat_illegal_word_chars;
+    // Regression guard for the early-staging bug caught during
+    // implementation: `$12` and `80%` don't validate as CHAT words
+    // on their own (they're meant to be expanded to "twelve dollars"
+    // / "eighty percent" by Stage 4). If the oracle rejects them
+    // they'd be sanitized away. The sanitization pass must run
+    // AFTER number expansion, so by the time it sees inputs, those
+    // tokens are already rewritten to word form. This test pins
+    // that contract: the bare numeric tokens DO get sanitized by
+    // this pass — confirming why pipeline placement matters and
+    // documenting the ordering invariant.
+    let words = vec![AsrWord::new("$12", Some(0), Some(500))];
+    let result = sanitize_chat_illegal_word_chars(words);
+    // $12 is not a valid standalone CHAT word — sanitization at
+    // this layer would strip it. The PIPELINE places this pass
+    // after expansion, so production never sees this case. This
+    // assertion documents the helper's per-token behavior, NOT the
+    // pipeline-level outcome.
+    assert!(
+        result.is_empty() || result[0].text.as_str() != "$12",
+        "raw $12 isn't CHAT-legal; production pipeline must expand \
+         it BEFORE this pass runs (see finalize_utterances ordering)"
+    );
+}

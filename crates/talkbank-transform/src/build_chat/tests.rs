@@ -1225,6 +1225,72 @@ fn english_transcribe_rules_fire_end_to_end() {
     );
 }
 
+// ASR-emitted CHAT-illegal characters must be sanitized at the
+// ASR-postprocess layer rather than tanking the transcript at the
+// build gate. Drill-down tests for the sanitization helper live in
+// `asr_postprocess/tests.rs`.
+
+#[test]
+fn whisper_colon_token_survives_pipeline_via_sanitization() {
+    // Whisper occasionally emits a bare `:` post-segment leak.
+    let result = run_transcribe_to_description(
+        &[
+            ("hello", 0.0, 0.3),
+            (":", 0.3, 0.4),
+            ("world", 0.4, 0.7),
+            (".", 0.7, 0.8),
+        ],
+        "eng",
+    );
+    assert!(
+        result.is_ok(),
+        "bare `:` ASR token must be sanitized at ASR-postprocess, \
+         not error the whole transcribe run. got: {result:?}"
+    );
+}
+
+#[test]
+fn tencent_tilde_token_survives_pipeline_via_sanitization() {
+    // Tencent occasionally emits bare `~` (a CHAT structural
+    // separator).
+    let result = run_transcribe_to_description(
+        &[
+            ("好", 0.0, 0.3),
+            ("~", 0.3, 0.35),
+            ("耐", 0.35, 0.7),
+            ("。", 0.7, 0.8),
+        ],
+        "yue",
+    );
+    assert!(
+        result.is_ok(),
+        "bare `~` ASR token must be sanitized at ASR-postprocess, \
+         not error the whole transcribe run. got: {result:?}"
+    );
+}
+
+#[test]
+fn exotic_unicode_glued_to_word_survives_pipeline_via_sanitization() {
+    // Whisper occasionally glues exotic Unicode (Tibetan + Greek +
+    // math) to real word content; the rest of the utterance should
+    // survive even when the bad chars are stripped (or the token
+    // dropped if it becomes empty).
+    let result = run_transcribe_to_description(
+        &[
+            ("hello", 0.0, 0.3),
+            ("ཌྷᾱ≡ᾱworld", 0.3, 0.6),
+            (".", 0.6, 0.7),
+        ],
+        "eng",
+    );
+    assert!(
+        result.is_ok(),
+        "ASR token with embedded CHAT-illegal Unicode must be \
+         sanitized at ASR-postprocess, not error the whole \
+         transcribe run. got: {result:?}"
+    );
+}
+
 /// Non-English input is untouched by the 2026-04-23 English
 /// rules. Language gate is the sole guard.
 #[test]

@@ -79,6 +79,11 @@ pub fn prepare_words_pre_expansion_with_snapshot(
     // downstream consumer, including the Python-routed number-expansion
     // path used by `transcribe`.
     let result = split_percent_suffix_words(words, lang);
+
+    // NOTE: CHAT-illegal character sanitization runs in
+    // `finalize_utterances`, not here, because Stage 4 number
+    // expansion rewrites tokens like `$12` → "twelve dollars" — the
+    // raw forms don't validate as CHAT words on their own.
     if let Some(ref mut s) = snapshot {
         s.after_multiword_split = result.clone();
     }

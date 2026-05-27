@@ -1794,6 +1794,65 @@ fn build_options_engine_overrides_multiple_commands() {
     }
 }
 
+// CLI → typed options → worker-JSON round-trip for engine-override
+// extras (per-engine knobs like ``qwen_model`` / ``qwen_device``).
+// The Python worker reads these by name from the engine_overrides
+// dict; if the Rust schema drops them at deserialize time, the worker
+// never sees the operator's choice.
+
+#[test]
+fn engine_overrides_accept_qwen_model_and_device_extras() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "--engine-overrides",
+        r#"{"asr":"qwen","qwen_model":"Qwen/Qwen3-ASR-0.6B","qwen_device":"cuda"}"#,
+        "transcribe",
+        "audio/",
+    ]);
+    let opts = build_typed_options(&cli.command, &cli.global).unwrap();
+    let overrides = &opts.common().engine_overrides;
+
+    assert_eq!(overrides.asr, Some(AsrEngineName::HkQwen));
+
+    // The wire format the Python worker sees MUST preserve the
+    // extras — load_qwen_asr reads qwen_model / qwen_device out of
+    // the engine_overrides dict by name.
+    let json = overrides.to_json_string();
+    assert!(
+        json.contains("\"qwen_model\":\"Qwen/Qwen3-ASR-0.6B\""),
+        "qwen_model lost on round-trip; worker won't see it. \
+         engine_overrides JSON was: {json}"
+    );
+    assert!(
+        json.contains("\"qwen_device\":\"cuda\""),
+        "qwen_device lost on round-trip; worker won't see it. \
+         engine_overrides JSON was: {json}"
+    );
+}
+
+#[test]
+fn engine_overrides_extras_survive_without_asr_field() {
+    // Extras alone count as a non-empty override (operator tuning
+    // the default-resolved engine without re-selecting it).
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "--engine-overrides",
+        r#"{"qwen_model":"Qwen/Qwen3-ASR-0.6B"}"#,
+        "transcribe",
+        "audio/",
+    ]);
+    let opts = build_typed_options(&cli.command, &cli.global).unwrap();
+    let overrides = &opts.common().engine_overrides;
+
+    assert_eq!(overrides.asr, None);
+    assert!(!overrides.is_empty(), "extras alone count as non-empty");
+    let json = overrides.to_json_string();
+    assert!(
+        json.contains("\"qwen_model\":\"Qwen/Qwen3-ASR-0.6B\""),
+        "qwen_model lost on round-trip. engine_overrides JSON was: {json}"
+    );
+}
+
 // ---- Translate-engine CLI flag ----
 
 #[test]

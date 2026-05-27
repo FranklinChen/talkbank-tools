@@ -576,6 +576,7 @@ mod tests {
             asr: Some(AsrEngineName::HkTencent),
             fa: None,
             translate: None,
+            ..Default::default()
         };
         let common = CommonOptions {
             override_media_cache: true,

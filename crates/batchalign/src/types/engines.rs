@@ -536,6 +536,17 @@ impl<'de> Deserialize<'de> for TranslateEngineName {
 ///
 /// Replaces `BTreeMap<String, String>` in `CommonOptions.engine_overrides`.
 /// Only populated fields are serialized; empty overrides produce `{}`.
+///
+/// Three top-level fields are typed (``asr`` / ``fa`` / ``translate``)
+/// because they pick *which* engine runs. Any other key is preserved
+/// as an opaque per-engine configuration extra in [`Self::extras`].
+/// This is how the Python worker receives per-engine knobs such as
+/// ``qwen_model``, ``qwen_device``, ``funaudio_*``, etc. — adding a
+/// new engine knob does NOT require a Rust schema change, but a typo
+/// in a knob name will reach Python where the engine loader chooses
+/// whether to use a default or error. (A future engine registry —
+/// task #66 / Phase 5c — replaces this string-keyed map with typed
+/// per-engine payload structs.)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct EngineOverrides {
     /// ASR engine override (e.g., `AsrEngineName::HkTencent`).
@@ -544,12 +555,19 @@ pub struct EngineOverrides {
     pub fa: Option<FaEngineName>,
     /// Translate engine override (e.g., `TranslateEngineName::Seamless`).
     pub translate: Option<TranslateEngineName>,
+    /// Opaque per-engine configuration knobs (e.g., ``qwen_model``,
+    /// ``qwen_device``). Round-trips verbatim through the JSON
+    /// boundary so the Python worker bootstrap can read them by name.
+    pub extras: std::collections::BTreeMap<String, String>,
 }
 
 impl EngineOverrides {
     /// Return `true` when no overrides are set.
     pub fn is_empty(&self) -> bool {
-        self.asr.is_none() && self.fa.is_none() && self.translate.is_none()
+        self.asr.is_none()
+            && self.fa.is_none()
+            && self.translate.is_none()
+            && self.extras.is_empty()
     }
 
     /// Serialize to a JSON string for pool worker keying and CLI pass-through.
@@ -572,7 +590,8 @@ impl Serialize for EngineOverrides {
         use serde::ser::SerializeMap;
         let count = self.asr.is_some() as usize
             + self.fa.is_some() as usize
-            + self.translate.is_some() as usize;
+            + self.translate.is_some() as usize
+            + self.extras.len();
         let mut map = serializer.serialize_map(Some(count))?;
         if let Some(ref asr) = self.asr {
             map.serialize_entry("asr", asr.as_wire_name())?;
@@ -582,6 +601,9 @@ impl Serialize for EngineOverrides {
         }
         if let Some(ref translate) = self.translate {
             map.serialize_entry("translate", translate.as_wire_name())?;
+        }
+        for (key, value) in &self.extras {
+            map.serialize_entry(key, value)?;
         }
         map.end()
     }
@@ -595,28 +617,32 @@ impl<'de> Deserialize<'de> for EngineOverrides {
         let map: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::deserialize(deserializer)?;
         let mut overrides = Self::default();
-        for (key, value) in &map {
+        for (key, value) in map {
             match key.as_str() {
                 "asr" => {
                     overrides.asr = Some(
-                        AsrEngineName::from_wire_name(value).map_err(serde::de::Error::custom)?,
+                        AsrEngineName::from_wire_name(&value).map_err(serde::de::Error::custom)?,
                     );
                 }
                 "fa" => {
                     overrides.fa = Some(
-                        FaEngineName::from_wire_name(value).map_err(serde::de::Error::custom)?,
+                        FaEngineName::from_wire_name(&value).map_err(serde::de::Error::custom)?,
                     );
                 }
                 "translate" => {
                     overrides.translate = Some(
-                        TranslateEngineName::from_wire_name(value)
+                        TranslateEngineName::from_wire_name(&value)
                             .map_err(serde::de::Error::custom)?,
                     );
                 }
-                other => {
-                    return Err(serde::de::Error::custom(format!(
-                        "unknown engine override key: {other}"
-                    )));
+                _other => {
+                    // Per-engine configuration knob. The set of valid
+                    // keys is engine-specific and validated on the
+                    // Python side at load time; an unknown knob falls
+                    // through to engine defaults rather than rejecting
+                    // the entire CLI invocation. See the doc comment
+                    // on EngineOverrides for the rationale.
+                    overrides.extras.insert(key, value);
                 }
             }
         }
@@ -882,6 +908,7 @@ mod tests {
             asr: None,
             fa: None,
             translate: Some(TranslateEngineName::Seamless),
+            ..Default::default()
         };
         let json = overrides.to_json_string();
         assert_eq!(json, "{\"translate\":\"seamless\"}");
@@ -901,6 +928,7 @@ mod tests {
             asr: None,
             fa: None,
             translate: Some(TranslateEngineName::Seamless),
+            ..Default::default()
         };
         assert!(!overrides.is_empty());
     }
@@ -910,5 +938,59 @@ mod tests {
         let overrides = EngineOverrides::default();
         assert!(overrides.is_empty());
         assert_eq!(overrides.to_json_string(), "");
+    }
+
+    // ---- EngineOverrides extras (per-engine knobs) ----
+
+    #[test]
+    fn engine_overrides_extras_round_trip_unknown_keys() {
+        // Drill-down regression guard for Fix 1 (the starter test
+        // lives in cli/args/tests.rs and exercises the full
+        // Cli::parse_from → build_typed_options → to_json_string
+        // path). This pins the deserialize/serialize layer in
+        // isolation so a future refactor that moves the JSON shape
+        // can't silently drop extras.
+        let parsed: EngineOverrides = serde_json::from_str(
+            r#"{"asr":"qwen","qwen_model":"Qwen/Qwen3-ASR-0.6B","qwen_device":"cuda"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.asr, Some(AsrEngineName::HkQwen));
+        assert_eq!(
+            parsed.extras.get("qwen_model").map(String::as_str),
+            Some("Qwen/Qwen3-ASR-0.6B")
+        );
+        assert_eq!(
+            parsed.extras.get("qwen_device").map(String::as_str),
+            Some("cuda")
+        );
+
+        let json = parsed.to_json_string();
+        let reparsed: EngineOverrides = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, reparsed, "round-trip must be lossless");
+    }
+
+    #[test]
+    fn engine_overrides_extras_only_is_not_empty() {
+        // An override payload of just per-engine knobs (no explicit
+        // engine selection) is still a meaningful payload that must
+        // reach the worker — ``is_empty`` must reflect that or the
+        // ``--engine-overrides`` flag drops out before reaching the
+        // worker spawn arg (see ``worker/handle/spawn.rs:61``).
+        let parsed: EngineOverrides =
+            serde_json::from_str(r#"{"qwen_model":"Qwen/Qwen3-ASR-0.6B"}"#).unwrap();
+        assert_eq!(parsed.asr, None);
+        assert!(!parsed.is_empty());
+    }
+
+    #[test]
+    fn engine_overrides_known_engine_validation_still_fires() {
+        // Unknown values for KNOWN keys (asr/fa/translate) still
+        // error — Fix 1 relaxed schema strictness only for unknown
+        // KEYS. A typo in an engine name is still loud.
+        let err = serde_json::from_str::<EngineOverrides>(r#"{"asr":"wisper"}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("wisper"),
+            "expected engine-name validation error, got: {err}"
+        );
     }
 }

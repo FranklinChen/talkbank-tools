@@ -35,19 +35,19 @@ class TestResolveAsrEngine:
 
     def test_override_wins(self) -> None:
         assert (
-            resolve_asr_engine({"asr": "whisper"}, "from-config")
+            resolve_asr_engine({"asr": "whisper"}, "from-config", lang="eng")
             is AsrEngine.WHISPER
         )
 
     def test_rev_is_selected_when_key_present(self) -> None:
-        assert resolve_asr_engine(None, "from-config") is AsrEngine.REV
+        assert resolve_asr_engine(None, "from-config", lang="eng") is AsrEngine.REV
 
     def test_whisper_is_default_without_key(self) -> None:
-        assert resolve_asr_engine(None, None) is AsrEngine.WHISPER
+        assert resolve_asr_engine(None, None, lang="eng") is AsrEngine.WHISPER
 
     def test_whisper_hub_override_wins(self) -> None:
         assert (
-            resolve_asr_engine({"asr": "whisper_hub"}, "from-config")
+            resolve_asr_engine({"asr": "whisper_hub"}, "from-config", lang="eng")
             is AsrEngine.WHISPER_HUB
         )
 
@@ -55,7 +55,7 @@ class TestResolveAsrEngine:
         # Pin the return-type contract so a future refactor that
         # accidentally returns ``str`` (the historical shape) breaks
         # immediately rather than at the dispatch site.
-        result = resolve_asr_engine({"asr": "tencent"}, None)
+        result = resolve_asr_engine({"asr": "tencent"}, None, lang="yue")
         assert isinstance(result, AsrEngine)
         assert result is AsrEngine.TENCENT
 
@@ -64,18 +64,49 @@ class TestResolveAsrEngine:
         # child speech per Lee et al. (2026) — added 2026-05-26 as the
         # recommended default for ``yue`` after the BA3-port benchmark.
         assert (
-            resolve_asr_engine({"asr": "qwen"}, None) is AsrEngine.QWEN
+            resolve_asr_engine({"asr": "qwen"}, None, lang="yue") is AsrEngine.QWEN
+        )
+
+    # Per-language defaults (yue → FunASR). Explicit overrides and
+    # Rev key still win; languages absent from the table fall through
+    # to Whisper.
+
+    def test_yue_without_rev_key_or_override_defaults_to_funaudio(self) -> None:
+        assert (
+            resolve_asr_engine(None, None, lang="yue") is AsrEngine.FUNAUDIO
+        )
+
+    def test_yue_with_explicit_override_still_uses_override(self) -> None:
+        assert (
+            resolve_asr_engine({"asr": "qwen"}, None, lang="yue")
+            is AsrEngine.QWEN
+        )
+
+    def test_yue_with_rev_key_still_uses_rev(self) -> None:
+        assert (
+            resolve_asr_engine(None, "from-config", lang="yue")
+            is AsrEngine.REV
+        )
+
+    def test_eng_without_rev_key_still_defaults_to_whisper(self) -> None:
+        assert (
+            resolve_asr_engine(None, None, lang="eng") is AsrEngine.WHISPER
+        )
+
+    def test_unknown_lang_falls_back_to_global_default(self) -> None:
+        assert (
+            resolve_asr_engine(None, None, lang="mri") is AsrEngine.WHISPER
         )
 
     def test_unknown_engine_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="unknown asr engine 'wisper'"):
-            resolve_asr_engine({"asr": "wisper"}, None)
+            resolve_asr_engine({"asr": "wisper"}, None, lang="eng")
 
     def test_unknown_engine_error_mentions_supported_options(self) -> None:
         # The supported-engines list is derived from the AsrEngine
         # enum, so adding a 7th variant requires zero changes here.
         with pytest.raises(ValueError) as exc_info:
-            resolve_asr_engine({"asr": "x"}, None)
+            resolve_asr_engine({"asr": "x"}, None, lang="eng")
         msg = str(exc_info.value)
         for variant in AsrEngine:
             assert variant.value in msg, (
@@ -180,6 +211,117 @@ def test_whisper_hub_override_dispatches_to_whisper_hub_loader(monkeypatch) -> N
     finally:
         _state.asr_engine = old_engine
         _state.whisper_asr_model = old_model
+
+
+# Top-level integration tests at the worker-bootstrap seam
+# (``load_asr_engine(WorkerBootstrapRuntime)``). Resolver unit tests
+# in ``TestResolveAsrEngine`` above are supplements, not substitutes.
+
+
+def test_load_asr_engine_yue_with_no_override_or_rev_dispatches_to_funaudio(
+    monkeypatch,
+) -> None:
+    """yue worker with no overrides and no Rev key must load FunASR,
+    not vanilla Whisper-large-v3 (the worst measured engine on
+    Cantonese in the 2026-05-26 v2 benchmark, 81.9% CER on Tier 3)."""
+
+    funaudio_calls: list[tuple[object, object]] = []
+    whisper_calls: list[dict[str, object]] = []
+
+    def fake_load_funaudio_asr(lang, engine_overrides):
+        funaudio_calls.append((lang, engine_overrides))
+
+    def fake_load_whisper_asr(**kwargs):
+        # If this gets called, Fix 3 is not done — the bug is alive.
+        # Capture so the test failure is informative rather than crashy.
+        whisper_calls.append(kwargs)
+        return "should-not-be-called"
+
+    monkeypatch.setattr(
+        "batchalign.inference.languages.cantonese._funaudio_asr.load_funaudio_asr",
+        fake_load_funaudio_asr,
+    )
+    monkeypatch.setattr(
+        "batchalign.inference.asr.load_whisper_asr",
+        fake_load_whisper_asr,
+    )
+
+    old_engine = _state.asr_engine
+    old_whisper = _state.whisper_asr_model
+    old_key = _state.rev_api_key
+    try:
+        load_asr_engine(
+            WorkerBootstrapRuntime(
+                task=InferTask.ASR,
+                lang="yue",
+                num_speakers=1,
+                # No engine_overrides, no revai_api_key — this is the
+                # exact bootstrap shape that produced 81.9% CER in v2.
+            )
+        )
+
+        assert whisper_calls == [], (
+            "yue worker with no override + no Rev key MUST NOT load "
+            "vanilla Whisper-large-v3 (Fix 3 regression). "
+            f"whisper called with: {whisper_calls}"
+        )
+        assert len(funaudio_calls) == 1, (
+            "yue worker with no override + no Rev key must load FunASR. "
+            f"funaudio_calls={funaudio_calls}"
+        )
+        assert funaudio_calls[0] == ("yue", None)
+        assert _state.asr_engine is AsrEngine.FUNAUDIO
+    finally:
+        _state.asr_engine = old_engine
+        _state.whisper_asr_model = old_whisper
+        _state.rev_api_key = old_key
+
+
+def test_load_asr_engine_eng_with_no_override_or_rev_still_loads_whisper(
+    monkeypatch,
+) -> None:
+    """Languages without a per-language default entry keep the global
+    Whisper fallback."""
+
+    funaudio_calls: list[tuple[object, object]] = []
+
+    def fake_load_funaudio_asr(lang, engine_overrides):
+        funaudio_calls.append((lang, engine_overrides))
+
+    def fake_load_whisper_asr(**kwargs):
+        return "fake-whisper-model"
+
+    monkeypatch.setattr(
+        "batchalign.inference.languages.cantonese._funaudio_asr.load_funaudio_asr",
+        fake_load_funaudio_asr,
+    )
+    monkeypatch.setattr(
+        "batchalign.inference.asr.load_whisper_asr",
+        fake_load_whisper_asr,
+    )
+
+    old_engine = _state.asr_engine
+    old_whisper = _state.whisper_asr_model
+    old_key = _state.rev_api_key
+    try:
+        load_asr_engine(
+            WorkerBootstrapRuntime(
+                task=InferTask.ASR,
+                lang="eng",
+                num_speakers=1,
+            )
+        )
+
+        assert funaudio_calls == [], (
+            "eng worker must not load FunASR. "
+            f"funaudio_calls={funaudio_calls}"
+        )
+        assert _state.asr_engine is AsrEngine.WHISPER
+        assert _state.whisper_asr_model == "fake-whisper-model"
+    finally:
+        _state.asr_engine = old_engine
+        _state.whisper_asr_model = old_whisper
+        _state.rev_api_key = old_key
 
 
 def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> None:

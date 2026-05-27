@@ -7,7 +7,7 @@ import os
 import typing
 from collections.abc import Mapping
 
-from batchalign.inference._domain_types import RevAiApiKey
+from batchalign.inference._domain_types import LanguageCode, RevAiApiKey
 from batchalign.inference.asr import iso3_to_language_name
 from batchalign.worker._types import AsrEngine, WorkerBootstrapRuntime, _state
 
@@ -29,7 +29,7 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
     rev_api_key = bootstrap.revai_api_key
     _state.rev_api_key = None
 
-    backend = resolve_asr_engine(engine_overrides, rev_api_key)
+    backend = resolve_asr_engine(engine_overrides, rev_api_key, lang=lang)
 
     if backend is AsrEngine.REV:
         _state.rev_api_key = rev_api_key
@@ -100,9 +100,25 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         typing.assert_never(backend)
 
 
+# Per-language default ASR engine, consulted only when no explicit
+# ``--engine-overrides`` and no Rev.AI key are present.
+#
+# Why ``yue → FUNAUDIO``: the 2026-05-26 v2 Cantonese ASR benchmark
+# measured vanilla Whisper-large-v3 at 81.9% CER on Tier 3 child
+# speech (worst of every engine measured), while FunASR/SenseVoiceSmall
+# came in at 42.8% (best open engine). Defaulting yue workers to
+# Whisper silently shipped the worst-measured engine to operators who
+# never passed an override flag.
+_LANG_DEFAULTS: dict[LanguageCode, AsrEngine] = {
+    "yue": AsrEngine.FUNAUDIO,
+}
+
+
 def resolve_asr_engine(
     engine_overrides: dict[str, str] | None,
     rev_api_key: RevAiApiKey | None,
+    *,
+    lang: LanguageCode,
 ) -> AsrEngine:
     """Resolve which ASR engine this worker should load.
 
@@ -113,7 +129,14 @@ def resolve_asr_engine(
        Whisper — a typo in a per-host override would otherwise produce
        wrong-model output.
     2. Rev.AI when a key is available.
-    3. Local Whisper fallback.
+    3. Per-language default from ``_LANG_DEFAULTS`` (currently
+       ``yue → FUNAUDIO``).
+    4. Local Whisper fallback for every other language.
+
+    ``lang`` is required (keyword-only) so a future caller cannot
+    accidentally trigger the global Whisper fallback by forgetting
+    to pass the language — that silent mis-selection is exactly the
+    bug Fix 3 closes.
     """
     if engine_overrides and "asr" in engine_overrides:
         choice = engine_overrides["asr"]
@@ -124,7 +147,9 @@ def resolve_asr_engine(
             raise ValueError(
                 f"unknown asr engine {choice!r}; expected one of: {supported}"
             ) from exc
-    return AsrEngine.REV if rev_api_key else AsrEngine.WHISPER
+    if rev_api_key:
+        return AsrEngine.REV
+    return _LANG_DEFAULTS.get(lang, AsrEngine.WHISPER)
 
 
 def resolve_injected_revai_api_key(

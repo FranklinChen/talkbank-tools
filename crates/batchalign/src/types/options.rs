@@ -819,6 +819,7 @@ mod tests {
             asr: Some(AsrEngineName::HkTencent),
             fa: Some(FaEngineName::Wav2vecCanto),
             translate: None,
+            ..Default::default()
         };
 
         let opts = CommandOptions::Align(AlignOptions {
@@ -861,6 +862,7 @@ mod tests {
             asr: Some(AsrEngineName::HkTencent),
             fa: None,
             translate: None,
+            ..Default::default()
         };
         let opts = TranscribeOptions {
             common: CommonOptions {
@@ -884,6 +886,7 @@ mod tests {
             asr: Some(AsrEngineName::HkAliyun),
             fa: None,
             translate: None,
+            ..Default::default()
         };
         let opts = BenchmarkOptions {
             common: CommonOptions {
@@ -1193,6 +1196,7 @@ mod tests {
                     asr: None,
                     fa: Some(FaEngineName::Whisper),
                     translate: None,
+                    ..Default::default()
                 },
                 ..CommonOptions::default()
             },

@@ -285,6 +285,44 @@ explicitly, then fix the architecture. A detection/workaround that
 prevents a crash is not a fix — it is evidence the architecture needs
 changing.
 
+### Red/Green TDD: Start at the Top, Drill Down
+
+**Every new feature and bug fix starts with a failing test, and the first
+failing test MUST be the highest-level integration test you can write for
+the actual boundary the bug or feature lives at.** Unit tests on internal
+helpers are *additional* regression guards, never substitutes for the
+top-level test.
+
+**What counts as "highest level" depends on the bug's seam:**
+
+| Bug lives at... | Top-level test invokes... |
+|-----------------|---------------------------|
+| CLI argument parsing | `subprocess.run(["chatter", ...])` or `Command::new("chatter")` |
+| BA3 daemon dispatch | HTTP POST to local `batchalign3 daemon` / `batchalign3 benchmark` |
+| Worker engine selection | `load_*_engine(bootstrap)` with `monkeypatch.setattr` on the model loader |
+| Rust pyo3 boundary | Round-trip a real `WorkerV2Request` JSON through `execute_*_request_v2` |
+| Grammar / parser | A real CHAT fragment through `talkbank-parser::parse_*` |
+| CLAN command parity | Golden test against OSX-CLAN output |
+
+**Drill down only after the top-level test is committed and failing.** If
+the top-level test cannot pin the behavior precisely (e.g. asserts the
+*outcome* but not which internal path produced it), add unit tests as
+supplements. They are never the starter.
+
+**Why this rule exists.** The 2026-05-26 BA3 Cantonese ASR ship had three
+show-stoppers — Rust `EngineOverrides` schema rejected `qwen_model`
+override keys; benchmark dispatch discarded entire runs when CHAT
+validation rejected one ASR token; yue defaulted to vanilla Whisper-large-v3
+(the worst-measured engine in the v2 benchmark, 81.9% CER on Tier 3).
+Every unit test passed. None of them exercised the actual seams
+(`--engine-overrides` CLI parsing, benchmark error recovery, language-aware
+default resolution). Unit-only TDD produced false-green security at
+every layer.
+
+**The discipline:** if you find yourself writing a unit test for a helper
+function as your first test, stop and ask "what's the user-visible seam
+this fix sits behind?" That seam is where the starter test goes.
+
 ### Test Failures Are Bugs Until Proven Otherwise
 
 **When a test fails, STOP and ask the user.** Do not assume the test
