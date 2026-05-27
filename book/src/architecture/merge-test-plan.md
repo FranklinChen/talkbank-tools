@@ -106,8 +106,8 @@ discarded, `0` discarded, `@l` / `@n` / `@c` suffix dropped,
 
 Each spec file in `spec/constructs/speaker-id/token-cleaner/` has
 the standard `# name`, `## Input`, `## Expected tokens`, and
-`## Metadata` sections per the
-[spec authoring template](../../../spec/CLAUDE.md).
+`## Metadata` sections per the spec authoring template at
+`spec/CLAUDE.md` in the workspace root (outside the book).
 
 ### L1.2 — Jaccard scoring
 
@@ -380,7 +380,7 @@ against the same invariants.
 |---|---|---|
 | `prompter_terminal_round_trip_decision` | `TerminalPrompter` reading a scripted stdin | Returns the expected `OperatorDecision` parsed from the operator's typed input |
 | `prompter_scripted_returns_decisions_in_order` | `ScriptedPrompter::from_decisions([d1, d2, d3])` | Three consecutive `ask()` calls return d1, d2, d3 in order |
-| `prompter_scripted_panics_on_unscripted_session` | `ScriptedPrompter` has decisions for [A]; tool asks for [B] | `ask()` returns `Err(PrompterError::NoDecisionFor(SessionId))` |
+| `prompter_scripted_panics_on_unscripted_session` | `ScriptedPrompter` has decisions for session A; tool asks for session B | `ask()` returns `Err(PrompterError::NoDecisionFor(SessionId))` |
 | `prompter_scripted_toml_round_trips` | Write a scripted-decisions TOML, read with `ScriptedTomlPrompter`, run | Same `OperatorDecision` sequence as a `ScriptedPrompter::from_decisions` with equivalent contents |
 
 ## Fixture catalog

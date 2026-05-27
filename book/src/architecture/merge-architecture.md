@@ -24,9 +24,8 @@ Companion documents:
 ## Boundary decisions
 
 Two boundary decisions govern where every new piece of code lives.
-Both reference rules already documented in
-[`talkbank/CLAUDE.md`](../../../CLAUDE.md) (the private workspace
-guide) and [`talkbank-tools/CLAUDE.md`](../../../CLAUDE.md).
+Both reference rules already documented in `talkbank-tools/CLAUDE.md`
+(workspace-root contributor guide, outside the book).
 
 ### Decision 1: talkbank-* crates, not batchalign-* crates
 

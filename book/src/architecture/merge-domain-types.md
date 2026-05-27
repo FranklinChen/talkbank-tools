@@ -13,10 +13,11 @@ the spec, and they need to be designed against the user contract in
 being inferred from prototype code.
 
 The design follows the cross-cutting rules in
-[`talkbank-tools/CLAUDE.md`](../../../CLAUDE.md): newtypes over
-primitives at every stable boundary; no boolean blindness; no
-tuple-packed seams; typed errors via `thiserror`; deterministic
-`BTreeMap`/`BTreeSet` over hash maps for serialized state.
+`talkbank-tools/CLAUDE.md` (workspace root, outside the book):
+newtypes over primitives at every stable boundary; no boolean
+blindness; no tuple-packed seams; typed errors via `thiserror`;
+deterministic `BTreeMap`/`BTreeSet` over hash maps for
+serialized state.
 
 ## Where the types live
 
@@ -635,10 +636,10 @@ The workspace already pins `chrono = "0.4"` at the root
 `Cargo.toml`. `talkbank-model::merge` uses the workspace version
 verbatim via `chrono = { workspace = true }`. No new datetime dep.
 
-The "succession-aware" rule from
-[`talkbank/CLAUDE.md`](../../../CLAUDE.md) (and the analogous
+The "succession-aware" rule from the workspace-root `CLAUDE.md`
+contributor guide (outside the book) and the analogous
 `feedback_no_terraform_only_opentofu` discipline from operator
-memory) says: do not fragment the ecosystem by introducing a
+memory says: do not fragment the ecosystem by introducing a
 second tool when a workspace tool already does the job. `jiff` is
 a fine library but adopting it for one new module would mean two
 datetime crates in tree.
