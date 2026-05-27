@@ -82,6 +82,8 @@ enum ClanSubcommandKind {
     EvalD,
     Timedur,
     Dates,
+    Flucalc,
+    Kideval,
     Other,
 }
 
@@ -131,6 +133,8 @@ impl ClanSubcommandKind {
                 "eval-d" => return Self::EvalD,
                 "timedur" => return Self::Timedur,
                 "dates" => return Self::Dates,
+                "flucalc" => return Self::Flucalc,
+                "kideval" => return Self::Kideval,
                 _ => {}
             }
         }
@@ -651,6 +655,25 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // date string. Same shape as EVAL: string-arg flag, not
         // numeric level. chatter has no consumer; pass through.
         (b'+', b'd') if subcommand == Dates => None,
+
+        // FLUCALC `+d`/`+dN<s|w>` — local `case 'd'` at
+        // `OSX-CLAN/src/clan/flucalc.cpp:752`. Bare `+d` errors
+        // ("Invalid argument for option"). `+dN<s|w>` parses N
+        // as a sample size and the trailing character as a unit
+        // (`s` = syllables, `w` = words); `+d100s` means "first
+        // 100 syllables". Not a level setter — `+d1` in CLAN
+        // would fail because `1` lacks the required unit suffix.
+        // chatter has no consumer; pass through.
+        (b'+', b'd') if subcommand == Flucalc => None,
+
+        // KIDEVAL `+d`/`+dTYPE~ARG` — local `case 'd'` at
+        // `OSX-CLAN/src/clan/kideval.cpp:5245`. Bare `+d` errors
+        // ("Missing argument for option"). `+dTYPE~ARG` parses
+        // the string as a tilde-separated TYPE/ARG pair, with
+        // TYPE prefixed by `_` and stored in `DB_type`. Same
+        // string-arg shape as EVAL, just with internal `~`
+        // structure. chatter has no consumer; pass through.
+        (b'+', b'd') if subcommand == Kideval => None,
 
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
@@ -1800,6 +1823,54 @@ mod tests {
     #[test]
     fn dates_dn_passes_through() {
         let input = args("clan dates +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// FLUCALC has a local `case 'd'` at
+    /// `OSX-CLAN/src/clan/flucalc.cpp:752`. Bare `+d` errors
+    /// ("Invalid argument for option"); `+dN<s|w>` parses N as a
+    /// sample size and the trailing character as a unit (`s` =
+    /// syllables, `w` = words). Example: `+d100s` means "first
+    /// 100 syllables". Not a level setter — `+d1` in CLAN would
+    /// fail because `1` lacks the required unit suffix. chatter
+    /// has no `--sample-size`/`--sample-unit` consumer; pass
+    /// through. Bare `+d` is the regression guard.
+    #[test]
+    fn flucalc_d_bare_passes_through() {
+        let input = args("clan flucalc +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare FLUCALC `+dN` (strict-RED).
+    #[test]
+    fn flucalc_dn_passes_through() {
+        let input = args("clan flucalc +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// KIDEVAL has a local `case 'd'` at
+    /// `OSX-CLAN/src/clan/kideval.cpp:5245`. Bare `+d` errors
+    /// ("Missing argument for option"); `+dTYPE~ARG` parses the
+    /// string as a tilde-separated TYPE/ARG pair, with TYPE
+    /// prefixed by `_` and stored in `DB_type`. Not a level
+    /// setter — `+d1` in CLAN would attempt to parse "1" as
+    /// TYPE~ARG and error because there's no `~` separator.
+    /// chatter has no consumer; pass through. Bare `+d` is the
+    /// regression guard.
+    #[test]
+    fn kideval_d_bare_passes_through() {
+        let input = args("clan kideval +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare KIDEVAL `+dN` (strict-RED).
+    #[test]
+    fn kideval_dn_passes_through() {
+        let input = args("clan kideval +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }
