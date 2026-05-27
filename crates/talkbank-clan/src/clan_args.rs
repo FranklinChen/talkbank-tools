@@ -78,6 +78,8 @@ enum ClanSubcommandKind {
     Chip,
     Flo,
     Wdlen,
+    Eval,
+    EvalD,
     Other,
 }
 
@@ -123,6 +125,8 @@ impl ClanSubcommandKind {
                 "chip" => return Self::Chip,
                 "flo" => return Self::Flo,
                 "wdlen" => return Self::Wdlen,
+                "eval" => return Self::Eval,
+                "eval-d" => return Self::EvalD,
                 _ => {}
             }
         }
@@ -607,6 +611,24 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // `cutt.cpp:9382`. chatter has no consumer for either
         // effect; pass through.
         (b'+', b'd') if subcommand == Wdlen => None,
+
+        // EVAL `+d`/`+dKEY` — local `case 'd'` at
+        // `OSX-CLAN/src/clan/eval.cpp:3595`. Bare `+d` errors
+        // ("Missing argument for option") and exits; `+dKEY`
+        // calls `addDBKeys(KEY)` to register comma-separated DB
+        // key names. Unlike WDSIZE/MLU/etc. this is *not* an
+        // `onlydata`-level setter — `+d1` in CLAN means
+        // `addDBKeys("1")`, treating "1" as a database key. The
+        // catch-all's `--display-mode` rewrite would be doubly
+        // wrong here (wrong semantics AND no chatter consumer).
+        // Pass through so clap rejects with the literal token.
+        (b'+', b'd') if subcommand == Eval => None,
+
+        // EVAL-D `+d`/`+dKEY` — identical `case 'd'` handler at
+        // `OSX-CLAN/src/clan/eval-d.cpp:3565` to EVAL (same
+        // `addDBKeys` string-arg semantics). chatter has no
+        // consumer; pass through.
+        (b'+', b'd') if subcommand == EvalD => None,
 
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
@@ -1661,6 +1683,52 @@ mod tests {
     #[test]
     fn wdlen_dn_passes_through() {
         let input = args("clan wdlen +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// EVAL has a local `case 'd'` at
+    /// `OSX-CLAN/src/clan/eval.cpp:3595`: bare `+d` errors with
+    /// "Missing argument for option" and exits; `+dKEY` calls
+    /// `addDBKeys(KEY)` (string-arg, comma-separated DB key list).
+    /// Unlike WDSIZE/MLU/etc. this is not an `onlydata`-level
+    /// setter at all — `+d1` in CLAN is `addDBKeys("1")`, not a
+    /// display mode. chatter has no `--db-keys` consumer. Pass
+    /// through. Bare `+d` is the regression guard (catch-all
+    /// already returns None for empty rest).
+    #[test]
+    fn eval_d_bare_passes_through() {
+        let input = args("clan eval +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare EVAL `+dN` (strict-RED). Pre-arm, the catch-all
+    /// rewrites to `["--display-mode", "1"]` which clap then
+    /// mis-suggests as `--tui-mode`. In CLAN this would be
+    /// `addDBKeys("1")` — entirely unrelated to display mode.
+    #[test]
+    fn eval_dn_passes_through() {
+        let input = args("clan eval +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// EVAL-D has the same `case 'd'` handler as EVAL at
+    /// `OSX-CLAN/src/clan/eval-d.cpp:3565` (both share the
+    /// `addDBKeys` string-arg semantics). Bare `+d` regression
+    /// guard.
+    #[test]
+    fn evald_d_bare_passes_through() {
+        let input = args("clan eval-d +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare EVAL-D `+dN` (strict-RED).
+    #[test]
+    fn evald_dn_passes_through() {
+        let input = args("clan eval-d +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }
