@@ -172,7 +172,7 @@ def _load_seamless_translate() -> None:
     # torch.nn.Module.eval() — sets the module to inference mode,
     # unrelated to Python's builtin eval().
     if hasattr(model, "eval"):
-        model.eval()  # type: ignore[no-untyped-call]
+        model.eval()
 
     def seamless_fn(text: str, src_lang: LanguageCode) -> str:
         """Translate one text payload through SeamlessM4T."""
@@ -227,7 +227,7 @@ def _load_nllb_translate() -> None:
         artifacts=HF_ARTIFACTS_NLLB,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id)  # type: ignore[no-untyped-call]
     model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
     # torch.nn.Module.eval() — sets the module to inference mode
     # (disables dropout/BN training behavior). Without this, the 1.3B
