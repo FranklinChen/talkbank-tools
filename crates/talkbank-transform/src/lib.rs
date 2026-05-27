@@ -72,6 +72,7 @@ pub mod redact;
 pub mod retokenize;
 pub mod serialize;
 pub mod tokenizer_realign;
+pub mod transcript_merge;
 pub mod translate;
 pub mod utseg;
 pub mod utseg_compute;

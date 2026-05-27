@@ -36,6 +36,7 @@ pub mod list_checks;
 pub mod new_file;
 pub mod normalize;
 pub mod schema;
+pub mod transcript_merge;
 pub mod validate;
 pub mod validate_parallel;
 pub mod validate_utseg;

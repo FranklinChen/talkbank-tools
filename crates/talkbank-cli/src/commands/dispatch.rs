@@ -84,6 +84,7 @@ impl Commands {
             | Self::FromJson { .. }
             | Self::Clean { .. }
             | Self::NewFile { .. }
+            | Self::Merge { .. }
             | Self::Schema { .. } => CommandFamily::Utility,
             Self::Cache { .. } => CommandFamily::Cache,
             Self::Clan { .. } => CommandFamily::Clan,
@@ -206,6 +207,12 @@ struct UtilityCommandService;
 impl CommandFamilyService for UtilityCommandService {
     fn dispatch(&self, command: Commands, _context: &CommandContext) {
         match command {
+            Commands::Merge {
+                file1,
+                file2,
+                retain,
+                output,
+            } => crate::commands::transcript_merge::run_merge(&file1, &file2, &retain, output.as_ref()),
             Commands::Normalize {
                 input,
                 output,

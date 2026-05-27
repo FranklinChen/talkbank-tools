@@ -230,6 +230,31 @@ pub enum Commands {
         check_xphon: bool,
     },
 
+    /// Merge two CHAT transcripts of the same media into one.
+    ///
+    /// Speakers listed in `--retain` come from FILE1 (byte-preserved);
+    /// all other speakers come from FILE2. Utterances are interleaved
+    /// by start-time. See `book/src/chatter/user-guide/merge.md` for
+    /// the full contract.
+    Merge {
+        /// First CHAT file. Retain-set speakers' utterances come
+        /// from here.
+        file1: PathBuf,
+
+        /// Second CHAT file. All other speakers' utterances come
+        /// from here.
+        file2: PathBuf,
+
+        /// Comma-separated speaker codes whose utterances come from
+        /// FILE1 (e.g. `CHI` or `CHI,SI2`).
+        #[arg(long, value_delimiter = ',')]
+        retain: Vec<String>,
+
+        /// Output path (prints to stdout if omitted).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// Normalize CHAT file to canonical format
     Normalize {
         /// Input CHAT file path

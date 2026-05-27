@@ -223,6 +223,8 @@
 - [CI Integration](chatter/user-guide/ci-integration.md)
 - [CHAT Processing Playbook (Editors & Analysts)](chatter/user-guide/chat-processing-playbook.md)
 - [Sanitize (Protected Corpora)](chatter/user-guide/sanitize.md)
+- [Speaker-ID (Label ASR Speakers)](chatter/user-guide/speaker-id.md)
+- [Merge (Transcript Combination)](chatter/user-guide/merge.md)
 
 # VS Code — Getting Started
 
@@ -497,6 +499,10 @@
 - [Parsing](architecture/parsing.md)
 - [CHAT Data Model](architecture/chat-model/chat-model.md)
 - [Transform Pipeline](architecture/transform-pipeline.md)
+- [Merge Pipeline — Domain Types](architecture/merge-domain-types.md)
+- [Merge Pipeline — Test Plan](architecture/merge-test-plan.md)
+- [Merge Pipeline — Crate Architecture](architecture/merge-architecture.md)
+- [Merge Pipeline — Adjudication Workflow](architecture/adjudication-workflow.md)
 - [XML Emitter](architecture/xml-emitter.md)
 - [Errors — talkbank-tools](architecture/errors-and-validation/talkbank-tools-errors.md)
 - [Crate Reference](architecture/crate-reference.md)
@@ -544,3 +550,4 @@
 - [JSON Output Reference](chatter/integrating/json-output.md)
 - [JSON Schema](chatter/integrating/json-schema.md)
 - [Diagnostic Contract](chatter/integrating/diagnostic-contract.md)
+- [Merge Override File Format](chatter/integrating/merge-overrides.md)
