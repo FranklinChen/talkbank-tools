@@ -422,14 +422,8 @@ fn legacy_freq_s_word_filters_per_word_not_per_utterance() -> Result<(), TestErr
     let harness = CliHarness::new()?;
     let file = corpus_file("core/basic-conversation.cha");
 
-    let output = harness.run_output(&[
-        "clan",
-        "freq",
-        "+sthe",
-        "--format",
-        "clan",
-        file.as_str(),
-    ])?;
+    let output =
+        harness.run_output(&["clan", "freq", "+sthe", "--format", "clan", file.as_str()])?;
     assert_exit_code(&output, 0, "freq +sthe should succeed");
 
     let stdout = stdout_string(&output);

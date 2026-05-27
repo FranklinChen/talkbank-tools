@@ -212,7 +212,12 @@ impl CommandFamilyService for UtilityCommandService {
                 file2,
                 retain,
                 output,
-            } => crate::commands::transcript_merge::run_merge(&file1, &file2, &retain, output.as_ref()),
+            } => crate::commands::transcript_merge::run_merge(
+                &file1,
+                &file2,
+                &retain,
+                output.as_ref(),
+            ),
             Commands::Normalize {
                 input,
                 output,

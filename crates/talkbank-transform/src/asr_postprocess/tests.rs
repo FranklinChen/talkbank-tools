@@ -974,11 +974,7 @@ fn sanitize_strips_chat_illegal_chars_from_word_internals() {
     // whole token fails `ChatWordText::try_from`, triggering the
     // greedy rebuild — keeps each char only if appending it leaves
     // the accumulated prefix CHAT-legal.
-    let words = vec![AsrWord::new(
-        "ཌྷᾱ≡ᾱworld",
-        Some(0),
-        Some(700),
-    )];
+    let words = vec![AsrWord::new("ཌྷᾱ≡ᾱworld", Some(0), Some(700))];
     let result = sanitize_chat_illegal_word_chars(words);
     assert_eq!(result.len(), 1, "non-empty residue must survive");
     let sanitized = result[0].text.as_str();

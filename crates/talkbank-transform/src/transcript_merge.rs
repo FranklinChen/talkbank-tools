@@ -18,9 +18,9 @@ use talkbank_model::ParseValidateOptions;
 use talkbank_model::model::header::{Header, ParticipantEntries, ParticipantEntry};
 use talkbank_model::model::{ChatFile, Line};
 
+use crate::PipelineError;
 use crate::pipeline::parse_and_validate;
 use crate::serialize::to_chat_string;
-use crate::PipelineError;
 
 /// Errors that can arise from the merge operation.
 ///
@@ -73,7 +73,10 @@ pub const DEFAULT_STRIP_TIERS: &[&str] = &["wor", "mor", "gra", "pho"];
 /// that needs an allocated owned value rather than the static
 /// `&[&str]` constant.
 pub fn default_strip_tiers() -> Vec<String> {
-    DEFAULT_STRIP_TIERS.iter().map(|s| (*s).to_string()).collect()
+    DEFAULT_STRIP_TIERS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 /// Merge two CHAT files. Retained-set speakers' utterances come from

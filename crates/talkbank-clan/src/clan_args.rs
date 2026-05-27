@@ -404,11 +404,7 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // (None) lets clap reject the literal token honestly so
         // the user knows the flag is unimplemented rather than
         // running with wrong-but-silent behavior.
-        (b'+', b'g')
-            if subcommand == Combo && (rest == "1" || rest == "2" || rest == "6") =>
-        {
-            None
-        }
+        (b'+', b'g') if subcommand == Combo && (rest == "1" || rest == "2" || rest == "6") => None,
         // DIST's bare `+g` is a counting policy ("one occurrence
         // per turn"), distinct from the inherited `+gLABEL` gem
         // filter. Only the no-rest form routes here; `+gLABEL`

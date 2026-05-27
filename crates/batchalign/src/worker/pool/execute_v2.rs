@@ -244,12 +244,10 @@ mod tests {
             TaskRequestV2::Asr(AsrRequestV2 {
                 lang: WorkerLanguage::from(LanguageCode3::yue()),
                 backend: AsrBackendV2::HkQwen,
-                input: AsrInputV2::ProviderMedia(
-                    crate::types::worker_v2::ProviderMediaInputV2 {
-                        media_path: "/dev/null".into(),
-                        num_speakers: crate::api::NumSpeakers(1),
-                    },
-                ),
+                input: AsrInputV2::ProviderMedia(crate::types::worker_v2::ProviderMediaInputV2 {
+                    media_path: "/dev/null".into(),
+                    num_speakers: crate::api::NumSpeakers(1),
+                }),
                 extras: extras.clone(),
             }),
         );

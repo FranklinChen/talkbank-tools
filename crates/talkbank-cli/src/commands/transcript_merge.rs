@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{Level, info, span, warn};
 
-use talkbank_transform::transcript_merge::{default_strip_tiers, merge_chats, MergeError};
+use talkbank_transform::transcript_merge::{MergeError, default_strip_tiers, merge_chats};
 
 /// Top-level entry for `chatter merge file1 file2 --retain <SPK[,SPK...]>`.
 ///

@@ -8,7 +8,7 @@
 //! Phase A cycle 2: byte-stability of retained-speaker utterances.
 
 use talkbank_model::ParseValidateOptions;
-use talkbank_transform::transcript_merge::{default_strip_tiers, merge_chats, MergeError};
+use talkbank_transform::transcript_merge::{MergeError, default_strip_tiers, merge_chats};
 
 /// File 1 fixture for cycle 2. CHI carries:
 ///   - a CHAT error code `[*]`
@@ -95,12 +95,8 @@ fn merge_retained_speakers_byte_stable() {
     let chi1_pos = merged
         .find(chi_line_1)
         .expect("CHI utterance 1 must be present");
-    let com_pos = merged
-        .find(com_line)
-        .expect("%com line must be present");
-    let inv_pos = merged
-        .find("*INV:")
-        .expect("INV utterance must be present");
+    let com_pos = merged.find(com_line).expect("%com line must be present");
+    let inv_pos = merged.find("*INV:").expect("INV utterance must be present");
     assert!(
         chi1_pos < com_pos && com_pos < inv_pos,
         "%com line not attached to its parent utterance: \
@@ -353,12 +349,8 @@ fn merge_header_participants_concatenates() {
     );
 
     // Ordering: File 1's entries come first.
-    let chi_pos = participants_line
-        .find("CHI")
-        .expect("CHI must be present");
-    let inv_pos = participants_line
-        .find("INV")
-        .expect("INV must be present");
+    let chi_pos = participants_line.find("CHI").expect("CHI must be present");
+    let inv_pos = participants_line.find("INV").expect("INV must be present");
     assert!(
         chi_pos < inv_pos,
         "@Participants ordering: File 1's CHI should precede File 2's INV. \
