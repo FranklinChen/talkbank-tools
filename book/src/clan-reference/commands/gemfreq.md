@@ -1,7 +1,7 @@
 # GEMFREQ -- Word Frequency Within Gem Segments
 
 **Status:** Current
-**Last updated:** 2026-05-26 11:24 EDT
+**Last updated:** 2026-05-27 09:56 EDT
 
 ## Purpose
 
@@ -58,7 +58,7 @@ Authoritative enumeration of every CLAN `gemfreq` flag. Sources:
 | `+e` | Do not output nested gems along with the matched one | — | Missing | Gem-nesting handling. |
 | `+g` (no S) | Marker tier should contain all words specified by `+s` | — | Missing | EVAL-style `+g` overload. |
 | `+n` | Each gem terminated by the next `@G` | — | Missing | Gem-termination semantic switch. |
-| `+o` | Sort output by descending frequency | (default) | Done | chatter sort matches. |
+| `+o` | Sort output by descending frequency | (default) | Done | CLAN: `gemfreq.cpp:260` (`isSort = TRUE; no_arg_option(f)`). chatter's `gemfreq` (compatibility alias for `freq --gem`) already sorts by descending frequency by default, so `+o` is semantically a no-op. Per-GEMFREQ rewriter arm in `clan_args.rs` consumes-and-drops `+o` so it doesn't fall through to the positional `<PATH>` slot. |
 | `+wS` / `+w@S` | Search for word `S` (or words in file `@S`) | `--include-word` | Partial | File-list form missing. |
 | `-wS` | Exclude word `S` | `--exclude-word` | Partial | |
 | `+yN` | Display whole tier unchanged (1) or cleaned up (0) | — | Missing | |

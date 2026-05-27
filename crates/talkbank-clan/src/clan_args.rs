@@ -567,6 +567,15 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // clap surface; pass through.
         (b'+', b'd') if subcommand == Gemfreq => None,
 
+        // GEMFREQ `+o` — bare no-value flag that turns on sort-by-
+        // descending-frequency in CLAN (`OSX-CLAN/src/clan/gemfreq.cpp:260`:
+        // `isSort = TRUE; no_arg_option(f)`). chatter's `gemfreq`
+        // (a compatibility alias that adapts to `freq --gem`) already
+        // sorts by descending frequency by default, so `+o` is
+        // semantically a no-op. Drop the flag so it doesn't fall
+        // through to the positional `<PATH>` slot.
+        (b'+', b'o') if rest.is_empty() && subcommand == Gemfreq => Some(vec![]),
+
         // VOCD `+d`/`+dN` — `onlydata` output-detail level per
         // `OSX-CLAN/src/clan/vocd/vocd.cpp:311` (same `+1`-offset
         // pattern as chains/ipsyn; bounded by `OnlydataLimit`).
@@ -1529,6 +1538,23 @@ mod tests {
     #[test]
     fn gemfreq_dn_passes_through() {
         assert_passthrough("clan gemfreq +d1 file.cha");
+    }
+
+    /// GEMFREQ `+o` is a no-value sort-by-descending-frequency flag
+    /// in CLAN (`OSX-CLAN/src/clan/gemfreq.cpp:260`: `isSort = TRUE;
+    /// no_arg_option(f)`). chatter's `gemfreq` (which adapts to
+    /// `freq --gem`) already sorts by descending frequency by
+    /// default — `+o` would be a no-op semantic but without this
+    /// arm the rewriter doesn't touch it, clap doesn't know `+o`,
+    /// and `+o` falls through to the positional `<PATH>` slot
+    /// (causing the "not a file or directory, skipping" warning
+    /// and silently dropping the flag from the invocation). The
+    /// per-command arm consumes-and-drops it cleanly.
+    #[test]
+    fn gemfreq_o_drops_redundant_sort_flag() {
+        let input = args("clan gemfreq --gem TEST +o file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan gemfreq --gem TEST file.cha"));
     }
 
     /// VOCD `+d`/`+dN` are `onlydata` output-detail levels per
