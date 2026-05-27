@@ -173,6 +173,21 @@ fn build_analysis_options(request: &AnalyzeRequest) -> Result<AnalysisOptions, L
             word_list_only: false,
             types_tokens_only: false,
             case_sensitive: false,
+            // LSP `talkbank/analyze` does not surface CLAN's
+            // `+sWORD` / `-sWORD` patterns yet; pass an empty
+            // per-word filter so FREQ emits all words. The mode
+            // MUST be ``PerWordEmit`` because FREQ applies word
+            // filtering at per-word emit time, not at the
+            // utterance gate (`Default::default()` would set
+            // `UtteranceContext` which is silently wrong for
+            // FREQ — see the comment on
+            // ``FreqOptions::word_filter`` in talkbank-clan).
+            word_filter: talkbank_clan::framework::WordFilter {
+                include: Vec::new(),
+                exclude: Vec::new(),
+                case_sensitive: false,
+                mode: talkbank_clan::framework::WordFilterMode::PerWordEmit,
+            },
         }),
         AnalysisCommandName::Mlu => AnalysisOptions::Mlu(MluOptions {
             words: options.words,
