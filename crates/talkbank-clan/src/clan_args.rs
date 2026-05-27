@@ -384,11 +384,27 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
             Some(vec!["--position-classification".into(), "second".into()])
         }
 
+        // FREQPOS `+dN` passthrough — CLAN's `case 'd'` at
+        // `OSX-CLAN/src/clan/freqpos.cpp` is a **no-arg flag**:
+        // `DC = TRUE; no_arg_option(f);`. Any `+dN` form errors
+        // in CLAN itself at `no_arg_option`. chatter has no
+        // consumer; pass through so clap rejects with the
+        // literal token rather than the misleading
+        // `--display-mode N` rewrite from the catch-all.
+        (b'+', b'd') if subcommand == Freqpos && !rest.is_empty() => None,
+
         // COOCCUR `+d` (no N) strips the leading count column from
         // the output. Same empty-rest intercept pattern.
         (b'+', b'd') if subcommand == Cooccur && rest.is_empty() => {
             Some(vec!["--no-frequency-counts".into()])
         }
+
+        // COOCCUR `+dN` passthrough — COOCCUR has **no local
+        // `case 'd'`** in `OSX-CLAN/src/clan/cooccur.cpp`;
+        // falls through to `maingetflag` for the shared
+        // `onlydata`-level path via `cutt.cpp:9382`. chatter has
+        // no `--display-mode` consumer for COOCCUR; pass through.
+        (b'+', b'd') if subcommand == Cooccur && !rest.is_empty() => None,
 
         // COOCCUR `+nN` sets the cluster size (number of adjacent
         // words counted as a unit). Default 2 = bigrams; +n3 =
@@ -401,10 +417,24 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // KWAL `+d` (no N) switches the output from CLAN's
         // location-annotated default to a legal CHAT fragment
         // (drop the `---` separator and `*** File ... Keyword: X`
-        // decoration). `+d1`/`+d2`/... and other KWAL display
-        // modes still fall through to the generic `--display-mode
-        // N` arm.
+        // decoration).
         (b'+', b'd') if subcommand == Kwal && rest.is_empty() => Some(vec!["--legal-chat".into()]),
+
+        // KWAL `+dN` passthrough — CLAN's `case 'd'` at
+        // `OSX-CLAN/src/clan/kwal.cpp` has 7+ specific `+dN`
+        // branches with break: `+d7` → `linkDep2Other = TRUE`;
+        // `+d40` → `isDuplicateTiers`, `isKeywordOneColumn`,
+        // `onlydata = 5`, `combinput` (CLAN_SRV-rejected);
+        // `+d4` → `combinput`, `isKeywordOneColumn` (no break;
+        // falls through into `case 's'`); `+d90` →
+        // `isExpendX`/`isExpandXForAll`/`OverWriteFile`;
+        // `+d99` → `isExpendX`; `+d30` → `outputOnlyMatched = 3`
+        // plus various flag resets; `+d31` →
+        // `outputOnlyMatched = 2`; `+d3` → `outputOnlyMatched = 1`.
+        // All other `+dN` values fall through to `case 's'`
+        // (search-pattern handling). None of these are display
+        // modes; none have chatter consumers. Pass through.
+        (b'+', b'd') if subcommand == Kwal && !rest.is_empty() => None,
 
         // FREQ `+d1` emits one word per line with no frequency or
         // other info — suitable as a `kwal +s@FILE` input. Other
@@ -1889,6 +1919,73 @@ mod tests {
     #[test]
     fn uniq_dn_passes_through() {
         assert_passthrough("clan uniq +d1 file.cha");
+    }
+
+    /// KWAL bare `+d` regression: must still route to
+    /// `--legal-chat` via the existing arm at line ~407.
+    /// The new non-bare-`+d` passthrough arm must not steal
+    /// the empty-rest case.
+    #[test]
+    fn kwal_d_bare_still_routes_to_legal_chat() {
+        let input = args("clan kwal +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan kwal --legal-chat file.cha"));
+    }
+
+    /// KWAL `+dN` passthrough (strict-RED). CLAN's `case 'd'`
+    /// at `OSX-CLAN/src/clan/kwal.cpp` has 7+ specific `+dN`
+    /// branches (`+d3`, `+d4`, `+d7`, `+d30`, `+d31`, `+d40`,
+    /// `+d90`, `+d99`) plus a fallthrough into `case 's'` for
+    /// unmatched values. None are display modes; none have
+    /// chatter consumers. The catch-all `--display-mode N`
+    /// rewrite is wrong for all of them.
+    #[test]
+    fn kwal_dn_passes_through() {
+        assert_passthrough("clan kwal +d1 file.cha");
+    }
+
+    /// COOCCUR bare `+d` regression: must still route to
+    /// `--no-frequency-counts` via the existing arm at line ~389.
+    #[test]
+    fn cooccur_d_bare_still_routes_to_no_frequency_counts() {
+        let input = args("clan cooccur +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan cooccur --no-frequency-counts file.cha"));
+    }
+
+    /// COOCCUR `+dN` passthrough (strict-RED). COOCCUR has NO
+    /// local `case 'd'` in `OSX-CLAN/src/clan/cooccur.cpp`;
+    /// falls through to `maingetflag` for the shared
+    /// `onlydata`-level path via `cutt.cpp:9382`. chatter has
+    /// no `--display-mode` consumer for COOCCUR.
+    #[test]
+    fn cooccur_dn_passes_through() {
+        assert_passthrough("clan cooccur +d1 file.cha");
+    }
+
+    /// FREQPOS bare `+d` regression: must still route to
+    /// `--position-classification second` via the existing arm
+    /// at line ~383.
+    #[test]
+    fn freqpos_d_bare_still_routes_to_position_classification() {
+        let input = args("clan freqpos +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(
+            result,
+            args("clan freqpos --position-classification second file.cha")
+        );
+    }
+
+    /// FREQPOS `+dN` passthrough (strict-RED). CLAN's
+    /// `case 'd'` at `OSX-CLAN/src/clan/freqpos.cpp` is a
+    /// **no-arg flag** — `DC = TRUE; no_arg_option(f)`. Any
+    /// `+dN` form errors in CLAN itself at `no_arg_option`.
+    /// chatter has no consumer; the catch-all's
+    /// `--display-mode N` rewrite would mask the real
+    /// "no-arg flag with arg" rejection.
+    #[test]
+    fn freqpos_dn_passes_through() {
+        assert_passthrough("clan freqpos +d1 file.cha");
     }
 
     #[test]
