@@ -1,7 +1,7 @@
 # LAB2CHAT -- LAB Timing Labels to CHAT Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-22 13:40 EDT
+**Last updated:** 2026-05-27 10:39 EDT
 
 ## Purpose
 
@@ -66,7 +66,7 @@ output CHAT. Sources: `OSX-CLAN/src/clan/lab2chat.cpp::usage`,
 | `+mF` | Movie file name `F` (default: input file name) | — | Missing |
 | `+p` | Plain file conversion (default: merge per attribute file) | — | Missing |
 | `+oS` | Code page selection | — | Missing |
-| `+tN` | Movie segment start time offset | — | Missing |
+| `+tN` | Movie segment start time offset | — | Missing | Per-LAB2CHAT rewriter arm in `clan_args.rs` returns None for digit-only `+tN` so the literal token passes through to clap (which rejects it) rather than silently mis-routing to `--speaker N` via the generic `+t` → `rewrite_tier_speaker` default branch. |
 | `+re` | Recurse subdirectories | (default for directory input) | Done |
 
 Audit summary: 1 Done, 6 Missing. LAB2CHAT's metadata-rich

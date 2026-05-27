@@ -86,6 +86,7 @@ enum ClanSubcommandKind {
     Kideval,
     Rely,
     Chat2elan,
+    Lab2chat,
     Other,
 }
 
@@ -139,6 +140,7 @@ impl ClanSubcommandKind {
                 "kideval" => return Self::Kideval,
                 "rely" => return Self::Rely,
                 "chat2elan" => return Self::Chat2elan,
+                "lab2chat" => return Self::Lab2chat,
                 _ => {}
             }
         }
@@ -258,6 +260,26 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
             rewrite_subcommand_value_flag(rest, "--tier")
         }
 
+        // LAB2CHAT `+tN` (digit-only N) is "Movie segment start
+        // time offset" per
+        // `book/src/clan-reference/commands/lab2chat.md:69`.
+        // chatter does not implement movie-segment offsets yet.
+        // Without this arm, `+t3` falls through to
+        // `rewrite_tier_speaker` and becomes `--speaker 3`
+        // (the default branch treats non-sigil-prefixed values as
+        // implicit speaker codes), silently mis-routing to LAB-CHAT
+        // speaker labeling. Pass-through (None) lets clap reject
+        // the digit-only form honestly. Letter forms like
+        // `lab2chat +tCHI` are not lab2chat semantics either but
+        // are out of scope here; they continue to fall through.
+        (b'+', b't')
+            if subcommand == Lab2chat
+                && !rest.is_empty()
+                && rest.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            None
+        }
+
         (b'+', b't') | (b'-', b't') => rewrite_tier_speaker(polarity, rest),
 
         // MLU / MLT `-bw` — switch the counting unit from morphemes
@@ -351,6 +373,24 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         (b'+', b'g') if subcommand == Combo && rest == "4" => Some(Vec::new()),
         (b'+', b'g') if subcommand == Combo && rest == "5" => Some(Vec::new()),
         (b'+', b'g') if subcommand == Combo && rest == "7" => Some(vec!["--dedupe-matches".into()]),
+        // MAXWD `+gN` (N in 1..=3) is the utterance-mode metric
+        // selector ("find longest utterance instead of longest
+        // word; N selects metric: 1=morph, 2=word, 3=char") per
+        // `book/src/clan-reference/commands/maxwd.md:52`. chatter
+        // does not implement utterance-mode yet. Without this
+        // arm, the token falls through to `rewrite_gem` (next in
+        // the chain) and becomes `--gem N` — silently mis-routing
+        // to a literal gem-name filter. Pass-through (None) lets
+        // clap reject `+gN` honestly. Maxwd's `+gX` (non-digit X)
+        // gem filter is left for `rewrite_gem` to handle.
+        (b'+', b'g')
+            if subcommand == Maxwd
+                && !rest.is_empty()
+                && rest.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            None
+        }
+
         // COMBO `+g1` / `+g2` / `+g6` are search-mode switches
         // (string-oriented whole-tier / single-word search;
         // include tier code name in search) that chatter does not
@@ -1652,6 +1692,40 @@ mod tests {
     #[test]
     fn gemfreq_dn_passes_through() {
         assert_passthrough("clan gemfreq +d1 file.cha");
+    }
+
+    /// MAXWD `+g1` / `+g2` / `+g3` are utterance-mode metric
+    /// selectors ("find longest utterance instead of longest word;
+    /// N selects metric: 1=morph, 2=word, 3=char"). chatter does
+    /// not implement utterance-mode yet (audit page status
+    /// "Missing"). Without per-command arms, `+g3` etc. fall
+    /// through to `rewrite_gem` and become `--gem 3` (literal gem
+    /// name), silently mis-routing. Pass-through (None) makes clap
+    /// reject the unimplemented flag honestly. Same pattern as
+    /// the combo `+g1`/`+g2`/`+g6` arms.
+    #[test]
+    fn maxwd_g1_passes_through_not_misrouted_to_gem() {
+        assert_passthrough("clan maxwd +g1 file.cha");
+    }
+
+    #[test]
+    fn maxwd_g3_passes_through_not_misrouted_to_gem() {
+        assert_passthrough("clan maxwd +g3 file.cha");
+    }
+
+    /// LAB2CHAT `+tN` is "Movie segment start time offset" per
+    /// `book/src/clan-reference/commands/lab2chat.md:69`. chatter
+    /// does not implement movie-segment offsets (audit page status
+    /// "Missing"). Without a per-command arm, `+t3` falls through
+    /// to `rewrite_tier_speaker` (default branch) and becomes
+    /// `--speaker 3` — silently mis-routing to LAB-CHAT speaker
+    /// labeling. Pass-through (None) makes clap reject the
+    /// digit-only `+tN` form honestly. Letter forms like `+tCHI`
+    /// are not lab2chat semantics either but are out of scope
+    /// here.
+    #[test]
+    fn lab2chat_t_digit_passes_through_not_speaker() {
+        assert_passthrough("clan lab2chat +t3 file.lab");
     }
 
     /// COMBO `+g1` (string-oriented whole-tier search), `+g2`
