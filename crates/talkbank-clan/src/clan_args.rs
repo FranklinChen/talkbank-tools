@@ -1044,6 +1044,17 @@ mod tests {
         s.split_whitespace().map(String::from).collect()
     }
 
+    /// Assert that `rewrite_clan_args` leaves the given invocation
+    /// byte-for-byte unchanged — the per-command pattern shared by
+    /// every passthrough arm. Pre-arm a passthrough test should
+    /// fail with the rewrite the arm is intended to suppress;
+    /// post-arm it passes by returning the input verbatim.
+    fn assert_passthrough(invocation: &str) {
+        let input = args(invocation);
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
     #[test]
     fn speaker_include() {
         let input = args("clan analyze freq +t*CHI file.cha");
@@ -1196,9 +1207,7 @@ mod tests {
         // The `-bw` rewrite is scoped to MLU/MLT — other commands
         // don't share the morphemes-vs-words counting axis, so
         // `-bw` should fall through unchanged for them.
-        let input = args("clan analyze freq -bw file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, args("clan analyze freq -bw file.cha"));
+        assert_passthrough("clan analyze freq -bw file.cha");
     }
 
     #[test]
@@ -1313,17 +1322,13 @@ mod tests {
     /// "--display-mode" rewrite from the catch-all.
     #[test]
     fn chains_dn_passes_through() {
-        let input = args("clan chains +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan chains +d1 file.cha");
     }
 
     /// Bare `+d` on CHAINS also passes through.
     #[test]
     fn chains_d_bare_passes_through() {
-        let input = args("clan chains +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan chains +d file.cha");
     }
 
     /// MODREP `+d` is a no-arg Excel toggle per
@@ -1331,9 +1336,7 @@ mod tests {
     /// it through; no `--format csv` for MODREP in chatter.
     #[test]
     fn modrep_d_passes_through() {
-        let input = args("clan modrep +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan modrep +d file.cha");
     }
 
     /// IPSYN `+d`/`+dN` are `onlydata` levels per
@@ -1341,9 +1344,7 @@ mod tests {
     /// them through; no `--only-data` flag in chatter.
     #[test]
     fn ipsyn_dn_passes_through() {
-        let input = args("clan ipsyn +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan ipsyn +d1 file.cha");
     }
 
     /// TRNFIX `+d` (bare) sets `whichDopt = 1` and `+d<anything>`
@@ -1355,18 +1356,14 @@ mod tests {
     /// "--display-mode" rewrite from the catch-all.
     #[test]
     fn trnfix_d_bare_passes_through() {
-        let input = args("clan trnfix +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan trnfix +d file.cha");
     }
 
     /// Non-bare TRNFIX `+dN` (`whichDopt = 2` branch) also passes
     /// through unchanged.
     #[test]
     fn trnfix_dn_passes_through() {
-        let input = args("clan trnfix +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan trnfix +d1 file.cha");
     }
 
     /// KEYMAP `+d` is a no-arg Excel/spreadsheet toggle per
@@ -1377,9 +1374,7 @@ mod tests {
     /// flag.
     #[test]
     fn keymap_d_bare_passes_through() {
-        let input = args("clan keymap +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan keymap +d file.cha");
     }
 
     /// `+d1` for KEYMAP is malformed input — CLAN errors because
@@ -1390,9 +1385,7 @@ mod tests {
     /// arm intercepts so the literal token survives to clap.
     #[test]
     fn keymap_dn_passes_through() {
-        let input = args("clan keymap +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan keymap +d1 file.cha");
     }
 
     /// DIST `+d`/`+dN` are `onlydata` output-detail levels routed
@@ -1407,18 +1400,14 @@ mod tests {
     /// through.
     #[test]
     fn dist_d_bare_passes_through() {
-        let input = args("clan dist +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan dist +d file.cha");
     }
 
     /// Non-bare DIST `+dN` also passes through unchanged (currently
     /// the catch-all rewrites it misleadingly to `--display-mode N`).
     #[test]
     fn dist_dn_passes_through() {
-        let input = args("clan dist +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan dist +d1 file.cha");
     }
 
     /// DSS `+d` is a spreadsheet-output toggle with its own
@@ -1428,18 +1417,14 @@ mod tests {
     /// the token through.
     #[test]
     fn dss_d_bare_passes_through() {
-        let input = args("clan dss +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan dss +d file.cha");
     }
 
     /// Non-bare DSS `+dN` (the `IsOutputSpreadsheet = 2` branch) also
     /// passes through unchanged.
     #[test]
     fn dss_dn_passes_through() {
-        let input = args("clan dss +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan dss +d1 file.cha");
     }
 
     /// GEM `+d2` is a local override at
@@ -1451,18 +1436,14 @@ mod tests {
     /// consumer; per-GEM arm passes through both forms.
     #[test]
     fn gem_d_bare_passes_through() {
-        let input = args("clan gem +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan gem +d file.cha");
     }
 
     /// Non-bare GEM `+dN` (including the `+d2` local override and
     /// the maingetflag-routed `+d0`/`+d1`) passes through unchanged.
     #[test]
     fn gem_dn_passes_through() {
-        let input = args("clan gem +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan gem +d1 file.cha");
     }
 
     /// GEMFREQ has no local `case 'd'`; `+d`/`+dN` is consumed
@@ -1472,17 +1453,13 @@ mod tests {
     /// `--display-mode` consumer; per-GEMFREQ arm passes through.
     #[test]
     fn gemfreq_d_bare_passes_through() {
-        let input = args("clan gemfreq +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan gemfreq +d file.cha");
     }
 
     /// Non-bare GEMFREQ `+dN` also passes through.
     #[test]
     fn gemfreq_dn_passes_through() {
-        let input = args("clan gemfreq +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan gemfreq +d1 file.cha");
     }
 
     /// VOCD `+d`/`+dN` are `onlydata` output-detail levels per
@@ -1494,17 +1471,13 @@ mod tests {
     /// per-VOCD arm passes through.
     #[test]
     fn vocd_d_bare_passes_through() {
-        let input = args("clan vocd +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan vocd +d file.cha");
     }
 
     /// Non-bare VOCD `+dN` also passes through (strict-RED case).
     #[test]
     fn vocd_dn_passes_through() {
-        let input = args("clan vocd +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan vocd +d1 file.cha");
     }
 
     /// CHSTRING `+d` is bare-only per
@@ -1515,9 +1488,7 @@ mod tests {
     /// Per-CHSTRING arm passes through.
     #[test]
     fn chstring_d_bare_passes_through() {
-        let input = args("clan chstring +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan chstring +d file.cha");
     }
 
     /// Malformed CHSTRING `+dN` (CLAN errors per `no_arg_option`)
@@ -1525,9 +1496,7 @@ mod tests {
     /// than hitting the misleading `--display-mode` rewrite.
     #[test]
     fn chstring_dn_passes_through() {
-        let input = args("clan chstring +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan chstring +d1 file.cha");
     }
 
     /// CHIP has no local `case 'd'`; `+d`/`+dN` is consumed via the
@@ -1539,17 +1508,13 @@ mod tests {
     /// arm passes through.
     #[test]
     fn chip_d_bare_passes_through() {
-        let input = args("clan chip +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan chip +d file.cha");
     }
 
     /// Non-bare CHIP `+dN` (strict-RED case).
     #[test]
     fn chip_dn_passes_through() {
-        let input = args("clan chip +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan chip +d1 file.cha");
     }
 
     /// FLO `+d` has multi-value local semantics at
@@ -1564,17 +1529,13 @@ mod tests {
     /// passes through.
     #[test]
     fn flo_d_bare_passes_through() {
-        let input = args("clan flo +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan flo +d file.cha");
     }
 
     /// Non-bare FLO `+dN` (strict-RED case).
     #[test]
     fn flo_dn_passes_through() {
-        let input = args("clan flo +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan flo +d1 file.cha");
     }
 
     /// MAXWD has no local `case 'd'`; consumption via shared
@@ -1585,17 +1546,13 @@ mod tests {
     /// MAXWD. Per-MAXWD arm passes through.
     #[test]
     fn maxwd_d_bare_passes_through() {
-        let input = args("clan maxwd +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan maxwd +d file.cha");
     }
 
     /// Non-bare MAXWD `+dN` (strict-RED case).
     #[test]
     fn maxwd_dn_passes_through() {
-        let input = args("clan maxwd +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan maxwd +d1 file.cha");
     }
 
     /// MLU/MLUMOR have no local `case 'd'`; consumption via shared
@@ -1605,17 +1562,13 @@ mod tests {
     /// chatter has no `--display-mode` consumer for MLU.
     #[test]
     fn mlu_d_bare_passes_through() {
-        let input = args("clan mlu +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan mlu +d file.cha");
     }
 
     /// Non-bare MLU `+dN` (strict-RED case).
     #[test]
     fn mlu_dn_passes_through() {
-        let input = args("clan mlu +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan mlu +d1 file.cha");
     }
 
     /// MLT has no local `case 'd'`; consumption via shared
@@ -1625,17 +1578,13 @@ mod tests {
     /// `--display-mode` consumer for MLT.
     #[test]
     fn mlt_d_bare_passes_through() {
-        let input = args("clan mlt +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan mlt +d file.cha");
     }
 
     /// Non-bare MLT `+dN` (strict-RED case).
     #[test]
     fn mlt_dn_passes_through() {
-        let input = args("clan mlt +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan mlt +d1 file.cha");
     }
 
     /// COMBO has a full local `case 'd'` at `combo.cpp:2858` with
@@ -1646,9 +1595,7 @@ mod tests {
     /// returns None for empty rest, so this passes pre-arm too).
     #[test]
     fn combo_d_bare_passes_through() {
-        let input = args("clan combo +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan combo +d file.cha");
     }
 
     /// Non-bare COMBO `+dN` (strict-RED). Pre-arm, this rewrites
@@ -1657,9 +1604,7 @@ mod tests {
     /// arm restores the literal-flag error path.
     #[test]
     fn combo_dn_passes_through() {
-        let input = args("clan combo +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan combo +d1 file.cha");
     }
 
     /// CHECK has no local `case 'd'`; consumption via shared
@@ -1671,17 +1616,13 @@ mod tests {
     /// for CHECK. Per-CHECK arm passes through.
     #[test]
     fn check_d_bare_passes_through() {
-        let input = args("clan check +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan check +d file.cha");
     }
 
     /// Non-bare CHECK `+dN` (strict-RED).
     #[test]
     fn check_dn_passes_through() {
-        let input = args("clan check +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan check +d1 file.cha");
     }
 
     /// WDSIZE has a local `case 'd'` at
@@ -1696,9 +1637,7 @@ mod tests {
     /// passes pre-arm too).
     #[test]
     fn wdsize_d_bare_passes_through() {
-        let input = args("clan wdsize +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan wdsize +d file.cha");
     }
 
     /// Non-bare WDSIZE `+dN` (strict-RED). Pre-arm, the catch-all
@@ -1707,9 +1646,7 @@ mod tests {
     /// exists). The arm restores the literal-flag error path.
     #[test]
     fn wdsize_dn_passes_through() {
-        let input = args("clan wdsize +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan wdsize +d1 file.cha");
     }
 
     /// WDLEN has the same `case 'd'` fallthrough at
@@ -1719,17 +1656,13 @@ mod tests {
     /// Bare `+d` is the regression guard.
     #[test]
     fn wdlen_d_bare_passes_through() {
-        let input = args("clan wdlen +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan wdlen +d file.cha");
     }
 
     /// Non-bare WDLEN `+dN` (strict-RED).
     #[test]
     fn wdlen_dn_passes_through() {
-        let input = args("clan wdlen +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan wdlen +d1 file.cha");
     }
 
     /// EVAL has a local `case 'd'` at
@@ -1743,9 +1676,7 @@ mod tests {
     /// already returns None for empty rest).
     #[test]
     fn eval_d_bare_passes_through() {
-        let input = args("clan eval +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan eval +d file.cha");
     }
 
     /// Non-bare EVAL `+dN` (strict-RED). Pre-arm, the catch-all
@@ -1754,9 +1685,7 @@ mod tests {
     /// `addDBKeys("1")` — entirely unrelated to display mode.
     #[test]
     fn eval_dn_passes_through() {
-        let input = args("clan eval +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan eval +d1 file.cha");
     }
 
     /// EVAL-D has the same `case 'd'` handler as EVAL at
@@ -1765,17 +1694,13 @@ mod tests {
     /// guard.
     #[test]
     fn evald_d_bare_passes_through() {
-        let input = args("clan eval-d +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan eval-d +d file.cha");
     }
 
     /// Non-bare EVAL-D `+dN` (strict-RED).
     #[test]
     fn evald_dn_passes_through() {
-        let input = args("clan eval-d +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan eval-d +d1 file.cha");
     }
 
     /// TIMEDUR has a local `case 'd'` at
@@ -1789,17 +1714,13 @@ mod tests {
     /// regression guard.
     #[test]
     fn timedur_d_bare_passes_through() {
-        let input = args("clan timedur +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan timedur +d file.cha");
     }
 
     /// Non-bare TIMEDUR `+dN` (strict-RED).
     #[test]
     fn timedur_dn_passes_through() {
-        let input = args("clan timedur +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan timedur +d1 file.cha");
     }
 
     /// DATES has a local `case 'd'` at
@@ -1812,9 +1733,7 @@ mod tests {
     /// the regression guard.
     #[test]
     fn dates_d_bare_passes_through() {
-        let input = args("clan dates +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan dates +d file.cha");
     }
 
     /// Non-bare DATES `+dN` (strict-RED). In CLAN this would
@@ -1822,9 +1741,7 @@ mod tests {
     /// the catch-all's rewrite would be doubly wrong.
     #[test]
     fn dates_dn_passes_through() {
-        let input = args("clan dates +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan dates +d1 file.cha");
     }
 
     /// FLUCALC has a local `case 'd'` at
@@ -1838,17 +1755,13 @@ mod tests {
     /// through. Bare `+d` is the regression guard.
     #[test]
     fn flucalc_d_bare_passes_through() {
-        let input = args("clan flucalc +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan flucalc +d file.cha");
     }
 
     /// Non-bare FLUCALC `+dN` (strict-RED).
     #[test]
     fn flucalc_dn_passes_through() {
-        let input = args("clan flucalc +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan flucalc +d1 file.cha");
     }
 
     /// KIDEVAL has a local `case 'd'` at
@@ -1862,17 +1775,13 @@ mod tests {
     /// regression guard.
     #[test]
     fn kideval_d_bare_passes_through() {
-        let input = args("clan kideval +d file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan kideval +d file.cha");
     }
 
     /// Non-bare KIDEVAL `+dN` (strict-RED).
     #[test]
     fn kideval_dn_passes_through() {
-        let input = args("clan kideval +d1 file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, input);
+        assert_passthrough("clan kideval +d1 file.cha");
     }
 
     #[test]
@@ -1980,12 +1889,10 @@ mod tests {
     /// subcommand to ensure scope-narrowing.
     #[test]
     fn freq_d_bare_does_not_match_position_classification() {
-        let input = args("clan freq +d file.cha");
-        let result = rewrite_clan_args(&input);
         // `+d` with empty rest under FREQ doesn't get rewritten —
         // it stays in the argv as-is (downstream clap will error
         // since there's no `+d` consumer).
-        assert_eq!(result, args("clan freq +d file.cha"));
+        assert_passthrough("clan freq +d file.cha");
     }
 
     /// FREQ's `+o1` is the reverse-concordance sort: words are
@@ -2434,12 +2341,10 @@ mod tests {
     /// distinguishes it from the inline-value form.
     #[test]
     fn keymap_keyword_file_passes_through() {
-        let input = args("clan keymap +b@codes.cut file.cha");
-        let result = rewrite_clan_args(&input);
         // `+b@codes.cut` unrewritten — clap rejects at parse time
         // (better than silently misinterpreting as an inline keyword
         // literally named "@codes.cut").
-        assert_eq!(result, args("clan keymap +b@codes.cut file.cha"));
+        assert_passthrough("clan keymap +b@codes.cut file.cha");
     }
 
     /// MAKEMOD's `+a` is the all-alternatives boolean.
@@ -2574,9 +2479,7 @@ mod tests {
     /// semantic). The arg passes through unchanged.
     #[test]
     fn fixbullets_o_with_non_numeric_passes_through() {
-        let input = args("clan fixbullets +omor file.cha");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, args("clan fixbullets +omor file.cha"));
+        assert_passthrough("clan fixbullets +omor file.cha");
     }
 
     /// CLAN's `+t#ROLE` selects speakers by their `@ID:` role field.
@@ -2597,10 +2500,8 @@ mod tests {
     /// wrong include semantic.
     #[test]
     fn role_exclude_polarity_not_rewritten() {
-        let input = args("clan freq -t#Target_Child file.cha");
-        let result = rewrite_clan_args(&input);
         // Arg passes through verbatim — no rewrite.
-        assert_eq!(result, args("clan freq -t#Target_Child file.cha"));
+        assert_passthrough("clan freq -t#Target_Child file.cha");
     }
 
     /// Outside SCRIPT, `+s` keeps its general meaning (include-word
@@ -2683,10 +2584,8 @@ mod tests {
 
     #[test]
     fn unknown_flag_passes_through() {
-        let input = args("clan analyze freq +x123 file.cha");
-        let result = rewrite_clan_args(&input);
         // Unknown +x flag is not rewritten
-        assert_eq!(result, args("clan analyze freq +x123 file.cha"));
+        assert_passthrough("clan analyze freq +x123 file.cha");
     }
 
     #[test]
@@ -2707,25 +2606,19 @@ mod tests {
 
     #[test]
     fn bare_plus_minus_pass_through() {
-        let input = args("+ -");
-        let result = rewrite_clan_args(&input);
-        assert_eq!(result, args("+ -"));
+        assert_passthrough("+ -");
     }
 
     #[test]
     fn r_without_6_passes_through() {
-        let input = args("clan analyze freq +r3 file.cha");
-        let result = rewrite_clan_args(&input);
         // +r3 is not +r6, so it passes through
-        assert_eq!(result, args("clan analyze freq +r3 file.cha"));
+        assert_passthrough("clan analyze freq +r3 file.cha");
     }
 
     #[test]
     fn display_mode_non_numeric_passes_through() {
-        let input = args("clan analyze freq +dabc file.cha");
-        let result = rewrite_clan_args(&input);
         // +dabc is not a valid display mode
-        assert_eq!(result, args("clan analyze freq +dabc file.cha"));
+        assert_passthrough("clan analyze freq +dabc file.cha");
     }
 
     // CHECK-specific flag tests
