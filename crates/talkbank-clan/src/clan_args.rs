@@ -80,6 +80,8 @@ enum ClanSubcommandKind {
     Wdlen,
     Eval,
     EvalD,
+    Timedur,
+    Dates,
     Other,
 }
 
@@ -127,6 +129,8 @@ impl ClanSubcommandKind {
                 "wdlen" => return Self::Wdlen,
                 "eval" => return Self::Eval,
                 "eval-d" => return Self::EvalD,
+                "timedur" => return Self::Timedur,
+                "dates" => return Self::Dates,
                 _ => {}
             }
         }
@@ -629,6 +633,24 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // `addDBKeys` string-arg semantics). chatter has no
         // consumer; pass through.
         (b'+', b'd') if subcommand == EvalD => None,
+
+        // TIMEDUR `+d`/`+dN` — local `case 'd'` at
+        // `OSX-CLAN/src/clan/timedur.cpp:157`. IS an `onlydata`-
+        // level setter but with TIMEDUR-specific semantics: bare
+        // `+d` / `+d0` → `onlydata = 1`; `+d1` → `onlydata = 2`;
+        // `+d10` → `onlydata = 3`; anything else errors;
+        // duplicate `+d` also errors. CLAN_SRV additionally
+        // rejects `onlydata == 1 || 3`. chatter has no
+        // `--display-mode` consumer for TIMEDUR; pass through.
+        (b'+', b'd') if subcommand == Timedur => None,
+
+        // DATES `+d`/`+dDATE` — local `case 'd'` at
+        // `OSX-CLAN/src/clan/dates.cpp:837`. NOT a level setter
+        // — `+dDATE` (or `+d DATE` two-token form, consuming the
+        // next arg) calls `getdate(DATE)` to register a literal
+        // date string. Same shape as EVAL: string-arg flag, not
+        // numeric level. chatter has no consumer; pass through.
+        (b'+', b'd') if subcommand == Dates => None,
 
         // +dN — display mode
         (b'+', b'd') => rewrite_display_mode(rest),
@@ -1729,6 +1751,55 @@ mod tests {
     #[test]
     fn evald_dn_passes_through() {
         let input = args("clan eval-d +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// TIMEDUR has a local `case 'd'` at
+    /// `OSX-CLAN/src/clan/timedur.cpp:157` that IS an
+    /// `onlydata`-level setter but with TIMEDUR-specific
+    /// semantics: bare `+d` / `+d0` → `onlydata = 1`; `+d1` →
+    /// `onlydata = 2`; `+d10` → `onlydata = 3`; anything else
+    /// errors. Duplicate `+d` also errors. CLAN_SRV additionally
+    /// rejects `onlydata == 1 || 3`. chatter has no
+    /// `--display-mode` consumer for TIMEDUR. Bare `+d` is the
+    /// regression guard.
+    #[test]
+    fn timedur_d_bare_passes_through() {
+        let input = args("clan timedur +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare TIMEDUR `+dN` (strict-RED).
+    #[test]
+    fn timedur_dn_passes_through() {
+        let input = args("clan timedur +d1 file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// DATES has a local `case 'd'` at
+    /// `OSX-CLAN/src/clan/dates.cpp:837` that is *not* a level
+    /// setter — `+dDATE` (or `+d DATE` two-token form) calls
+    /// `getdate(DATE)` to register a literal date string. Same
+    /// general shape as EVAL: `+d` takes a string argument, not
+    /// a numeric level. chatter has no `--date-filter` or
+    /// `--display-mode` consumer; pass through. Bare `+d` is
+    /// the regression guard.
+    #[test]
+    fn dates_d_bare_passes_through() {
+        let input = args("clan dates +d file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, input);
+    }
+
+    /// Non-bare DATES `+dN` (strict-RED). In CLAN this would
+    /// be `getdate("1")` — entirely unrelated to display mode;
+    /// the catch-all's rewrite would be doubly wrong.
+    #[test]
+    fn dates_dn_passes_through() {
+        let input = args("clan dates +d1 file.cha");
         let result = rewrite_clan_args(&input);
         assert_eq!(result, input);
     }
