@@ -589,6 +589,36 @@ fn try_rewrite_clan_flag(arg: &str, subcommand: ClanSubcommandKind) -> Option<Ve
         // output; semantically a no-op. Pass through.
         (b'+', b'd') if subcommand == Chstring => None,
 
+        // CHSTRING `+b` — bare-only "work only on text right of the
+        // colon (CHAT format)" per
+        // `OSX-CLAN/src/clan/chstring.cpp:1120` (`case 'b':
+        // lineonly = TRUE; no_arg_option(f)`). chatter's `chstring`
+        // already mutates only main-tier word content (never
+        // speaker codes or dependent-tier text), so `+b` is
+        // semantically a no-op. Drop the flag — without this arm
+        // clap consumes the bare `+b` token as the positional
+        // `<PATH>` slot.
+        (b'+', b'b') if rest.is_empty() && subcommand == Chstring => Some(vec![]),
+
+        // CHSTRING `+lx` — "do not show the list of changes" per
+        // `OSX-CLAN/src/clan/chstring.cpp:1108-1111` (`case 'l': if
+        // (*f == 'x') DispChanges = FALSE`). chatter never prints a
+        // changes-list (silent by design), so `+lx` is semantically
+        // a no-op. Drop the specific `lx` form; bare `+l` (header-
+        // only mode) is genuinely unimplemented and falls through
+        // to clap as before.
+        (b'+', b'l') if rest == "x" && subcommand == Chstring => Some(vec![]),
+
+        // CHSTRING `-w` — bare-only "string-oriented search and
+        // replacement" per `OSX-CLAN/src/clan/chstring.cpp:1145-1147`
+        // (`case 'w': if (*f == EOS) stringOriented = 1`). chatter's
+        // word-leaf replacement is already string-oriented by
+        // default, so `-w` is semantically a no-op. CLAN's `-w1`
+        // (`stringOriented = 2`) is not documented in the chstring
+        // audit page, so the specific `1` form is left to fall
+        // through.
+        (b'-', b'w') if rest.is_empty() && subcommand == Chstring => Some(vec![]),
+
         // CHIP `+d`/`+dN` — `onlydata`-level via shared
         // `maingetflag` path at `OSX-CLAN/src/clan/cutt.cpp:9382`
         // with non-empty per-program body at `cutt.cpp:9427`
@@ -1538,6 +1568,48 @@ mod tests {
     #[test]
     fn gemfreq_dn_passes_through() {
         assert_passthrough("clan gemfreq +d1 file.cha");
+    }
+
+    /// CHSTRING `+b` is "work only on text right of the colon (CHAT
+    /// format)" per `OSX-CLAN/src/clan/chstring.cpp:1120` (`case 'b':
+    /// lineonly = TRUE; no_arg_option(f)`). chatter's `chstring`
+    /// already only mutates main-tier word content (never speaker
+    /// codes or header/dependent-tier text), so `+b` is semantically
+    /// a no-op. Without this arm `+b` falls through to clap, where
+    /// the bare `+`-prefixed token is consumed as the positional
+    /// `<PATH>` slot — orphaning the real `.cha` file.
+    #[test]
+    fn chstring_b_drops_redundant_main_tier_only_flag() {
+        let input = args("clan chstring --changes c.txt +b file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan chstring --changes c.txt file.cha"));
+    }
+
+    /// CHSTRING `+lx` is "do not show the list of changes" per
+    /// `OSX-CLAN/src/clan/chstring.cpp:1108-1111` (`case 'l': if (*f
+    /// == 'x') { DispChanges = FALSE; }`). chatter never prints a
+    /// changes-list (operates silently by design), so `+lx` is
+    /// semantically a no-op. Same fall-through-to-positional bug as
+    /// `+b` without this arm.
+    #[test]
+    fn chstring_lx_drops_redundant_silent_flag() {
+        let input = args("clan chstring --changes c.txt +lx file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan chstring --changes c.txt file.cha"));
+    }
+
+    /// CHSTRING `-w` is "string-oriented search and replacement"
+    /// per `OSX-CLAN/src/clan/chstring.cpp:1145-1147` (`case 'w': if
+    /// (*f == EOS) stringOriented = 1`). chatter's word-leaf
+    /// replacement is already string-oriented by default, so `-w`
+    /// is semantically a no-op. Unlike `+b`/`+lx`, the bare `-w`
+    /// form fails by clap rejecting `-w` directly as an unknown
+    /// short flag rather than falling through to the positional.
+    #[test]
+    fn chstring_w_drops_redundant_string_oriented_flag() {
+        let input = args("clan chstring --changes c.txt -w file.cha");
+        let result = rewrite_clan_args(&input);
+        assert_eq!(result, args("clan chstring --changes c.txt file.cha"));
     }
 
     /// GEMFREQ `+o` is a no-value sort-by-descending-frequency flag

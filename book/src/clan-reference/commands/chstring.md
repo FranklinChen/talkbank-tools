@@ -1,7 +1,7 @@
 # CHSTRING -- String Replacement Using a Changes File
 
 **Status:** Current
-**Last updated:** 2026-05-26 11:43 EDT
+**Last updated:** 2026-05-27 10:06 EDT
 
 ## Purpose
 
@@ -39,15 +39,15 @@ Sources: `OSX-CLAN/src/clan/chstring.cpp::usage`,
 
 | CLAN flag | Meaning | Chatter | Status | Notes |
 |---|---|---|---|---|
-| `+b` | Work only on text right of the colon (CHAT format) | (default) | Done | chatter only mutates the main-tier word content; speaker codes are preserved. |
+| `+b` | Work only on text right of the colon (CHAT format) | (default) | Done | CLAN: `chstring.cpp:1120` (`case 'b': lineonly = TRUE; no_arg_option(f)`). chatter's `chstring` already mutates only main-tier word content (never speaker codes or dependent-tier text), so `+b` is semantically a no-op. Per-CHSTRING rewriter arm in `clan_args.rs` consumes-and-drops `+b` so it doesn't fall through to the positional `<PATH>` slot. |
 | `+cF` / `-c` | Dictionary file path / do not change inside `[...]` codes | `--changes <PATH>` (file form only) | Partial | chatter requires the path explicitly (no `changes.cut`-in-cwd default). The `-c` inside-codes guard is implicit — chatter's AST-based replacement only touches word leaves, never code-bracket content. |
 | `+d` | Do not re-wrap tiers | — | Missing | Bare-only per `OSX-CLAN/src/clan/chstring.cpp:1087` (`NO_CHANGE = TRUE` + `no_arg_option(f)`). chatter never wraps on output, so semantically a no-op. Per-CHSTRING rewriter arm in `clan_args.rs` passes the token through so clap reports the literal `+d` argument rather than the misleading `--display-mode` rewrite. |
 | `+l` | Work only on codes left of colon (speaker tag) | — | Missing | |
-| `+lx` | Do not show the list of changes | (default) | Done | chatter operates silently. |
+| `+lx` | Do not show the list of changes | (default) | Done | CLAN: `chstring.cpp:1108-1111` (`case 'l': if (*f == 'x') DispChanges = FALSE`). chatter never prints a changes-list (silent by design), so `+lx` is semantically a no-op. Per-CHSTRING rewriter arm in `clan_args.rs` consumes-and-drops the specific `lx` form so it doesn't fall through to the positional `<PATH>` slot. Bare `+l` (`headeronly = TRUE`) is genuinely unimplemented and falls through to clap. |
 | `+q` | Clean up tiers (add tabs after colons, remove blank spaces) | — | Missing | Tier-cleanup pass. |
 | `+q1` | Clean up tiers for CORELEX | — | Missing | |
 | `+sS S` | Inline find/replace pair | — | Missing | All replacements must come via `--changes`. |
-| `-w` | String-oriented search and replacement | (default) | Done | chatter's word-leaf replacement IS string-oriented. |
+| `-w` | String-oriented search and replacement | (default) | Done | CLAN: `chstring.cpp:1145-1147` (`case 'w': if (*f == EOS) stringOriented = 1`). chatter's word-leaf replacement is already string-oriented by default, so `-w` is semantically a no-op. Per-CHSTRING rewriter arm in `clan_args.rs` consumes-and-drops bare `-w` so it doesn't fall through to clap as an unknown short flag. CLAN's `-w1` (`stringOriented = 2`) is not documented in this audit and is left to fall through. |
 | `+x` | Interpret `*`, `_`, `\` as literal characters | — | Missing | chatter's matcher does not yet expose wildcard-vs-literal switching. |
 
 ### Audit summary
