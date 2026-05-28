@@ -21,6 +21,13 @@ pub struct GlobalOpts {
 
     /// Inference timeout in seconds for audio tasks (ASR, FA, speaker).
     /// Increase for very long recordings (default: 1800 = 30 minutes).
+    ///
+    /// Applies to new daemons (auto-spawned or `--no-server` direct
+    /// runs). When reusing an existing daemon (the common server-mode
+    /// path), the per-task ceiling was fixed at the daemon's startup
+    /// and `--timeout` here does NOT override it — pass `--no-server`
+    /// or restart the daemon to change the ceiling. A note is printed
+    /// when `--timeout` is provided but reuse is happening.
     #[arg(long, global = true)]
     pub timeout: Option<u64>,
 
