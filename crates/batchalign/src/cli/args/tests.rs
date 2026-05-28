@@ -1362,8 +1362,9 @@ fn build_options_wor_matrix_for_processing_commands() {
         ),
         (
             vec!["batchalign3", "benchmark", "audio/"],
-            false,
-            "benchmark defaults to omitting %wor",
+            true,
+            "benchmark defaults to writing %wor (mirrors align — \
+             forced alignment is always run as the comparison anchor)",
         ),
         (
             vec!["batchalign3", "benchmark", "--wor", "audio/"],
@@ -1412,7 +1413,12 @@ fn build_options_benchmark_defaults() {
     match opts {
         CommandOptions::Benchmark(b) => {
             assert_eq!(b.asr_engine, AsrEngineName::RevAi);
-            assert!(!b.wor.should_write());
+            // Benchmark always runs forced alignment as the comparison
+            // anchor, so word timings already exist — writing %wor by
+            // default keeps that data in the output instead of throwing
+            // it away. Mirrors `align`; differs from `transcribe` (which
+            // defaults to Omit because it doesn't always run FA).
+            assert!(b.wor.should_write());
             assert!(!b.merge_abbrev.should_merge());
         }
         _ => panic!("expected Benchmark"),

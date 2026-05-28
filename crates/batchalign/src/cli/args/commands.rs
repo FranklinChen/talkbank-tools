@@ -584,11 +584,14 @@ pub struct BenchmarkArgs {
     #[arg(short = 'n', long, default_value_t = 2)]
     pub num_speakers: u32,
 
-    /// Write word-level alignment (%wor) tier.
-    #[arg(long, conflicts_with = "nowor")]
+    /// Write word-level alignment (%wor) tier. Defaults to true for
+    /// `benchmark` because the comparison anchor (forced alignment)
+    /// has already computed word timings — omitting them throws away
+    /// data the user paid the FA cost for. Mirrors the `align` command.
+    #[arg(long, conflicts_with = "nowor", default_value_t = true)]
     pub wor: bool,
 
-    /// Disable %wor tier (default).
+    /// Disable %wor tier.
     #[arg(long, conflicts_with = "wor")]
     pub nowor: bool,
 

@@ -438,8 +438,13 @@ pub struct BenchmarkOptions {
     #[serde(default = "default_asr_engine")]
     pub asr_engine: AsrEngineName,
 
-    /// Generate `%wor` tier with word-level timing bullets.
-    #[serde(default)]
+    /// Generate `%wor` tier with word-level timing bullets. Defaults to
+    /// `Include` because the benchmark pipeline always runs forced
+    /// alignment (it's the comparison anchor against the gold), so the
+    /// word timings already exist — omitting them from the serialized
+    /// output throws away alignment data the comparison just computed.
+    /// Mirrors `AlignOptions::wor`, not `TranscribeOptions::wor`.
+    #[serde(default = "default_wor_tier_include")]
     pub wor: WorTierPolicy,
 
     /// Merge abbreviated forms during processing.
