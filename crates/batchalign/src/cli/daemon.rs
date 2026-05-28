@@ -375,19 +375,15 @@ async fn ensure_daemon_locked(
             }
 
             if health_check(info.port).await {
-                // If the user passed `--timeout`, warn that it doesn't
-                // override the running daemon's per-task ceiling — the
-                // daemon's `audio_task_timeout_s` was set at startup
-                // and reused here. Without this warning the user sees
-                // their request fail with "timed out at N seconds"
-                // where N < their requested timeout, with no diagnostic
-                // pointing at the cause. This was the failure mode that
-                // surfaced during the 2026-05-28 qwen-0.6b CHILDES sweep
-                // when a 7200s client `--timeout` did not raise the
-                // existing daemon's 1800s default.
+                // The daemon's per-task ceiling (`audio_task_timeout_s`)
+                // is fixed at startup. Reusing an existing daemon means
+                // the user's `--timeout` only affects client-side
+                // polling, not the worker's actual deadline — without
+                // surfacing that, a request can fail with a timeout
+                // below the requested value and no obvious cause.
                 if timeout.is_some() {
                     eprintln!(
-                        "note: --timeout applies to new daemons. This run is reusing the \
+                        "warning: --timeout applies to new daemons. This run is reusing the \
                          existing {} daemon, whose per-task ceiling was set at startup. \
                          To change the daemon's ceiling, run `batchalign3 serve stop` then \
                          `batchalign3 serve start --timeout <secs>`, or pass `--no-server` \

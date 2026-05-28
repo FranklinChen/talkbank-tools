@@ -12,17 +12,12 @@ fn repr_text(value: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(value.repr()?.to_str()?.to_string())
 }
 
-fn error_payload<'py>(py: Python<'py>, message: &str) -> PyResult<Bound<'py, PyAny>> {
-    error_payload_with_request_id(py, message, None)
-}
-
-/// Build an `{"op":"error",...}` envelope, optionally tagging it with the
-/// `request_id` of the V2 dispatch that triggered the failure. The Rust
-/// `reader_loop_generic` matches on `request_id` to fail the pending
-/// oneshot immediately, instead of letting the dispatch sit on the
-/// per-request timeout for the full audio-task budget. See
-/// `crates/batchalign/src/worker/pool/shared_gpu/reader.rs`.
-fn error_payload_with_request_id<'py>(
+/// Build an `{"op":"error",...}` envelope. When `request_id` is
+/// supplied, it is included as a top-level field; the Rust reader loop
+/// matches on `request_id` to fail the matching V2 dispatch's pending
+/// oneshot directly, rather than routing the error to the sequential
+/// control channel where a runtime V2 caller has no consumer registered.
+fn error_payload<'py>(
     py: Python<'py>,
     message: &str,
     request_id: Option<&str>,
@@ -37,8 +32,7 @@ fn error_payload_with_request_id<'py>(
 }
 
 /// Extract a `request_id` field from a request payload dict, if present
-/// and string-typed. Used to tag pre-validation errors so the Rust
-/// reader loop can route the failure to the right pending oneshot.
+/// and string-typed.
 fn extract_request_id(payload: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     let Ok(dict) = payload.cast::<PyDict>() else {
         return Ok(None);
@@ -89,7 +83,7 @@ fn validate_request_model<'py>(
                 // the operator sees a generic timeout instead of the
                 // validation error.
                 let request_id = extract_request_id(req_payload)?;
-                let payload = error_payload_with_request_id(
+                let payload = error_payload(
                     py,
                     &format!("invalid {op} request: {error}"),
                     request_id.as_deref(),
@@ -136,7 +130,7 @@ pub(crate) fn dispatch_protocol_message(
         Ok(message) => message,
         Err(_) => {
             return Ok((
-                error_payload(py, "request must be a JSON object")?.unbind(),
+                error_payload(py, "request must be a JSON object", None)?.unbind(),
                 false,
             ));
         }
@@ -147,12 +141,13 @@ pub(crate) fn dispatch_protocol_message(
             Ok(value) => (value.to_str()?.to_string(), repr_text(value.as_any())?),
             Err(_) => {
                 return Ok((
-                    error_payload(py, &format!("unknown op: {}", repr_text(&value)?))?.unbind(),
+                    error_payload(py, &format!("unknown op: {}", repr_text(&value)?), None)?
+                        .unbind(),
                     false,
                 ));
             }
         },
-        None => return Ok((error_payload(py, "unknown op: None")?.unbind(), false)),
+        None => return Ok((error_payload(py, "unknown op: None", None)?.unbind(), false)),
     };
 
     if op == "shutdown" {
@@ -165,7 +160,7 @@ pub(crate) fn dispatch_protocol_message(
         "infer" => {
             let Some(req_payload) = message.get_item("request")? else {
                 return Ok((
-                    error_payload(py, "infer request must include mapping field 'request'")?
+                    error_payload(py, "infer request must include mapping field 'request'", None)?
                         .unbind(),
                     false,
                 ));
@@ -174,7 +169,7 @@ pub(crate) fn dispatch_protocol_message(
                 Ok(payload) => payload.as_any(),
                 Err(_) => {
                     return Ok((
-                        error_payload(py, "infer request must include mapping field 'request'")?
+                        error_payload(py, "infer request must include mapping field 'request'", None)?
                             .unbind(),
                         false,
                     ));
@@ -198,6 +193,7 @@ pub(crate) fn dispatch_protocol_message(
                     error_payload(
                         py,
                         "batch_infer request must include mapping field 'request'",
+                    None,
                     )?
                     .unbind(),
                     false,
@@ -210,6 +206,7 @@ pub(crate) fn dispatch_protocol_message(
                         error_payload(
                             py,
                             "batch_infer request must include mapping field 'request'",
+                        None,
                         )?
                         .unbind(),
                         false,
@@ -234,6 +231,7 @@ pub(crate) fn dispatch_protocol_message(
                     error_payload(
                         py,
                         "execute_v2 request must include mapping field 'request'",
+                    None,
                     )?
                     .unbind(),
                     false,
@@ -246,6 +244,7 @@ pub(crate) fn dispatch_protocol_message(
                         error_payload(
                             py,
                             "execute_v2 request must include mapping field 'request'",
+                        None,
                         )?
                         .unbind(),
                         false,
@@ -272,6 +271,7 @@ pub(crate) fn dispatch_protocol_message(
                     error_payload(
                         py,
                         "ensure_task request must include mapping field 'request'",
+                    None,
                     )?
                     .unbind(),
                     false,
@@ -281,7 +281,7 @@ pub(crate) fn dispatch_protocol_message(
                 Ok(d) => d,
                 Err(_) => {
                     return Ok((
-                        error_payload(py, "ensure_task request must be a mapping")?.unbind(),
+                        error_payload(py, "ensure_task request must be a mapping", None)?.unbind(),
                         false,
                     ));
                 }
@@ -290,7 +290,7 @@ pub(crate) fn dispatch_protocol_message(
                 Some(v) => v,
                 None => {
                     return Ok((
-                        error_payload(py, "ensure_task request must include 'task'")?.unbind(),
+                        error_payload(py, "ensure_task request must include 'task'", None)?.unbind(),
                         false,
                     ));
                 }
@@ -302,7 +302,7 @@ pub(crate) fn dispatch_protocol_message(
             };
             response_payload(py, &op, &result)?
         }
-        _ => error_payload(py, &format!("unknown op: {op_repr}"))?,
+        _ => error_payload(py, &format!("unknown op: {op_repr}"), None)?,
     };
 
     Ok((payload.unbind(), false))

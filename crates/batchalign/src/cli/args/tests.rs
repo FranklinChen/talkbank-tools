@@ -1413,11 +1413,7 @@ fn build_options_benchmark_defaults() {
     match opts {
         CommandOptions::Benchmark(b) => {
             assert_eq!(b.asr_engine, AsrEngineName::RevAi);
-            // Benchmark always runs forced alignment as the comparison
-            // anchor, so word timings already exist — writing %wor by
-            // default keeps that data in the output instead of throwing
-            // it away. Mirrors `align`; differs from `transcribe` (which
-            // defaults to Omit because it doesn't always run FA).
+            // Mirrors `align` — see BenchmarkOptions::wor rustdoc.
             assert!(b.wor.should_write());
             assert!(!b.merge_abbrev.should_merge());
         }

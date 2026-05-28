@@ -136,44 +136,42 @@ pub(crate) async fn reader_loop_generic<R: tokio::io::AsyncBufRead + Unpin>(
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown error")
                             .to_string();
-                        // If the worker tagged the error with a
-                        // `request_id`, route it to the matching V2 pending
-                        // oneshot as a synthetic `ExecuteResponseV2` with
-                        // `outcome: Error{...}`. Without this, the V2
-                        // dispatch sits on its per-request timeout (default
-                        // 180s for audio tasks) while the worker has
-                        // ALREADY surfaced the error — exactly the failure
-                        // mode that hid the 2026-05-27 HK_QWEN schema-drift
-                        // bug for ~12 hours. See
-                        // `crates/batchalign-pyo3/src/worker_protocol.rs::
-                        // error_payload_with_request_id` for the Python
-                        // side.
+                        // V2 dispatches register a pending oneshot keyed by
+                        // request_id; sequential ops (health / capabilities /
+                        // ensure_task) register a single-slot control receiver
+                        // instead. The worker tags errors with `request_id`
+                        // when the failure belongs to a V2 dispatch, untagged
+                        // otherwise. Routing tagged errors to `pending` (and
+                        // untagged to `control`) keeps each consumer's
+                        // receiver semantics intact — otherwise a V2 dispatch
+                        // would block on its per-request timeout while the
+                        // error was silently absorbed by the empty control
+                        // slot.
                         let request_id = parsed
                             .get("request_id")
                             .and_then(|v| v.as_str())
-                            .map(str::to_owned);
+                            .map(WorkerRequestIdV2::from);
                         if let Some(request_id) = request_id {
                             let routed = {
                                 let mut pending = super::super::lock_recovered(&pending);
-                                pending.remove(&request_id)
+                                pending.remove(request_id.as_ref())
                             };
                             if let Some(tx) = routed {
-                                let response = ExecuteResponseV2 {
-                                    request_id: WorkerRequestIdV2::from(request_id.clone()),
-                                    outcome: ExecuteOutcomeV2::Error {
-                                        code: ProtocolErrorCodeV2::InvalidPayload,
-                                        message: error_msg.clone(),
-                                    },
-                                    result: None,
-                                    elapsed_s: DurationSeconds(0.0),
-                                };
                                 debug!(
                                     pid = %pid,
                                     request_id = %request_id,
                                     error = %error_msg,
                                     "GPU worker: routing tagged error to pending V2 dispatch"
                                 );
-                                let _ = tx.send(response);
+                                let _ = tx.send(ExecuteResponseV2 {
+                                    request_id,
+                                    outcome: ExecuteOutcomeV2::Error {
+                                        code: ProtocolErrorCodeV2::InvalidPayload,
+                                        message: error_msg,
+                                    },
+                                    result: None,
+                                    elapsed_s: DurationSeconds(0.0),
+                                });
                                 continue;
                             }
                             warn!(
@@ -184,10 +182,6 @@ pub(crate) async fn reader_loop_generic<R: tokio::io::AsyncBufRead + Unpin>(
                                  (worker may have processed it asynchronously)"
                             );
                         }
-                        // Untagged error envelopes still flow through the
-                        // control channel for the sequential ops
-                        // (health / capabilities / ensure_task) that
-                        // expect them there.
                         let mut ctrl = control.lock().await;
                         if let Some(tx) = ctrl.take() {
                             let _ = tx.send(WorkerControlResponse::Error(error_msg));
@@ -236,8 +230,7 @@ mod tests {
     /// `op=error` envelopes tagged with `request_id` must fail the matching
     /// V2 dispatch's pending oneshot immediately, rather than be silently
     /// routed to the empty control channel and leave the dispatch sitting
-    /// on its per-request timeout. Regression guard for the 2026-05-27
-    /// HK_QWEN schema-drift hang.
+    /// on its per-request timeout.
     #[tokio::test]
     async fn tagged_error_envelope_fails_pending_v2_dispatch() {
         let pid = WorkerPid(12345);
