@@ -11,6 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{Level, info, span, warn};
 
+use crate::exit_codes::{EXIT_INPUT_ERROR, EXIT_PRECONDITION};
+use talkbank_model::SpeakerCode;
 use talkbank_transform::transcript_merge::{MergeError, default_strip_tiers, merge_chats};
 
 /// Top-level entry for `chatter merge file1 file2 --retain <SPK[,SPK...]>`.
@@ -34,7 +36,7 @@ pub fn run_merge(file1: &Path, file2: &Path, retain: &[String], output: Option<&
         Err(e) => {
             warn!("failed to read {}: {}", file1.display(), e);
             eprintln!("Error reading {}: {}", file1.display(), e);
-            std::process::exit(1);
+            std::process::exit(EXIT_INPUT_ERROR);
         }
     };
     let content2 = match fs::read_to_string(file2) {
@@ -42,15 +44,17 @@ pub fn run_merge(file1: &Path, file2: &Path, retain: &[String], output: Option<&
         Err(e) => {
             warn!("failed to read {}: {}", file2.display(), e);
             eprintln!("Error reading {}: {}", file2.display(), e);
-            std::process::exit(1);
+            std::process::exit(EXIT_INPUT_ERROR);
         }
     };
 
     let options = talkbank_model::ParseValidateOptions::default();
-    // Cycle 4: strip_tiers is configurable; CLI uses the default
-    // set until a later cycle adds the `--strip-tiers` flag.
     let strip = default_strip_tiers();
-    let merged = match merge_chats(&content1, &content2, retain, &strip, options) {
+    // Parse the clap-provided raw strings into domain newtypes at the
+    // CLI boundary. Interior code in `merge_chats` works on
+    // `&[SpeakerCode]` only.
+    let retain: Vec<SpeakerCode> = retain.iter().map(SpeakerCode::new).collect();
+    let merged = match merge_chats(&content1, &content2, &retain, &strip, options) {
         Ok(s) => s,
         Err(e) => {
             warn!("merge failed: {}", e);
@@ -61,9 +65,11 @@ pub fn run_merge(file1: &Path, file2: &Path, retain: &[String], output: Option<&
             // Future MergeError variants from later precondition
             // cycles get explicit arms here.
             let code = match e {
-                MergeError::RetainSpeakersMissing { .. } => 2,
-                MergeError::NoTimelineInFile1 => 2,
-                MergeError::Parse(_) => 1,
+                MergeError::RetainSpeakersMissing { .. }
+                | MergeError::NoTimelineInFile1
+                | MergeError::LanguageMismatch { .. }
+                | MergeError::AmbiguousSpeaker { .. } => EXIT_PRECONDITION,
+                MergeError::Parse(_) => EXIT_INPUT_ERROR,
             };
             std::process::exit(code);
         }
@@ -74,7 +80,7 @@ pub fn run_merge(file1: &Path, file2: &Path, retain: &[String], output: Option<&
             if let Err(e) = fs::write(path, merged) {
                 warn!("failed to write {}: {}", path.display(), e);
                 eprintln!("Error writing {}: {}", path.display(), e);
-                std::process::exit(1);
+                std::process::exit(EXIT_INPUT_ERROR);
             }
             info!("wrote merged file: {}", path.display());
         }

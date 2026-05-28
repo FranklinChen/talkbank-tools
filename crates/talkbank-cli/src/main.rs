@@ -126,6 +126,7 @@
 
 mod cli;
 mod commands;
+pub mod exit_codes;
 pub mod output;
 pub mod progress;
 pub mod ui;

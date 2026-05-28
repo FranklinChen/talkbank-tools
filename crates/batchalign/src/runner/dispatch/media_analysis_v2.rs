@@ -1,6 +1,5 @@
 //! Per-file Rust-owned V2 dispatch for media-analysis commands.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -455,29 +454,49 @@ async fn dispatch_avqi_attempt(
     ))
 }
 
+/// Serialize an openSMILE result to CSV using BA2's
+/// `features-as-rows, single 'value' column` shape:
+///
+/// ```csv
+/// feature,value
+/// alphaFeature,1.5
+/// betaFeature,2.5
+/// ```
+///
+/// BA2's call chain that produces this shape:
+///
+/// 1. `batchalign/pipelines/opensmile/engine.py:88-93` — opensmile-python
+///    returns `features_df` with shape `(N_segments, N_features)`. BA2
+///    transposes once: `results_df = features_df.T`.
+/// 2. `batchalign/cli/cli.py:546` — `features_df.to_csv(output_csv,
+///    header=['value'], index_label='feature')`. With
+///    `feature_level='functionals'` (the only mode BA2 exposes at the
+///    CLI), the source frame collapses to `(N_features, 1)`, so the
+///    CSV is a two-column file: `feature`, `value`.
+///
+/// BA3 emits the same shape so BA2-era researcher scripts that parse
+/// `opensmile.csv` keep working. Feature order is alphabetical (it
+/// comes from `BTreeMap`); BA2's order is opensmile-python's natural
+/// feature-set order, which is feature-set-dependent.
 fn format_opensmile_csv(result: &OpenSmileResultV2) -> String {
-    let mut headers = BTreeSet::new();
-    for row in &result.rows {
-        for key in row.keys() {
-            headers.insert(key.clone());
+    // BA2's `feature_level='functionals'` invariant means one segment
+    // per file. Higher-level callers should not be feeding multi-segment
+    // (LLD-mode) results into this serializer — BA2 itself would have
+    // crashed in pandas if asked to write multi-column data with a
+    // single-element header list. Take the first segment when present
+    // and ignore any extras.
+    let segment = result.rows.first();
+    let mut lines = Vec::with_capacity(result.num_features.saturating_add(1) as usize);
+    lines.push("feature,value".to_string());
+    if let Some(row) = segment {
+        for (feature, value) in row {
+            lines.push(format!("{feature},{value}"));
         }
     }
-    let ordered_headers: Vec<String> = headers.into_iter().collect();
-    let mut lines = Vec::with_capacity(result.rows.len().saturating_add(1));
-    lines.push(ordered_headers.join(","));
-    for row in &result.rows {
-        let line = ordered_headers
-            .iter()
-            .map(|header| {
-                row.get(header)
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        lines.push(line);
-    }
-    lines.join("\n")
+    // BA2's `pandas.to_csv` writes a trailing newline after the last
+    // row. Mirror that — downstream `cat`/`wc`/diff tooling treats the
+    // file as one record per line including the final one.
+    lines.join("\n") + "\n"
 }
 
 fn format_avqi_report(result: &AvqiResultV2) -> String {
@@ -536,5 +555,56 @@ mod tests {
             opensmile_result_filename("sample.mp3"),
             "sample.opensmile.csv"
         );
+    }
+
+    /// BA2's opensmile CSV (`batchalign/cli/cli.py:546`) writes the
+    /// post-transpose DataFrame with `header=['value']` and
+    /// `index_label='feature'`. For the only mode BA2 exposes at the
+    /// CLI (`feature_level='functionals'`), the source frame has shape
+    /// `(N_features, 1)`, so the CSV is:
+    ///
+    /// ```csv
+    /// feature,value
+    /// alphaFeature,1.5
+    /// betaFeature,2.5
+    /// ```
+    ///
+    /// BA3 must emit the same shape so downstream BA2-era researcher
+    /// scripts keep working.
+    #[test]
+    fn opensmile_csv_matches_ba2_feature_value_shape() {
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("alphaFeature".to_string(), 1.5);
+        row.insert("betaFeature".to_string(), 2.5);
+        let result = OpenSmileResultV2 {
+            feature_set: "eGeMAPSv02".to_string(),
+            feature_level: "functionals".to_string(),
+            num_features: 2,
+            duration_segments: 1,
+            audio_file: "sample.mp3".to_string(),
+            rows: vec![row],
+            success: true,
+            error: None,
+        };
+        let csv = format_opensmile_csv(&result);
+        assert_eq!(csv, "feature,value\nalphaFeature,1.5\nbetaFeature,2.5\n");
+    }
+
+    /// Empty result (no segments) should still emit the BA2 header so
+    /// downstream parsers don't trip on a zero-byte file.
+    #[test]
+    fn opensmile_csv_empty_result_emits_header_only() {
+        let result = OpenSmileResultV2 {
+            feature_set: "eGeMAPSv02".to_string(),
+            feature_level: "functionals".to_string(),
+            num_features: 0,
+            duration_segments: 0,
+            audio_file: "sample.mp3".to_string(),
+            rows: vec![],
+            success: true,
+            error: None,
+        };
+        let csv = format_opensmile_csv(&result);
+        assert_eq!(csv, "feature,value\n");
     }
 }

@@ -1,7 +1,12 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use talkbank_transform::sanity_scan::SanityScanThreshold;
+
+use super::cache_commands::CacheCommands;
 use super::clan_commands::ClanCommands;
+use super::cli_types::{AlignmentTier, LogFormat, OutputFormat, ParserBackend, TuiMode};
+use super::debug_commands::DebugCommands;
 
 pub use crate::ui::ThemePreset;
 
@@ -45,73 +50,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Commands,
-}
-
-/// Supported formats for tracing output.
-#[derive(Debug, Clone, ValueEnum)]
-pub enum LogFormat {
-    /// Human-readable text format
-    Text,
-    /// JSON format for observability/telemetry tools
-    Json,
-}
-
-/// Controls whether the interactive TUI is used for validation output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
-pub enum TuiMode {
-    /// Automatically detect terminal capability (TUI when stdout is a TTY)
-    #[default]
-    Auto,
-    /// Force TUI mode regardless of terminal detection
-    Force,
-    /// Disable TUI mode even in interactive terminals
-    Disable,
-}
-
-impl TuiMode {
-    /// Resolve the mode into a concrete decision, consulting the terminal when `Auto`.
-    pub fn should_use_tui(self) -> bool {
-        match self {
-            Self::Force => true,
-            Self::Disable => false,
-            Self::Auto => atty::is(atty::Stream::Stdout),
-        }
-    }
-}
-
-/// Output encodings for command results.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum OutputFormat {
-    /// Human-readable validation output
-    Text,
-    /// Structured JSON output
-    Json,
-}
-
-/// Which parser backend to use for CHAT parsing.
-///
-/// Tree-sitter (default) supports incremental reparsing and is used by the LSP.
-/// Re2c is a DFA-based parser that is faster for batch validation.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-pub enum ParserBackend {
-    /// Tree-sitter parser (default, supports incremental reparsing)
-    #[default]
-    TreeSitter,
-    /// Re2c DFA parser (faster batch validation)
-    Re2c,
-}
-
-/// Dependent tiers that `show-alignment` can filter on.
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum AlignmentTier {
-    /// Morphology tier (%mor)
-    Mor,
-    /// Grammar tier (%gra)
-    Gra,
-    /// Phonology tier (%pho)
-    Pho,
-    /// Syntax tier (%sin)
-    Sin,
 }
 
 /// Top-level `talkbank` subcommands.
@@ -253,6 +191,290 @@ pub enum Commands {
         /// Output path (prints to stdout if omitted).
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+
+    /// Assign CHAT-conformant speaker codes to an anonymously-labeled
+    /// CHAT file. Supports explicit-mapping mode (via `--mapping`) and
+    /// reference mode (via `--reference` + `--anchor` +
+    /// `--inserted-role`). See `book/src/chatter/user-guide/speaker-id.md`.
+    SpeakerId {
+        /// Input CHAT file with anonymous speaker codes (e.g. PAR0,
+        /// PAR1, …) to be relabeled.
+        input: PathBuf,
+
+        /// Explicit-mapping specification, comma-separated
+        /// assignments of the form `OLD=drop` or `OLD=CODE:ROLE`.
+        /// Every speaker in the input must be named in the mapping.
+        /// Mutually exclusive with `--reference`.
+        #[arg(long, conflicts_with = "reference")]
+        mapping: Option<String>,
+
+        /// Reference-mode: path to a CHAT file containing the
+        /// authoritative anchor speaker. The donor speaker whose
+        /// content best matches the anchor by multiset-Jaccard text
+        /// similarity is dropped; remaining donor speakers are
+        /// renamed per `--inserted-role`.
+        #[arg(long, requires = "anchor", requires = "inserted_role")]
+        reference: Option<PathBuf>,
+
+        /// Reference-mode: speaker code in `--reference` whose
+        /// content represents the donor speaker to drop.
+        #[arg(long)]
+        anchor: Option<String>,
+
+        /// Reference-mode: role spec for non-anchor donor speakers,
+        /// formatted `CODE:ROLE` (e.g. `INV:Investigator`).
+        #[arg(long = "inserted-role")]
+        inserted_role: Option<String>,
+
+        /// Reference-mode: minimum winner→runner-up Jaccard margin
+        /// for the auto-decision to stand. Default 2.0×; below
+        /// threshold the command refuses (exit 4) and prints
+        /// per-speaker scores to stderr.
+        #[arg(long, default_value_t = 2.0)]
+        confidence_threshold: f64,
+
+        /// Reference-mode: when the auto-decide succeeds, append the
+        /// decision to this override file (created if absent). The
+        /// file is the durable audit trail of the batch run — see
+        /// `book/src/chatter/integrating/merge-overrides.md`.
+        #[arg(long = "write-override")]
+        write_override: Option<PathBuf>,
+
+        /// Reference-mode: when the auto-decide refuses on low
+        /// confidence, append a pending-adjudication entry to this
+        /// file (created if absent). The orchestrator hands the
+        /// resulting file to `chatter adjudicate` for human review.
+        #[arg(long = "write-pending")]
+        write_pending: Option<PathBuf>,
+
+        /// Override-file mode: replay a prior adjudication recorded
+        /// in this override file. Mutually exclusive with `--mapping`
+        /// and `--reference`. Requires `--session-id` (or defaults
+        /// to the input file's basename stem).
+        #[arg(
+            long = "override-file",
+            conflicts_with = "mapping",
+            conflicts_with = "reference"
+        )]
+        override_file: Option<PathBuf>,
+
+        /// Override-file mode: the session ID whose entry to apply
+        /// from `--override-file`. Defaults to the input file's
+        /// basename stem when omitted.
+        #[arg(long = "session-id")]
+        session_id: Option<String>,
+
+        /// Output path (prints to stdout if omitted).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Batch driver: loop `chatter pipeline` over matched donor /
+    /// reference pairs in two directories. Files match by basename;
+    /// donors without a matching reference are warned and skipped.
+    /// Low-confidence refusals are aggregated (with optional
+    /// pending-file write) but don't abort the batch.
+    Batch {
+        /// Directory of donor CHAT files (ASR output).
+        donor_dir: PathBuf,
+
+        /// Directory of reference CHAT files. Reference for donor
+        /// `X.cha` is `reference_dir/X.cha`.
+        reference_dir: PathBuf,
+
+        /// Anchor speaker code in each reference file (typically
+        /// `CHI`).
+        #[arg(long)]
+        anchor: String,
+
+        /// Inserted-role spec for the donor's non-anchor speakers
+        /// (e.g., `INV:Investigator`).
+        #[arg(long = "inserted-role")]
+        inserted_role: String,
+
+        /// Speaker codes whose utterances come from the reference in
+        /// each merge step.
+        #[arg(long, value_delimiter = ',')]
+        retain: Vec<String>,
+
+        /// Minimum winner→runner-up Jaccard margin (default 2.0×).
+        #[arg(long, default_value_t = 2.0)]
+        confidence_threshold: f64,
+
+        /// Aggregate low-confidence refusals into this pending file.
+        /// One operator run of `chatter adjudicate` resolves them all.
+        #[arg(long = "write-pending")]
+        write_pending: Option<PathBuf>,
+
+        /// Override-file path threaded to every per-session
+        /// `chatter pipeline` invocation. Sessions that have an
+        /// entry are processed via override-file replay; others
+        /// fall through to reference mode. Pass-2 workflow.
+        #[arg(long = "override-file")]
+        override_file: Option<PathBuf>,
+
+        /// Audit-trail destination for clean-winner auto-decisions.
+        /// Pass-1 workflow: each session that succeeds via reference
+        /// mode appends its mapping + scores + margin to this file
+        /// with `mode = "auto"`. Required for the post-merge
+        /// `chatter sanity-scan` pass.
+        #[arg(long = "write-override")]
+        write_override: Option<PathBuf>,
+
+        /// Run the post-merge sanity scan after the per-session
+        /// pipeline loop completes. Requires `--write-override` (the
+        /// scan reads pass-1 auto-decisions) and `--write-pending`
+        /// (flagged sessions get appended). Exit code 4 fires when
+        /// the scan flags any session.
+        #[arg(long = "sanity-scan", requires_all = ["write_override", "write_pending"])]
+        sanity_scan: bool,
+
+        /// Ratio threshold for the sanity-scan mean-word-count
+        /// heuristic. Only consulted when `--sanity-scan` is set.
+        #[arg(long = "sanity-scan-threshold", default_value_t = SanityScanThreshold::DEFAULT.0)]
+        sanity_scan_threshold: f64,
+
+        /// Skip donors whose merged output already exists in the
+        /// output directory. Lets the operator resume an interrupted
+        /// batch or add new donors without redoing finished work.
+        /// Default: re-process every matched donor.
+        #[arg(long = "skip-existing")]
+        skip_existing: bool,
+
+        /// Output directory for merged files (created if absent).
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
+    /// End-to-end per-session shortcut: run speaker-id in reference
+    /// mode to relabel an anonymous donor, then merge the relabeled
+    /// donor with the reference. One CLI invocation instead of two
+    /// for the common case.
+    Pipeline {
+        /// Donor CHAT file with anonymous speaker codes (the ASR
+        /// output).
+        donor: PathBuf,
+
+        /// Reference CHAT file carrying the authoritative anchor
+        /// speaker (typically the hand-coded child transcript).
+        reference: PathBuf,
+
+        /// Speaker code in the reference whose content the algorithm
+        /// matches against to identify the donor's anchor speaker.
+        #[arg(long)]
+        anchor: String,
+
+        /// Role spec for the donor's non-anchor speakers,
+        /// `CODE:ROLE` (e.g. `INV:Investigator`).
+        #[arg(long = "inserted-role")]
+        inserted_role: String,
+
+        /// Speaker codes whose utterances come from the reference in
+        /// the final merge step. Typically the same as `--anchor`.
+        #[arg(long, value_delimiter = ',')]
+        retain: Vec<String>,
+
+        /// Minimum winner→runner-up Jaccard margin (default 2.0×).
+        #[arg(long, default_value_t = 2.0)]
+        confidence_threshold: f64,
+
+        /// On low-confidence refusal, append a pending-adjudication
+        /// entry to this file (created if absent). Exit code 4 still
+        /// fires.
+        #[arg(long = "write-pending")]
+        write_pending: Option<PathBuf>,
+
+        /// Override-file path. If the file contains an entry for
+        /// this session (basename-stem of `donor`), the pipeline
+        /// uses the recorded decision via override-file replay
+        /// mode instead of running reference mode. Sessions
+        /// without an entry fall through to reference mode. The
+        /// same `chatter pipeline` command works for both pass 1
+        /// (no entries yet) and pass 2 (entries from prior
+        /// adjudication).
+        #[arg(long = "override-file")]
+        override_file: Option<PathBuf>,
+
+        /// Audit-trail destination for the clean-winner
+        /// auto-decision. When set and reference mode produces a
+        /// merge, the pipeline appends a `mode = "auto"` entry for
+        /// this session to the named file.
+        #[arg(long = "write-override")]
+        write_override: Option<PathBuf>,
+
+        /// Output path for the merged CHAT file (required).
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
+    /// Adjudicate pending speaker-id (and future) decisions and
+    /// write the resolved entries to an override file. See
+    /// `book/src/architecture/adjudication-workflow.md`.
+    Adjudicate {
+        /// Path to the pending-adjudications TOML file. Rewritten
+        /// on success to remove the resolved entries.
+        pending: PathBuf,
+
+        /// Override file to append resolved decisions to. Created
+        /// if absent.
+        #[arg(long = "override-file")]
+        override_file: PathBuf,
+
+        /// Pre-canned operator decisions in TOML form — see the
+        /// adjudication workflow doc for the format. Mutually
+        /// exclusive with `--interactive`.
+        #[arg(long, conflicts_with = "interactive")]
+        scripted: Option<PathBuf>,
+
+        /// Prompt the operator interactively (one stdin line per
+        /// pending entry). Currently supports `accept` / `a` for
+        /// AcceptSuggested.
+        #[arg(long)]
+        interactive: bool,
+
+        /// Operator identifier recorded in the override entries.
+        /// Defaults to `$USER` (`"unknown"` if unset).
+        #[arg(long)]
+        operator: Option<String>,
+    },
+
+    /// Post-merge sanity scan: detect sessions whose pass-1 auto-
+    /// decision looks suspicious by an out-of-band heuristic (mean
+    /// utterance word count asymmetry between anchor and inserted
+    /// speakers). Flagged sessions become
+    /// `sanity-scan-misclassification` pending entries the operator
+    /// resolves via `chatter adjudicate`. See
+    /// `book/src/architecture/adjudication-workflow.md`.
+    SanityScan {
+        /// Directory of merged CHAT files (produced by `chatter
+        /// batch` or `chatter pipeline`). Each file's basename stem
+        /// is treated as its session ID.
+        merged_dir: PathBuf,
+
+        /// Override file from pass-1. Sessions are matched by
+        /// session ID; auto-decided entries are eligible for
+        /// scanning, explicit-mode entries are skipped (operator
+        /// already signed off).
+        #[arg(long = "override-file")]
+        override_file: PathBuf,
+
+        /// Anchor speaker code in the merged files (typically
+        /// `CHI`).
+        #[arg(long)]
+        anchor: String,
+
+        /// Ratio threshold for the mean-word-count heuristic
+        /// (default 1.5×). A session is flagged when
+        /// `anchor_mean >= inserted_mean * threshold`.
+        #[arg(long, default_value_t = 1.5)]
+        threshold: f64,
+
+        /// Pending-adjudications file to append flagged sessions
+        /// to. Created if absent. Required — flagged sessions
+        /// without a pending file would be discarded.
+        #[arg(long = "write-pending")]
+        write_pending: PathBuf,
     },
 
     /// Normalize CHAT file to canonical format
@@ -522,179 +744,6 @@ pub enum Commands {
     },
 }
 
-/// Debug subcommands under `chatter debug`.
-#[derive(Subcommand)]
-pub enum DebugCommands {
-    /// Rewrite whole-utterance runs of `@s` into utterance precodes (`[- LANG]`).
-    ///
-    /// Walks `.cha` files under the given paths, detects the same E255
-    /// whole-utterance language-switch pattern that `chatter validate` rejects,
-    /// and rewrites qualifying utterances in place. Files that need no changes
-    /// are left untouched.
-    FixS {
-        /// Path to CHAT file(s) or directory trees to rewrite in place.
-        path: Vec<PathBuf>,
-    },
-
-    /// Analyze CA overlap markers (⌈⌉⌊⌋): pairing, temporal consistency, orphans
-    OverlapAudit {
-        /// Path to CHAT file(s) or directory
-        path: Vec<PathBuf>,
-
-        /// Output format
-        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
-
-        /// Write JSON lines database to this file (one JSON object per file).
-        /// Enables persistent overlap data for downstream analysis.
-        #[arg(long, value_name = "PATH")]
-        database: Option<PathBuf>,
-    },
-
-    /// Audit linker and special terminator usage across a corpus
-    ///
-    /// Analyzes cross-utterance pairing correctness for linkers (+<, ++, +^,
-    /// +", +,, +≋, +≈) and special terminators (+..., +/., +//., +"/.etc.).
-    /// Reports frequency tables, pairing violations, orphaned terminators,
-    /// and +< overlap block patterns.
-    LinkerAudit {
-        /// Path to CHAT file(s) or directory
-        path: Vec<PathBuf>,
-
-        /// Write per-anomaly JSON lines to this file. Each line is a JSON
-        /// object with file, line, anomaly type, context, and suggested fix.
-        #[arg(long, value_name = "PATH")]
-        anomalies: Option<PathBuf>,
-    },
-
-    /// Filter CHAT files by @Languages / body content across a corpus tree.
-    ///
-    /// Internal corpus-inspection tool. Walks the given paths, parses the
-    /// @Languages header of each .cha via the tree-sitter header fragment
-    /// parser, and counts occurrences of an optional body substring. Emits
-    /// the filtered list as paths / JSON Lines / CSV.
-    ///
-    /// Example: pick files with ≥20 @s tokens in bilingual transcripts,
-    /// three per language pair, sorted by density:
-    ///
-    ///   chatter debug find ~/0tb/data --min-languages 2 --has-token @s \
-    ///       --min-token-count 20 --max-per-pair 3 \
-    ///       --sort token-count-desc --format jsonl
-    Find(crate::commands::find::FindArgs),
-
-    /// Sanitize a CHAT file for protected-corpus debugging — strip
-    /// contributor lexical content while preserving structure.
-    ///
-    /// Replaces all word content, free-text dependent tiers, and
-    /// free-text headers with placeholders / `[redacted]`, while
-    /// preserving timing bullets, %wor offsets, speaker codes, POS
-    /// tags, language markers, and structural counts. Intended for use
-    /// before loading a protected `.cha` into LLM-assisted debugging
-    /// tools. See `talkbank/docs/protected-corpus-debugging-workflow.md`.
-    Sanitize {
-        /// Path to a single .cha file to sanitize.
-        input: PathBuf,
-
-        /// Output path. If omitted, writes to stdout.
-        #[arg(short, long, value_name = "PATH")]
-        output: Option<PathBuf>,
-    },
-}
-
-/// Cache maintenance subcommands under `talkbank cache`.
-#[derive(Subcommand)]
-pub enum CacheCommands {
-    /// Display cache statistics
-    Stats {
-        /// Output JSON format
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Clear cache entries
-    Clear {
-        /// Clear all cache entries
-        #[arg(long, conflicts_with = "prefix")]
-        all: bool,
-
-        /// Clear entries matching this path prefix
-        #[arg(long, conflicts_with = "all")]
-        prefix: Option<PathBuf>,
-
-        /// Show what would be cleared without actually clearing
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use clap::{CommandFactory, Parser};
-
-    use super::{Cli, Commands, DebugCommands};
-
-    fn run_with_large_stack(test: impl FnOnce() + Send + 'static) {
-        let join_result = std::thread::Builder::new()
-            .name("core-args-test".into())
-            .stack_size(8 * 1024 * 1024)
-            .spawn(test)
-            .expect("spawn core args test thread")
-            .join();
-        match join_result {
-            Ok(()) => {}
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
-    }
-
-    #[test]
-    fn to_xml_parses_output_flag() {
-        run_with_large_stack(|| {
-            let parsed =
-                Cli::parse_from(["chatter", "to-xml", "sample.cha", "--output", "sample.xml"]);
-
-            let Commands::ToXml {
-                input,
-                output,
-                skip_alignment,
-            } = parsed.command
-            else {
-                panic!("expected to-xml command");
-            };
-
-            assert_eq!(input, PathBuf::from("sample.cha"));
-            assert_eq!(output, Some(PathBuf::from("sample.xml")));
-            assert!(!skip_alignment);
-        });
-    }
-
-    #[test]
-    fn help_shows_to_xml_and_not_from_xml() {
-        run_with_large_stack(|| {
-            let mut command = Cli::command();
-            let mut help = Vec::new();
-            command.write_long_help(&mut help).expect("render help");
-            let rendered = String::from_utf8(help).expect("utf8 help");
-
-            assert!(rendered.contains("to-xml"));
-            assert!(!rendered.contains("from-xml"));
-        });
-    }
-
-    #[test]
-    fn debug_fix_s_parses_path_arguments() {
-        run_with_large_stack(|| {
-            let parsed = Cli::parse_from(["chatter", "debug", "fix-s", "sample.cha"]);
-
-            let Commands::Debug {
-                command: DebugCommands::FixS { path },
-            } = parsed.command
-            else {
-                panic!("expected debug fix-s command");
-            };
-
-            assert_eq!(path, vec![PathBuf::from("sample.cha")]);
-        });
-    }
-}
+#[path = "core_tests.rs"]
+mod tests;

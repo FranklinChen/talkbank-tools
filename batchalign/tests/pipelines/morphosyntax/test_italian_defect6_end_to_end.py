@@ -77,7 +77,13 @@ CHAT_FIXTURE = (
 
 @pytest.fixture(scope="module")
 def morphotag_output() -> str:
-    """Run ``batchalign3 morphotag --lang ita`` once; return CHAT output."""
+    """Run ``batchalign3 morphotag`` once on the Italian fixture; return CHAT output.
+
+    The CHAT fixture above carries ``@Languages: ita`` so morphotag's
+    per-file language resolution selects Italian; the CLI deliberately
+    has no ``--lang`` flag (see ``MorphotagArgs`` docstring re: the
+    2026-05-03 incident).
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = Path(tmpdir) / "ita_defect6.cha"
         output_dir = Path(tmpdir) / "output"
@@ -90,7 +96,6 @@ def morphotag_output() -> str:
                 "morphotag",
                 str(input_path),
                 "-o", str(output_dir),
-                "--lang", "ita",
                 "--sequential",
             ],
             capture_output=True,

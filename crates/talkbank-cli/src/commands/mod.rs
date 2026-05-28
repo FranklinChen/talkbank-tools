@@ -23,7 +23,9 @@
 //! - <https://talkbank.org/0info/manuals/CHAT.html#Main_Tier>
 //! - <https://talkbank.org/0info/manuals/CHAT.html#Dependent_Tiers>
 
+pub mod adjudicate;
 pub mod alignment;
+pub mod batch;
 pub mod cache;
 pub mod clan;
 pub mod clean;
@@ -35,7 +37,10 @@ pub mod lint;
 pub mod list_checks;
 pub mod new_file;
 pub mod normalize;
+pub mod pipeline;
+pub mod sanity_scan;
 pub mod schema;
+pub mod speaker_id;
 pub mod transcript_merge;
 pub mod validate;
 pub mod validate_parallel;

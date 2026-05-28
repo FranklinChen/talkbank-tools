@@ -52,6 +52,7 @@
 //! assert_eq!(chat_file.utterances().count(), 1);
 //! ```
 
+pub mod adjudication;
 pub mod asr_postprocess;
 pub mod benchmark;
 pub mod build_chat;
@@ -70,7 +71,9 @@ pub mod morphosyntax;
 pub mod parse;
 pub mod redact;
 pub mod retokenize;
+pub mod sanity_scan;
 pub mod serialize;
+pub mod speaker_id;
 pub mod tokenizer_realign;
 pub mod transcript_merge;
 pub mod translate;

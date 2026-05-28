@@ -353,11 +353,81 @@ fn find_best_segment_prefers_align_matches_over_waste() {
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let main_utts: Vec<usize> = vec![0; main.len()];
     assert_eq!(
-        find_best_segment(&gold, &main),
+        find_best_segment(&gold, &main, &main_utts),
         (4, 9),
         "should pick the higher-align-match window even if it wastes more tokens"
     );
+}
+
+/// BA2 majority-projects each candidate main window to its majority
+/// utterance index before scoring (compare.py:200-249). When the raw
+/// window straddles two utterances, BA2 trims non-majority tokens
+/// from both ends and scores the projected window. This prevents
+/// the cross-utterance bag-of-words overlap from beating in-utterance
+/// matches.
+///
+/// Constructed pair (Gap A regression guard):
+///   gold       = [the, dog, ran]
+///   main       = [the, sky, this, dog, ran, fast]
+///   main_utts  = [  0,   0,    1,   1,   1,    1]
+///
+/// Without majority-projection, the span=5 window [0..5] has the
+/// highest raw overlap (3: "the" + "dog" + "ran") and BA3 used to
+/// pick it. With majority-projection, every cross-utterance candidate
+/// gets trimmed to its majority slice before scoring. Across all
+/// projected candidates, the span=2 window (3, 5) = [dog, ran] wins
+/// on the (overlap, align_matches, Reverse(waste), end) tuple:
+/// overlap=2, align_matches=2, waste=0 (no extra tokens), end=5.
+#[test]
+fn find_best_segment_projects_to_majority_utterance() {
+    let gold: Vec<String> = ["the", "dog", "ran"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let main: Vec<String> = ["the", "sky", "this", "dog", "ran", "fast"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let main_utts: Vec<usize> = vec![0, 0, 1, 1, 1, 1];
+    assert_eq!(
+        find_best_segment(&gold, &main, &main_utts),
+        (3, 5),
+        "should pick the majority-projected zero-waste window (3, 5) \
+         per BA2 (compare.py:200-249), not the cross-utterance window \
+         (0, 5) that raw bag-of-words overlap prefers"
+    );
+}
+
+/// BA2 parity at the top-level compare() seam: when main has two
+/// utterances and gold has one, BA3 must not "steal" matching tokens
+/// from a non-majority utterance to inflate match count. This is the
+/// user-visible consequence of majority-projection in find_best_segment.
+///
+/// Scenario:
+///   main: "the sky ." (utt 0) + "this dog ran fast ." (utt 1)
+///   gold: "the dog ran ."
+///
+/// Pre-fix BA3 would report 3 matches (greedily including utt 0's
+/// "the" together with utt 1's "dog, ran"). Post-fix BA3 reports 2
+/// matches (dog, ran) — BA2 picks the pure utt-1 window [dog, ran, fast]
+/// and "the" surfaces as a deletion.
+#[test]
+fn compare_does_not_steal_match_across_utterance_boundary() {
+    let parser = TreeSitterParser::new().unwrap();
+    let main = make_chat(&[("CHI", "the sky ."), ("CHI", "this dog ran fast .")]);
+    let gold = make_chat(&[("CHI", "the dog ran .")]);
+    let (main_file, _) = parse_lenient(&parser, &main);
+    let (gold_file, _) = parse_lenient(&parser, &gold);
+
+    let result = compare(&main_file, &gold_file);
+    assert_eq!(
+        result.metrics.matches, 2,
+        "BA2 majority-projection should keep matches at 2 (dog, ran); \
+         pre-fix BA3 reports 3 by stealing 'the' from utt 0"
+    );
+    assert_eq!(result.metrics.total_gold_words, 3);
 }
 
 #[test]
@@ -480,9 +550,13 @@ fn inject_comparison_rejects_empty_compare_tokens() {
 
 #[test]
 fn compare_uses_mor_pos_for_xsmor_output() {
+    // Both files carry %mor with the same POS tags, so attribution direction
+    // (main vs gold) is invisible. This test verifies POS extraction from
+    // %mor in general; see compare_attributes_gold_pos_to_matches for the
+    // BA2-parity test that pins gold-side attribution explicitly.
     let parser = TreeSitterParser::new().unwrap();
     let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";
-    let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n@End\n";
+    let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";
     let (main_file, _) = parse_lenient(&parser, main);
     let (gold_file, _) = parse_lenient(&parser, gold);
 
@@ -495,6 +569,40 @@ fn compare_uses_mor_pos_for_xsmor_output() {
     );
     assert_eq!(result.metrics.pos_counts["INTJ"].matches, 1);
     assert_eq!(result.metrics.pos_counts["NOUN"].matches, 1);
+}
+
+/// BA2 attributes the gold-side form's POS to every Match and
+/// ExtraReference, not the main-side form's (compare.py:540-550, via
+/// `_get_pos(gold_form)`). When the two transcripts have a %mor disagreement
+/// on the same matched word — which is the entire point of running
+/// `compare` — the xsmor tier and pos_counts must reflect the gold-standard
+/// POS so the reviewer can see the gold tag the transcriber missed.
+#[test]
+fn compare_attributes_gold_pos_to_matches() {
+    let parser = TreeSitterParser::new().unwrap();
+    // Main %mor: noun|hello adj|world  — the disagreed POS tags.
+    // Gold %mor: intj|hello noun|world — the gold-standard reference.
+    let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n%mor:\tnoun|hello adj|world .\n@End\n";
+    let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";
+    let (main_file, _) = parse_lenient(&parser, main);
+    let (gold_file, _) = parse_lenient(&parser, gold);
+
+    let result = compare(&main_file, &gold_file);
+    assert_eq!(result.metrics.matches, 2);
+    assert_eq!(
+        XsmorTierContent::try_from(&result.main_utterances[0])
+            .expect("xsmor tier")
+            .to_chat_string(),
+        "INTJ NOUN",
+        "matches should carry gold-side POS (INTJ, NOUN) per BA2 \
+         compare.py:540-550, not main-side POS (NOUN, ADJ)",
+    );
+    assert_eq!(result.metrics.pos_counts["INTJ"].matches, 1);
+    assert_eq!(result.metrics.pos_counts["NOUN"].matches, 1);
+    assert!(
+        !result.metrics.pos_counts.contains_key("ADJ"),
+        "main-side ADJ should not appear in match counts",
+    );
 }
 
 #[test]
@@ -547,11 +655,15 @@ fn batchalign2_master_simple_gold_projection_shape() {
             .to_chat_string(),
         "hello +big world -today ."
     );
+    // Strict BA2 parity (compare.py:540-550 uses `_get_pos(gold_form)`):
+    // gold has no %mor here, so every Match and ExtraReference token gets
+    // None POS → "?" in xsmor. Only the ExtraPayload ("+big") keeps its
+    // POS, since insertions come from main and main has %mor.
     assert_eq!(
         XsmorTierContent::try_from(&result.gold_utterances[0])
             .expect("xsmor tier")
             .to_chat_string(),
-        "INTJ +ADJ NOUN -? ."
+        "? +ADJ ? -? ."
     );
     assert_eq!(result.metrics.matches, 2);
     assert_eq!(result.metrics.insertions, 1);
@@ -559,6 +671,7 @@ fn batchalign2_master_simple_gold_projection_shape() {
     assert!((result.metrics.wer - (2.0 / 3.0)).abs() < 0.001);
     assert_eq!(result.metrics.pos_counts["ADJ"].insertions, 1);
     assert_eq!(result.metrics.pos_counts["?"].deletions, 1);
+    assert_eq!(result.metrics.pos_counts["?"].matches, 2);
 }
 
 #[test]
@@ -580,11 +693,14 @@ fn batchalign2_master_windowed_alignment_ignores_skipped_prefix_tokens() {
             .to_chat_string(),
         "the dog ."
     );
+    // Strict BA2 parity: gold has no %mor, so Match POS = gold's None = "?".
+    // BA3 pre-fix would have lifted DET/NOUN from main, but that's not what
+    // BA2 does (compare.py:540-550 reads `_get_pos(gold_form)`).
     assert_eq!(
         XsmorTierContent::try_from(&result.gold_utterances[0])
             .expect("xsmor tier")
             .to_chat_string(),
-        "DET NOUN ."
+        "? ? ."
     );
 }
 
@@ -603,11 +719,14 @@ fn batchalign2_master_multi_utterance_compare_metrics() {
             .to_chat_string(),
         "one fish +two fish ."
     );
+    // Strict BA2 parity: gold has no %mor on either utterance. Matches
+    // and gold-side deletions get "?" POS; only main-side insertions keep
+    // their main %mor POS.
     assert_eq!(
         XsmorTierContent::try_from(&result.gold_utterances[0])
             .expect("xsmor tier")
             .to_chat_string(),
-        "NUM NOUN +NUM NOUN ."
+        "? ? +NUM ? ."
     );
     assert_eq!(
         XsrepTierContent::try_from(&result.gold_utterances[1])
@@ -619,7 +738,7 @@ fn batchalign2_master_multi_utterance_compare_metrics() {
         XsmorTierContent::try_from(&result.gold_utterances[1])
             .expect("xsmor tier")
             .to_chat_string(),
-        "ADJ NOUN -? +ADJ NOUN ."
+        "? ? -? +ADJ ? ."
     );
     assert_eq!(result.metrics.matches, 6);
     assert_eq!(result.metrics.insertions, 2);

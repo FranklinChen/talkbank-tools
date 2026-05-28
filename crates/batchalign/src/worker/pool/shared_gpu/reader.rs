@@ -261,7 +261,9 @@ mod tests {
 
         reader_loop_generic(&mut reader, pending.clone(), control.clone(), pid).await;
 
-        let response = rx.await.expect("pending oneshot must resolve when error is routed");
+        let response = rx
+            .await
+            .expect("pending oneshot must resolve when error is routed");
         assert_eq!(response.request_id.as_ref(), request_id);
         match response.outcome {
             ExecuteOutcomeV2::Error { code, message } => {
@@ -306,7 +308,9 @@ mod tests {
 
         reader_loop_generic(&mut reader, pending.clone(), control.clone(), pid).await;
 
-        let routed = ctrl_rx.await.expect("control channel must receive untagged error");
+        let routed = ctrl_rx
+            .await
+            .expect("control channel must receive untagged error");
         match routed {
             WorkerControlResponse::Error(msg) => {
                 assert!(msg.contains("capabilities-time crash"));

@@ -15,7 +15,9 @@
 //! `RetainSet`, `MergeError`, `--strip-tiers`, etc.
 
 use talkbank_model::ParseValidateOptions;
-use talkbank_model::model::header::{Header, ParticipantEntries, ParticipantEntry};
+use talkbank_model::SpeakerCode;
+use talkbank_model::WriteChat;
+use talkbank_model::model::header::{Header, LanguageCodes, ParticipantEntries, ParticipantEntry};
 use talkbank_model::model::{ChatFile, Line};
 
 use crate::PipelineError;
@@ -40,7 +42,12 @@ pub enum MergeError {
     /// (a degenerate output that researchers would mistake for a
     /// successful merge); we refuse instead.
     #[error("File 1 declares no utterances for any speaker in --retain ({retain:?})")]
-    RetainSpeakersMissing { retain: Vec<String> },
+    RetainSpeakersMissing {
+        /// The retain set passed to `merge_chats` — surfaced so the
+        /// operator sees which speaker codes were searched for without
+        /// re-reading the invoking command.
+        retain: Vec<SpeakerCode>,
+    },
 
     /// File 1 has retained-speaker utterances but none carry a time
     /// bullet. Without a bulleted utterance the merge has no shared
@@ -48,6 +55,42 @@ pub enum MergeError {
     /// "merge" would be a meaningless start-time-less concatenation.
     #[error("File 1 has no time-bulleted utterances; cannot merge against a shared timeline")]
     NoTimelineInFile1,
+
+    /// The two input files' `@Languages` headers disagree. Cross-language
+    /// merging would corrupt downstream language-aware stages (morphotag,
+    /// alignment, segmentation), so the merge refuses rather than emit a
+    /// mixed-language file. Both files' declared code lists are preserved
+    /// in the payload so the operator can diagnose the mismatch without
+    /// re-reading the inputs.
+    #[error(
+        "File 1 @Languages = {f1} ; File 2 @Languages = {f2} ; merge requires matching @Languages",
+        f1 = file1.to_chat_string(),
+        f2 = file2.to_chat_string(),
+    )]
+    LanguageMismatch {
+        /// File 1's declared `@Languages` code list (empty if the file
+        /// had no `@Languages` header at all).
+        file1: LanguageCodes,
+        /// File 2's declared `@Languages` code list (empty if the file
+        /// had no `@Languages` header at all).
+        file2: LanguageCodes,
+    },
+
+    /// A speaker code outside the retain set appears in both files.
+    /// The merge has no rule to choose between File 1's version of the
+    /// speaker's utterances and File 2's, so it refuses. The operator
+    /// resolves by either adding the code to `--retain` (File 1's
+    /// version wins) or by renaming the conflicting code in File 2 as
+    /// a preprocessing step.
+    #[error(
+        "speaker {speaker} appears in both files but is not in --retain; \
+         add it to --retain or rename it in File 2"
+    )]
+    AmbiguousSpeaker {
+        /// The conflicting speaker code, named so the operator does
+        /// not have to diff participant lists to identify it.
+        speaker: SpeakerCode,
+    },
 
     /// Underlying parse error from either input file.
     #[error("parse error: {0}")]
@@ -96,14 +139,27 @@ pub fn default_strip_tiers() -> Vec<String> {
 pub fn merge_chats(
     file1_content: &str,
     file2_content: &str,
-    retain: &[String],
+    retain: &[SpeakerCode],
     strip_tiers: &[String],
     options: ParseValidateOptions,
 ) -> Result<String, MergeError> {
     let f1 = parse_and_validate(file1_content, options.clone())?;
     let f2 = parse_and_validate(file2_content, options)?;
 
-    let in_retain = |speaker: &str| retain.iter().any(|s| s == speaker);
+    // Precondition: both files' `@Languages` headers must agree. A
+    // language disagreement makes every later precondition moot, so
+    // it's checked first. Files without an explicit `@Languages` row
+    // both produce an empty `LanguageCodes`, which compare equal.
+    let f1_langs = extract_languages(&f1);
+    let f2_langs = extract_languages(&f2);
+    if f1_langs != f2_langs {
+        return Err(MergeError::LanguageMismatch {
+            file1: f1_langs,
+            file2: f2_langs,
+        });
+    }
+
+    let in_retain = |speaker: &SpeakerCode| retain.iter().any(|s| s == speaker);
 
     // Precondition: File 1 must declare at least one utterance for
     // some speaker in `retain`. Without this, the merge would emit a
@@ -116,7 +172,7 @@ pub fn merge_chats(
         .0
         .iter()
         .filter(|line| match line {
-            Line::Utterance(u) => in_retain(u.main.speaker.as_str()),
+            Line::Utterance(u) => in_retain(&u.main.speaker),
             _ => false,
         })
         .collect();
@@ -138,6 +194,25 @@ pub fn merge_chats(
         return Err(MergeError::NoTimelineInFile1);
     }
 
+    // Precondition: a non-retained speaker appearing in both files is
+    // ambiguous — the merge has no rule to choose between File 1's and
+    // File 2's versions. Detect by walking File 2's utterances in
+    // document order; the first non-retained speaker that also appears
+    // in File 1 is reported. Document-order traversal gives a
+    // deterministic, reproducible error across runs.
+    let f1_speakers: std::collections::HashSet<SpeakerCode> =
+        f1.unique_utterance_speakers().into_iter().collect();
+    for line in f2.lines.0.iter() {
+        if let Line::Utterance(u) = line {
+            let sp = &u.main.speaker;
+            if !in_retain(sp) && f1_speakers.contains(sp) {
+                return Err(MergeError::AmbiguousSpeaker {
+                    speaker: sp.clone(),
+                });
+            }
+        }
+    }
+
     // Collect File 2's participant entries for speakers NOT in
     // `retain` — these will extend File 1's @Participants header.
     let inserted_participants: Vec<ParticipantEntry> = f2
@@ -152,7 +227,7 @@ pub fn merge_chats(
             _ => None,
         })
         .flat_map(|entries| entries.iter().cloned())
-        .filter(|entry| !in_retain(entry.speaker_code.as_str()))
+        .filter(|entry| !in_retain(&entry.speaker_code))
         .collect();
 
     // Collect File 2's @ID rows for speakers NOT in `retain` —
@@ -163,7 +238,7 @@ pub fn merge_chats(
         .iter()
         .filter(|line| match line {
             Line::Header { header, .. } => match header.as_ref() {
-                Header::ID(id) => !in_retain(id.speaker.as_str()),
+                Header::ID(id) => !in_retain(&id.speaker),
                 _ => false,
             },
             _ => false,
@@ -221,7 +296,7 @@ pub fn merge_chats(
                 }
             }
             Line::Utterance(u) => {
-                if in_retain(u.main.speaker.as_str()) {
+                if in_retain(&u.main.speaker) {
                     retained_utts.push(line.clone());
                 }
             }
@@ -250,7 +325,7 @@ pub fn merge_chats(
     let mut inserted_utts: Vec<Line> = Vec::new();
     for line in f2.lines.0.iter() {
         if let Line::Utterance(u) = line
-            && !in_retain(u.main.speaker.as_str())
+            && !in_retain(&u.main.speaker)
         {
             let mut cloned = u.as_ref().clone();
             cloned
@@ -292,6 +367,21 @@ fn line_start_ms(line: &Line) -> u64 {
             .unwrap_or(u64::MAX),
         Line::Header { .. } => u64::MAX,
     }
+}
+
+/// Extract the declared `@Languages` codes from `chat_file`. Returns
+/// an empty `LanguageCodes` when no `@Languages` header is present; if
+/// multiple `@Languages` rows somehow appear, the first wins (CHAT
+/// validation should already have rejected the duplicate, but the
+/// merge precondition stays robust against malformed input).
+fn extract_languages(chat_file: &ChatFile) -> LanguageCodes {
+    chat_file
+        .headers()
+        .find_map(|h| match h {
+            Header::Languages { codes } => Some(codes.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Find the index of the last header line in `chat_file` whose

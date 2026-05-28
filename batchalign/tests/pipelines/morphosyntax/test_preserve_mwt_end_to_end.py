@@ -62,7 +62,6 @@ def morphotag_output() -> str:
                 "morphotag",
                 str(input_path),
                 "-o", str(output_dir),
-                "--lang", "eng",
                 "--sequential",
             ],
             capture_output=True,

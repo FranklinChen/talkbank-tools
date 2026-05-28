@@ -35,7 +35,7 @@ dependencies = [
     "transformers>=4.38.2",
     "tokenizers>=0.14.1",
     "numpy>=1.26",
-    "stanza[transformers]>=1.12.0",
+    "stanza[transformers]>=1.12.1,<1.13",
     "pycountry>=22.3",
     "soundfile>=0.12.0",
     # ASR

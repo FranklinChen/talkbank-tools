@@ -261,3 +261,130 @@ fn merge_no_timeline_in_file1() -> Result<(), TestError> {
     );
     Ok(())
 }
+
+/// File 1 declares both `*CHI:` (retained) and `*INV:` (an
+/// already-attributed clinician turn). File 2's ASR output also
+/// attributes utterances to `*INV:`. With `--retain CHI`, the merge
+/// has no rule to pick which file's INV utterances to keep — File 1's
+/// hand-coded INV vs File 2's ASR INV are two different conventions
+/// for the same speaker code. Refuse rather than guess.
+const FIX_REF_CHI_PLUS_INV: &str = "@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tCHI Target_Child, INV Investigator
+@ID:\teng|corpus|CHI|2;06.|||Target_Child|||
+@ID:\teng|corpus|INV|||||Investigator|||
+@Media:\tambig, audio
+*CHI:\thello there . \u{15}0_1000\u{15}
+*INV:\thand-coded clinician turn . \u{15}1500_2500\u{15}
+@End
+";
+
+const FIX_ASR_INV_AMBIG: &str = "@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tINV Investigator
+@ID:\teng|corpus|INV|||||Investigator|||
+@Media:\tambig, audio
+*INV:\tasr generated clinician turn . \u{15}3000_4000\u{15}
+@End
+";
+
+/// `chatter merge` refuses with exit code 2 when a non-retained
+/// speaker code appears in BOTH files. The user must disambiguate by
+/// adding the speaker to `--retain` (preferring File 1's version) or
+/// preprocessing File 2 to rename the conflicting code.
+#[test]
+fn merge_ambiguous_speaker() -> Result<(), TestError> {
+    let dir = tempdir()?;
+    let file1 = dir.path().join("ref.cha");
+    let file2 = dir.path().join("asr.cha");
+    let out = dir.path().join("merged.cha");
+    fs::write(&file1, FIX_REF_CHI_PLUS_INV)?;
+    fs::write(&file2, FIX_ASR_INV_AMBIG)?;
+
+    assert_cmd::cargo::cargo_bin_cmd!("chatter")
+        .arg("merge")
+        .arg(&file1)
+        .arg(&file2)
+        .arg("--retain")
+        .arg("CHI")
+        .arg("-o")
+        .arg(&out)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(
+            predicate::str::contains("INV")
+                .or(predicate::str::contains("ambiguous"))
+                .or(predicate::str::contains("--retain")),
+        );
+
+    assert!(
+        !out.exists(),
+        "merged output file should not exist on precondition failure"
+    );
+    Ok(())
+}
+
+/// File 1 is monolingual English; File 2 is monolingual Cantonese.
+/// The merge contract treats `@Languages` as a hard precondition —
+/// silently merging across languages would corrupt downstream
+/// language-aware tooling (morphotag, alignment, segmentation), so
+/// the merge must refuse rather than emit a cross-language file.
+const FIX_REF_CHI_ENG: &str = "@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tCHI Target_Child
+@ID:\teng|corpus|CHI|2;06.|||Target_Child|||
+@Media:\tprecond_lang, audio
+*CHI:\thello there . \u{15}0_1000\u{15}
+@End
+";
+
+const FIX_ASR_INV_YUE: &str = "@UTF8
+@Begin
+@Languages:\tyue
+@Participants:\tINV Investigator
+@ID:\tyue|corpus|INV|||||Investigator|||
+@Media:\tprecond_lang, audio
+*INV:\t你好 . \u{15}500_1500\u{15}
+@End
+";
+
+/// `chatter merge` refuses with exit code 2 when the two input files'
+/// `@Languages` headers disagree. The stderr message must name the
+/// precondition specifically so an operator can identify the cause
+/// without re-reading either input file.
+#[test]
+fn merge_language_mismatch() -> Result<(), TestError> {
+    let dir = tempdir()?;
+    let file1 = dir.path().join("ref.cha");
+    let file2 = dir.path().join("asr.cha");
+    let out = dir.path().join("merged.cha");
+    fs::write(&file1, FIX_REF_CHI_ENG)?;
+    fs::write(&file2, FIX_ASR_INV_YUE)?;
+
+    assert_cmd::cargo::cargo_bin_cmd!("chatter")
+        .arg("merge")
+        .arg(&file1)
+        .arg(&file2)
+        .arg("--retain")
+        .arg("CHI")
+        .arg("-o")
+        .arg(&out)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(
+            predicate::str::contains("language")
+                .or(predicate::str::contains("Languages"))
+                .or(predicate::str::contains("@Languages")),
+        );
+
+    assert!(
+        !out.exists(),
+        "merged output file should not exist on precondition failure"
+    );
+    Ok(())
+}

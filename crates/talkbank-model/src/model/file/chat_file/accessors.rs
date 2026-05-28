@@ -80,6 +80,25 @@ impl<S: ValidationState> ChatFile<S> {
         self.lines.iter().filter(|line| line.is_utterance()).count()
     }
 
+    /// Returns the distinct speaker codes appearing on utterance main
+    /// tiers, in document order of first appearance.
+    ///
+    /// Useful for transforms that need the actual speaker set of the
+    /// utterance body — distinct from `id_headers()` (declared @ID
+    /// speakers, which may include speakers with no utterances or
+    /// omit speakers present only via ad-hoc *XXX: lines).
+    pub fn unique_utterance_speakers(&self) -> Vec<crate::SpeakerCode> {
+        let mut out: Vec<crate::SpeakerCode> = Vec::new();
+        let mut seen: std::collections::HashSet<crate::SpeakerCode> =
+            std::collections::HashSet::new();
+        for utt in self.utterances() {
+            if seen.insert(utt.main.speaker.clone()) {
+                out.push(utt.main.speaker.clone());
+            }
+        }
+        out
+    }
+
     /// Returns participant metadata for a speaker code, if present.
     ///
     /// Lookups are exact and case-sensitive, matching canonical CHAT speaker codes.

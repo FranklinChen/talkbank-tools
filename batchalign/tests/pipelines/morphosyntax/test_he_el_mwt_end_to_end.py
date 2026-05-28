@@ -90,7 +90,6 @@ def _run_morphotag(chat_text: str, lang: str) -> str:
                 "morphotag",
                 str(input_path),
                 "-o", str(output_dir),
-                "--lang", lang,
                 "--sequential",
             ],
             capture_output=True,

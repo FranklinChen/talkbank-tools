@@ -8,6 +8,7 @@
 //! Phase A cycle 2: byte-stability of retained-speaker utterances.
 
 use talkbank_model::ParseValidateOptions;
+use talkbank_model::SpeakerCode;
 use talkbank_transform::transcript_merge::{MergeError, default_strip_tiers, merge_chats};
 
 /// File 1 fixture for cycle 2. CHI carries:
@@ -50,7 +51,7 @@ fn merge_retained_speakers_byte_stable() {
     let merged = merge_chats(
         FIX_REF_RICH_CHI,
         FIX_ASR_LABELED_RICH,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -157,7 +158,7 @@ fn merge_strips_default_derived_tiers() {
     let merged = merge_chats(
         FIX_REF_CHI_WITH_COM,
         FIX_ASR_INV_WITH_DERIVED,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -215,7 +216,7 @@ fn merge_strip_tiers_configurable() {
     let merged = merge_chats(
         FIX_REF_CHI_WITH_COM,
         FIX_ASR_INV_WITH_DERIVED,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &custom_strip,
         options,
     )
@@ -263,7 +264,7 @@ fn merge_strip_tiers_empty_preserves_all() {
     let merged = merge_chats(
         FIX_REF_CHI_WITH_COM,
         FIX_ASR_INV_WITH_DERIVED,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &empty_strip,
         options,
     )
@@ -312,7 +313,7 @@ fn merge_header_participants_concatenates() {
     let merged = merge_chats(
         FIX_REF_CHI_WITH_COM,
         FIX_ASR_INV_WITH_DERIVED,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -376,7 +377,7 @@ fn merge_header_id_concatenates() {
     let merged = merge_chats(
         FIX_REF_CHI_WITH_COM,
         FIX_ASR_INV_WITH_DERIVED,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -446,7 +447,7 @@ fn merge_header_comments_concatenate() {
     let merged = merge_chats(
         FIX_REF_CHI_WITH_COM,
         FIX_ASR_INV_WITH_DERIVED,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -522,7 +523,7 @@ fn merge_header_languages_passthrough() {
     let merged = merge_chats(
         FIX_REF_CYCLE8B,
         FIX_ASR_CYCLE8B,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -559,7 +560,7 @@ fn merge_header_media_file1_wins() {
     let merged = merge_chats(
         FIX_REF_CYCLE8B,
         FIX_ASR_CYCLE8B,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -591,15 +592,57 @@ fn merge_header_media_file1_wins() {
     );
 }
 
-// ============================================================================
-// Phase A — cycle 9b — preconditions: NoTimelineInFile1 (L2)
-// ============================================================================
-//
-// L2 sibling of merge_no_timeline_in_file1 (L3, lives in
-// crates/talkbank-cli/tests/merge_tests.rs). The L3 test asserts the
-// CLI exit-code contract; this L2 test pins the exact MergeError
-// variant returned by merge_chats so future CLI refactors don't
-// silently widen the failure mode.
+// L2 sibling of the CLI-level `merge_no_retain_speakers_in_file1`:
+// pins the exact `MergeError::RetainSpeakersMissing` variant + its
+// `retain` payload so a CLI refactor cannot silently widen the
+// failure into a generic "empty merge" arm.
+
+/// File 1 has only `*PAR:` utterances; the retain set is `["CHI"]`.
+/// `merge_chats` must refuse before any timeline / language check —
+/// retain-set membership is the most fundamental shape question
+/// (without any retained-speaker utterance, the entire merge is
+/// ill-defined regardless of every other invariant).
+const FIX_REF_PAR_ONLY_L2: &str = "@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant
+@ID:\teng|corpus|PAR|||||Participant|||
+@Media:\tprecond, audio
+*PAR:\tsome utterance . \u{15}0_1000\u{15}
+@End
+";
+
+/// `merge_chats` returns `MergeError::RetainSpeakersMissing { retain }`
+/// when File 1 declares no utterances for any speaker in the retain
+/// set. The variant's `retain` payload echoes the caller's input set
+/// so an operator reading the error knows *which* set was searched
+/// for.
+#[test]
+fn merge_no_retain_speakers_in_file1_returns_err() {
+    let options = ParseValidateOptions::default();
+    let retain = vec![SpeakerCode::new("CHI")];
+    let err = merge_chats(
+        FIX_REF_PAR_ONLY_L2,
+        FIX_ASR_INV_PRECOND_L2,
+        &retain,
+        &default_strip_tiers(),
+        options,
+    )
+    .expect_err("merge should refuse when File 1 has no utterances for any retain-set speaker");
+
+    match err {
+        MergeError::RetainSpeakersMissing { retain: echoed } => {
+            assert_eq!(
+                echoed, retain,
+                "retain payload should echo the caller's input, got: {echoed:?}"
+            );
+        }
+        other => panic!("expected MergeError::RetainSpeakersMissing, got: {other:?}"),
+    }
+}
+
+// L2 sibling of `merge_no_timeline_in_file1`: pins the
+// `MergeError::NoTimelineInFile1` variant against silent widening.
 
 /// File 1 with retained-speaker utterances that lack time bullets.
 /// The CHAT parser accepts unbulleted main tiers (legacy hand
@@ -637,7 +680,7 @@ fn merge_no_timeline_in_file1_returns_err() {
     let err = merge_chats(
         FIX_REF_CHI_NO_BULLETS_L2,
         FIX_ASR_INV_PRECOND_L2,
-        &["CHI".to_string()],
+        &[SpeakerCode::new("CHI")],
         &default_strip_tiers(),
         options,
     )
@@ -647,4 +690,132 @@ fn merge_no_timeline_in_file1_returns_err() {
         matches!(err, MergeError::NoTimelineInFile1),
         "expected MergeError::NoTimelineInFile1, got: {err:?}"
     );
+}
+
+// L2 sibling of `merge_language_mismatch`: pins the
+// `MergeError::LanguageMismatch` variant + both files' code-list
+// payloads against silent widening into a generic header-mismatch
+// arm.
+
+/// File 1 declares `@Languages: eng`. The retained speaker has a
+/// time-bulleted utterance, so the timeline + retain preconditions
+/// are satisfied; the only failing precondition is language equality.
+const FIX_REF_CHI_ENG_L2: &str = "@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tCHI Target_Child
+@ID:\teng|corpus|CHI|2;06.|||Target_Child|||
+@Media:\tprecond_lang, audio
+*CHI:\thello there . \u{15}0_1000\u{15}
+@End
+";
+
+/// File 2 declares `@Languages: yue` (Cantonese). Same media key as
+/// File 1, but the language disagreement must trigger refusal.
+const FIX_ASR_INV_YUE_L2: &str = "@UTF8
+@Begin
+@Languages:\tyue
+@Participants:\tINV Investigator
+@ID:\tyue|corpus|INV|||||Investigator|||
+@Media:\tprecond_lang, audio
+*INV:\t你好 . \u{15}500_1500\u{15}
+@End
+";
+
+/// `merge_chats` returns `MergeError::LanguageMismatch` carrying both
+/// files' declared `@Languages` codes when they disagree. Cross-language
+/// merging would corrupt downstream language-aware stages (morphotag,
+/// alignment, segmentation), so the merge refuses on disagreement
+/// rather than emitting a mixed-language file.
+#[test]
+fn merge_language_mismatch_returns_err() {
+    let options = ParseValidateOptions::default();
+    let err = merge_chats(
+        FIX_REF_CHI_ENG_L2,
+        FIX_ASR_INV_YUE_L2,
+        &[SpeakerCode::new("CHI")],
+        &default_strip_tiers(),
+        options,
+    )
+    .expect_err("merge should refuse when @Languages disagree");
+
+    match err {
+        MergeError::LanguageMismatch { file1, file2 } => {
+            // The payload preserves each file's declared codes so the
+            // operator can see *which* language pair was in conflict
+            // without re-reading the inputs.
+            let f1_codes: Vec<String> = file1.0.iter().map(|c| c.as_str().to_string()).collect();
+            let f2_codes: Vec<String> = file2.0.iter().map(|c| c.as_str().to_string()).collect();
+            assert_eq!(
+                f1_codes,
+                vec!["eng".to_string()],
+                "file1 codes should be [eng], got {f1_codes:?}"
+            );
+            assert_eq!(
+                f2_codes,
+                vec!["yue".to_string()],
+                "file2 codes should be [yue], got {f2_codes:?}"
+            );
+        }
+        other => panic!("expected MergeError::LanguageMismatch, got: {other:?}"),
+    }
+}
+
+// L2 sibling of `merge_ambiguous_speaker`: pins the
+// `MergeError::AmbiguousSpeaker` variant and its `speaker` payload
+// against silent widening into a generic precondition arm.
+
+/// File 1 has both CHI (retain set) and INV (non-retained, hand-coded
+/// clinician). File 2 also attributes utterances to INV. With
+/// `--retain CHI`, INV is the ambiguous code: the merge cannot pick
+/// between File 1's hand-coded INV and File 2's ASR INV.
+const FIX_REF_CHI_PLUS_INV_L2: &str = "@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tCHI Target_Child, INV Investigator
+@ID:\teng|corpus|CHI|2;06.|||Target_Child|||
+@ID:\teng|corpus|INV|||||Investigator|||
+@Media:\tambig, audio
+*CHI:\thello there . \u{15}0_1000\u{15}
+*INV:\thand-coded clinician turn . \u{15}1500_2500\u{15}
+@End
+";
+
+const FIX_ASR_INV_AMBIG_L2: &str = "@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tINV Investigator
+@ID:\teng|corpus|INV|||||Investigator|||
+@Media:\tambig, audio
+*INV:\tasr generated clinician turn . \u{15}3000_4000\u{15}
+@End
+";
+
+/// `merge_chats` returns `MergeError::AmbiguousSpeaker { speaker }`
+/// when a speaker code outside the retain set appears in both files.
+/// The payload names the conflicting code so the operator can either
+/// add it to `--retain` (favoring File 1's version) or rename File 2's
+/// usage as a preprocessing step.
+#[test]
+fn merge_ambiguous_speaker_returns_err() {
+    let options = ParseValidateOptions::default();
+    let err = merge_chats(
+        FIX_REF_CHI_PLUS_INV_L2,
+        FIX_ASR_INV_AMBIG_L2,
+        &[SpeakerCode::new("CHI")],
+        &default_strip_tiers(),
+        options,
+    )
+    .expect_err("merge should refuse when a non-retained speaker code appears in both files");
+
+    match err {
+        MergeError::AmbiguousSpeaker { speaker } => {
+            assert_eq!(
+                speaker,
+                SpeakerCode::new("INV"),
+                "expected ambiguous speaker = INV, got: {speaker:?}"
+            );
+        }
+        other => panic!("expected MergeError::AmbiguousSpeaker, got: {other:?}"),
+    }
 }

@@ -1,7 +1,7 @@
 # Merge Pipeline — Test Plan
 
 **Status:** Draft
-**Last updated:** 2026-05-27 11:19 EDT
+**Last updated:** 2026-05-28 14:32 EDT
 
 This page is the test-coverage roadmap for the new merge pipeline
 (`chatter speaker-id` + `chatter merge` + `chatter adjudicate` +
@@ -580,8 +580,70 @@ working end-to-end with synthetic fixtures.
 | 7 | `merge_header_languages_passthrough` + `merge_header_media_file1_wins` + `merge_header_comments_concatenate` — L2 | Extend `header_reconcile` for remaining headers per the contract table. |
 | 8 | `merge_preconditions_retain_missing` + `merge_preconditions_no_timeline` + `merge_preconditions_language_mismatch` + `merge_preconditions_ambiguous_speaker` — L3, each asserting exit code 2 with a specific stderr message | Implement `preconditions` module + map `MergeError` to exit codes in the CLI. |
 
+#### Phase A — actual cycle log
+
+The four-precondition cycle 8 was deliberately split into four
+single-variant cycles (9a / 9b / 9c / 9d) so each `MergeError`
+variant lands with its own RED→GREEN cycle and L2 + L3 sibling
+tests. The numbering here is therefore finer-grained than the
+plan table above; the table records the *shape* of Phase A, the
+log records what was actually committed.
+
+| # | Test(s) | Layer | Status |
+|---|---------|-------|--------|
+| 1 | `merge_basic_smoke` | L3 | done |
+| 2 | `merge_retained_speakers_byte_stable` | L2 | done |
+| 3 | `merge_strips_default_derived_tiers` | L2 | done |
+| 4 | `merge_strip_tiers_configurable` | L2 | done |
+| 5 | `merge_strip_tiers_empty_preserves_all` | L2 | done |
+| 6 | `merge_header_participants_concatenates` | L2 | done |
+| 7 | `merge_header_id_concatenates` | L2 | done |
+| 8a | `merge_header_comments_concatenate` | L2 | done |
+| 8b | `merge_header_languages_passthrough` + `merge_header_media_file1_wins` | L2 | done |
+| 9a | `merge_no_retain_speakers_in_file1` + `_returns_err` | L3 + L2 | done (L2 sibling backfilled in 9c) |
+| 9b | `merge_no_timeline_in_file1` + `_returns_err` | L3 + L2 | done |
+| 9c | `merge_language_mismatch` + `_returns_err` | L3 + L2 | done |
+| 9d | `merge_ambiguous_speaker` + `_returns_err` | L3 + L2 | done |
+
 End of Phase A: `chatter merge` works on simple fixtures with
-all preconditions enforced. The pipeline is publishable as v0.
+all four preconditions (retain / timeline / language / ambiguous
+speaker) enforced. The pipeline is publishable as v0.
+
+#### Phase B — actual cycle log
+
+Phase B picks up at cycle 10 in the cycle log (Phase A used 9a–9d for
+the precondition split).
+
+| # | Test(s) | Layer | Status |
+|---|---------|-------|--------|
+| 10 | `speaker_id_explicit_basic` | L3 | done |
+| 11 | `apply_mapping_byte_stable_except_prefix` + `apply_mapping_rewrites_participants` + `apply_mapping_rewrites_id` | L2 | done (regression-guards) |
+| 12 | `identify_mapping_clean_winner` | L2 | done |
+| 13 | `identify_mapping_borderline_refuses` | L2 | done |
+| 14 | `speaker_id_reference_low_confidence_exits_4` | L3 | done |
+| 15 | `speaker_id_reference_writes_override` (+ `OverrideFile` data model) | L3 | done |
+| 16 | `speaker_id_override_file_replay` (+ `OverrideFile::get`) | L3 | done |
+| 17 | `adjudicate_speaker_id_accepts_suggested` (+ adjudication core) | L4 | done |
+| 18 | `adjudicate_scripted_accepts_suggested` (+ `chatter adjudicate` CLI + scripted-TOML I/O) | L3 | done |
+| 19 | `speaker_id_reference_writes_pending_on_low_confidence` (+ `--write-pending` flag + `LowConfidence` carries `DonorMatchReport`) | L3 | done |
+| 20 | `adjudicate_speaker_id_override_mapping` (+ `OperatorDecision::OverrideMapping` variant + scripted-TOML `override-mapping` shape) | L4 | done |
+| 21 | `adjudicate_interactive_accepts_suggested` (+ `TerminalPrompter` + `--interactive` flag) | L3 | done |
+| 22 | `adjudicate_parent_role_lookup_chooses_role` (+ `PendingKindData` promotion + `ParentRoleLookup` kind + `ChooseRole` decision) | L4 | done |
+| 23 | `adjudicate_interactive_chooses_role` (+ `parse_operator_response` + kind-aware prompt hint) | L3 | done |
+| 24 | `adjudicate_interactive_override_mapping` (+ `parse_override_mapping` + `parse_speaker_assignment`) | L3 | done |
+| 25 | `pipeline_clean_winner_end_to_end` (+ `chatter pipeline` subcommand) | L3 | done |
+| 26 | `batch_pass1_single_session` (+ `chatter batch` subcommand, subprocess driver) | L3 | done |
+| 27 | `batch_mixed_outcomes` (regression-guard: clean+borderline aggregation) | L3 | done |
+| 28 | `batch_pass2_replay` (+ `--override-file` on `pipeline` + `batch`; per-session auto-detection) | L3 | done |
+| 29 | `batch_skip_existing` (+ `--skip-existing` flag on `batch` for idempotent re-runs) | L3 | done |
+| 30 | refactor — `PipelineArgs` + `BatchArgs` structs retire three `#[allow(clippy::too_many_arguments)]` markers | — | done (true-no-op refactor; covered by cycles 25-29 regression suite) |
+| 31 | refactor — split `commands/speaker_id.rs` (472 lines) into `speaker_id/{mod,modes,writes,support}.rs` (158 + 196 + 103 + 86 lines); retire 4 stale `#[allow(dead_code)]` markers on `ReferenceModeOutcome` (fields are read by `write_override_entry`) | — | done (true-no-op refactor; covered by cycles 10-29 regression suite) |
+| 32 | `adjudicate_sanity_scan_accept_suggested` (+ `AdjudicationKind::SanityScanMisclassification` variant, `PendingKindData::SanityScanMisclassification { suggested, reason }` variant, two apply-decision arms mirroring `SpeakerIdLowConfidence`, terminal prompter render + prompt-hint arm) | L4 | done — adjudication kind end-to-end; the post-merge scan detector itself (heuristic + auto-pending-write) is a separate cycle 33 |
+| 33 | `sanity_scan_flags_inverted_mlu` (+ `talkbank_transform::sanity_scan::scan_session` + `chatter sanity-scan` subcommand; mean-utterance-word-count asymmetry heuristic, default 1.5×, binary-mapping only) | L3 | done — detector + CLI end-to-end; multi-rename support, batch integration, and alternative heuristics deferred |
+| 34 | `batch_writes_override_for_auto_decisions` (+ `--write-override` on both `chatter pipeline` and `chatter batch`; threaded through `PipelineArgs.write_override_path` + `BatchArgs.write_override_path`; reference-mode auto-decisions audit-trailed for sanity-scan + future re-runs) | L3 | done |
+| 35 | `batch_with_sanity_scan_flag_flags_inverted_mlu` (+ `--sanity-scan` + `--sanity-scan-threshold` on `chatter batch`; post-loop subprocess driver for `chatter sanity-scan`; precondition validation requiring `--write-override` + `--write-pending`) | L3 | done |
+| 36 | refactor — split `cli/args/core.rs` (984 → 747 lines): extract `DebugCommands` → `debug_commands.rs`, `CacheCommands` → `cache_commands.rs`, config enums (`LogFormat`, `TuiMode`, `OutputFormat`, `ParserBackend`, `AlignmentTier`) → `cli_types.rs`, unit-test module → `core_tests.rs` (via `#[path]`); satisfies the 800-line hard limit | — | done (true-no-op refactor; covered by full regression suite + 110 bin/integration tests) |
+| 37+ | sanity-scan multi-rename support; diarization-mix-review kind (operator workflow design needed); newtype threading at struct seams (deferred simplify finding); `apply_decision` arm dedup + per-kind `OperatorDecision` sub-enums | L3 + L4 | pending |
 
 ### Phase B — speaker-id pipeline (cycles 9–16)
 

@@ -69,10 +69,22 @@ pub(in crate::compare) fn conform_with_mapping(words: &[String]) -> (Vec<String>
 ///
 /// Tiebreaker order matches BA2-master 86230ef (2026-04-17,
 /// "fix part 2 of compare").
+///
+/// `main_utts[i]` is the utterance index that `main_tokens[i]` belongs to.
+/// BA2 (compare.py:200-249) projects each candidate window to its majority
+/// utterance by trimming non-majority tokens from both ends before scoring,
+/// preventing cross-utterance bag-of-words inflation. The projection is a
+/// no-op for windows whose tokens all share one utterance index.
 pub(in crate::compare) fn find_best_segment(
     gold_tokens: &[String],
     main_tokens: &[String],
+    main_utts: &[usize],
 ) -> (usize, usize) {
+    debug_assert_eq!(
+        main_tokens.len(),
+        main_utts.len(),
+        "main_tokens and main_utts must be parallel arrays",
+    );
     if gold_tokens.is_empty() || main_tokens.is_empty() {
         return (0, 0);
     }
@@ -93,13 +105,22 @@ pub(in crate::compare) fn find_best_segment(
     for span in min_window..=max_window {
         for start in 0..=(main_len - span) {
             let end = start + span;
-            let overlap = token_overlap(&main_tokens[start..end], &gold_counts);
-            let waste = span.saturating_sub(overlap);
-            let align_matches = count_alignment_matches(&main_tokens[start..end], gold_tokens);
+            // Majority-project the candidate window before scoring (BA2
+            // compare.py:200-249). If trimming non-majority tokens from
+            // both ends empties the window, BA2 `continue`s the loop.
+            let (ts, te) = match majority_project(main_utts, start, end) {
+                Some(window) => window,
+                None => continue,
+            };
+            let projected = &main_tokens[ts..te];
+            let projected_len = te - ts;
+            let overlap = token_overlap(projected, &gold_counts);
+            let waste = projected_len.saturating_sub(overlap);
+            let align_matches = count_alignment_matches(projected, gold_tokens);
 
-            let key = (overlap, align_matches, Reverse(waste), end);
+            let key = (overlap, align_matches, Reverse(waste), te);
             if best_key.is_none_or(|best| key > best) {
-                best_window = (start, end);
+                best_window = (ts, te);
                 best_key = Some(key);
             }
         }
@@ -112,6 +133,49 @@ pub(in crate::compare) fn find_best_segment(
     }
 
     best_window
+}
+
+/// Trim a candidate window down to its majority-utterance subrange.
+///
+/// Mirrors BA2's `Counter(window_utts).most_common(1)` followed by
+/// leading/trailing non-majority-token trim. Tiebreaker for the majority
+/// itself is **first-seen** (matches Python's `Counter`, which is
+/// insertion-ordered — `Iterator::max_by_key` would pick last-seen, the
+/// opposite). Returns `None` if the projected window is empty.
+fn majority_project(main_utts: &[usize], start: usize, end: usize) -> Option<(usize, usize)> {
+    if start >= end {
+        return None;
+    }
+
+    let mut counts: Vec<(usize, usize)> = Vec::new();
+    for &utt in &main_utts[start..end] {
+        match counts.iter_mut().find(|(idx, _)| *idx == utt) {
+            Some(entry) => entry.1 += 1,
+            None => counts.push((utt, 1)),
+        }
+    }
+
+    // Strict `>` keeps first-seen as the winning utterance index on ties.
+    let majority = counts
+        .iter()
+        .fold(None::<(usize, usize)>, |best, &cur| match best {
+            Some(b) if b.1 >= cur.1 => Some(b),
+            _ => Some(cur),
+        })?
+        .0;
+
+    let mut ts = start;
+    while ts < end && main_utts[ts] != majority {
+        ts += 1;
+    }
+    let mut te = end;
+    while te > ts && main_utts[te - 1] != majority {
+        te -= 1;
+    }
+    if te <= ts {
+        return None;
+    }
+    Some((ts, te))
 }
 
 fn count_alignment_matches(window: &[String], gold_tokens: &[String]) -> usize {
@@ -183,6 +247,15 @@ pub fn compare(main_file: &ChatFile, gold_file: &ChatFile) -> ComparisonBundle {
     let (conformed_main, main_map) = conform_with_mapping(&main_words);
     let (conformed_gold, gold_map) = conform_with_mapping(&gold_words);
 
+    // Per-conformed-token utterance index, parallel to `conformed_main`.
+    // `find_best_segment` needs this for BA2's majority-projection step
+    // (compare.py:200-249), which trims cross-utterance leaders/trailers
+    // before scoring each candidate window.
+    let conformed_main_utts: Vec<usize> = main_map
+        .iter()
+        .map(|&orig_idx| main_info[orig_idx].utterance_index)
+        .collect();
+
     // 4. Partition conformed gold tokens by utterance so compare can work
     // sequentially, one gold utterance at a time.
     let mut gold_utt_tokens: Vec<Vec<String>> = vec![Vec::new(); gold_utts.len()];
@@ -214,7 +287,8 @@ pub fn compare(main_file: &ChatFile, gold_file: &ChatFile) -> ComparisonBundle {
         }
 
         let remaining_main = &conformed_main[search_start..];
-        let (win_start, win_end) = find_best_segment(g_tokens, remaining_main);
+        let remaining_main_utts = &conformed_main_utts[search_start..];
+        let (win_start, win_end) = find_best_segment(g_tokens, remaining_main, remaining_main_utts);
         let abs_start = search_start + win_start;
         let abs_end = search_start + win_end;
 
@@ -251,9 +325,12 @@ pub fn compare(main_file: &ChatFile, gold_file: &ChatFile) -> ComparisonBundle {
                     let orig_gold_idx = g_maps[local_gold_cursor];
                     let gold_word = &gold_info[orig_gold_idx];
 
+                    // BA2 (compare.py:540-550) attributes the gold form's
+                    // POS to every Match — the gold standard is what the
+                    // reviewer needs to see, not the transcriber's tag.
                     let token = CompareToken {
                         text: key,
-                        pos: main_word.pos.clone(),
+                        pos: gold_word.pos.clone(),
                         status: CompareStatus::Match,
                     };
                     metrics.record(&token);

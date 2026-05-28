@@ -1,7 +1,7 @@
 # User Workflow Migration (batchalign2 -> batchalign3)
 
 **Status:** Current
-**Last updated:** 2026-05-05 13:54 EDT
+**Last updated:** 2026-05-28 14:18 EDT
 
 This page describes durable differences between:
 
@@ -425,10 +425,9 @@ The important durable differences are operational rather than algorithmic:
   hunting during server/daemon runs
 - `avqi` no longer needs on-disk temporary mono WAV files
 
-One user-visible migration note does matter for scripting:
-
-- `opensmile` CSV output is now row-oriented (feature names as columns) rather
-  than the transposed BA2 dataframe export shape (feature names as rows)
+`opensmile` CSV output matches the BA2 shape exactly: `feature,value`
+header followed by one row per feature, single-column. BA2-era scripts
+that parse this layout continue to work without modification.
 
 ## 5) Migration checklist for existing users
 
@@ -451,9 +450,10 @@ One user-visible migration note does matter for scripting:
    port it to subprocess calls into `batchalign3`. There is no
    public Python API in BA3 — see
    [No Python API](../user-guide/python-api.md).
-6. If you have automation around `opensmile` CSV post-processing,
-   check whether it assumed the old BA2 transposed CSV layout and
-   update it for BA3's row-oriented output.
+6. (Reserved — was previously a note about opensmile CSV layout
+   changing during the rewrite. That divergence has been corrected;
+   `opensmile` output now matches the BA2 `feature,value` shape and
+   no script changes are required.)
 7. Adopt `jobs` / `logs` / `cache` operational commands for
    repeatability.
 8. For editor media workflows, use sidecar / timing-index aware
