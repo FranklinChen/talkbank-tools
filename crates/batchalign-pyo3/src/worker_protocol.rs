@@ -13,10 +13,40 @@ fn repr_text(value: &Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 fn error_payload<'py>(py: Python<'py>, message: &str) -> PyResult<Bound<'py, PyAny>> {
+    error_payload_with_request_id(py, message, None)
+}
+
+/// Build an `{"op":"error",...}` envelope, optionally tagging it with the
+/// `request_id` of the V2 dispatch that triggered the failure. The Rust
+/// `reader_loop_generic` matches on `request_id` to fail the pending
+/// oneshot immediately, instead of letting the dispatch sit on the
+/// per-request timeout for the full audio-task budget. See
+/// `crates/batchalign/src/worker/pool/shared_gpu/reader.rs`.
+fn error_payload_with_request_id<'py>(
+    py: Python<'py>,
+    message: &str,
+    request_id: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
     let payload = PyDict::new(py);
     payload.set_item("op", "error")?;
     payload.set_item("error", message)?;
+    if let Some(rid) = request_id {
+        payload.set_item("request_id", rid)?;
+    }
     Ok(payload.into_any())
+}
+
+/// Extract a `request_id` field from a request payload dict, if present
+/// and string-typed. Used to tag pre-validation errors so the Rust
+/// reader loop can route the failure to the right pending oneshot.
+fn extract_request_id(payload: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let Ok(dict) = payload.cast::<PyDict>() else {
+        return Ok(None);
+    };
+    let Some(value) = dict.get_item("request_id")? else {
+        return Ok(None);
+    };
+    Ok(value.extract::<String>().ok())
 }
 
 fn shutdown_payload<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -52,7 +82,18 @@ fn validate_request_model<'py>(
         Ok(request) => Ok(Ok(request)),
         Err(error) => {
             if error.matches(py, validation_error_type)? {
-                let payload = error_payload(py, &format!("invalid {op} request: {error}"))?;
+                // Preserve any `request_id` on the rejected payload so the
+                // Rust reader loop can fail the matching pending oneshot
+                // immediately. Without this, a V2 dispatch sits on the
+                // per-request timeout (default 180s for audio tasks) and
+                // the operator sees a generic timeout instead of the
+                // validation error.
+                let request_id = extract_request_id(req_payload)?;
+                let payload = error_payload_with_request_id(
+                    py,
+                    &format!("invalid {op} request: {error}"),
+                    request_id.as_deref(),
+                )?;
                 Ok(Err(payload))
             } else {
                 Err(error)
