@@ -187,11 +187,16 @@ impl SharedGpuWorker {
         // `tokio::time::timeout` wrap below. See the field-level doc on
         // `dispatch_semaphore` for the production failure this prevents.
         // The permit is released when `_permit` drops at function end.
+        tracing::debug!(
+            available_permits = self.dispatch_semaphore.available_permits(),
+            "execute_v2: about to acquire dispatch_semaphore",
+        );
         let _permit = self.dispatch_semaphore.acquire().await.map_err(|_| {
             WorkerError::Protocol(
                 "GPU worker dispatch semaphore closed (worker shutting down)".into(),
             )
         })?;
+        tracing::debug!("execute_v2: dispatch_semaphore acquired");
 
         // Re-check shutdown after acquiring the permit — the worker may have
         // started tearing down while we waited. Without this, a caller that
@@ -213,7 +218,9 @@ impl SharedGpuWorker {
 
         // Write the request under the stdin mutex.
         {
+            tracing::debug!("execute_v2: about to lock stdin");
             let mut stdin = self.stdin.lock().await;
+            tracing::debug!("execute_v2: stdin locked");
             let envelope = serde_json::json!({
                 "op": "execute_v2",
                 "request": request
@@ -221,16 +228,26 @@ impl SharedGpuWorker {
             let mut line = serde_json::to_string(&envelope)
                 .map_err(|e| WorkerError::Protocol(format!("failed to encode request: {e}")))?;
             line.push('\n');
+            tracing::debug!(bytes = line.len(), "execute_v2: about to write_all");
             if let Err(e) = stdin.write_all(line.as_bytes()).await {
                 // Remove the pending entry on write failure.
                 super::super::lock_recovered(&self.pending).remove(&request_id);
                 return Err(e.into());
             }
+            tracing::debug!("execute_v2: write_all returned Ok, about to flush");
             if let Err(e) = stdin.flush().await {
                 super::super::lock_recovered(&self.pending).remove(&request_id);
                 return Err(e.into());
             }
+            tracing::debug!("execute_v2: flush returned Ok");
         }
+        tracing::debug!(
+            timeout_s = request.timeout_seconds_with_config(
+                self.config.audio_task_timeout_s,
+                self.config.analysis_task_timeout_s,
+            ),
+            "execute_v2: stdin write done; awaiting oneshot response",
+        );
 
         // Wait for the response with a timeout.
         let timeout_s = request.timeout_seconds_with_config(

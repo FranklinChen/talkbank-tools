@@ -27,6 +27,8 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::EnvFilter;
+#[cfg(feature = "debug-runtime")]
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
 use batchalign::cli::args::Cli;
@@ -168,9 +170,13 @@ fn init_tracing(
         match init_otlp_provider(&otlp) {
             Ok(provider) => {
                 let tracer = provider.tracer("batchalign3");
+                let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+                #[cfg(feature = "debug-runtime")]
+                let fmt_layer =
+                    fmt_layer.with_span_events(FmtSpan::ENTER | FmtSpan::EXIT | FmtSpan::CLOSE);
                 let registry = tracing_subscriber::registry()
                     .with(env_filter)
-                    .with(tracing_subscriber::fmt::layer().with_target(false))
+                    .with(fmt_layer)
                     .with(file_layer)
                     .with(tracing_opentelemetry::layer().with_tracer(tracer));
                 #[cfg(feature = "debug-runtime")]
@@ -188,9 +194,14 @@ fn init_tracing(
         }
     }
 
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+    // When debug-runtime is on, surface span lifecycle events (enter/exit/close)
+    // so that operators can correlate per-span work without attaching tokio-console.
+    #[cfg(feature = "debug-runtime")]
+    let fmt_layer = fmt_layer.with_span_events(FmtSpan::ENTER | FmtSpan::EXIT | FmtSpan::CLOSE);
     let registry = tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(fmt_layer)
         .with(file_layer);
     #[cfg(feature = "debug-runtime")]
     let registry = registry.with(

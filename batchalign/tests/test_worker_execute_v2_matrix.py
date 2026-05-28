@@ -151,6 +151,10 @@ def _provider_asr_host(backend: AsrBackendV2) -> AsrExecutionHostV2:
         return AsrExecutionHostV2(
             hk_funaudio_runner=lambda item: _response("funaudio", item.audio_path)
         )
+    if backend is AsrBackendV2.HK_QWEN:
+        return AsrExecutionHostV2(
+            hk_qwen_runner=lambda item: _response("qwen", item.audio_path)
+        )
     raise AssertionError(f"unexpected provider ASR backend {backend!s}")
 
 
@@ -374,6 +378,7 @@ def _assert_error_response(
         AsrBackendV2.HK_TENCENT,
         AsrBackendV2.HK_ALIYUN,
         AsrBackendV2.HK_FUNAUDIO,
+        AsrBackendV2.HK_QWEN,
     ],
     ids=lambda backend: backend.value,
 )

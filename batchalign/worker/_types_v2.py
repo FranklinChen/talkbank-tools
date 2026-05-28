@@ -74,6 +74,9 @@ class AsrBackendV2(str, Enum):
     HK_TENCENT = "hk_tencent"
     HK_ALIYUN = "hk_aliyun"
     HK_FUNAUDIO = "hk_funaudio"
+    # Qwen3-ASR Cantonese provider (local model via qwen-asr package).
+    # Mirrors `crates/batchalign-types/src/worker_v2/requests.rs::AsrBackendV2::HkQwen`.
+    HK_QWEN = "hk_qwen"
     REVAI = "revai"
 
 
