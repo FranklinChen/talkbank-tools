@@ -2,16 +2,9 @@
 //!
 //! **CRITICAL**: No error message should contain "node 'ERROR'" or expose tree-sitter internals.
 
-use talkbank_model::ErrorCollector;
-use talkbank_parser::TreeSitterParser;
+mod common;
 
-/// Helper to parse CHAT content and collect errors
-fn parse_and_collect_errors(input: &str) -> Vec<talkbank_model::ParseError> {
-    let parser = TreeSitterParser::new().expect("grammar loads");
-    let errors = ErrorCollector::new();
-    let _file = parser.parse_chat_file_streaming(input, &errors);
-    errors.into_vec()
-}
+use common::parse_and_collect_errors;
 
 /// Tests no error node keyword in messages.
 #[test]

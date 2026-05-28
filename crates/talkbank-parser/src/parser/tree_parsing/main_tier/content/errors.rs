@@ -90,7 +90,13 @@ pub(crate) fn analyze_word_error(error_node: Node, source: &str) -> ParseError {
             "Incomplete word-level annotation - '&' must be followed by annotation name"
                 .to_string(),
         )
-        .with_suggestion("Complete the annotation like '&=laugh' or '&uh' for filler");
+        // Modern CHAT (per java-chatter `changes.txt`) requires one of four
+        // marker prefixes after `&`. Bare `&XYZ` was retired; suggesting it
+        // here would tell the user to type the exact pattern E207 rejects.
+        .with_suggestion(
+            "Add a marker prefix: '&-uh' (filler), '&+um' (fragment), \
+             '&~mhm' (nonword), or '&=laugh' (event)",
+        );
     }
 
     // E207: Unknown scoped annotation marker (PRIORITY 4)
