@@ -1,7 +1,7 @@
 # Cantonese Language Support
 
 **Status:** Current
-**Last updated:** 2026-05-27 11:30 EDT
+**Last updated:** 2026-05-27 21:27 EDT
 
 User reference for Cantonese (`yue`) processing in batchalign3 — ASR engine
 options, credentials, retokenize usage, and what to expect from each
@@ -122,6 +122,19 @@ CER on per-utterance Cantonese child speech with the 1.7B variant;
 TalkBank's own longer-form Cantonese fixtures show this engine
 benefits from per-utterance segmentation rather than full-session
 input.
+
+The Qwen3-ASR worker always pairs the ASR model with
+`Qwen/Qwen3-ForcedAligner-0.6B`, Qwen's companion forced-aligner
+model. The aligner is loaded at worker bootstrap (~1.2 GB
+additional download on first use, then cached) so the ASR pipeline
+emits word-level timestamps the downstream FA stage can consume.
+This pairing is required, not optional: the `qwen-asr` library
+raises `ValueError` from `model.transcribe(...,
+return_time_stamps=True)` whenever the aligner was not supplied at
+`Qwen3ASRModel.from_pretrained(...)`. Dropping
+`return_time_stamps=True` to "fix" that error degrades every
+downstream `%wor` tier and is therefore not a permitted shortcut;
+the only correct configuration is the aligner-paired one.
 
 **Cantonese forced alignment.** Converts Chinese characters to jyutping
 romanization (via PyCantonese), strips tone numbers for Wave2Vec

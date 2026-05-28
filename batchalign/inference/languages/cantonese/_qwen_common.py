@@ -44,6 +44,16 @@ _QWEN_LANG_LABELS: dict[LanguageCode, str] = {
 }
 
 
+# Canonical forced-alignment companion model from the Qwen3-ASR family.
+# qwen-asr's ``Qwen3ASRModel.transcribe(..., return_time_stamps=True)``
+# raises ValueError when ``forced_aligner`` was not supplied at
+# ``from_pretrained``. We always want word-level timestamps (the
+# downstream BA3 FA pipeline depends on them for ``%wor`` tier
+# injection), so the aligner is always wired. The model ID matches
+# Qwen's own README example for paired ASR + forced-alignment usage.
+_QWEN_FORCED_ALIGNER_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
+
+
 def _resolve_qwen_language(lang: LanguageCode) -> str:
     label = _QWEN_LANG_LABELS.get(lang)
     if label is None:
@@ -164,6 +174,16 @@ class QwenRecognizer:
             # chunk's text is bounded by this. 4096 is generous for
             # the ~5-60 second chunks the package's VAD produces.
             max_new_tokens=4096,
+            # qwen-asr requires the forced aligner at init when the
+            # caller asks for return_time_stamps=True later. The
+            # aligner loads on the same device + dtype as the ASR
+            # model so cross-device tensor moves don't surprise the
+            # downstream batch loop.
+            forced_aligner=_QWEN_FORCED_ALIGNER_MODEL_ID,
+            forced_aligner_kwargs={
+                "dtype": dtype,
+                "device_map": self.device,
+            },
         )
         L.info(
             "Qwen3-ASR loaded: model=%s, lang=%s (%s), device=%s, dtype=%s",
