@@ -1,12 +1,24 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-05 03:20 EDT
+**Last updated:** 2026-09-05 17:08 EDT
 
 ## Philosophy
 
 The test suite is split into tiers by design. The following diagram shows
 the tiers, their resource requirements, and how to invoke each.
+
+The manually dispatched Coverage job runs Rust coverage once over the workspace,
+including `batchalign-pyo3`, and excludes the experimental desktop shell:
+
+```bash
+cargo llvm-cov --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
+```
+
+The desktop shell needs GTK/WebKit on Linux and is outside the headless CI
+package set. This exclusion does not remove PyO3 coverage; the former separate
+PyO3 step repeated tests that the workspace command already selects. Coverage
+remains an explicit measurement job, not an inner-loop test command.
 
 ```mermaid
 flowchart TD

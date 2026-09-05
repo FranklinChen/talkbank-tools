@@ -322,16 +322,12 @@ jobs:
           uv pip install --no-deps dist/*.whl
       - name: Python coverage
         run: uv run --no-sync pytest --cov=batchalign --cov-report=lcov:lcov-python.info batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'
-      # `cargo llvm-cov` with no runner argument drives `cargo test`. It used to
-      # say `llvm-cov nextest`, which cannot work: nextest is banned and
-      # uninstalled in this workspace. The PyO3 step also pointed at
-      # `pyo3/Cargo.toml`, a path that has not existed since the crate moved
-      # under `crates/`, so `-p` is used instead of a path that can go stale.
-      # Both defects were invisible because this job is `workflow_dispatch`-only.
-      - name: Rust PyO3 coverage
-        run: cargo llvm-cov -p batchalign-pyo3 --lcov --output-path lcov-rust.info
+      # The workspace pass already includes batchalign-pyo3. Running it
+      # separately repeats its instrumented tests. The experimental desktop
+      # shell is outside CI's supported package set and requires GTK/WebKit;
+      # do not accidentally pull it into this headless coverage job.
       - name: Rust workspace coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov-rust-workspace.info
+        run: cargo llvm-cov --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
 
   dashboard-smoke:
     name: Dashboard Smoke
