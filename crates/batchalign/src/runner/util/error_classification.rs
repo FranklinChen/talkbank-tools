@@ -77,7 +77,8 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         ServerError::Database(_)
         | ServerError::Migration(_)
         | ServerError::Persistence(_)
-        | ServerError::MediaTiming(_) => FailureCategory::System,
+        | ServerError::MediaTiming(_)
+        | ServerError::OutputParse(_) => FailureCategory::System,
         ServerError::JobNotFound(_)
         | ServerError::JobConflict { .. }
         | ServerError::JobNotTerminal(_)

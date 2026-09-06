@@ -304,7 +304,8 @@ impl AudioFileTask for AlignAudioTask<'_> {
             self.output.incremental_enabled,
         );
         Ok(FileOutput::Chat {
-            text: crate::provenance::inject_provenance_into_text(&output_text, &provenance),
+            text: crate::provenance::inject_provenance_into_text(&output_text, &provenance)
+                .map_err(crate::error::ServerError::OutputParse)?,
             merge_abbreviations: self.output.merge_abbreviations,
         })
     }

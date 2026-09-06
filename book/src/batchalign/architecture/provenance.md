@@ -1,7 +1,7 @@
 # Processing Provenance System
 
 **Status:** Current
-**Last updated:** 2026-08-30 21:00 EDT
+**Last updated:** 2026-09-05 21:58 EDT
 
 ## Overview
 
@@ -31,8 +31,7 @@ The module provides:
 - **`ProvenanceComment`**: typed builder for provenance metadata
 - **`inject_provenance(&mut ChatFile, &ProvenanceComment)`**: AST-level
   injection that adds/replaces `@Comment` headers
-- **`inject_provenance_into_text(&str, &ProvenanceComment) -> String`**,
-  convenience wrapper for pipelines working with serialized text
+- **`inject_provenance_into_text(&str, &ProvenanceComment) -> Result<String, ParseErrors>`**: strictly parses serialized output before adding a comment; parser recovery errors return diagnostics instead of a rewritten document
 - **Per-command builders**: `morphotag_provenance()`,
   `align_provenance()`, `transcribe_provenance()`, etc.
 
@@ -83,7 +82,7 @@ Each pipeline injects provenance right before serialization:
 | utseg | `pipeline/text_infer.rs` | `run_cached_text_pipeline()`: after `apply()`, before `to_chat_string()` |
 | translate | `pipeline/text_infer.rs` | Same as utseg (shared generic pipeline) |
 | coref | `coref.rs` | `run_coref_impl()`: after injection, before serialize |
-| align | `runner/dispatch/fa_pipeline.rs` | `process_one_fa_file()`: after FA result, uses `inject_provenance_into_text()` |
+| align | `runner/dispatch/fa_pipeline.rs` | `AlignAudioTask::finalize_success()`: after FA result, uses fallible `inject_provenance_into_text()` |
 | transcribe | `pipeline/transcribe.rs` | serialization stage: injects structured provenance and the unchecked-ASR warning through the production AST helpers |
 
 ## Engine Version Source
@@ -116,7 +115,7 @@ When the same command is run again on the same file:
 1. `inject_provenance()` scans all `Line::Header` entries
 2. Any `Header::Comment` whose `BulletContent` text starts with
    `[ba3 <command> |` is removed
-3. The new comment is inserted after the last `@ID`
+3. The new comment is inserted after the last constant participant header
 
 This means re-running morphotag replaces the morphotag comment but
 preserves any align or transcribe comments. The processing history
@@ -143,7 +142,10 @@ constant-header-aware AST insertion point as structured provenance.
 
 Tests beside `provenance.rs` cover deterministic formatting, replacement,
 cross-command preservation, constant-header ordering, extraction, no-op write
-detection, the product-version stamp, and the explicit safety warning. The ASR
+detection, the product-version stamp, and the explicit safety warning. Malformed
+main tiers and generated morphosyntax tiers are refused at the serialized-output
+boundary. The dispatcher preserves these diagnostics as `ServerError::OutputParse`,
+a system failure rather than a successful file or a bad-input response. The ASR
 backend matrix in `transcribe/mod.rs` proves that Rev, Whisper variants,
 Tencent, Aliyun, Funaudio, and Qwen retain distinct provenance names. There is
 no test-only comment implementation: tests exercise the production builder and

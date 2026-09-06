@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use crate::api::ReleasedCommand;
 use crate::chat_ops::{ChatFile, Header, Line};
-use batchalign_transform::parse::parse_lenient;
+use batchalign_transform::parse::parse_strict;
 use batchalign_transform::serialize::to_chat_string;
 
 /// Processing provenance metadata for one batchalign3 command invocation.
@@ -137,12 +137,17 @@ pub fn inject_provenance(file: &mut ChatFile, comment: &ProvenanceComment) {
 ///
 /// Parses the text, injects the comment into the AST, and re-serializes.
 /// This is a convenience wrapper for pipelines that work with CHAT strings
-/// rather than AST objects.
-pub fn inject_provenance_into_text(chat_text: &str, comment: &ProvenanceComment) -> String {
+/// rather than AST objects. Parse failure returns the original diagnostics;
+/// a recovered document must not be serialized as successful output merely
+/// because the caller requested a provenance comment.
+pub fn inject_provenance_into_text(
+    chat_text: &str,
+    comment: &ProvenanceComment,
+) -> Result<String, talkbank_model::ParseErrors> {
     let parser = crate::chat_parser();
-    let (mut file, _) = parse_lenient(&parser, chat_text);
+    let mut file = parse_strict(&parser, chat_text)?;
     inject_provenance(&mut file, comment);
-    to_chat_string(&file)
+    Ok(to_chat_string(&file))
 }
 
 /// Build a provenance comment for morphotag from engine versions.
@@ -404,6 +409,7 @@ pub fn extract_provenance(chat_text: &str) -> Vec<ProvenanceEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use batchalign_transform::parse::parse_lenient;
 
     #[test]
     fn format_morphotag_provenance() {
@@ -424,6 +430,21 @@ mod tests {
     }
 
     #[test]
+    fn provenance_refuses_recovered_output() {
+        let comment = ProvenanceComment::new("align");
+        for body in ["*PAR:\thello [ .", "*PAR:\thello .\n%mor:\t|"] {
+            let chat = format!(
+                "@UTF8\n@Begin\n@Languages:\teng\n\
+                 @Participants:\tPAR Participant\n\
+                 @ID:\teng|test|PAR|||||Participant|||\n{body}\n@End\n"
+            );
+            let errors = inject_provenance_into_text(&chat, &comment)
+                .expect_err("provenance must not hide main-tier or generated-tier parse errors");
+            assert!(!errors.errors.is_empty());
+        }
+    }
+
+    #[test]
     fn inject_replaces_existing_comment_for_same_command() {
         let chat = "\
 @UTF8
@@ -439,7 +460,7 @@ mod tests {
             .field("engine", "stanza-1.11.1")
             .field("lang", "eng");
 
-        let result = inject_provenance_into_text(chat, &new_comment);
+        let result = inject_provenance_into_text(chat, &new_comment).expect("valid CHAT");
 
         // Old comment should be gone
         assert!(!result.contains("stanza-1.10.0"));
@@ -469,7 +490,7 @@ mod tests {
             .field("engine", "stanza-1.11.1")
             .field("lang", "eng");
 
-        let result = inject_provenance_into_text(chat, &morphotag_comment);
+        let result = inject_provenance_into_text(chat, &morphotag_comment).expect("valid CHAT");
 
         // Transcribe comment should survive
         assert!(result.contains("[ba3 transcribe"));
@@ -497,7 +518,7 @@ mod tests {
             .field("engine", "stanza-1.11.1")
             .field("lang", "eng");
 
-        let result = inject_provenance_into_text(chat, &comment);
+        let result = inject_provenance_into_text(chat, &comment).expect("valid CHAT");
 
         let birth_pos = result
             .find("@Birth of")

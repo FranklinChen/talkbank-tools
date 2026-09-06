@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-05 17:08 EDT
+**Last updated:** 2026-09-05 21:59 EDT
 
 ## Philosophy
 
@@ -19,6 +19,12 @@ The desktop shell needs GTK/WebKit on Linux and is outside the headless CI
 package set. This exclusion does not remove PyO3 coverage; the former separate
 PyO3 step repeated tests that the workspace command already selects. Coverage
 remains an explicit measurement job, not an inner-loop test command.
+
+Both the Python wheel job and standalone PyO3 build cache the root Cargo
+workspace's `target` directory. The extension lives at
+`crates/batchalign-pyo3`; the former `pyo3` workspace path no longer exists.
+The cache action's default root mapping follows the actual Cargo workspace
+without maintaining a second, stale crate layout.
 
 ```mermaid
 flowchart TD

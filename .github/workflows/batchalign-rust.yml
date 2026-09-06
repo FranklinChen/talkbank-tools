@@ -59,10 +59,6 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            pyo3 -> pyo3/target
 
       - name: Build imported standalone PyO3 crate
         run: make batchalign-build-pyo3

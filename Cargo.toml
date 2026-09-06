@@ -15,10 +15,10 @@ members = [
 # core (model, parser, transform, spec, grammar) lives in the chatter repo; the
 # old root talkbank-tools CHAT-validation package (bins, TUI, roundtrip tests)
 # was removed in the chatter dedup. Members consume chatter's crates via the
-# path deps under [workspace.dependencies].
+# released git tags under [workspace.dependencies].
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 authors = ["Franklin Chen <franklinchen@franklinchen.com>"]
 license = "BSD-3-Clause"
@@ -133,12 +133,12 @@ batchalign-transform = { path = "crates/batchalign-transform" }
 # ../chatter/crates/...; never commit a path override here. Adopt a newer chatter
 # by bumping the tag. talkbank-transform is the GENERIC transform;
 # batchalign-transform (above) holds the ML accretion.
-talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.18.1", default-features = false }
+talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.19.0", default-features = false }
 # Stage 1 dedup: talkbank-tools no longer carries its own copies of these.
-talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.18.1" }
-talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.18.1" }
-talkbank-parser-re2c = { git = "https://github.com/TalkBank/chatter", tag = "v0.18.1" }
-talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.18.1" }
+talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.19.0" }
+talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.19.0" }
+talkbank-parser-re2c = { git = "https://github.com/TalkBank/chatter", tag = "v0.19.0" }
+talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.19.0" }
 
 phf = { version = "0.14", features = ["macros"] }
 phf_codegen = "0.14"

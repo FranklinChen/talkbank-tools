@@ -205,6 +205,13 @@ pub enum ServerError {
     #[error("media/timing transition failed: {0}")]
     MediaTiming(#[from] batchalign_transform::media_timing::MediaTimingError),
 
+    /// Serialized pipeline output failed parsing before provenance publication.
+    ///
+    /// **HTTP 500.** Preserve diagnostics from the generated output rather than
+    /// blaming the submitted request or retrying a worker that already finished.
+    #[error("pipeline output could not receive provenance: {0}")]
+    OutputParse(#[source] talkbank_model::ParseErrors),
+
     /// A cache-only request reached a non-empty set of FA cache misses.
     ///
     /// This is an intentional, actionable precondition refusal, not corrupt
@@ -403,7 +410,7 @@ impl ServerError {
         match self {
             Self::Database(_) | Self::Migration(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::MediaTiming(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::MediaTiming(_) | Self::OutputParse(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::RequiredEvidenceUnavailable(_) => StatusCode::PRECONDITION_FAILED,
             Self::JobNotFound(_) => StatusCode::NOT_FOUND,
             Self::JobConflict { .. } => StatusCode::CONFLICT,

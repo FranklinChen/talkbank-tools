@@ -1,7 +1,7 @@
 # Release Contract
 
 **Status:** Current
-**Last updated:** 2026-08-30 21:00 EDT
+**Last updated:** 2026-09-05 22:04 EDT
 
 This page defines the compatibility promises for the public `batchalign3`
 product. It describes the current 0.x public-preview line; it is not a promise
@@ -72,10 +72,12 @@ their experiment reports.
 
 ## Workspace dependency
 
-BA3 lives in the `talkbank-tools` Cargo workspace and consumes the sibling
-TalkBank Rust crates by workspace dependency. That single reviewed repository
-is the release source of truth; there is no cross-repository dependency pin to
-update for a normal BA3 release.
+BA3 lives in the `talkbank-tools` Cargo workspace and consumes Chatter's CHAT
+model, parsers and generic transforms through public git dependencies pinned
+to a released Chatter tag. `Cargo.lock` records the exact source commit. A
+clean checkout builds without a sibling Chatter checkout or local path patch.
+When adopting a Chatter release, review its API and validation changes and
+update the workspace tags and lockfile together before the BA3 release gates.
 
 The BA3 product version appears in `pyproject.toml`, the workspace package
 version, and `crates/batchalign/Cargo.toml`. Several internal helper crates keep
