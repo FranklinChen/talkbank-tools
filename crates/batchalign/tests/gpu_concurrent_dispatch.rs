@@ -1475,3 +1475,7 @@ async fn concurrent_callers_at_a_cold_key_spawn_exactly_one_worker() {
 
     pool.shutdown().await;
 }
+
+#[cfg(unix)]
+#[path = "gpu_concurrent_dispatch/recovery.rs"]
+mod recovery;

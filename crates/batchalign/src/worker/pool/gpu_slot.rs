@@ -29,9 +29,10 @@
 //!
 //! # Failure is retryable, and eviction would be a bug
 //!
-//! [`tokio::sync::OnceCell::get_or_try_init`] leaves the cell uninitialized when
-//! the initializer returns an error, so a failed spawn simply lets the next
-//! caller try again; there is no poisoning to recover from. Removing the slot
+//! A failed or cancelled initializer leaves the slot empty, so the next caller
+//! can try again. A dead worker is retired before a new generation is spawned.
+//! The former OnceCell retained its first successful worker forever, including
+//! after the reader died, poisoning every later FA group. Removing the slot
 //! from the map on failure would be actively wrong: another caller may already
 //! hold a clone of that slot and be initializing through it, and its worker
 //! would then exist with no map entry pointing at it, i.e. an orphaned worker
@@ -39,31 +40,65 @@
 
 use std::sync::Arc;
 
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, MutexGuard};
 
+use super::lock_recovered;
 use super::shared_gpu::SharedGpuWorker;
 
-/// One `gpu_workers` entry: a live shared GPU worker, or a spawn in flight for
-/// that key.
-///
-/// Cheap to clone; every clone refers to the same underlying cell, which is what
-/// makes "one spawn per key" hold without the map lock.
+#[derive(Default)]
+enum Occupancy {
+    #[default]
+    Empty,
+    Transitioning,
+    Worker(Arc<SharedGpuWorker>),
+}
+
+#[derive(Default)]
+struct SlotInner {
+    occupancy: std::sync::Mutex<Occupancy>,
+    transition: Mutex<()>,
+}
+
+/// One stable map entry coordinating all generations of a key's worker.
 #[derive(Clone, Default)]
-pub(in crate::worker) struct GpuWorkerSlot(Arc<OnceCell<Arc<SharedGpuWorker>>>);
+pub(in crate::worker) struct GpuWorkerSlot(Arc<SlotInner>);
+
+/// Own the key's transition until a replacement is published or creation ends.
+/// Dropping a cancelled/failed initializer restores Empty before unlocking.
+struct SlotTransition<'a> {
+    inner: &'a SlotInner,
+    _permit: MutexGuard<'a, ()>,
+}
+
+impl SlotTransition<'_> {
+    fn publish(self, worker: Arc<SharedGpuWorker>) {
+        *lock_recovered(&self.inner.occupancy) = Occupancy::Worker(worker);
+    }
+}
+
+impl Drop for SlotTransition<'_> {
+    fn drop(&mut self) {
+        let mut occupancy = lock_recovered(&self.inner.occupancy);
+        if matches!(*occupancy, Occupancy::Transitioning) {
+            *occupancy = Occupancy::Empty;
+        }
+    }
+}
 
 /// What a slot holds at the moment it is read.
 ///
 /// An enum rather than an `Option` so that every reader of the map has to say
 /// what an in-flight spawn means for IT. The two answers differ: a status
 /// listing wants to report it, and a worker count must not count it.
-pub(in crate::worker) enum GpuSlotState<'a> {
-    /// A spawn for this key is in flight; no worker exists yet.
-    ///
-    /// Transient by construction: the slot resolves to [`Self::Ready`] when the
-    /// spawn succeeds, or back to `Spawning` (retryable) when it fails.
+pub(in crate::worker) enum GpuSlotState {
+    /// No successful spawn is retained; the next caller can initialize it.
+    Empty,
+    /// A caller owns this key's spawn or retirement transition.
     Spawning,
-    /// The worker is live and usable.
-    Ready(&'a Arc<SharedGpuWorker>),
+    /// The retained worker currently accepts requests.
+    Ready(Arc<SharedGpuWorker>),
+    /// The retained worker stopped accepting requests and needs retirement.
+    Unavailable,
 }
 
 impl GpuWorkerSlot {
@@ -74,25 +109,33 @@ impl GpuWorkerSlot {
     }
 
     /// Read the slot without waiting for an in-flight spawn.
-    pub(in crate::worker) fn state(&self) -> GpuSlotState<'_> {
-        match self.0.get() {
-            Some(worker) => GpuSlotState::Ready(worker),
-            None => GpuSlotState::Spawning,
+    pub(in crate::worker) fn state(&self) -> GpuSlotState {
+        let occupancy = lock_recovered(&self.0.occupancy);
+        match &*occupancy {
+            Occupancy::Empty => GpuSlotState::Empty,
+            Occupancy::Transitioning => GpuSlotState::Spawning,
+            Occupancy::Worker(worker) => match worker.check_available() {
+                Ok(()) => GpuSlotState::Ready(worker.clone()),
+                Err(_) => GpuSlotState::Unavailable,
+            },
         }
     }
 
-    /// The live worker, if this slot has one. For callers that are draining the
-    /// map and cannot borrow from it.
-    pub(in crate::worker) fn ready_worker(&self) -> Option<Arc<SharedGpuWorker>> {
-        self.0.get().cloned()
+    /// Retained ownership for pool teardown, even if the process already died.
+    /// An in-flight transition owns cleanup and observes pool cancellation.
+    pub(in crate::worker) fn retained_worker(&self) -> Option<Arc<SharedGpuWorker>> {
+        let occupancy = lock_recovered(&self.0.occupancy);
+        match &*occupancy {
+            Occupancy::Empty | Occupancy::Transitioning => None,
+            Occupancy::Worker(worker) => Some(worker.clone()),
+        }
     }
 
-    /// Return this key's worker, running `init` exactly once across all callers
-    /// holding this slot.
+    /// Hand off a live worker, or retire the old generation and initialize one.
     ///
-    /// Concurrent callers for the same key await the one initialization;
-    /// callers for other keys are unaffected, because they hold different slots
-    /// and the map lock is not held here.
+    /// The per-key lock spans retirement and initialization. Failure leaves
+    /// Empty, allowing retry; concurrent callers cannot create duplicate
+    /// replacement processes. The map lock is never held here.
     pub(in crate::worker) async fn worker_or_init<Init, Fut>(
         &self,
         init: Init,
@@ -101,6 +144,27 @@ impl GpuWorkerSlot {
         Init: FnOnce() -> Fut,
         Fut: Future<Output = Result<Arc<SharedGpuWorker>, crate::worker::error::WorkerError>>,
     {
-        self.0.get_or_try_init(init).await.cloned()
+        if let GpuSlotState::Ready(worker) = self.state() {
+            return Ok(worker);
+        }
+        let permit = self.0.transition.lock().await;
+        // Another caller may have finished replacement while we waited.
+        if let GpuSlotState::Ready(worker) = self.state() {
+            return Ok(worker);
+        }
+        let previous = std::mem::replace(
+            &mut *lock_recovered(&self.0.occupancy),
+            Occupancy::Transitioning,
+        );
+        let transition = SlotTransition {
+            inner: &self.0,
+            _permit: permit,
+        };
+        if let Occupancy::Worker(worker) = previous {
+            worker.shutdown().await;
+        }
+        let worker = init().await?;
+        transition.publish(worker.clone());
+        Ok(worker)
     }
 }

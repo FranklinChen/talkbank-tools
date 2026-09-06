@@ -44,7 +44,7 @@ impl WorkerPool {
         {
             let mut gpu_workers = self.gpu_workers.lock().await;
             for (key, slot) in gpu_workers.drain() {
-                match slot.ready_worker() {
+                match slot.retained_worker() {
                     Some(worker) => {
                         info!(
                             target = %key.target.label(),

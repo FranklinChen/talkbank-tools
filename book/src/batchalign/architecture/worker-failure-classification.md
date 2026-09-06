@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-08-31 22:01 EDT
+**Last updated:** 2026-09-06 06:59 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -89,6 +89,42 @@ The key invariants the diagram encodes:
   catalog: connection refused") reaches the user with light framing,
   not a generic "internal error" wrapper. Bootstrap errors are
   user-actionable.
+
+## Shared stdio worker generations
+
+A successful spawn does not prove permanent liveness. The shared GPU pool
+previously stored each key's first worker in a `OnceCell`; after that process
+died, every later request received the same dead handle. In the September 6
+MICASE run, one FA worker failure was followed by failures for the rest of that
+file and all 743 groups of another file.
+
+`GpuWorkerSlot` now retains one stable slot across replaceable worker
+generations. Its occupancy is Empty, Transitioning or Worker; status reporting
+distinguishes a retained but unavailable worker from one accepting requests.
+`SharedGpuWorker::check_available` supplies the same live observation to the
+slot and the dispatch boundary. External process death remains a fallible
+runtime event, not a permanent guarantee attached to a successful constructor.
+
+Warm handoffs only inspect occupancy. A separate per-key transition permit
+serializes retirement and replacement, without holding the map lock or blocking
+unrelated warm keys. `SlotTransition` owns that permit: publishing the new worker
+consumes the transition, while failure or cancellation restores Empty before
+unlocking. The old process is retired through its lifecycle owner before the
+replacement is initialized. The slot is never evicted while another caller
+may still hold it. Pool shutdown retains responsibility for occupied slots;
+an in-flight initializer observes pool cancellation and retires its result.
+
+The integration regression kills an actual owned echo worker, then requires
+four concurrent follow-up dispatches to share one new PID and checks both
+processes are reaped. Run the existing worker boundary target:
+
+```bash
+cargo test -p batchalign --test gpu_concurrent_dispatch
+```
+
+This changes which process serves later requests; it does not retry the
+crashing input automatically, classify every process exit as OOM, or establish
+the validity of an overlong FA audio window. Those are separate decisions.
 
 ## The wire protocol
 

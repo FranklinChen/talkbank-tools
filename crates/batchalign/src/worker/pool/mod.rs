@@ -1014,7 +1014,7 @@ impl WorkerPool {
     /// Coordination is PER KEY, not per map: the map lock is held only long
     /// enough to hand out this key's [`GpuWorkerSlot`], and the spawn runs with
     /// the lock released. Two callers for one key still produce exactly one
-    /// worker process (they share the slot's cell); a caller for a DIFFERENT
+    /// worker process (they share the slot's lifecycle lock); a caller for a DIFFERENT
     /// key, including one whose worker is already warm, no longer waits behind
     /// the spawn.
     ///

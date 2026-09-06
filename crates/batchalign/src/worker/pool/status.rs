@@ -136,6 +136,8 @@ impl WorkerPool {
                 let state = match slot.state() {
                     GpuSlotState::Ready(_) => "1 total, shared",
                     GpuSlotState::Spawning => "spawning",
+                    GpuSlotState::Empty => "awaiting spawn",
+                    GpuSlotState::Unavailable => "unavailable, awaiting replacement",
                 };
                 keys.push(format!(
                     "{}:{}{suffix} ({state})",

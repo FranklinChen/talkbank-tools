@@ -176,18 +176,7 @@ impl SharedGpuWorker {
         &self,
         request: &ExecuteRequestV2,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        if self.shutdown_started.load(Ordering::Acquire) {
-            return Err(WorkerError::Protocol("GPU worker is shutting down".into()));
-        }
-
-        // Check if the reader loop is still alive. If it finished (worker
-        // crashed or exited), fail fast instead of writing to a dead pipe.
-        if self.reader_task.is_finished() {
-            return Err(WorkerError::ProcessExited {
-                code: None,
-                stderr: Some("GPU worker reader loop exited, worker process is dead".into()),
-            });
-        }
+        self.check_available()?;
 
         // Acquire one dispatch permit BEFORE registering the pending oneshot
         // and starting the per-request timer. Permit count matches the Python
@@ -541,6 +530,23 @@ impl SharedGpuWorker {
         }
 
         self.finish_shutdown().await;
+    }
+
+    /// Observe whether this external process can still accept requests.
+    ///
+    /// The slot and dispatch share this observation. A successful spawn is not
+    /// permanent proof of liveness: the process may die between requests.
+    pub(in crate::worker::pool) fn check_available(&self) -> Result<(), WorkerError> {
+        if self.shutdown_started.load(Ordering::Acquire) {
+            return Err(WorkerError::Protocol("GPU worker is shutting down".into()));
+        }
+        if self.reader_task.is_finished() {
+            return Err(WorkerError::ProcessExited {
+                code: None,
+                stderr: Some("GPU worker reader loop exited, worker process is dead".into()),
+            });
+        }
+        Ok(())
     }
 
     /// The worker process ID.
