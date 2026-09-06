@@ -1,4 +1,4 @@
-.PHONY: help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-ml-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
+.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-ml-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
 
 help:
 	@echo "talkbank-tools task index (batchalign3 workspace)"
@@ -8,6 +8,7 @@ help:
 	@echo "  make test                  Rust workspace tests + doctests"
 	@echo "  make verify                Canonical pre-merge gate (compile + batchalign + book)"
 	@echo "  make ci-local              Fast local CI approximation"
+	@echo "  make gate                  Verify source and record a pre-push receipt"
 	@echo "  make ci-full               Stricter local CI approximation"
 	@echo "  make smoke CRATE=x         Fast compile check + one crate test"
 	@echo ""
@@ -342,7 +343,7 @@ lint:
 		-p batchalign -p batchalign-transform -p batchalign-pyo3 \
 		--all-targets -- -D warnings
 	@echo "==> push gate covers CI"
-	@# Static check that scripts/pre-push.sh runs what the workflow runs. The
+	@# Static check that scripts/gate.sh runs what the workflow runs. The
 	@# hook drifted into a weaker subset and reported success for three pushes
 	@# CI rejected on 2026-08-14.
 	@python3 scripts/check_push_gate_sync.py
@@ -483,6 +484,14 @@ ci-full:
 	@echo "==> imported Batchalign Rust/PyO3 gate"
 	@$(MAKE) batchalign-ci-rust
 	@echo "✓ ci-full passed"
+
+# Verify the complete local pre-push gate once; the hook only checks its receipt.
+gate:
+	bash scripts/gate.sh
+
+gate-receipts-test:
+	python3 scripts/test_push_gate_sync.py
+	bash scripts/test-gate-receipts.sh
 
 # Install git hooks (pre-push).
 install-hooks:

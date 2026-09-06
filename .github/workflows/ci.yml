@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 # Every gate here is a property of the COMMIT, and a developer can make each one
-# pass before pushing (`scripts/pre-push.sh` runs them). Dependency advisories
+# pass before pushing (`make gate` runs them). Dependency advisories
 # are deliberately NOT here: they are a property of the world on the day the job
 # runs, so the same commit goes red without changing, and the person blocked
 # cannot fix it by fixing their work. They live in dependency-audit.yml, on a
@@ -51,6 +51,8 @@ jobs:
       # scripts via git ls-files. See CLAUDE.md.
       - name: shellcheck all shell scripts
         run: make lint-shell
+      - name: Verify exact-tree gate receipts
+        run: make gate-receipts-test
 
   # rustfmt was enforced ONLY by the unversioned local pre-push hook, so a
   # fresh clone (or any push that skipped hooks) could land unformatted code

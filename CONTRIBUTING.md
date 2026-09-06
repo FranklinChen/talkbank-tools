@@ -1,38 +1,24 @@
 # Contributing to talkbank-tools
 
 **Status:** Current
-**Last updated:** 2026-04-29 13:15 EDT
+**Last updated:** 2026-09-06 03:40 EDT
 
 Thank you for contributing.
 
-This repository is the unified home for:
+This repository owns Batchalign3: the ML pipeline, Python package,
+`batchalign-*` crates, dashboard, and PyO3 bridge. The native CLI lives in
+`crates/batchalign/`.
 
-- the CHAT specification and grammar pipeline
-- the core Rust crates (`talkbank-*`)
-- the `chatter` CLI
-- the imported Batchalign stack (`batchalign3`, Python package, `batchalign-*` crates, dashboard, PyO3 bridge)
+CHAT grammar, specification, parsers, model, validation, Chatter CLI, and CLAN
+commands belong to the separate [Chatter repository](https://github.com/TalkBank/chatter).
+Batchalign consumes its release-pinned crates. Make CHAT-format changes and
+regenerate grammar walkers there; do not recreate that toolchain here.
 
-Start with the root [README.md](README.md) for the documentation map by surface.
-
-### External Dependency Note
-
-The file `crates/talkbank-parser-tests/src/generated_traversal.rs` is generated
-by [`tree-sitter-grammar-utils`](https://github.com/TalkBank/tree-sitter-grammar-utils),
-which is not yet published. If your changes require regenerating this file
-(i.e., you modified `grammar/grammar.js` in a way that changes the CST node
-types), note this in your PR and a maintainer will regenerate it.
-
-Most contributions (spec changes, validation logic, CLAN commands, CLI features)
-do not require this step.
-
-The main user-facing binaries live in:
-
-- `crates/talkbank-cli/` -> `chatter`
-- `crates/batchalign/` -> `batchalign3`
+Start with [README.md](README.md) and the [pushing guide](docs/contributing/pushing.md).
 
 ## Development Setup
 1. Install Rust (stable).
-2. Install Node.js (for grammar/frontend tooling).
+2. Install Node.js (for frontend tooling).
 3. Install `uv` for the Python/Batchalign surfaces.
 
 Core commands:
@@ -48,6 +34,7 @@ make batchalign-typecheck-python
 make batchalign-ci-python
 make ci-local
 make ci-full
+make gate
 make chat-anchors-check
 ```
 
@@ -78,27 +65,14 @@ CHAT_HTML_URL=https://talkbank.org/0info/manuals/CHAT.html make chat-anchors-che
 
 This check is now part of required CI gates.
 
-## Required Workflow
-If you change specs, symbols, or other inputs that feed generated artifacts,
-regenerate the affected outputs:
-```bash
-make test-gen
-```
-
 ## Before Opening a PR
-Run at minimum:
-```bash
-make verify
-```
 
-If you changed imported Batchalign code or packaging/runtime surfaces, also run:
-
-```bash
-make batchalign-check
-make batchalign-test-rust
-make batchalign-test-integration
-make batchalign-ci-python
-```
+Run `make gate`, commit the verified content, then push. The installed hook
+verifies that each pushed tree has a matching successful receipt. Changes after
+the gate require another run. For packaging and Python runtime changes, also run
+`make batchalign-ci-python`, which builds and installs the wheel for its checks.
+Platform, build, lint-configuration, and crate-set changes go through branch CI
+before advancing `main`; see the pushing guide for the local gate's limits.
 
 If you changed the dashboard frontend, also run:
 
@@ -138,9 +112,7 @@ Update docs in the same PR when behavior, workflows, or contracts change.
 
 Key doc surfaces:
 
-- `book/`: the unified TalkBank Toolchain mdBook. All product
-  surfaces (chatter, Batchalign3, CLAN command reference) live as
-  sections under `book/src/`.
+- `book/`: the Batchalign developer and user documentation under `book/src/`.
 - crate READMEs for component-specific entrypoints
 
 ## Reporting Bugs

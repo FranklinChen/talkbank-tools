@@ -1,92 +1,76 @@
 #!/usr/bin/env bash
-# Pre-push hook: runs the SAME target CI runs. Install: make install-hooks
-#
-# It does not mirror CI, it invokes CI's target. A mirror is a second list of
-# what must pass, and a second list drifts: this hook used to run `fmt`, an
-# `affected-rust check`, and clippy only when `TALKBANK_PRE_PUSH_CLIPPY=1`
-# (default 0), while CI ran `make batchalign-ci-rust`. Its own docstring
-# promised to "catch anything the GitHub main CI workflow would flag on a push
-# to main", and on 2026-08-14 it printed "All pre-push checks passed" three
-# times for pushes CI then rejected.
-#
-# The justification for the weaker subset was speed. Measured on a warm tree,
-# the full target is 16 SECONDS, so there was nothing to save.
-#
-# WHAT THIS CANNOT CATCH, and it is the reason for the branch flow below:
-# CI runs on Linux and developers run macOS. Two of those three failures were
-# `cfg(target_os)`-conditional, and no macOS command can see them:
-#   - the Tauri desktop crate needs glib, absent on the runner, so a
-#     `--workspace` clippy passes here and fails there;
-#   - a helper used only inside a `cfg(target_os = "macos")` block is live
-#     here and dead code there.
-# For those, the ONLY gate is CI itself, which is why main should receive a
-# commit CI has already seen. See `docs/contributing/pushing.md`.
+# Verify the receipt from make gate against the working tree and pushed objects.
+# This hook does no compilation. Install with make install-hooks.
+# The protocol is shared with Chatter and tb and exercised by test-gate-receipts.sh.
 set -euo pipefail
 
-# The hygiene jobs CI runs in their OWN jobs. They are separate targets rather
-# than prerequisites of `lint` because CI invokes `lint` (via
-# `batchalign-ci-rust`) on a cargo-only runner: adding shellcheck or actionlint
-# there kills that job with `Error 127`, which is exactly what happened on
-# 2026-08-25 when they were briefly folded in.
-echo "==> pre-push: shellcheck (CI's 'Shell scripts' job)"
-make lint-shell
-echo "==> pre-push: actionlint (CI's 'Workflow files' job)"
-make lint-actionlint
-
-echo "==> pre-push: the CI target (make batchalign-ci-rust)"
-make batchalign-ci-rust
-
-echo "==> pre-push: ruff lint + format over the Python sources"
-# The SOURCE-only half of the Python gate: ruff reads the tree, so this needs
-# no wheel and takes about a second. The rest of that job (mypy, the drift
-# checks) needs a maturin release build and is listed in EXEMPT in
-# check_push_gate_sync.py with its reason. A `ruff format --check` failure
-# reached main on 2026-08-14 because CI ran the tool directly instead of a make
-# target, which made it invisible to the coverage check.
-make batchalign-lint-python-source
-
-echo "==> pre-push: IPC schema drift"
-# `batchalign-ipc-schema-check` asks Cargo to prove a development binary is
-# current, then runs that exact binary. On a warm tree this is a few seconds;
-# on a cold tree it links development mode rather than compiling an unrelated
-# optimized release artifact.
+# The stamp hashes working-tree CONTENT, not staging or commit state.
+# Committing the same bytes preserves it; changing any included file after
+# the gate requires a fresh gate. See tree-stamp.sh for the ownership of that
+# content calculation.
 #
-# It earned its place on 2026-08-16. `numeric_id!` derives
-# `schemars::JsonSchema`, which copies a Rust doc comment into the schema's
-# `description`, so editing the docstring on `DurationMs` silently regenerated
-# six files under `ipc-schema/worker_v2/` and CI rejected a push that every
-# local gate had passed. Nothing about that change looked like it touched a
-# wire format.
-make batchalign-ipc-schema-check
+# `tree-stamp.sh` exits non-zero rather than printing an empty stamp; under
+# `set -e` that aborts the push here, which is the point. Its first version
+# printed nothing on failure and this hook then compared "" to "" and passed.
+# Keep Git's exact ref stream for verification and the optional local hook.
+refs_dir="$(mktemp -d)"
+trap 'rm -r "$refs_dir"' EXIT
+cat > "$refs_dir/refs"
 
-# `openapi.json` is GENERATED from the Rust types, so a doc-comment or a
-# `required` change makes the committed copy stale. The FULL dashboard check
-# also runs `npx openapi-typescript` and stays exempt for needing the
-# npm-installed frontend; this half reuses the binary the IPC check just proved
-# current. A stale openapi.json reached main on
-# 2026-08-27 through exactly that exemption.
-echo "==> pre-push: generated openapi.json drift"
-# The preceding IPC check asked Cargo to prove this exact development binary is
-# current. Reuse it instead of asking Cargo to walk the same dependency graph a
-# second time.
-BATCHALIGN_BIN="$PWD/target/debug/batchalign3" make batchalign-dashboard-schema-check
+TREE_STATE="$(bash "$(git rev-parse --show-toplevel)/scripts/tree-stamp.sh")"
 
-echo "==> pre-push: mdBook build + linkcheck"
-# Not part of batchalign-ci-rust: it is a separate workflow. linkcheck2 verifies
-# every relative link against SUMMARY.md, which is how a SUMMARY-unreachable
-# page broke CI after a 68-commit squash push in May.
-make book-check
+# `git rev-parse --git-dir`, never a literal `.git`: in a worktree `.git` is a
+# file, and the gate writes its stamp to the same resolved directory.
+stamp="$(git rev-parse --git-dir)/gate-passed"
+if [ ! -f "$stamp" ]; then
+    echo "[pre-push] REFUSED: no stamp from 'make gate'." >&2
+    exit 1
+fi
+got="$(cat "$stamp")"
+if [ "$got" != "$TREE_STATE" ]; then
+    echo "[pre-push] REFUSED: the gate stamp is for a different tree." >&2
+    echo "           stamped: $got" >&2
+    echo "           pushing: $TREE_STATE" >&2
+    exit 1
+fi
 
-echo "✓ pre-push ran CI's own target; anything it missed is platform-conditional"
+# Working-tree equality alone cannot authorize a different committed tree.
+# Annotated release tags are peeled by ^{tree}; deletion refs contain no tree.
+while read -r local_ref local_oid remote_ref remote_oid extra || [[ -n "$local_ref" ]]; do
+    if [[ -z "$local_ref" || -z "$local_oid" || -z "$remote_ref" || -z "$remote_oid" || -n "$extra" ]]; then
+        echo "[pre-push] REFUSED: malformed Git ref update." >&2
+        exit 1
+    fi
+    if [[ ! "$local_oid" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+        echo "[pre-push] REFUSED: invalid local object ID." >&2
+        exit 1
+    fi
+    if [[ "$local_oid" == "${TREE_STATE//?/0}" ]]; then
+        continue
+    fi
+    if ! pushed_tree="$(git rev-parse --verify "$local_oid^{tree}")"; then
+        echo "[pre-push] REFUSED: $local_ref does not resolve to a commit tree." >&2
+        exit 1
+    fi
+    if [[ "$pushed_tree" != "$TREE_STATE" ]]; then
+        echo "[pre-push] REFUSED: $local_ref contains bytes that were not gated." >&2
+        echo "           gated:   $TREE_STATE" >&2
+        echo "           pushing: $pushed_tree" >&2
+        exit 1
+    fi
+done < "$refs_dir/refs"
 
-# Chain to an untracked local hook, if one is installed. `.git/hooks` is not
-# versioned, so a contributor may keep a further pre-push check of their own at
-# `pre-push.local`; git runs only THIS file, so this is the only way that check
-# runs at all. Order matters: the gate above first, then the local hook. This
-# hook never reads stdin, so the ref list git provides reaches the local hook
-# untouched. Keep this free of any particular local hook's identity: what a
-# contributor checks on their own machine is theirs.
-LOCAL_HOOK="$(git rev-parse --git-path hooks)/pre-push.local"
-if [[ -x "$LOCAL_HOOK" ]]; then
-    exec "$LOCAL_HOOK" "$@"
+echo "[pre-push] the gate stamp matches the working tree and every pushed tree."
+
+# Chain to an optional local pre-push hook, AFTER the gate stamp, so a stamp
+# failure short-circuits first and a contributor's own check never masks it.
+#
+# Replay the unchanged ref bytes after verification. Calling rather than
+# execing lets the EXIT trap remove the temporary ref stream.
+#
+# Keep this free of any specific local hook's identity. It is tracked and
+# public; what an individual checks on their own machine is theirs.
+LOCAL_HOOK="$(git rev-parse --git-dir)/hooks/pre-push.local"
+if [ -x "$LOCAL_HOOK" ]; then
+    "$LOCAL_HOOK" "$@" < "$refs_dir/refs"
 fi

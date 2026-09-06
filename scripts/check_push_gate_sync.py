@@ -1,26 +1,11 @@
 #!/usr/bin/env python3
-"""Fail if the pre-push hook does not run everything CI runs.
+"""Fail if the receipt-producing local gate does not cover CI's named targets.
 
-The hook and the workflow are two lists of what must pass, and two lists drift.
-This one drifted far enough that the hook printed "All pre-push checks passed"
-for three pushes CI then rejected on 2026-08-14: it ran `fmt`, an affected-only
-compile check, and clippy solely behind an environment variable that defaulted
-to off, while CI ran `make batchalign-ci-rust` (clippy, audits, check, tests,
-doctests, integration, PyO3).
-
-The cure is not a longer hook, it is the same command. This asserts that every
-`make` target a push-triggered workflow invokes is also reached by the hook, so
-a step added to CI cannot silently stop being checked before a push.
-
-"Reached by", not "written in": coverage is computed through the Makefile, so a
-hook line reading `make batchalign-ci-rust` covers everything that target's
-recipe invokes, transitively. Comparing the two texts literally would demand
-that the hook restate the recipe, which is the mirroring this file exists to
-prevent, one level down.
-
-Modelled on chatter's `check_ci_gate_sync.py`, which exists because that
-repository had FOUR independent lists of what must pass and all four had
-drifted.
+scripts/gate.sh runs the former pre-push checks before a push begins. The hook
+then verifies its receipt against every actual pushed tree. This checker follows
+make targets transitively from the gate script, so moving verification out of
+the hook does not weaken CI coverage. Platform and wheel-only exemptions remain
+explicit below. The receipt protocol is tested by make gate-receipts-test.
 
 Usage: python3 scripts/check_push_gate_sync.py
 """
@@ -28,13 +13,14 @@ Usage: python3 scripts/check_push_gate_sync.py
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parents[1]
-HOOK = REPO / "scripts" / "pre-push.sh"
+GATE = REPO / "scripts" / "gate.sh"
 MAKEFILE = REPO / "Makefile"
 WORKFLOWS = REPO / ".github" / "workflows"
 
@@ -119,30 +105,29 @@ EXEMPT: dict[str, Exemption] = {
 
 
 def make_targets(text: str) -> set[str]:
-    """Every `make <target>` INVOKED in a shell snippet.
+    """Read direct make commands, including YAML run lines and env assignments.
 
-    Comment lines are stripped first, and that is load-bearing rather than
-    tidiness. A recipe comment reading "the developer target is `make ci-local`"
-    is prose, not an invocation, but it was read as one: `batchalign-ci-rust`
-    carried exactly that sentence, so the hook appeared to reach `ci-local`, and
-    through it `lint-shell`. Removing `make lint-shell` from the hook then
-    changed nothing this checker could see, and it reported success on a hook
-    that had stopped running a CI job.
-
-    A guard defeated by a comment about the guard is worse than no guard,
-    because it reports clean. Proved by deleting a hook line and watching this
-    fail; before the strip, it passed.
-
-    Both comment forms matter: `#` at the start of a Makefile line, and the
-    `@#` a recipe body uses to keep the comment from being echoed.
+    This deliberately handles the repository's direct-command convention, not
+    arbitrary shell execution. Quoted prose and comments confer no coverage.
     """
-    without_comments = "\n".join(
-        line for line in text.splitlines() if not _is_comment(line)
-    )
-    return {
-        match.group(1)
-        for match in re.finditer(r"\bmake\s+([a-z0-9][a-z0-9-]*)", without_comments)
-    }
+    targets: set[str] = set()
+    for line in text.splitlines():
+        command = line.strip().removeprefix("run:").strip().lstrip("@")
+        command = command.replace("$(MAKE)", "make")
+        try:
+            words = shlex.split(command, comments=True)
+        except ValueError:
+            continue  # YAML prose and continued shell lines are not commands.
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words.pop(0)
+        if not words or words.pop(0) != "make":
+            continue
+        for word in words:
+            if word in {";", "&&", "||", "|"}:
+                break
+            if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", word):
+                targets.add(word)
+    return targets
 
 
 def _is_comment(line: str) -> bool:
@@ -154,7 +139,7 @@ def _is_comment(line: str) -> bool:
 
 
 class Uncovered(NamedTuple):
-    """A gate CI runs on a push that the hook does not reach.
+    """A gate CI runs on a push that the gate does not reach.
 
     Named rather than a bare pair because both fields are strings and the
     reporting loop had them in scope beside a `Path` of the same name.
@@ -164,32 +149,41 @@ class Uncovered(NamedTuple):
     target: str
 
 
-def makefile_recipes() -> dict[str, str]:
-    """Each target's recipe body, keyed by target name.
+@dataclass(frozen=True)
+class Recipe:
+    """Keep prerequisite evidence separate from executable recipe text."""
 
-    A recipe is the run of tab-indented lines following a `target:` line.
-    Enough of make's syntax for this file, which uses no pattern rules, no
-    multi-target rules and no conditionals around recipes.
-    """
-    recipes: dict[str, str] = {}
+    prerequisites: frozenset[str]
+    commands: tuple[str, ...]
+
+
+def makefile_recipes(text: str | None = None) -> dict[str, Recipe]:
+    """Parse this Makefile's single-target rules and direct prerequisites."""
+    recipes: dict[str, Recipe] = {}
     current: str | None = None
-    for line in MAKEFILE.read_text(encoding="utf-8").splitlines():
+    if text is None:
+        text = MAKEFILE.read_text(encoding="utf-8")
+    for line in text.splitlines():
         if line.startswith("\t"):
             if current is not None:
-                recipes[current] += line + "\n"
+                recipe = recipes[current]
+                recipes[current] = Recipe(
+                    recipe.prerequisites,
+                    (*recipe.commands, line.strip().lstrip("@")),
+                )
             continue
         match = re.match(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*)\s*:(?!=)", line)
         current = match.group(1) if match else None
         if current is not None:
-            recipes.setdefault(current, "")
-            # Prerequisites run before the recipe, so they are part of what the
-            # target reaches. `target: dep1 dep2` puts them on the header line.
-            _, _, prereqs = line.partition(":")
-            recipes[current] += prereqs.replace("=", "") + "\n"
+            prerequisites = line.partition(":")[2].partition("#")[0].split()
+            previous = recipes.get(current, Recipe(frozenset(), ()))
+            recipes[current] = Recipe(
+                previous.prerequisites | frozenset(prerequisites), previous.commands
+            )
     return recipes
 
 
-def reachable(roots: set[str], recipes: dict[str, str]) -> set[str]:
+def reachable(roots: set[str], recipes: dict[str, Recipe]) -> set[str]:
     """Every target reached from `roots`, following recipes and prerequisites.
 
     A prerequisite is named bare (`foo: bar`) while a recursive call is written
@@ -206,12 +200,12 @@ def reachable(roots: set[str], recipes: dict[str, str]) -> set[str]:
         body = recipes.get(target)
         if body is None:
             continue
-        pending.extend(make_targets(body) & recipes.keys())
-        pending.extend(word for word in body.split() if word in recipes)
+        pending.extend(make_targets("\n".join(body.commands)) & recipes.keys())
+        pending.extend(body.prerequisites & recipes.keys())
     return seen
 
 
-def invalid_exemption_invariants(recipes: dict[str, str]) -> list[str]:
+def invalid_exemption_invariants(recipes: dict[str, Recipe]) -> list[str]:
     """Return exemptions whose executable recipe no longer earns its reason.
 
     Whole-line comments are deliberately excluded and a real recipe line must
@@ -223,9 +217,9 @@ def invalid_exemption_invariants(recipes: dict[str, str]) -> list[str]:
         if not isinstance(exemption, RecipeInvariantExemption):
             continue
         required = exemption.required_recipe_prefix
-        recipe = recipes.get(target, "")
+        recipe = recipes.get(target, Recipe(frozenset(), ()))
         executable_lines = [
-            line.strip() for line in recipe.splitlines() if not _is_comment(line)
+            line.strip() for line in recipe.commands if not _is_comment(line)
         ]
         if not any(line.startswith(required) for line in executable_lines):
             invalid.append(
@@ -249,8 +243,8 @@ def is_push_triggered(text: str) -> bool:
 
 
 def main() -> int:
-    if not HOOK.is_file():
-        print(f"missing {HOOK}", file=sys.stderr)
+    if not GATE.is_file():
+        print(f"missing {GATE}", file=sys.stderr)
         return 2
 
     recipes = makefile_recipes()
@@ -261,10 +255,10 @@ def main() -> int:
             print(f"  {invalid}", file=sys.stderr)
         return 1
 
-    hook_roots = make_targets(HOOK.read_text(encoding="utf-8")) & recipes.keys()
+    hook_roots = make_targets(GATE.read_text(encoding="utf-8")) & recipes.keys()
     if not hook_roots:
         print(
-            "the pre-push hook invokes no make target at all; either it was "
+            "the local gate invokes no make target at all; either it was "
             "rewritten to call cargo directly (in which case this check needs "
             "updating) or it is not gating anything",
             file=sys.stderr,
@@ -294,21 +288,21 @@ def main() -> int:
             missing.append(Uncovered(workflow=workflow.name, target=target))
 
     if missing:
-        print("pre-push hook does not run what CI runs:", file=sys.stderr)
+        print("local gate does not run what CI runs:", file=sys.stderr)
         for gap in missing:
             print(
-                f"  {gap.workflow} runs 'make {gap.target}', the hook does not",
+                f"  {gap.workflow} runs 'make {gap.target}', the gate does not",
                 file=sys.stderr,
             )
         print(
-            "\nAdd it to scripts/pre-push.sh, or add it to EXEMPT in this file "
+            "\nAdd it to scripts/gate.sh, or add it to EXEMPT in this file "
             "WITH a reason.",
             file=sys.stderr,
         )
         return 1
 
     covered = ", ".join(sorted(hook_targets))
-    print(f"pre-push runs CI's targets ({covered})")
+    print(f"local gate runs CI's targets ({covered})")
     return 0
 
 

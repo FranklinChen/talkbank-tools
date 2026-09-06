@@ -1,65 +1,57 @@
 # Pushing without CI churn
 
 **Status:** Current
-**Last updated:** 2026-09-01 13:18 EDT
+**Last updated:** 2026-09-06 03:40 EDT
 
-Three pushes to `main` on 2026-08-14 each turned CI red and each needed a
-follow-up commit. The pre-push hook reported "All pre-push checks passed" every
-time. This is what changed so that stops, and the one case that local checks
-can never cover.
+Run the verification once, then push the content it verified:
 
-## The hook must actually be installed, and it chains to a local hook
+```bash
+make install-hooks  # once, and after another tool replaces Git's hook
+make gate
+git add <changed-files>
+git commit
+git push
+```
 
-`git` runs exactly one file, `.git/hooks/pre-push`, and that directory is
-unversioned. Anything else that writes it (another tool's installer, a hand
-symlink) displaces this gate WITHOUT SAYING SO, and the next push reports only
-whatever the displacing hook checks. That happened between 2026-08-19 and
-2026-09-01: a separate local screen owned `.git/hooks/pre-push`, so two
-release-prep pushes reached `main` that `make batchalign-ci-rust` refuses (a
-version bump that missed a generated artifact). The gate was fine; it was not
-running.
+`make gate` records a receipt only after all checks succeed and the source tree
+still matches the tree captured before checking. A new attempt invalidates any
+previous receipt. Committing the same content preserves the receipt; editing
+content requires another gate. Add new scripts to the index before running the
+gate so the tracked-script ShellCheck inventory includes them.
 
-Two consequences. `make install-hooks` is the thing to re-run after anything
-touches `.git/hooks`, and `scripts/pre-push.sh` ends by chaining to
-`.git/hooks/pre-push.local` if that file is executable, so a further local
-check coexists with the gate instead of replacing it. The gate runs first; the
-local hook receives git's ref list unchanged.
+The pre-push hook performs no compilation. It checks the current content and
+every actual pushed commit tree against the receipt, including annotated tags.
+A verified dirty tree cannot authorize an older, different commit. The receipt
+covers Git content, including nonignored new files, rather than timestamps or a
+list of changed paths. It does not attest to external tool versions or prevent
+an edit followed by restoration while a check is running.
 
-## The hook runs CI's target, not a copy of it
+## Hook installation and local checks
 
-`scripts/pre-push.sh` invokes `make batchalign-ci-rust`, the same target
-`.github/workflows/batchalign-rust.yml` invokes. It used to run a hand-written
-subset (`fmt`, an affected-only compile check, and clippy only when
-`TALKBANK_PRE_PUSH_CLIPPY=1`, which defaulted to off) while claiming in its own
-docstring to "catch anything the GitHub main CI workflow would flag".
+`make install-hooks` installs `scripts/pre-push.sh` in `.git/hooks/pre-push`.
+If `core.hooksPath` is configured, make sure Git resolves that installed hook.
+An executable `.git/hooks/pre-push.local` runs after receipt verification and
+receives Git's original ref stream unchanged. A failed receipt check stops the
+push before the local hook runs.
 
-Two lists of what must pass will drift. `scripts/check_push_gate_sync.py` now
-fails if a `make` target a push-triggered workflow runs is not reached by the
-hook, and it runs inside `make lint`, so the loop closes: the hook runs the CI
-target, which checks that the hook runs the CI target.
+## The gate invokes CI's targets
 
-The subset existed to keep the hook fast. Measured on a warm tree, the full
-target is **16 seconds**. There was nothing to save.
+`scripts/gate.sh` invokes `make batchalign-ci-rust` and the source-only Python,
+schema, shell, workflow, and book checks previously run during every push.
+This avoids repeating successful verification during the commit/push cycle;
+it does not replace those checks with a smaller subset.
 
-Two things about that checker are worth knowing, because both were wrong on its
-first day and each let a red build through:
+`scripts/check_push_gate_sync.py`, run by `make lint`, follows actual Makefile
+prerequisites and direct recursive make commands. It checks all push/PR-triggered
+workflows. Comments and echoed suggestions cannot establish coverage. This
+checker follows the repository's direct-command convention; arbitrary shell
+control flow or raw tool invocations need explicit review when changing CI.
 
-- **Coverage is computed through the Makefile, not by comparing two texts.** A
-  hook line reading `make batchalign-ci-rust` covers everything that recipe
-  invokes, transitively. Demanding the hook restate the recipe would be the same
-  mirroring one level down.
-- **It reads every push-triggered workflow**, decided by each workflow's own
-  `on:` triggers. It originally read only the file mentioning
-  `batchalign-ci-rust`, so the Python job was outside the scan entirely and a
-  `ruff format --check` failure reached `main`. That job now calls
-  `make batchalign-lint-python-source`, which the hook also runs: a workflow
-  step that invokes a tool directly instead of through a target is invisible to
-  a checker that reads targets.
-
-`EXEMPT` in that file is the honest statement of what a green hook does **not**
-prove. Everything listed there needs a maturin release wheel, the
-npm-installed frontend, or the built binary, so it costs minutes and is covered
-only once CI runs.
+`make gate-receipts-test` exercises both the receipt protocol in temporary Git
+repositories and the coverage checker. These checks also run in CI without
+building a Rust test binary. Exemptions in the checker document wheel-installed
+Python and frontend checks that require their own CI setup; a local receipt is
+not evidence that those jobs or other platforms have passed.
 
 ## What local checks cannot catch: the runner is Linux
 
@@ -100,14 +92,11 @@ and it is the one worth remembering. Nothing in the push was wrong: an advisory
 had been published against a transitive dependency since the previous run, and
 `pip-audit` exits non-zero on any advisory outside its allowlist.
 
-No local hook can catch that, because there is nothing to catch. The commit did
-not change. And the fix available to the person blocked is to append another
-identifier to an allowlist, which is not a fix, it is the gate asking to be
-turned off one line at a time. The allowlist had reached five entries, every one
-of them recording the same verdict (this code loads only pinned first-party
-models, so the vulnerable path is unreachable), and the sixth would have said it
-again on a deploy day, for a vulnerability whose upstream fix exists only as an
-unreleased commit.
+An advisory can appear without a source change. Treat it as a security finding
+that needs assessment and an upgrade when a fix is available, rather than
+assuming that a successful source gate proves the dependencies safe. Pinned
+model revisions constrain which checkpoints load; they do not make a vulnerable
+checkpoint-loading path unreachable.
 
 So dependency advisories moved to `.github/workflows/dependency-audit.yml`,
 weekly plus `workflow_dispatch`. The information is unchanged and Dependabot
