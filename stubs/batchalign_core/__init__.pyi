@@ -10,8 +10,21 @@ from collections.abc import Callable
 # Worker protocol dispatch
 # ---------------------------------------------------------------------------
 
-def dispatch_protocol_message(
+class PendingProtocolRequest:
+    @property
+    def message(self) -> dict[str, object]: ...
+
+class ImmediateProtocolReply:
+    @property
+    def payload(self) -> dict[str, object]: ...
+    @property
+    def should_shutdown(self) -> bool: ...
+
+def prepare_protocol_message(
     message: object,
+) -> PendingProtocolRequest | ImmediateProtocolReply: ...
+def dispatch_protocol_message(
+    request: PendingProtocolRequest,
     *,
     health_fn: Callable[..., object],
     capabilities_fn: Callable[..., object],
@@ -23,7 +36,7 @@ def dispatch_protocol_message(
     batch_infer_request_model: object,
     execute_v2_request_model: object,
     validation_error_type: object,
-) -> tuple[dict[str, object], bool]: ...
+) -> dict[str, object]: ...
 
 # ---------------------------------------------------------------------------
 # Worker V2 execution

@@ -28,6 +28,7 @@ import socket
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,7 +36,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from batchalign.inference._domain_types import TcpPort
 
-from batchalign.worker._protocol_ops import dispatch_protocol_message
+from batchalign.worker._protocol_ops import (
+    PendingProtocolRequest,
+    ProtocolDispatchResult,
+    dispatch_prepared_protocol_message,
+    dispatch_protocol_message,
+    prepare_protocol_message,
+)
 from batchalign.worker._runtime_identity import observe_worker_runtime
 from batchalign.worker._types import WorkerJSONValue
 
@@ -352,7 +359,7 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
     pool = ThreadPoolExecutor(max_workers=max_threads)
     shutdown_event = threading.Event()
 
-    def _handle_and_respond(message: object) -> None:
+    def _handle_and_respond(request: PendingProtocolRequest) -> None:
         # Short-circuit if a prior task in the pool already signalled
         # shutdown (bootstrap error, explicit shutdown op, or a write
         # failure). Without this gate, every in-flight task that the
@@ -362,7 +369,7 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
         if shutdown_event.is_set():
             return
         try:
-            dispatch = dispatch_protocol_message(message)
+            dispatch = dispatch_prepared_protocol_message(request)
         except BaseException as exc:
             kind = _classify_dispatch_exception(exc)
             import traceback
@@ -374,7 +381,7 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
             with _stdout_lock:
                 _write_error(
                     str(exc) or exc.__class__.__name__,
-                    correlation=ErrorCorrelation.of_message(message),
+                    correlation=ErrorCorrelation.of_message(request.message),
                     kind=kind,
                 )
             if kind == "bootstrap":
@@ -383,8 +390,6 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
 
         with _stdout_lock:
             _write_json(dispatch.payload)
-        if dispatch.should_shutdown:
-            shutdown_event.set()
 
     for raw_line in sys.stdin:
         if shutdown_event.is_set():
@@ -403,7 +408,15 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
                 )
             continue
 
-        pool.submit(_handle_and_respond, message)
+        prepared = prepare_protocol_message(message)
+        if isinstance(prepared, ProtocolDispatchResult):
+            with _stdout_lock:
+                _write_json(prepared.payload)
+            if prepared.should_shutdown:
+                shutdown_event.set()
+                break
+            continue
+        pool.submit(_handle_and_respond, prepared)
 
     pool.shutdown(wait=True)
 
@@ -532,14 +545,20 @@ def _handle_tcp_connection_concurrent(
     pool = ThreadPoolExecutor(max_workers=max_threads)
     shutdown_event = threading.Event()
 
-    def _handle_and_respond(message: object) -> None:
+    def _stop_reading() -> None:
+        """Publish shutdown and wake the connection's blocked reader together."""
+        shutdown_event.set()
+        with suppress(OSError):
+            conn.shutdown(socket.SHUT_RD)
+
+    def _handle_and_respond(request: PendingProtocolRequest) -> None:
         # Short-circuit if a prior pooled task already signalled shutdown
         # (bootstrap error, broken pipe). See ``_serve_stdio_concurrent``
         # for the same gate's rationale.
         if shutdown_event.is_set():
             return
         try:
-            dispatch = dispatch_protocol_message(message)
+            dispatch = dispatch_prepared_protocol_message(request)
         except BaseException as exc:
             # Same exception-shielding contract as the sequential TCP
             # handler. Classification + structured emit + bootstrap-on-
@@ -557,16 +576,16 @@ def _handle_tcp_connection_concurrent(
                     error_envelope(
                         str(exc) or exc.__class__.__name__,
                         kind,
-                        ErrorCorrelation.of_message(message),
+                        ErrorCorrelation.of_message(request.message),
                     )
                 )
                 try:
                     wfile.write(error_payload + "\n")
                     wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
-                    shutdown_event.set()
+                    _stop_reading()
             if kind == "bootstrap":
-                shutdown_event.set()
+                _stop_reading()
             return
 
         with write_lock:
@@ -574,9 +593,7 @@ def _handle_tcp_connection_concurrent(
                 wfile.write(json.dumps(dispatch.payload) + "\n")
                 wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                shutdown_event.set()
-        if dispatch.should_shutdown:
-            shutdown_event.set()
+                _stop_reading()
 
     try:
         for raw_line in rfile:
@@ -601,7 +618,16 @@ def _handle_tcp_connection_concurrent(
                     wfile.flush()
                 continue
 
-            pool.submit(_handle_and_respond, message)
+            prepared = prepare_protocol_message(message)
+            if isinstance(prepared, ProtocolDispatchResult):
+                with write_lock:
+                    wfile.write(json.dumps(prepared.payload) + "\n")
+                    wfile.flush()
+                if prepared.should_shutdown:
+                    _stop_reading()
+                    break
+                continue
+            pool.submit(_handle_and_respond, prepared)
     except (BrokenPipeError, ConnectionResetError):
         logger.info("TCP connection closed by peer %s:%d", addr[0], addr[1])
     finally:

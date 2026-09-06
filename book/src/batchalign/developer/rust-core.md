@@ -1,7 +1,7 @@
 # Rust Core (`batchalign_core`)
 
 **Status:** Current
-**Last updated:** 2026-05-20 00:53 EDT
+**Last updated:** 2026-09-06 08:07 EDT
 
 For new contributors, start with:
 
@@ -61,8 +61,11 @@ the source under `crates/batchalign-pyo3/src/`.
 
 ### Worker protocol
 
-- `dispatch_protocol_message(...)`: route IPC messages to typed
-  Python handlers.
+- `prepare_protocol_message(...)`: admit a constructor-private pending request
+  or return an immediate reader reply for rejection/shutdown.
+- `dispatch_protocol_message(...)`: execute only an admitted pending request
+  through typed Python handlers and return its response payload. Shutdown has
+  no executable operation variant.
 
 ### Worker V2 executors
 

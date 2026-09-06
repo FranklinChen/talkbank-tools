@@ -96,10 +96,134 @@ fn validate_request_model<'py>(
     }
 }
 
-/// Dispatch one worker IPC message using Rust-owned op routing.
+/// Operations admitted to a worker thread. Shutdown has no executable variant.
+#[derive(Clone, Copy)]
+enum ExecutableOperation {
+    Health,
+    Capabilities,
+    Infer,
+    BatchInfer,
+    ExecuteV2,
+    EnsureTask,
+}
+
+impl ExecutableOperation {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Health => "health",
+            Self::Capabilities => "capabilities",
+            Self::Infer => "infer",
+            Self::BatchInfer => "batch_infer",
+            Self::ExecuteV2 => "execute_v2",
+            Self::EnsureTask => "ensure_task",
+        }
+    }
+}
+
+/// A request whose operation can execute on a worker thread.
+/// No Python constructor exists; admission owns its immutable operation.
+#[pyclass(frozen, module = "batchalign_core")]
+pub(crate) struct PendingProtocolRequest {
+    operation: ExecutableOperation,
+    message: Py<PyDict>,
+}
+
+#[pymethods]
+impl PendingProtocolRequest {
+    /// Copy the envelope for exception correlation without exposing its mapping.
+    #[getter]
+    fn message(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        Ok(self.message.bind(py).copy()?.unbind())
+    }
+}
+
+enum ImmediateReply {
+    Rejected(Py<PyAny>),
+    Shutdown,
+}
+
+/// A reader-thread reply. Its action and payload cannot disagree.
+#[pyclass(frozen, module = "batchalign_core")]
+pub(crate) struct ImmediateProtocolReply {
+    reply: ImmediateReply,
+}
+
+#[pymethods]
+impl ImmediateProtocolReply {
+    #[getter]
+    fn payload(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.reply {
+            ImmediateReply::Rejected(payload) => Ok(payload.clone_ref(py)),
+            ImmediateReply::Shutdown => Ok(shutdown_payload(py)?.unbind()),
+        }
+    }
+
+    #[getter]
+    fn should_shutdown(&self) -> bool {
+        matches!(self.reply, ImmediateReply::Shutdown)
+    }
+}
+
+fn rejected_message(py: Python<'_>, message: &str) -> PyResult<Py<PyAny>> {
+    Ok(Py::new(
+        py,
+        ImmediateProtocolReply {
+            reply: ImmediateReply::Rejected(error_payload(py, message, None)?.unbind()),
+        },
+    )?
+    .into_any())
+}
+
+/// Classify control messages before the reader can block or enqueue work.
+#[pyfunction]
+pub(crate) fn prepare_protocol_message(
+    py: Python<'_>,
+    message: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let Ok(message) = message.cast::<PyDict>() else {
+        return rejected_message(py, "request must be a JSON object");
+    };
+    let Some(op) = message.get_item("op")? else {
+        return rejected_message(py, "unknown op: None");
+    };
+    let Ok(op_text) = op.cast::<PyString>() else {
+        return rejected_message(py, &format!("unknown op: {}", repr_text(&op)?));
+    };
+    let Ok(op_text) = op_text.to_str() else {
+        return rejected_message(py, &format!("unknown op: {}", repr_text(&op)?));
+    };
+    let operation = match op_text {
+        "shutdown" => {
+            return Ok(Py::new(
+                py,
+                ImmediateProtocolReply {
+                    reply: ImmediateReply::Shutdown,
+                },
+            )?
+            .into_any());
+        }
+        "health" => ExecutableOperation::Health,
+        "capabilities" => ExecutableOperation::Capabilities,
+        "infer" => ExecutableOperation::Infer,
+        "batch_infer" => ExecutableOperation::BatchInfer,
+        "execute_v2" => ExecutableOperation::ExecuteV2,
+        "ensure_task" => ExecutableOperation::EnsureTask,
+        _ => return rejected_message(py, &format!("unknown op: {}", repr_text(&op)?)),
+    };
+    Ok(Py::new(
+        py,
+        PendingProtocolRequest {
+            operation,
+            message: message.copy()?.unbind(),
+        },
+    )?
+    .into_any())
+}
+
+/// Execute an admitted non-control request; raw messages cannot cross this boundary.
 #[pyfunction]
 #[pyo3(signature = (
-    message,
+    request,
     *,
     health_fn,
     capabilities_fn,
@@ -119,7 +243,7 @@ fn validate_request_model<'py>(
 )]
 pub(crate) fn dispatch_protocol_message(
     py: Python<'_>,
-    message: &Bound<'_, PyAny>,
+    request: &PendingProtocolRequest,
     health_fn: &Bound<'_, PyAny>,
     capabilities_fn: &Bound<'_, PyAny>,
     infer_fn: &Bound<'_, PyAny>,
@@ -130,183 +254,135 @@ pub(crate) fn dispatch_protocol_message(
     batch_infer_request_model: &Bound<'_, PyAny>,
     execute_v2_request_model: &Bound<'_, PyAny>,
     validation_error_type: &Bound<'_, PyAny>,
-) -> PyResult<(Py<PyAny>, bool)> {
-    let message = match message.cast::<PyDict>() {
-        Ok(message) => message,
-        Err(_) => {
-            return Ok((
-                error_payload(py, "request must be a JSON object", None)?.unbind(),
-                false,
-            ));
-        }
-    };
+) -> PyResult<Py<PyAny>> {
+    let message = request.message.bind(py);
+    let op = request.operation.wire_name();
 
-    let (op, op_repr) = match message.get_item("op")? {
-        Some(value) => match value.cast::<PyString>() {
-            Ok(value) => (value.to_str()?.to_string(), repr_text(value.as_any())?),
-            Err(_) => {
-                return Ok((
-                    error_payload(py, &format!("unknown op: {}", repr_text(&value)?), None)?
-                        .unbind(),
-                    false,
-                ));
-            }
-        },
-        None => return Ok((error_payload(py, "unknown op: None", None)?.unbind(), false)),
-    };
-
-    if op == "shutdown" {
-        return Ok((shutdown_payload(py)?.unbind(), true));
-    }
-
-    let payload = match op.as_str() {
-        "health" => response_payload(py, &op, &health_fn.call0()?)?,
-        "capabilities" => response_payload(py, &op, &capabilities_fn.call0()?)?,
-        "infer" => {
+    let payload = match request.operation {
+        ExecutableOperation::Health => response_payload(py, op, &health_fn.call0()?)?,
+        ExecutableOperation::Capabilities => response_payload(py, op, &capabilities_fn.call0()?)?,
+        ExecutableOperation::Infer => {
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok((
-                    error_payload(
-                        py,
-                        "infer request must include mapping field 'request'",
-                        None,
-                    )?
-                    .unbind(),
-                    false,
-                ));
+                return Ok(error_payload(
+                    py,
+                    "infer request must include mapping field 'request'",
+                    None,
+                )?
+                .unbind());
             };
             let req_payload = match req_payload.cast::<PyDict>() {
                 Ok(payload) => payload.as_any(),
                 Err(_) => {
-                    return Ok((
-                        error_payload(
-                            py,
-                            "infer request must include mapping field 'request'",
-                            None,
-                        )?
-                        .unbind(),
-                        false,
-                    ));
+                    return Ok(error_payload(
+                        py,
+                        "infer request must include mapping field 'request'",
+                        None,
+                    )?
+                    .unbind());
                 }
             };
             let request_model = match validate_request_model(
                 py,
-                &op,
+                op,
                 infer_request_model,
                 req_payload,
                 validation_error_type,
             )? {
                 Ok(request_model) => request_model,
-                Err(payload) => return Ok((payload.unbind(), false)),
+                Err(payload) => return Ok(payload.unbind()),
             };
-            response_payload(py, &op, &infer_fn.call1((request_model,))?)?
+            response_payload(py, op, &infer_fn.call1((request_model,))?)?
         }
-        "batch_infer" => {
+        ExecutableOperation::BatchInfer => {
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok((
-                    error_payload(
-                        py,
-                        "batch_infer request must include mapping field 'request'",
-                        None,
-                    )?
-                    .unbind(),
-                    false,
-                ));
+                return Ok(error_payload(
+                    py,
+                    "batch_infer request must include mapping field 'request'",
+                    None,
+                )?
+                .unbind());
             };
             let req_payload = match req_payload.cast::<PyDict>() {
                 Ok(payload) => payload.as_any(),
                 Err(_) => {
-                    return Ok((
-                        error_payload(
-                            py,
-                            "batch_infer request must include mapping field 'request'",
-                            None,
-                        )?
-                        .unbind(),
-                        false,
-                    ));
+                    return Ok(error_payload(
+                        py,
+                        "batch_infer request must include mapping field 'request'",
+                        None,
+                    )?
+                    .unbind());
                 }
             };
             let request_model = match validate_request_model(
                 py,
-                &op,
+                op,
                 batch_infer_request_model,
                 req_payload,
                 validation_error_type,
             )? {
                 Ok(request_model) => request_model,
-                Err(payload) => return Ok((payload.unbind(), false)),
+                Err(payload) => return Ok(payload.unbind()),
             };
-            response_payload(py, &op, &batch_infer_fn.call1((request_model,))?)?
+            response_payload(py, op, &batch_infer_fn.call1((request_model,))?)?
         }
-        "execute_v2" => {
+        ExecutableOperation::ExecuteV2 => {
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok((
-                    error_payload(
-                        py,
-                        "execute_v2 request must include mapping field 'request'",
-                        None,
-                    )?
-                    .unbind(),
-                    false,
-                ));
+                return Ok(error_payload(
+                    py,
+                    "execute_v2 request must include mapping field 'request'",
+                    None,
+                )?
+                .unbind());
             };
             let req_payload = match req_payload.cast::<PyDict>() {
                 Ok(payload) => payload.as_any(),
                 Err(_) => {
-                    return Ok((
-                        error_payload(
-                            py,
-                            "execute_v2 request must include mapping field 'request'",
-                            None,
-                        )?
-                        .unbind(),
-                        false,
-                    ));
+                    return Ok(error_payload(
+                        py,
+                        "execute_v2 request must include mapping field 'request'",
+                        None,
+                    )?
+                    .unbind());
                 }
             };
             let request_model = match validate_request_model(
                 py,
-                &op,
+                op,
                 execute_v2_request_model,
                 req_payload,
                 validation_error_type,
             )? {
                 Ok(request_model) => request_model,
-                Err(payload) => return Ok((payload.unbind(), false)),
+                Err(payload) => return Ok(payload.unbind()),
             };
-            response_payload(py, &op, &execute_v2_fn.call1((request_model,))?)?
+            response_payload(py, op, &execute_v2_fn.call1((request_model,))?)?
         }
-        "ensure_task" => {
+        ExecutableOperation::EnsureTask => {
             // ensure_task is a lightweight op: extract task + engine_overrides
             // from the request dict and call the Python handler directly.
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok((
-                    error_payload(
-                        py,
-                        "ensure_task request must include mapping field 'request'",
-                        None,
-                    )?
-                    .unbind(),
-                    false,
-                ));
+                return Ok(error_payload(
+                    py,
+                    "ensure_task request must include mapping field 'request'",
+                    None,
+                )?
+                .unbind());
             };
             let req_dict = match req_payload.cast::<PyDict>() {
                 Ok(d) => d,
                 Err(_) => {
-                    return Ok((
+                    return Ok(
                         error_payload(py, "ensure_task request must be a mapping", None)?.unbind(),
-                        false,
-                    ));
+                    );
                 }
             };
             let task = match req_dict.get_item("task")? {
                 Some(v) => v,
                 None => {
-                    return Ok((
+                    return Ok(
                         error_payload(py, "ensure_task request must include 'task'", None)?
                             .unbind(),
-                        false,
-                    ));
+                    );
                 }
             };
             let engine_overrides = req_dict.get_item("engine_overrides")?;
@@ -314,10 +390,9 @@ pub(crate) fn dispatch_protocol_message(
                 Some(eo) => ensure_task_fn.call1((task, eo))?,
                 None => ensure_task_fn.call1((task, py.None()))?,
             };
-            response_payload(py, &op, &result)?
+            response_payload(py, op, &result)?
         }
-        _ => error_payload(py, &format!("unknown op: {op_repr}"), None)?,
     };
 
-    Ok((payload.unbind(), false))
+    Ok(payload.unbind())
 }

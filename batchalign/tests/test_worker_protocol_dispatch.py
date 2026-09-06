@@ -2,7 +2,36 @@
 
 from __future__ import annotations
 
-from batchalign.worker._protocol_ops import dispatch_protocol_message
+import pytest
+
+from batchalign.worker._protocol_ops import (
+    PendingProtocolRequest,
+    dispatch_prepared_protocol_message,
+    dispatch_protocol_message,
+    prepare_protocol_message,
+)
+
+
+def test_prepared_operation_cannot_be_mutated_into_shutdown() -> None:
+    message = {"op": "health"}
+    prepared = prepare_protocol_message(message)
+    assert isinstance(prepared, PendingProtocolRequest)
+    message["op"] = "shutdown"
+    prepared.message["op"] = "shutdown"
+    response = dispatch_prepared_protocol_message(prepared)
+    assert response.payload["op"] == "health"
+    assert response.should_shutdown is False
+
+
+def test_pending_request_has_no_python_constructor() -> None:
+    with pytest.raises(TypeError):
+        PendingProtocolRequest()
+
+
+def test_invalid_unicode_operation_is_a_reply_not_a_reader_exception() -> None:
+    response = dispatch_protocol_message({"op": "\ud800"})
+    assert response.should_shutdown is False
+    assert response.payload["op"] == "error"
 
 
 def test_dispatch_protocol_message_wraps_health_response() -> None:

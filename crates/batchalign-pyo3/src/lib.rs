@@ -94,6 +94,12 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
 
     // Worker protocol dispatch
+    m.add_class::<worker_protocol::PendingProtocolRequest>()?;
+    m.add_class::<worker_protocol::ImmediateProtocolReply>()?;
+    m.add_function(wrap_pyfunction!(
+        worker_protocol::prepare_protocol_message,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         worker_protocol::dispatch_protocol_message,
         m

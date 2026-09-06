@@ -28,13 +28,55 @@ from __future__ import annotations
 
 import io
 import json
+import queue
+import subprocess
 import sys
+import threading
 from unittest import mock
 
 from batchalign.worker._protocol import (
     _classify_dispatch_exception,
     _serve_stdio,
 )
+
+
+def test_concurrent_shutdown_exits_with_parent_stdin_still_open() -> None:
+    """A shutdown reply must not leave the worker waiting for another line."""
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from batchalign.worker._protocol import _serve_stdio_concurrent; "
+            "_serve_stdio_concurrent(max_threads=2)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    replies: queue.Queue[str] = queue.Queue()
+    assert child.stdin is not None and child.stdout is not None
+    stdout = child.stdout
+    reader = threading.Thread(
+        target=lambda: replies.put(stdout.readline()), daemon=True
+    )
+    reader.start()
+    try:
+        child.stdin.write('{"op":"shutdown"}\n')
+        child.stdin.flush()
+        assert json.loads(replies.get(timeout=10)) == {"op": "shutdown"}
+        # Coarse hang check, not a performance benchmark. Keep stdin open.
+        assert child.wait(timeout=5) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+        reader.join(timeout=5)
+        child.stdin.close()
+        child.stdout.close()
+        assert child.stderr is not None
+        child.stderr.close()
+
 
 # ---------------------------------------------------------------------------
 # Classifier: bootstrap-vs-runtime discriminator on raw exception types.

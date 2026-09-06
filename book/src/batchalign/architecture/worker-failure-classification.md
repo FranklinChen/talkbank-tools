@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-06 07:47 EDT
+**Last updated:** 2026-09-06 08:07 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -285,11 +285,12 @@ loops in `_protocol.py`:
 Stanza/IO-profile workers use the TCP variants (one daemon, multiple
 servers connecting). They are exactly the profiles that load Stanza
 catalogs, the incident shape this whole architecture is designed to
-prevent originally manifested on these workers. Every loop wraps
-`dispatch_protocol_message` in a `BaseException` catch, classifies via
-`_classify_dispatch_exception`, and emits the structured error envelope.
-TCP handlers also tear the connection down on bootstrap-kind errors so
-the orchestrator sees a typed error rather than a closed socket.
+prevent originally manifested on these workers. Sequential loops wrap
+`dispatch_protocol_message`; concurrent handlers wrap
+`dispatch_prepared_protocol_message`. Both catch `BaseException`, classify via
+`_classify_dispatch_exception`, and emit the structured error envelope.
+TCP handlers also tear the connection down on bootstrap-kind errors after
+emitting that typed error.
 
 ## The Rust side: `WorkerError`, `FailureCategory`, classifier
 
@@ -564,6 +565,45 @@ permission-denied" → distinct user-facing remediation):
 6. Update the test in `runner/util/mod.rs::worker_error_classification_is_stable`
    to lock in the classification.
 7. Update this chapter's tables.
+
+## Concurrent reader control and shutdown
+
+Rust admission separates executable requests from immediate reader replies.
+`PendingProtocolRequest` has no Python constructor, owns its operation, and
+cannot name shutdown. Native execution accepts only that type. Changing the
+original message or the copied envelope exposed for error correlation cannot
+turn an admitted health request into shutdown. Immediate reply payloads and
+actions come from one closed native outcome, so a shutdown action cannot be
+paired with an error payload.
+
+Both concurrent transports process immediate replies before submitting work to
+the executor. After replying to shutdown, the reader exits its loop without
+waiting for another input line or client EOF. Queued requests observe shutdown;
+already running calls are still joined. This fixes the idle open-pipe hang,
+not cancellation of an arbitrary in-flight model call.
+
+The concurrent TCP handler also owns publishing shutdown and waking its socket
+reader as one operation. Bootstrap errors and write failures can therefore
+close the connection after their response without waiting for client EOF. The
+former bootstrap test masked a blocked reader with a two-second read timeout;
+it now requires the handler to terminate while the client write side is open.
+Concurrent **stdio** bootstrap errors still set an event that a blocked stdin
+reader cannot observe until input or EOF arrives. That asynchronous error path
+remains separate work; explicit shutdown is now handled before queueing.
+
+Reproduce with the actual child process, loopback socket and native admission:
+
+```bash
+uv run --no-sync pytest -q batchalign/tests/test_serve_stdio_bootstrap_error.py \
+  batchalign/tests/test_serve_tcp_bootstrap_error.py \
+  batchalign/tests/test_worker_protocol_dispatch.py
+```
+
+The stdio regression received its shutdown acknowledgement but exceeded five
+seconds while stdin remained open before the fix. The TCP bootstrap regression
+also failed before its reader wakeup was added. A malformed Unicode operation
+now produces an error reply instead of escaping from admission as a reader
+exception. Wire responses for supported operations retain their existing shape.
 
 ## Alignment window admission
 

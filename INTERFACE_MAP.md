@@ -1,7 +1,7 @@
 # Python/Rust Interface Map
 
 **Status:** Current
-**Last updated:** 2026-08-28 19:15 EDT
+**Last updated:** 2026-09-06 08:07 EDT
 
 This document is the unified reference for all Python/Rust interface boundaries in batchalign3.
 
@@ -27,6 +27,14 @@ This document is the unified reference for all Python/Rust interface boundaries 
 **Responsibility:**
 - **Rust controls:** Message validation, routing, envelope structure, error codes
 - **Python implements:** Handler dispatch, message logging, resource cleanup
+
+Rust `prepare_protocol_message` returns either a constructor-private
+`PendingProtocolRequest` or an `ImmediateProtocolReply`. The pending operation
+vocabulary excludes shutdown. Native `dispatch_protocol_message` accepts only
+that pending type and returns a response payload; the former always-false
+shutdown return flag is gone. Python's synchronous wrapper still accepts raw
+messages, while concurrent readers handle immediate replies before queueing.
+The canonical stub is `stubs/batchalign_core/__init__.pyi`.
 
 ---
 

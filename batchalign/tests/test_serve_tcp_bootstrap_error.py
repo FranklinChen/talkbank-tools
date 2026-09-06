@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+from contextlib import suppress
 
 from batchalign.worker._protocol import (
     _handle_tcp_connection_concurrent,
@@ -73,6 +74,31 @@ def _drain_lines(sock: socket.socket, until_close: bool = True) -> list[str]:
     finally:
         rfile.close()
     return out
+
+
+def test_tcp_concurrent_shutdown_closes_without_client_eof() -> None:
+    client, server = _make_connected_pair()
+    handler = threading.Thread(
+        target=_handle_tcp_connection_concurrent,
+        args=(server, ("127.0.0.1", 0), 2),
+    )
+    handler.start()
+    client.settimeout(5)
+    reader = client.makefile("r", encoding="utf-8")
+    try:
+        client.sendall(b'{"op":"shutdown"}\n')
+        assert json.loads(reader.readline()) == {"op": "shutdown"}
+        assert reader.readline() == "", (
+            "server must close while client write side stays open"
+        )
+        handler.join(timeout=5)
+        assert not handler.is_alive()
+    finally:
+        with suppress(OSError):
+            client.shutdown(socket.SHUT_RDWR)
+        reader.close()
+        client.close()
+        handler.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +217,7 @@ def test_tcp_concurrent_emits_bootstrap_kind(monkeypatch):
         raise StanzaCatalogDownloadError("network unreachable")
 
     monkeypatch.setattr(
-        "batchalign.worker._protocol.dispatch_protocol_message",
+        "batchalign.worker._protocol.dispatch_prepared_protocol_message",
         fake_dispatch,
     )
 
@@ -204,9 +230,14 @@ def test_tcp_concurrent_emits_bootstrap_kind(monkeypatch):
 
     client.sendall(b'{"op": "ensure_task", "request": {"task": "morphosyntax"}}\n')
     lines = _drain_lines(client)
+    t.join(timeout=1.0)
+    closed_without_client_eof = not t.is_alive()
     client.close()
     t.join(timeout=3.0)
 
+    assert closed_without_client_eof, (
+        "bootstrap failure must wake the blocked TCP reader"
+    )
     assert lines, "Handler must emit at least one response"
     # Concurrent mode dispatches via a thread pool, so order is loose; the
     # only invariant we assert is that AT LEAST ONE bootstrap envelope is

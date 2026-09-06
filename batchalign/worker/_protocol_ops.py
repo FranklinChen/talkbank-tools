@@ -27,10 +27,36 @@ class ProtocolDispatchResult:
     should_shutdown: bool = False
 
 
+PendingProtocolRequest = batchalign_core.PendingProtocolRequest
+
+
+def prepare_protocol_message(
+    message: object,
+) -> PendingProtocolRequest | ProtocolDispatchResult:
+    """Admit executable work or return a reply for the reader to handle now."""
+    prepared = batchalign_core.prepare_protocol_message(message)
+    if isinstance(prepared, batchalign_core.ImmediateProtocolReply):
+        return ProtocolDispatchResult(
+            payload=cast(dict[str, WorkerJSONValue], prepared.payload),
+            should_shutdown=prepared.should_shutdown,
+        )
+    return prepared
+
+
 def dispatch_protocol_message(message: object) -> ProtocolDispatchResult:
-    """Decode one worker IPC message into a response envelope."""
-    payload, should_shutdown = batchalign_core.dispatch_protocol_message(
-        message,
+    """Dispatch a raw message synchronously, including reader control replies."""
+    prepared = prepare_protocol_message(message)
+    if isinstance(prepared, ProtocolDispatchResult):
+        return prepared
+    return dispatch_prepared_protocol_message(prepared)
+
+
+def dispatch_prepared_protocol_message(
+    request: PendingProtocolRequest,
+) -> ProtocolDispatchResult:
+    """Execute an admitted request; shutdown cannot enter this function."""
+    payload = batchalign_core.dispatch_protocol_message(
+        request,
         health_fn=_health,
         capabilities_fn=_capabilities,
         infer_fn=_infer,
@@ -44,11 +70,13 @@ def dispatch_protocol_message(message: object) -> ProtocolDispatchResult:
     )
     return ProtocolDispatchResult(
         payload=cast(dict[str, WorkerJSONValue], payload),
-        should_shutdown=should_shutdown,
     )
 
 
 __all__ = [
+    "PendingProtocolRequest",
     "ProtocolDispatchResult",
+    "dispatch_prepared_protocol_message",
     "dispatch_protocol_message",
+    "prepare_protocol_message",
 ]
