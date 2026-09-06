@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-06 01:08 EDT
+**Last updated:** 2026-09-06 18:14 EDT
 
 ## Philosophy
 
@@ -122,6 +122,11 @@ starting 34 executables, while a no-run build was already warm in 0.42 seconds.
 The consolidated layout starts nine ordinary executables, including the two
 unit-test targets, and the same listing probe takes 6.61 seconds. The assertions
 were retained; the removed cost was repeated linking and process startup.
+
+`make test` runs compiled workspace tests with `--tests`, then workspace doctests
+with `--doc`, each once and with `--locked`. Bare `cargo test --workspace`
+already runs doctests, so following it with a second doctest command duplicated
+their compilation and execution. Scoped commands remain the inner loop.
 
 The workspace continues to use plain `cargo test`. `cargo-nextest` is not
 installed because it must still enumerate every executable and its earlier
@@ -384,7 +389,7 @@ uv run pytest batchalign/tests/test_worker_protocol_v2_types.py -q
 uv run pytest batchalign/tests/test_worker_protocol_v2_artifacts.py -q
 uv run pytest batchalign/tests/test_worker_fa_v2.py -q
 cargo test -p batchalign --test contract_suite worker_protocol_v2_compat::
-cargo test -p batchalign -E 'test(fa_result_v2)'
+cargo test -p batchalign --lib worker::fa_result_v2:: --locked
 cargo test -p batchalign --test worker_integration_suite worker_v2_fa_roundtrip::
 ```
 

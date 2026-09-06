@@ -50,7 +50,7 @@ hooks-check:
 	  echo "warning: .git/hooks/pre-push is not installed, run 'make install-hooks'" >&2; \
 	fi
 
-# Run all tests.
+# Run compiled tests once, then workspace doctests once.
 #
 # `cargo test`, never `cargo nextest`: nextest is banned and uninstalled in this
 # workspace (it execs every test binary up front merely to enumerate tests, which
@@ -59,9 +59,9 @@ hooks-check:
 # "no such command".
 test:
 	@echo "==> Testing Rust workspace..."
-	cargo test --workspace
+	cargo test --workspace --tests --locked
 	@echo "==> Testing doctests..."
-	cargo test --doc
+	cargo test --workspace --doc --locked
 
 test-affected:
 	cargo run -q -p xtask -- affected-rust test
