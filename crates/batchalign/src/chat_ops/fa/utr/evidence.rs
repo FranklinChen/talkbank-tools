@@ -135,6 +135,11 @@ pub(super) struct UtrWordOrdinal(pub(super) usize);
 #[serde(transparent)]
 pub(super) struct UtrAsrTokenOrdinal(pub(super) usize);
 
+/// Zero-based whitespace-delimited word ordinal within one provider token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(transparent)]
+pub(super) struct UtrAsrWordOrdinal(pub(super) usize);
+
 impl UtrAsrTokenOrdinal {
     pub(super) fn index(self) -> usize {
         self.0
@@ -167,12 +172,19 @@ impl UtrWordAddress {
 pub struct UtrAsrTokenAddress {
     /// Zero-based token ordinal in the exact ASR stream given to UTR.
     pub(super) token_index: UtrAsrTokenOrdinal,
+    /// Word position within that token's original text, without inferred timing.
+    pub(super) word_index: UtrAsrWordOrdinal,
 }
 
 impl UtrAsrTokenAddress {
     /// Token ordinal within the admitted ASR timing stream.
     pub fn token_index(self) -> usize {
         self.token_index.index()
+    }
+
+    /// Word ordinal after splitting the original token on Unicode whitespace.
+    pub fn word_index(self) -> usize {
+        self.word_index.0
     }
 }
 

@@ -51,6 +51,68 @@ fn offline_utr_replay_writes_typed_evidence_without_changing_chat() {
 }
 
 #[test]
+fn offline_utr_projects_segment_words_and_retains_provider_timing() {
+    let harness = CliHarness::new();
+    let chat = harness.home_dir().join("input.cha");
+    let tokens = harness.home_dir().join("tokens.json");
+    let text = CHAT.replace("*PAR:\thello .", "*PAR:\thello world .\n*PAR:\tagain .");
+    let provider = r#"[{"text":"  ","start_ms":0,"end_ms":50},{"text":" hello\u2003world again ","start_ms":100,"end_ms":900}]"#;
+    std::fs::write(&chat, &text).expect("write CHAT");
+    std::fs::write(&tokens, provider).expect("write retained provider segments");
+
+    for fuzzy in [false, true] {
+        let output = harness.home_dir().join(format!("report-{fuzzy}.json"));
+        let mut command = harness.cmd();
+        command
+            .args(["eval", "utr-alignment"])
+            .arg("--chat")
+            .arg(&chat)
+            .arg("--tokens")
+            .arg(&tokens)
+            .arg("--output")
+            .arg(&output);
+        if fuzzy {
+            command.args(["--fuzzy-threshold", "0.85"]);
+        }
+        command.assert().success();
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output).expect("read report"))
+                .expect("report JSON");
+        assert_eq!(report["schema_version"], 2);
+        let utterances = report["plan"]["utterances"].as_array().expect("utterances");
+        assert_eq!(utterances.len(), 2);
+        for utterance in utterances {
+            assert_eq!(utterance["status"], "matched");
+            assert_eq!(utterance["proposal"]["start_ms"], 100);
+            assert_eq!(
+                utterance["proposal"]["end_ms"], 900,
+                "lexical projection must not invent sub-segment times"
+            );
+        }
+        let first = &utterances[0]["matches"];
+        assert_eq!(first["first"]["asr_text"], "hello");
+        assert_eq!(
+            first["first"]["token"],
+            serde_json::json!({"token_index":1,"word_index":0})
+        );
+        assert_eq!(first["rest"][0]["asr_text"], "world");
+        assert_eq!(
+            first["rest"][0]["token"],
+            serde_json::json!({"token_index":1,"word_index":1})
+        );
+        assert_eq!(
+            utterances[1]["matches"]["first"]["token"],
+            serde_json::json!({"token_index":1,"word_index":2})
+        );
+    }
+    assert_eq!(std::fs::read_to_string(chat).expect("read CHAT"), text);
+    assert_eq!(
+        std::fs::read_to_string(tokens).expect("read retained segments"),
+        provider
+    );
+}
+
+#[test]
 fn offline_utr_replay_rejects_invalid_policy_before_writing() {
     let harness = CliHarness::new();
     let chat = harness.home_dir().join("input.cha");

@@ -1,7 +1,7 @@
 # eval
 
 **Status:** Current
-**Last updated:** 2026-09-01 06:47 EDT
+**Last updated:** 2026-09-06 15:57 EDT
 
 `batchalign3 eval` contains offline evaluators. They consume retained artifacts
 and never submit ordinary processing jobs.
@@ -34,6 +34,12 @@ and retains exhaustive per-utterance match or refusal states. A matched state
 owns a nonempty word-to-token collection and a positive or nonpositive timing
 proposal. This is research evidence, not permission to overwrite main-tier or
 `%wor` timing, and it never generates `%xalign`.
+
+Schema 2 matches words inside provider segments and records both the original
+token index and its within-token word index. Each word retains its provider
+segment's interval; these are coarse timing proposals, not newly measured word
+timestamps. Input token JSON is unchanged, so retained older runs can be
+replayed into a fresh report without inference.
 
 ```mermaid
 flowchart LR

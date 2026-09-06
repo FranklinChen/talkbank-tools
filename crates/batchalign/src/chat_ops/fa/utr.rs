@@ -37,15 +37,18 @@ use super::coordinates::{FileMs, Recording};
 use super::extraction::collect_fa_words;
 
 mod evidence;
+mod lexical;
 pub mod overlap_markers;
 mod two_pass;
 
+#[cfg(test)]
+use evidence::UtrAsrTokenOrdinal;
+use evidence::UtrWordOrdinal;
 pub use evidence::{
     NonEmptyUtrWordMatches, UtrAlignmentEvidence, UtrAlignmentPlan, UtrAlignmentStrategy,
     UtrAsrTokenAddress, UtrLexicalRelation, UtrOverlapRecovery, UtrResult, UtrTimingProposal,
     UtrUtteranceAlignmentEvidence, UtrUtteranceOrdinal, UtrWordAddress, UtrWordMatch,
 };
-use evidence::{UtrAsrTokenOrdinal, UtrWordOrdinal};
 
 /// Synthetic drift-class regression scenarios. Public entry point is
 /// [`inject_utr_timing`]; the scenarios generate CHAT + ASR in-memory and
@@ -57,13 +60,14 @@ use evidence::{UtrAsrTokenOrdinal, UtrWordOrdinal};
 #[cfg(test)]
 mod drift_scenarios;
 
-/// A single ASR token with timing, used as input for UTR.
+/// A provider ASR token or segment with timing, used as retained input for UTR.
 ///
 /// This is intentionally a simple struct; it can be constructed from
 /// any ASR response format (Python worker `AsrToken`, or any other source).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AsrTimingToken {
-    /// Token text (single word).
+    /// Provider text, which may contain multiple words. UTR projects lexical
+    /// words while retaining this token's original timing interval.
     pub text: String,
     /// Start time in milliseconds.
     pub start_ms: u64,
@@ -235,7 +239,7 @@ pub(super) fn run_global_utr(
         let plan = build_alignment_plan(
             UtrAlignmentStrategy::GlobalDp,
             &[],
-            asr_tokens,
+            &lexical::UtrLexicalStream::from_tokens(asr_tokens),
             &utt_infos,
             std::iter::empty(),
             participation,
@@ -597,10 +601,8 @@ fn plan_utr_alignment(
         .iter()
         .map(|word| word.text.clone())
         .collect::<Vec<_>>();
-    let asr_texts = asr_tokens
-        .iter()
-        .map(|token| token.text.clone())
-        .collect::<Vec<_>>();
+    let lexical = lexical::UtrLexicalStream::from_tokens(asr_tokens);
+    let asr_texts = lexical.texts();
 
     // This fast path deliberately uses case-folded comparison, so it is only
     // valid for the case-insensitive DP policy. An exact caller must reach the
@@ -612,7 +614,7 @@ fn plan_utr_alignment(
         return build_alignment_plan(
             UtrAlignmentStrategy::UniqueExactSubsequence,
             payload,
-            asr_tokens,
+            &lexical,
             utt_infos,
             reference_indices.into_iter().enumerate(),
             participation,
@@ -632,7 +634,7 @@ fn plan_utr_alignment(
     build_alignment_plan(
         UtrAlignmentStrategy::GlobalDp,
         payload,
-        asr_tokens,
+        &lexical,
         utt_infos,
         matched_indices,
         participation,
@@ -703,7 +705,7 @@ fn greedy_reverse_match_indices(payload: &[String], reference: &[String]) -> Opt
 fn build_alignment_plan(
     strategy: UtrAlignmentStrategy,
     payload: &[UtrPayloadWord],
-    asr_tokens: &[AsrTimingToken],
+    asr_tokens: &lexical::UtrLexicalStream<'_>,
     utt_infos: &[UtrUtteranceInfo],
     matched_indices: impl IntoIterator<Item = (usize, usize)>,
     participation: GlobalUtrParticipation,
@@ -711,16 +713,11 @@ fn build_alignment_plan(
     let mut by_utterance = vec![Vec::new(); utt_infos.len()];
     for (payload_idx, reference_idx) in matched_indices {
         let payload_word = &payload[payload_idx];
-        let asr_token = &asr_tokens[reference_idx];
-        by_utterance[payload_word.address.utterance_index.index()].push(UtrWordMatch {
-            word: payload_word.address,
-            token: UtrAsrTokenAddress {
-                token_index: UtrAsrTokenOrdinal(reference_idx),
-            },
-            chat_text: payload_word.text.clone(),
-            asr_text: asr_token.text.clone(),
-            relation: lexical_relation(&payload_word.text, &asr_token.text),
-        });
+        by_utterance[payload_word.address.utterance_index.index()].push(asr_tokens.matched_word(
+            reference_idx,
+            payload_word.address,
+            &payload_word.text,
+        ));
     }
 
     let utterances = utt_infos
@@ -746,11 +743,7 @@ fn build_alignment_plan(
                     }
                 };
             };
-            let (minimum_token_index, maximum_token_index) = matches.token_extent();
-            let proposal = UtrTimingProposal::spanning(
-                &asr_tokens[minimum_token_index.index()],
-                &asr_tokens[maximum_token_index.index()],
-            );
+            let proposal = asr_tokens.proposal(&matches);
             UtrUtteranceAlignmentEvidence::Matched {
                 utterance_index: UtrUtteranceOrdinal(utterance_index),
                 alignable_words: info.words.len(),
@@ -1143,6 +1136,7 @@ mod tests {
     fn test_token_address(token_index: usize) -> UtrAsrTokenAddress {
         UtrAsrTokenAddress {
             token_index: UtrAsrTokenOrdinal(token_index),
+            word_index: evidence::UtrAsrWordOrdinal(0),
         }
     }
 

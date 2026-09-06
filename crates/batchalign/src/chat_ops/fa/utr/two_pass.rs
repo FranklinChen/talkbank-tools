@@ -783,18 +783,14 @@ pub fn recover_overlap_timing(
     window_end_ms: u64,
     dp_match_mode: MatchMode,
 ) -> Option<(u64, u64)> {
-    // Filter ASR tokens to those overlapping the window.
-    let windowed: Vec<(usize, &AsrTimingToken)> = asr_tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.start_ms < window_end_ms && t.end_ms > window_start_ms)
-        .collect();
+    let windowed =
+        super::lexical::UtrLexicalStream::within_window(asr_tokens, window_start_ms, window_end_ms);
 
     if windowed.is_empty() {
         return None;
     }
 
-    let windowed_texts: Vec<String> = windowed.iter().map(|(_, t)| t.text.clone()).collect();
+    let windowed_texts = windowed.texts();
 
     let alignment = dp_align::align(words, &windowed_texts, dp_match_mode);
 
@@ -803,7 +799,7 @@ pub fn recover_overlap_timing(
 
     for result_item in &alignment {
         if let dp_align::AlignResult::Match { reference_idx, .. } = result_item {
-            let token = windowed[*reference_idx].1;
+            let token = windowed.timing_token(*reference_idx);
             match min_start {
                 Some(s) if token.start_ms < s => min_start = Some(token.start_ms),
                 None => min_start = Some(token.start_ms),
@@ -826,6 +822,15 @@ pub fn recover_overlap_timing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlap_word_inside_a_segment_keeps_the_provider_interval() {
+        let tokens = make_asr_tokens(&[("outside", 0, 50), ("hello world", 100, 900)]);
+        assert_eq!(
+            recover_overlap_timing(&["world".to_owned()], &tokens, 400, 600, MatchMode::Exact),
+            Some((100, 900)),
+        );
+    }
 
     #[test]
     fn deserialization_rejects_an_out_of_domain_fuzzy_threshold() {

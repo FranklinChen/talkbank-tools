@@ -107,7 +107,7 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
         }
     };
     let report = UtrAlignmentReport {
-        schema_version: 1,
+        schema_version: 2,
         build: crate::cli::build_hash(),
         chat: InputIdentity::of(&args.chat, &chat_bytes),
         tokens: InputIdentity::of(&args.tokens, &token_bytes),
@@ -183,7 +183,7 @@ mod tests {
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&output).expect("read report"))
                 .expect("parse report");
-        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["schema_version"], 2);
         assert_eq!(report["participation"], "all_utterances");
         assert_eq!(
             report["plan"],
@@ -196,7 +196,7 @@ mod tests {
                     "matches": {
                         "first": {
                             "word": {"utterance_index": 0, "word_index": 0},
-                            "token": {"token_index": 0},
+                            "token": {"token_index": 0, "word_index": 0},
                             "chat_text": "hello",
                             "asr_text": "hello",
                             "relation": {"kind": "exact"}

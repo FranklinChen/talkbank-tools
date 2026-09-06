@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-09-02 20:07 EDT
+**Last updated:** 2026-09-06 15:57 EDT
 
 ## Overview
 
@@ -223,6 +223,22 @@ flowchart TD
 
 #### UTR alignment evidence and offline replay
 
+Provider tokens may contain whole phrases. `UtrLexicalStream` projects each
+token into nonempty words separated by Unicode whitespace before global or
+local overlap matching. It owns the relationship between those words and the
+original token stream. Matches record the original `token_index` and the
+`word_index` within its text; skipped blank tokens do not renumber later
+provider tokens. This removes the mismatch in which transcript words were
+compared against whole Whisper segments.
+
+Projection preserves the provider's interval for every word in a segment.
+It does not interpolate word timestamps, remove punctuation, or infer language
+segmentation where whitespace is absent. Two utterances matched within one
+segment can therefore receive the same coarse interval. Forced alignment must
+still establish word boundaries. Existing cached ASR responses remain reusable:
+the projection happens after reading the retained provider response, and no
+new inference is required to replay it.
+
 The global alignment plan is a first-class typed value. It records the chosen
 strategy, participation policy, every utterance state, every monotone
 word-to-token match, its lexical relation, and the timing proposal derived
@@ -253,6 +269,10 @@ existing output. Omit
 `--fuzzy-threshold` for case-insensitive exact matching. Add
 `--participation exclude-marked-overlap` to
 replay the participation rule used by the first pass of two-pass UTR.
+
+Offline report schema 2 adds the within-token word address and uses this
+lexical projection. The input token JSON format is unchanged. Older reports
+retain their original meaning and should be kept alongside a fresh replay.
 
 The resulting proposal is evidence, not a final main-tier or `%wor` policy.
 Complete lexical coverage does not by itself establish word-boundary accuracy,
