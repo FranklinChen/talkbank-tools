@@ -272,7 +272,7 @@ impl CommonOpts {
                 // come from each file's `@Languages:` header, resolved in
                 // `pipeline/morphosyntax.rs::stage_parse` via
                 // `resolve_per_file_lang` and read through
-                // `MorphosyntaxPipelineContext::require_resolved_lang`.
+                // the admitted morphosyntax analysis state.
                 //
                 // The wire-level `"per-file"` value parses to
                 // `LanguageSpec::PerFile`. This replaces the prior

@@ -119,6 +119,21 @@ impl<C> PipelinePlan<C> {
     }
 }
 
+/// Observe a consuming transition without erasing its output type or boxing it.
+pub(crate) async fn observe_stage<T>(
+    command: &'static str,
+    stage: StageId,
+    transition: impl Future<Output = Result<T, ServerError>>,
+) -> Result<T, ServerError> {
+    let started = Instant::now();
+    info!(command, stage = %stage, "Starting pipeline stage");
+    let output = transition.await?;
+    info!(command, stage = %stage,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "Completed pipeline stage");
+    Ok(output)
+}
+
 /// Execute a plan sequentially while respecting declared dependencies.
 ///
 /// If `on_stage` is provided, it is called before each stage executes
@@ -176,15 +191,7 @@ pub(crate) async fn run_plan<C>(
                 cb(stage.id, completed.len(), enabled.len());
             }
 
-            let started = Instant::now();
-            info!(command, stage = %stage.id, "Starting pipeline stage");
-            (stage.run)(ctx).await?;
-            info!(
-                command,
-                stage = %stage.id,
-                duration_ms = started.elapsed().as_millis() as u64,
-                "Completed pipeline stage"
-            );
+            observe_stage(command, stage.id, (stage.run)(ctx)).await?;
 
             completed.insert(stage.id);
             executed.push(stage.id);

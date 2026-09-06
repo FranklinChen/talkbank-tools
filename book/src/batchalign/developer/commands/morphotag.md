@@ -1,7 +1,7 @@
 # morphotag: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-05 05:21 EDT
+**Last updated:** 2026-09-06 03:15 EDT
 
 Implementation guide for the `morphotag` command. For user-facing
 documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.md).
@@ -27,6 +27,46 @@ documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.m
 Local submissions (auto-daemon or loopback `--server`) use `paths_mode=true`:
 the CLI posts source/output path lists instead of CHAT bytes. See
 [Submission Modes](../../reference/command-io.md#submission-modes-paths_modetrue-vs-paths_modefalse).
+
+---
+
+## Single-file phase ownership
+
+The single-file path in `pipeline/morphosyntax.rs` uses consuming transitions:
+
+```mermaid
+flowchart LR
+    P["ParsedFile"] --> CA["CA pass-through"]
+    CA --> CS["Strip legacy decision tiers and serialize"]
+    P --> A["Analysis of Parsed input"]
+    A --> V["Admitted main tiers"]
+    V --> C["Prepared: stale morphology cleared"]
+    C --> B["Collected payloads and hint evidence"]
+    B --> I["Inferred: matching responses or NoWork"]
+    I --> R["Applied morphology"]
+    R --> K["PostChecked"]
+    K --> S["Provenance, placeholder cleanup, serialization"]
+```
+
+`Analysis<S>` owns the CHAT document and its per-file language. Each phase
+exposes only the next operation: an unparsed or unadmitted document cannot
+reach payload collection, and injection requires an inferred phase carrying
+its payloads and matching response count. `HintPlan` contains captured evidence
+when requested; there is no separate flag permitting a missing evidence value.
+Job-level language is excluded from the immutable run options. The two language
+representations needed by the worker and model APIs are resolved once.
+
+CA pass-through remains a separate policy outcome. It does not claim analysis
+admission, resolve an inference language, or traverse six no-op analysis stages.
+Its existing lenient parse/recovery behavior remains unchanged. `PostChecked`
+means the existing non-fatal output checks ran; it does not claim the output
+was admitted as valid. Neither branch stores optional final output.
+
+The shared generic `observe_stage` helper retains the existing start/completion
+trace fields and duration measurement for transitions that execute. It accepts
+and returns the transition's concrete types without boxing futures or building
+an eight-stage dependency graph for every file. Other command pipelines still
+use the dynamic planner and share the same observation helper.
 
 ---
 
