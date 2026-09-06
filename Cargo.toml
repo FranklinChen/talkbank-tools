@@ -26,7 +26,8 @@ repository = "https://github.com/TalkBank/talkbank-tools"
 homepage = "https://talkbank.org/"
 keywords = ["talkbank", "chat-format", "linguistics", "nlp", "parsing"]
 categories = ["parser-implementations", "text-processing"]
-rust-version = "1.89.0"
+# CI and releases use current stable Rust. No older-compiler support is promised.
+# Add an MSRV only with a concrete consumer requirement and a matching CI job.
 
 # Workspace-level lint policy.
 #

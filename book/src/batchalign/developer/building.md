@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-08-30 21:00 EDT
+**Last updated:** 2026-09-05 20:24 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -16,6 +16,16 @@ Development is supported on **Windows, macOS, and Linux**. The instructions belo
   Free-threaded 3.14t is **not** a supported install or deployment target; see
   [Python Versioning](python-versioning.md).
 - **Platform note:** On macOS, `python` and `python3` may not exist outside a venv. Always use `uv run` to execute Python commands, which handles this automatically on all platforms.
+
+## Rust compiler policy
+
+Development, CI, and releases use current stable Rust. We do not maintain an
+older minimum supported Rust version: update with `rustup update stable` when
+needed, and evaluate dependencies against the compiler our supported builds use.
+
+The former workspace `rust-version = "1.89.0"` was neither inherited by any
+package nor tested by CI. It has been removed. An older-compiler commitment
+would require a concrete consumer need and a CI job proving that commitment.
 
 ## Development Install
 
