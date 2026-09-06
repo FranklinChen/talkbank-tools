@@ -442,6 +442,7 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "ratatui",
+ "regex",
  "reqwest",
  "rstest",
  "rubato",

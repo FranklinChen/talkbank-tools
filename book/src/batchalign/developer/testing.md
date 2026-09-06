@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-05 21:59 EDT
+**Last updated:** 2026-09-05 22:52 EDT
 
 ## Philosophy
 
@@ -19,6 +19,13 @@ The desktop shell needs GTK/WebKit on Linux and is outside the headless CI
 package set. This exclusion does not remove PyO3 coverage; the former separate
 PyO3 step repeated tests that the workspace command already selects. Coverage
 remains an explicit measurement job, not an inner-loop test command.
+Its native compile restores the dashboard artifact produced by the same
+workflow before compiling the embedded server assets.
+
+The memory-tier architecture test scans Rust files in process and parses the
+embedded runtime TOML. It requires no `rg` subprocess or workspace-root search;
+unreadable source files fail the check. This keeps ordinary test and coverage
+environments equivalent without adding a search executable to every runner.
 
 Both the Python wheel job and standalone PyO3 build cache the root Cargo
 workspace's `target` directory. The extension lives at

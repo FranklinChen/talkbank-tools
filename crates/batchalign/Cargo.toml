@@ -168,6 +168,7 @@ whisper-rs = { workspace = true, features = ["metal"], optional = true }
 whisper-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
+regex = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 reqwest = { workspace = true }
 insta = { workspace = true }

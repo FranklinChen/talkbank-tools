@@ -517,90 +517,45 @@ mod tests {
         );
         assert_eq!(tier.io_startup_mb.0, 4_000, "Large-tier IO envelope");
 
-        // (b) Scan production sources in batchalign/src for parallel definitions.
-        //
-        // Resolve paths via a workspace-marker walk rather than a fixed
-        // `../../` traversal: the latter breaks if the crate ever moves.
-        // The marker is the workspace Cargo.toml containing `[workspace]`.
-        let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let src_root = crate_root.join("src");
-        let workspace_root = find_workspace_root(&crate_root).expect(
-            "workspace root not found: Cargo.toml with [workspace] absent above CARGO_MANIFEST_DIR",
-        );
-
-        // Definition-shape regex: matches top-level fn/const/static or `pub` struct
-        // fields named *_startup_mb (gpu, stanza, or io). Field-access expressions
-        // like `tier.gpu_startup_mb` and doc-comment mentions are NOT matched.
-        let regex = r"^\s*(pub\s+)?(fn|const|static)\s+(gpu|stanza|io)_startup_mb\b|^\s*pub\s+(gpu|stanza|io)_startup_mb\s*:";
-
-        // Excluded file: the operator-override config whose fields flow INTO MemoryTier.
-        // The canonical MemoryTier struct is in batchalign-types/src/memory.rs and is
-        // not under src_root, so no exclude needed for it.
-        let excludes = ["--glob=!**/types/config/server.rs"];
-
-        let output = std::process::Command::new("rg")
-            .arg("--no-heading")
-            .arg("--line-number")
-            .arg("--multiline-dotall")
-            .arg("-e")
-            .arg(regex)
-            .args(excludes)
-            .arg(&src_root)
-            .output()
-            .expect("ripgrep must be installed and on PATH for this test");
-
-        // ripgrep exits 1 when there are no matches; that is the expected state.
-        // Exit 0 means matches were found, which is a regression.
-        if output.status.success() {
-            let matches = String::from_utf8_lossy(&output.stdout);
-            panic!(
-                "Architectural invariant violation (spec Principle 1):\n\
-                 found parallel definition(s) of *_startup_mb inside batchalign/src.\n\
-                 MemoryTier in batchalign-types/src/memory.rs is the SOLE canonical source.\n\
-                 Operator overrides via RuntimeOverridesConfig are the only allowed channel.\n\
-                 (Phase α, Principle 1).\n\n\
-                 ripgrep matches:\n{matches}"
-            );
-        }
-
-        // (c) Also catch reintroduction of the deleted TOML section name.
-        //     The bare token `worker_startup_mb` was the key for the deleted
-        //     [worker_startup_mb] table; it must not return.
-        let toml_scan = std::process::Command::new("rg")
-            .arg("--no-heading")
-            .arg("--line-number")
-            .arg("-e")
-            .arg(r"\bworker_startup_mb\b")
-            .arg(workspace_root.join("batchalign/runtime_constants.toml"))
-            .output()
-            .expect("ripgrep must be installed and on PATH for this test");
-
-        if toml_scan.status.success() {
-            let matches = String::from_utf8_lossy(&toml_scan.stdout);
-            panic!(
-                "Architectural invariant violation (spec Principle 1):\n\
-                 the `[worker_startup_mb]` TOML section was deleted in Phase α \
-                 and must not be reintroduced. MemoryTier is the canonical source.\n\n\
-                 ripgrep matches:\n{matches}"
-            );
-        }
-    }
-
-    /// Walk up from `start` looking for the workspace `Cargo.toml`
-    /// (the one containing `[workspace]`). Returns the directory.
-    /// Used by the architectural-invariant test to anchor file
-    /// scans without baked-in `../../` traversal.
-    fn find_workspace_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
-        let mut current = start;
-        loop {
-            let cargo_toml = current.join("Cargo.toml");
-            if cargo_toml.is_file() {
-                let contents = std::fs::read_to_string(&cargo_toml).ok()?;
-                if contents.contains("[workspace]") {
-                    return Some(current.to_path_buf());
+        // (b) Scan Rust sources in process. A source-architecture assertion
+        // must not depend on an external search executable, and an unreadable
+        // file must fail the scan rather than look like "no matches".
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let allowed = src_root.join("types/config/server.rs");
+        let definitions = regex::Regex::new(
+            r"^\s*(pub\s+)?(fn|const|static)\s+(gpu|stanza|io)_startup_mb\b|^\s*pub\s+(gpu|stanza|io)_startup_mb\s*:",
+        )
+        .expect("definition-shape regex must compile");
+        let mut matches = Vec::new();
+        for entry in walkdir::WalkDir::new(&src_root) {
+            let entry = entry.expect("source scan must read every directory");
+            let path = entry.path();
+            if !entry.file_type().is_file()
+                || path.extension().is_none_or(|extension| extension != "rs")
+                || path == allowed
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            for (line, text) in source.lines().enumerate() {
+                if definitions.is_match(text) {
+                    matches.push(format!("{}:{}:{text}", path.display(), line + 1));
                 }
             }
-            current = current.parent()?;
         }
+        assert!(
+            matches.is_empty(),
+            "MemoryTier is the sole source for startup envelopes; parallel definitions:\n{}",
+            matches.join("\n"),
+        );
+
+        // (c) Check the actual embedded TOML table, not comments containing a
+        // retired key's spelling. No workspace search or second file read.
+        let constants: toml::Value = toml::from_str(TOML_SRC).expect("valid runtime constants");
+        assert!(
+            constants.get("worker_startup_mb").is_none(),
+            "the retired [worker_startup_mb] table must not replace MemoryTier",
+        );
     }
 }
