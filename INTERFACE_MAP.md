@@ -1,7 +1,7 @@
 # Python/Rust Interface Map
 
 **Status:** Current
-**Last updated:** 2026-09-06 08:07 EDT
+**Last updated:** 2026-09-06 08:27 EDT
 
 This document is the unified reference for all Python/Rust interface boundaries in batchalign3.
 
@@ -35,6 +35,13 @@ that pending type and returns a response payload; the former always-false
 shutdown return flag is gone. Python's synchronous wrapper still accepts raw
 messages, while concurrent readers handle immediate replies before queueing.
 The canonical stub is `stubs/batchalign_core/__init__.pyi`.
+
+Concurrent stdio obtains `ProtocolStdin` from native `open_protocol_stdin`
+(`worker_stdio.rs`). Its bounded mailbox owns line delivery, EOF, read failures,
+and stopping; `stop()` wakes a blocked Python `read_line()` without requiring
+parent EOF. EOF drains queued requests, whereas stopping cancels queued work.
+The sole native OS reader holds no Python objects and is process-owned; shutdown
+does not join an uncancellable OS stdin read.
 
 ---
 

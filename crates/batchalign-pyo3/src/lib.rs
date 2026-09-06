@@ -39,6 +39,7 @@ mod worker_execute;
 mod worker_fa_exec;
 mod worker_media_exec;
 mod worker_protocol;
+mod worker_stdio;
 mod worker_text_exec;
 mod worker_text_results;
 
@@ -94,6 +95,8 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
 
     // Worker protocol dispatch
+    m.add_class::<worker_stdio::ProtocolStdin>()?;
+    m.add_function(wrap_pyfunction!(worker_stdio::open_protocol_stdin, m)?)?;
     m.add_class::<worker_protocol::PendingProtocolRequest>()?;
     m.add_class::<worker_protocol::ImmediateProtocolReply>()?;
     m.add_function(wrap_pyfunction!(

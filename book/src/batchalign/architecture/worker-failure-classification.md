@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-06 08:07 EDT
+**Last updated:** 2026-09-06 08:27 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -587,9 +587,21 @@ reader as one operation. Bootstrap errors and write failures can therefore
 close the connection after their response without waiting for client EOF. The
 former bootstrap test masked a blocked reader with a two-second read timeout;
 it now requires the handler to terminate while the client write side is open.
-Concurrent **stdio** bootstrap errors still set an event that a blocked stdin
-reader cannot observe until input or EOF arrives. That asynchronous error path
-remains separate work; explicit shutdown is now handled before queueing.
+Concurrent stdio uses native `ProtocolStdin`, which owns delivery and stopping
+through one bounded mailbox. Bootstrap errors and response-write failures stop
+that mailbox and wake Python immediately. EOF is a different state: it drains
+already admitted requests rather than cancelling them. The former independent
+Python event and blocked `sys.stdin` iterator are gone.
+
+One process-owned Rust thread reads UTF-8 protocol lines from OS stdin. It holds
+no Python objects or GIL and retains at most one queued line plus the line being
+read. A private process-wide lease prevents competing native readers. Stopping
+wakes mailbox waits but cannot portably cancel the OS read; the worker therefore
+does not join this native thread before process exit. The thread retains its
+lease until its read ends or the process terminates. This is a worker-process
+transport, not a reusable reader for arbitrary embedded Python streams. No
+polling interval, Python buffered-reader thread, or new dependency is involved.
+Already running model calls remain joined by the executor.
 
 Reproduce with the actual child process, loopback socket and native admission:
 
@@ -600,7 +612,10 @@ uv run --no-sync pytest -q batchalign/tests/test_serve_stdio_bootstrap_error.py 
 ```
 
 The stdio regression received its shutdown acknowledgement but exceeded five
-seconds while stdin remained open before the fix. The TCP bootstrap regression
+seconds while stdin remained open before the fix. The asynchronous bootstrap
+case independently reproduced the same hang. Both now exit with the parent
+pipe still open, and an EOF control requires all 32 queued health replies. The
+TCP bootstrap regression
 also failed before its reader wakeup was added. A malformed Unicode operation
 now produces an error reply instead of escaping from admission as a reader
 exception. Wire responses for supported operations retain their existing shape.

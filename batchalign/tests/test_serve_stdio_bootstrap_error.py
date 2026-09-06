@@ -34,21 +34,42 @@ import sys
 import threading
 from unittest import mock
 
+import pytest
+
 from batchalign.worker._protocol import (
     _classify_dispatch_exception,
     _serve_stdio,
 )
 
 
-def test_concurrent_shutdown_exits_with_parent_stdin_still_open() -> None:
-    """A shutdown reply must not leave the worker waiting for another line."""
-    child = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
+@pytest.mark.parametrize(
+    ("code", "message", "expected"),
+    [
+        (
             "from batchalign.worker._protocol import _serve_stdio_concurrent; "
             "_serve_stdio_concurrent(max_threads=2)",
-        ],
+            {"op": "shutdown"},
+            {"op": "shutdown"},
+        ),
+        (
+            "from batchalign.worker import _protocol\n"
+            "from batchalign.worker._stanza_capabilities import StanzaCatalogDownloadError\n"
+            "def fail(request):\n"
+            "    raise StanzaCatalogDownloadError('offline test catalog')\n"
+            "_protocol.dispatch_prepared_protocol_message = fail\n"
+            "_protocol._serve_stdio_concurrent(max_threads=2)\n",
+            {"op": "ensure_task", "request": {"task": "morphosyntax"}},
+            {"op": "error", "error": "offline test catalog", "kind": "bootstrap"},
+        ),
+    ],
+    ids=["shutdown", "bootstrap"],
+)
+def test_concurrent_stdio_exits_with_parent_stdin_still_open(
+    code: str, message: dict[str, object], expected: dict[str, object]
+) -> None:
+    """A terminal reply must not leave the worker waiting for another line."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", code],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -62,9 +83,9 @@ def test_concurrent_shutdown_exits_with_parent_stdin_still_open() -> None:
     )
     reader.start()
     try:
-        child.stdin.write('{"op":"shutdown"}\n')
+        child.stdin.write(json.dumps(message) + "\n")
         child.stdin.flush()
-        assert json.loads(replies.get(timeout=10)) == {"op": "shutdown"}
+        assert json.loads(replies.get(timeout=10)) == expected
         # Coarse hang check, not a performance benchmark. Keep stdin open.
         assert child.wait(timeout=5) == 0
     finally:
@@ -76,6 +97,27 @@ def test_concurrent_shutdown_exits_with_parent_stdin_still_open() -> None:
         child.stdout.close()
         assert child.stderr is not None
         child.stderr.close()
+
+
+def test_concurrent_stdio_eof_drains_queued_requests() -> None:
+    """Input completion must not cancel requests already admitted to the pool."""
+    count = 32
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from batchalign.worker._protocol import _serve_stdio_concurrent; "
+            "_serve_stdio_concurrent(max_threads=1)",
+        ],
+        input='{"op": "health"}\n' * count,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert child.returncode == 0, child.stderr
+    replies = [json.loads(line) for line in child.stdout.splitlines()]
+    assert len(replies) == count
+    assert all(reply["op"] == "health" for reply in replies)
 
 
 # ---------------------------------------------------------------------------

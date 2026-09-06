@@ -349,24 +349,27 @@ def _serve_stdio() -> None:
 def _serve_stdio_concurrent(max_threads: int = 4) -> None:
     """Run the concurrent stdio request loop for GPU profile workers.
 
-    The main thread reads stdin sequentially and dispatches each request to a
-    ``ThreadPoolExecutor``. GPU inference (PyTorch) releases the GIL during
+    The main thread receives stdin lines from an interruptible native mailbox
+    and dispatches each request to a ``ThreadPoolExecutor``. GPU inference (PyTorch) releases the GIL during
     CUDA kernels, enabling real concurrent model execution across threads that
     share the same in-process model weights.
 
     Responses are written under ``_stdout_lock`` so JSON lines never interleave.
     """
-    pool = ThreadPoolExecutor(max_workers=max_threads)
-    shutdown_event = threading.Event()
+    from batchalign_core import open_protocol_stdin
+
+    reader = open_protocol_stdin()
+
+    def _respond(payload: dict[str, WorkerJSONValue]) -> None:
+        try:
+            with _stdout_lock:
+                _write_json(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            reader.stop()
 
     def _handle_and_respond(request: PendingProtocolRequest) -> None:
-        # Short-circuit if a prior task in the pool already signalled
-        # shutdown (bootstrap error, explicit shutdown op, or a write
-        # failure). Without this gate, every in-flight task that the
-        # main thread already submitted before bootstrap fires would
-        # still run dispatch and emit additional error envelopes
-        # noisy and racy.
-        if shutdown_event.is_set():
+        # Terminal failures cancel queued work; EOF still drains admitted work.
+        if reader.stopped:
             return
         try:
             dispatch = dispatch_prepared_protocol_message(request)
@@ -378,47 +381,48 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
                 f"--- worker dispatch exception ({kind}) ---\n" + traceback.format_exc()
             )
             sys.stderr.flush()
-            with _stdout_lock:
-                _write_error(
+            _respond(
+                error_envelope(
                     str(exc) or exc.__class__.__name__,
-                    correlation=ErrorCorrelation.of_message(request.message),
-                    kind=kind,
+                    kind,
+                    ErrorCorrelation.of_message(request.message),
                 )
+            )
             if kind == "bootstrap":
-                shutdown_event.set()
+                reader.stop()
             return
 
-        with _stdout_lock:
-            _write_json(dispatch.payload)
+        _respond(dispatch.payload)
 
-    for raw_line in sys.stdin:
-        if shutdown_event.is_set():
-            break
-        line = raw_line.strip()
-        if not line:
-            continue
+    try:
+        with ThreadPoolExecutor(max_workers=max_threads) as pool:
+            for raw_line in iter(reader.read_line, None):
+                line = raw_line.strip()
+                if not line:
+                    continue
 
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError as exc:
-            with _stdout_lock:
-                _write_error(
-                    f"invalid JSON request: {exc}",
-                    correlation=ErrorCorrelation.uncorrelated(),
-                )
-            continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    _respond(
+                        error_envelope(
+                            f"invalid JSON request: {exc}",
+                            "runtime",
+                            ErrorCorrelation.uncorrelated(),
+                        )
+                    )
+                    continue
 
-        prepared = prepare_protocol_message(message)
-        if isinstance(prepared, ProtocolDispatchResult):
-            with _stdout_lock:
-                _write_json(prepared.payload)
-            if prepared.should_shutdown:
-                shutdown_event.set()
-                break
-            continue
-        pool.submit(_handle_and_respond, prepared)
-
-    pool.shutdown(wait=True)
+                prepared = prepare_protocol_message(message)
+                if isinstance(prepared, ProtocolDispatchResult):
+                    _respond(prepared.payload)
+                    if prepared.should_shutdown:
+                        reader.stop()
+                        break
+                    continue
+                pool.submit(_handle_and_respond, prepared)
+    finally:
+        reader.stop()
 
 
 # ---------------------------------------------------------------------------
