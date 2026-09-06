@@ -344,6 +344,11 @@ jobs:
       # do not accidentally pull it into this headless coverage job.
       - name: Rust workspace coverage
         env:
+          # Instrumented live-model tests share a 16 GB host and its memory
+          # ledger. Concurrent independent daemons can reserve each other's
+          # startup headroom until both time out. Keep this job within one
+          # test's resource budget; tests retain their internal concurrency.
+          RUST_TEST_THREADS: "1"
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: cargo llvm-cov --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
 

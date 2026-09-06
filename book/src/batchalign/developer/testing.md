@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-06 00:02 EDT
+**Last updated:** 2026-09-06 00:42 EDT
 
 ## Philosophy
 
@@ -24,6 +24,15 @@ workflow before compiling the embedded server assets. It installs and probes
 `protoc`, `ffmpeg` and `ffprobe` before the instrumented build, because coverage
 also exercises real media boundaries. PyO3 uses the same virtual-environment
 interpreter as the installed wheel.
+The instrumented Rust coverage job sets `RUST_TEST_THREADS=1` on its small
+runner. Independent CLI tests otherwise reserve host memory as separate
+servers: a 16 GB runner reached 8.25 GB of pending reservations with 7 GB
+available, blocking another worker for 120 seconds and timing out other jobs.
+This is an execution budget for coverage, not a disabled memory guard or a
+skipped test. Explicit concurrency inside a test still runs. Ordinary local
+and push tests retain their existing scheduling. Reproduce the affected suite
+with `cargo test -p batchalign --test cli_integration_suite --locked -- --test-threads=1`.
+
 Coverage caches `target/llvm-cov-target` under its own shared key and saves
 compiled dependencies after failed tests. The ordinary build's full cache hit
 cannot stand in for those instrumented artifacts; sharing that immutable key
