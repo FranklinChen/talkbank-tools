@@ -4,13 +4,13 @@ use super::{resolve_per_file_lang, unsupported_primary_language_error};
 use crate::chat_ops::morphosyntax_ops::{
     BatchItemWithPosition, MultilingualPolicy, MwtDict, PosHintEvidence, TokenizationMode,
     apply_pos_hint_evidence, clear_morphosyntax, collect_payloads, collect_pos_hints,
-    declared_languages, inject_results, l2, remove_empty_morphosyntax_placeholders,
-    validate_mor_alignment,
+    declared_languages, l2, remove_empty_morphosyntax_placeholders, validate_mor_alignment,
 };
 use crate::chat_ops::nlp::UdResponse;
 use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::morphosyntax::{MorphotagDisposition, infer_batch};
 use crate::{api::LanguageCode3, error::ServerError, pipeline::PipelineServices};
+use batchalign_transform::morphosyntax::MatchedMorphosyntaxResponses;
 use batchalign_transform::parse::parse_lenient;
 use batchalign_transform::validate::{ValidityLevel, validate_output, validate_to_level};
 use tracing::warn;
@@ -86,8 +86,7 @@ enum HintPlan {
 enum InferenceWork {
     NoWork,
     Responses {
-        items: Vec<BatchItemWithPosition>,
-        responses: Vec<UdResponse>,
+        batch: MatchedMorphosyntaxResponses,
         hints: HintPlan,
     },
 }
@@ -211,19 +210,13 @@ impl Analysis<Collected> {
         self,
         responses: Vec<UdResponse>,
     ) -> Result<Analysis<Inferred>, ServerError> {
-        if self.state.items.len() != responses.len() {
-            return Err(ServerError::Validation(format!(
-                "morphotag: {} payloads received {} worker responses",
-                self.state.items.len(),
-                responses.len()
-            )));
-        }
-        let work = if self.state.items.is_empty() {
+        let batch = MatchedMorphosyntaxResponses::new(self.state.items, responses)
+            .map_err(|error| ServerError::Validation(error.to_string()))?;
+        let work = if batch.items().is_empty() {
             InferenceWork::NoWork
         } else {
             InferenceWork::Responses {
-                items: self.state.items,
-                responses,
+                batch,
                 hints: self.state.hints,
             }
         };
@@ -242,26 +235,22 @@ impl Analysis<Inferred> {
     ) -> Result<Analysis<Applied>, ServerError> {
         match self.state.work {
             InferenceWork::NoWork => {}
-            InferenceWork::Responses {
-                items,
-                responses,
-                hints,
-            } => {
+            InferenceWork::Responses { batch, hints } => {
                 let deferred = if options.l2.should_analyze() {
-                    l2::extract_l2_deferred_positions(&items, &responses)
+                    l2::extract_l2_deferred_positions(batch.items(), batch.responses())
                 } else {
                     Vec::new()
                 };
-                let injection = inject_results(
-                    &crate::chat_parser(),
-                    &mut self.chat,
-                    items,
-                    responses,
-                    &self.language.model,
-                    options.tokenization,
-                    options.mwt,
-                )
-                .map_err(|e| ServerError::Validation(format!("Result injection failed: {e}")))?;
+                let injection = batch
+                    .inject(
+                        &crate::chat_parser(),
+                        &mut self.chat,
+                        options.tokenization,
+                        options.mwt,
+                    )
+                    .map_err(|e| {
+                        ServerError::Validation(format!("Result injection failed: {e}"))
+                    })?;
                 if !deferred.is_empty() {
                     crate::morphosyntax::dispatch_secondary_l2(
                         &mut self.chat,

@@ -1,7 +1,7 @@
 # morphotag: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-06 03:15 EDT
+**Last updated:** 2026-09-06 03:27 EDT
 
 Implementation guide for the `morphotag` command. For user-facing
 documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.md).
@@ -53,6 +53,16 @@ exposes only the next operation: an unparsed or unadmitted document cannot
 reach payload collection, and injection requires an inferred phase carrying
 its payloads and matching response count. `HintPlan` contains captured evidence
 when requested; there is no separate flag permitting a missing evidence value.
+The shared transform boundary now owns `MatchedMorphosyntaxResponses`:
+construction rejects missing or extra utterance responses, and binding to the
+mutable CHAT document checks every destination index before any injection.
+The existing `inject_results` entry point admits through the same type, while
+the typed pipeline carries the admitted batch directly into its consuming
+`inject` method. This prevents `zip` truncation and stale-index panics. Batch
+admission is distinct from the existing per-token linguistic mismatch policy,
+which still records diagnostics. Equal counts and valid indices do not prove
+response ordering or linguistic correctness.
+
 Job-level language is excluded from the immutable run options. The two language
 representations needed by the worker and model APIs are resolved once.
 

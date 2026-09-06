@@ -76,6 +76,7 @@ mod mor_word;
 mod outcome;
 mod payload;
 mod pos_hints;
+mod responses;
 mod sentence_mapping;
 mod stanza_raw;
 mod synthesis;
@@ -104,6 +105,7 @@ pub use pos_hints::{
     HintOutcome, PosHintEvidence, apply_pos_hint_evidence, apply_pos_hints, collect_pos_hints,
     is_stanza_supported, supported_iso3_codes,
 };
+pub use responses::{MatchedMorphosyntaxResponses, ResponseCountMismatch};
 pub use sentence_mapping::{
     TerminatorPolicy, build_gra_and_validate, is_terminator_punct, map_ud_sentence,
     map_ud_sentence_expanded, map_ud_sentence_with_overrides,

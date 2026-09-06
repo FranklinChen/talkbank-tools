@@ -670,3 +670,77 @@ fn a_code_switch_span_reaches_the_stanza_payload_as_its_own_language() -> TestRe
 
     Ok(())
 }
+
+/// A missing or extra utterance response is a broken worker batch, not a
+/// per-token linguistic disagreement. Reject it before touching CHAT.
+#[test]
+fn injection_rejects_response_cardinality_without_mutating_chat() -> TestResult {
+    use batchalign_transform::morphosyntax::{
+        MwtDict, TokenizationMode, UdResponse, inject_results,
+    };
+    use batchalign_transform::serialize::to_chat_string;
+    let parser = TreeSitterParser::new()?;
+    let language = LanguageCode::new("eng")?;
+    for count in [0, 2] {
+        let mut chat = parse_one_utterance("hello .")?;
+        let before = to_chat_string(&chat);
+        let languages = declared_languages(&chat, &language);
+        let items = collect_payloads(&chat, &language, &languages, MultilingualPolicy::ProcessAll)
+            .batch_items;
+        assert_eq!(items.len(), 1);
+        let responses = (0..count)
+            .map(|_| UdResponse {
+                sentences: Vec::new(),
+            })
+            .collect();
+        let outcome = inject_results(
+            &parser,
+            &mut chat,
+            items,
+            responses,
+            &language,
+            TokenizationMode::Preserve,
+            &MwtDict::default(),
+        );
+        assert!(
+            outcome.is_err(),
+            "one payload and {count} responses must not succeed"
+        );
+        assert_eq!(to_chat_string(&chat), before, "rejected batch mutated CHAT");
+    }
+    Ok(())
+}
+
+/// Payload positions are an external library boundary; a stale position must
+/// return an error rather than panic, even when Stanza returns no sentences.
+#[test]
+fn injection_rejects_stale_position_without_panicking() -> TestResult {
+    use batchalign_transform::morphosyntax::{
+        MwtDict, TokenizationMode, UdResponse, inject_results,
+    };
+    let parser = TreeSitterParser::new()?;
+    let language = LanguageCode::new("eng")?;
+    let mut chat = parse_one_utterance("hello .")?;
+    let before = batchalign_transform::serialize::to_chat_string(&chat);
+    let languages = declared_languages(&chat, &language);
+    let mut items =
+        collect_payloads(&chat, &language, &languages, MultilingualPolicy::ProcessAll).batch_items;
+    items[0].0 = chat.lines.len();
+    let result = inject_results(
+        &parser,
+        &mut chat,
+        items,
+        vec![UdResponse {
+            sentences: Vec::new(),
+        }],
+        &language,
+        TokenizationMode::Preserve,
+        &MwtDict::default(),
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        batchalign_transform::serialize::to_chat_string(&chat),
+        before
+    );
+    Ok(())
+}
