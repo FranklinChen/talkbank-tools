@@ -634,6 +634,8 @@ pub enum FaEvidenceSourceTrace {
     RawEvidenceReplay,
     /// Produced by a worker call during this run.
     Inference,
+    /// No usable worker evidence was obtained; words were left unaligned.
+    Unaligned,
 }
 
 /// One forced-alignment engine fallback that occurred for a single group.

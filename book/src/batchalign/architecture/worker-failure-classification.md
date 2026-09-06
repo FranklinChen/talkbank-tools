@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-06 06:59 EDT
+**Last updated:** 2026-09-06 07:25 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -564,6 +564,34 @@ permission-denied" → distinct user-facing remediation):
 6. Update the test in `runner/util/mod.rs::worker_error_classification_is_stable`
    to lock in the classification.
 7. Update this chapter's tables.
+
+## FA evidence after a group-local failure
+
+An attempted worker call is not itself timing evidence. Both full-file and
+incremental FA consume `FaWorkerGroupResult::into_projection()`, which issues
+the timing projection and its source together. A successful admitted response
+records `inference`; a deliberately skipped group records `unaligned` and
+materializes one missing timing per word. A successful response may also align
+zero words, so missing timings alone cannot determine provenance.
+
+This adds the `unaligned` evidence-source label to serialized FA artifacts.
+Existing source labels remain readable. Older artifacts may label failed groups
+as `inference`; the September 6 MICASE failed run preserves that historical
+output alongside its worker logs rather than rewriting the evidence. Consumers
+of older runs must consult those logs when distinguishing an attempted call
+from an admitted response.
+
+`ProcessExited` proves that the request lost its worker. Without a reported
+exit cause it does not establish OOM, a signal, or deterministic failure of that
+input. The warning now states process exit without inventing a diagnosis.
+Worker replacement and safe FA window sizing are separate concerns; correct
+provenance does not make an oversized alignment request safe.
+
+The serialization regression runs inside the existing library test target:
+
+```bash
+cargo test -p batchalign --lib worker_outcomes_serialize_distinct_evidence_provenance
+```
 
 ## Cross-references
 

@@ -167,6 +167,50 @@ pub(crate) enum FaWorkerGroupResult {
     Unaligned(FaWorkerUnalignedResult),
 }
 
+/// Timing projection and provenance issued together by the worker outcome.
+/// Callers cannot construct a projection with a fabricated evidence source.
+pub(crate) struct FaWorkerProjection {
+    /// Original group index in the file.
+    pub group_index: usize,
+    /// One optional timing per requested word.
+    pub timings: Vec<Option<WordTiming>>,
+    /// Replayable direct evidence, when admitted by the worker boundary.
+    pub raw_evidence: Option<ReplayableFaRawEvidence>,
+    /// Engine fallback associated with this evidence, if any.
+    pub fallback_event: Option<FaFallbackEventTrace>,
+    source: crate::types::traces::FaEvidenceSourceTrace,
+}
+
+impl FaWorkerProjection {
+    /// Provenance of this projection, including the absence of worker evidence.
+    pub fn source(&self) -> crate::types::traces::FaEvidenceSourceTrace {
+        self.source
+    }
+}
+
+impl FaWorkerGroupResult {
+    /// Preserve the outcome distinction when materializing unaligned words.
+    pub fn into_projection(self) -> FaWorkerProjection {
+        use crate::types::traces::FaEvidenceSourceTrace;
+        match self {
+            Self::Evidence(evidence) => FaWorkerProjection {
+                group_index: evidence.group_index,
+                timings: evidence.timings,
+                raw_evidence: evidence.raw_evidence,
+                fallback_event: evidence.fallback_event,
+                source: FaEvidenceSourceTrace::Inference,
+            },
+            Self::Unaligned(unaligned) => FaWorkerProjection {
+                group_index: unaligned.group_index,
+                timings: vec![None; unaligned.word_count],
+                raw_evidence: None,
+                fallback_event: None,
+                source: FaEvidenceSourceTrace::Unaligned,
+            },
+        }
+    }
+}
+
 /// Successful FA evidence paired inseparably with its parsed timing projection.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FaWorkerEvidenceResult {
@@ -289,24 +333,17 @@ async fn infer_groups_v2(
                 parsed_results.push(unaligned_group_result(group_index, group));
                 continue;
             }
-            // A worker process crash (SIGKILL / OOM / C-extension SIGSEGV) is
-            // caused by this group's specific audio + word content, not by a
-            // broken environment.  The crash is deterministic on the same group:
-            // retrying with a fresh worker on the same input reproduces it.
-            // Other groups have different audio and words and are unaffected.
-            //
-            // The correct recovery is a group-level skip (leave words unaligned,
-            // continue to the next group) rather than a file-level abort.  A
-            // file abort followed by FA retry just respawns workers that crash
-            // on the same group, the retry loop in `fa_pipeline.rs` confirmed
-            // this for job 1020067a-85f (3 files × 3 retries, all within 4 s).
+            // Process exit proves that this request lost its worker, not why
+            // the process exited or whether this input caused it. Preserve the
+            // group as unaligned; the pool replaces a dead shared generation
+            // before later requests. Do not label an unknown exit as OOM.
             Err(ref e) if is_worker_process_crash(e) => {
                 warn!(
                     group = group_index,
                     start_ms = group.audio_start_ms(),
                     end_ms = group.audio_end_ms(),
                     error = %e,
-                    "Worker process crash on FA group (signal/OOM); leaving words unaligned"
+                    "Worker process exited during FA group; leaving words unaligned"
                 );
                 parsed_results.push(unaligned_group_result(group_index, group));
                 continue;
@@ -792,6 +829,41 @@ mod tests {
         WorkerRequestIdV2,
     };
     use crate::worker::error::WorkerError;
+
+    #[test]
+    fn worker_outcomes_serialize_distinct_evidence_provenance() {
+        // A failed call and a successful response that aligned no words have
+        // the same timing projection. The outcome, not those timings, owns
+        // the distinction recorded in the evidence artifact.
+        let outcomes = [
+            (
+                FaWorkerGroupResult::Unaligned(FaWorkerUnalignedResult {
+                    group_index: 7,
+                    word_count: 2,
+                }),
+                "unaligned",
+            ),
+            (
+                FaWorkerGroupResult::Evidence(Box::new(FaWorkerEvidenceResult {
+                    group_index: 7,
+                    timings: vec![None; 2],
+                    raw_evidence: None,
+                    fallback_event: None,
+                })),
+                "inference",
+            ),
+        ];
+        for (outcome, expected) in outcomes {
+            let projection = outcome.into_projection();
+            let encoded = serde_json::to_value(projection.source()).expect("serialize source");
+            assert_eq!(encoded, expected);
+            let decoded: crate::types::traces::FaEvidenceSourceTrace =
+                serde_json::from_value(encoded).expect("read recorded source");
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+            assert_eq!(projection.group_index, 7);
+            assert_eq!(projection.timings, vec![None; 2]);
+        }
+    }
 
     /// Build a small FA word for transport unit tests.
     fn make_word(index: usize, text: &str) -> FaWord {

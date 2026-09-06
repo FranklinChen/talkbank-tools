@@ -343,23 +343,12 @@ pub(crate) async fn process_fa_incremental(
             .await?;
 
         for (parsed_idx, parsed_result) in parsed_results.into_iter().enumerate() {
-            let (miss_idx, timings, raw_evidence, fallback_event) = match parsed_result {
-                super::transport::FaWorkerGroupResult::Evidence(evidence) => {
-                    let evidence = *evidence;
-                    (
-                        evidence.group_index,
-                        evidence.timings,
-                        evidence.raw_evidence,
-                        evidence.fallback_event,
-                    )
-                }
-                super::transport::FaWorkerGroupResult::Unaligned(unaligned) => (
-                    unaligned.group_index,
-                    vec![None; unaligned.word_count],
-                    None,
-                    None,
-                ),
-            };
+            let projection = parsed_result.into_projection();
+            let miss_idx = projection.group_index;
+            evidence_sources[miss_idx] = Some(projection.source());
+            let timings = projection.timings;
+            let raw_evidence = projection.raw_evidence;
+            let fallback_event = projection.fallback_event;
             if let Some(event) = fallback_event {
                 fallback_events.push(event);
             }
@@ -410,7 +399,6 @@ pub(crate) async fn process_fa_incremental(
             }
 
             all_timings[miss_idx] = Some(timings);
-            evidence_sources[miss_idx] = Some(FaEvidenceSourceTrace::Inference);
 
             if let Some(tx) = progress {
                 let done = reused_or_cached_groups + parsed_idx + 1;
