@@ -407,7 +407,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "batchalign"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "batchalign-transform"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -8033,13 +8033,13 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "talkbank-build"
-version = "0.20.1"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+version = "0.20.2"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 
 [[package]]
 name = "talkbank-derive"
-version = "0.20.1"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+version = "0.20.2"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8048,8 +8048,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-model"
-version = "0.20.1"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+version = "0.20.2"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "dashmap",
  "indexmap 2.14.1",
@@ -8071,8 +8071,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-parser"
-version = "0.20.1"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+version = "0.20.2"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "indexmap 2.14.1",
  "smallvec",
@@ -8087,8 +8087,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-parser-re2c"
-version = "0.20.1"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+version = "0.20.2"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "chumsky",
  "indexmap 2.14.1",
@@ -8105,8 +8105,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-parser-tests"
-version = "0.20.1"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+version = "0.20.2"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "clap",
  "comrak",
@@ -8129,7 +8129,7 @@ dependencies = [
 [[package]]
 name = "talkbank-spec-vocabulary"
 version = "0.0.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -8139,8 +8139,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-transform"
-version = "0.20.1"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+version = "0.20.2"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "chrono",
  "jsonschema",
@@ -9333,7 +9333,7 @@ checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 [[package]]
 name = "tree-sitter-talkbank"
 version = "0.1.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.1#449facc187f55e3d5b01da04047e25c8425fdf78"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10866,7 +10866,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "batchalign-types",
  "blake3",

@@ -462,7 +462,7 @@ wheels = [
 
 [[package]]
 name = "batchalign3"
-version = "0.5.3"
+version = "0.5.4"
 source = { editable = "." }
 dependencies = [
     { name = "alibabacloud-nls-python-sdk" },
