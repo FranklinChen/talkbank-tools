@@ -46,21 +46,15 @@ use talkbank_parser::TreeSitterParser;
 use walkdir::WalkDir;
 
 fn reference_corpus_root() -> PathBuf {
-    // batchalign-chat-ops/ tests/ ../ ../ talkbank-tools/ corpus/ reference
-    // Cargo runs integration tests with CARGO_MANIFEST_DIR set to the
-    // crate dir, so we resolve relative to that.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join("../chatter/corpus/reference"))
-        .expect("CARGO_MANIFEST_DIR should have at least two parents")
+    // The dependency owns its source location. This follows Cargo's pinned
+    // checkout (or an explicit local patch), never an unrelated sibling clone.
+    talkbank_parser_tests::repo_paths::workspace_root().join("corpus/reference")
 }
 
 fn collect_cha_files(root: &PathBuf) -> Vec<PathBuf> {
     WalkDir::new(root)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .map(|entry| entry.expect("read reference corpus directory entry"))
         .filter(|e| {
             e.file_type().is_file() && e.path().extension().and_then(|x| x.to_str()) == Some("cha")
         })
@@ -69,7 +63,7 @@ fn collect_cha_files(root: &PathBuf) -> Vec<PathBuf> {
 }
 
 fn parse_file(parser: &TreeSitterParser, path: &PathBuf) -> Option<ChatFile> {
-    let contents = std::fs::read_to_string(path).ok()?;
+    let contents = std::fs::read_to_string(path).expect("read reference corpus file");
     let product = parser.parse_chat_file(&contents);
     (!product.has_error_diagnostics()).then(|| product.expect_built())
 }
@@ -91,7 +85,7 @@ fn mor_alignable_count_parity_across_reference_corpus() {
     let corpus_root = reference_corpus_root();
     assert!(
         corpus_root.exists(),
-        "reference corpus missing at {}; clones may need `make clone`",
+        "reference corpus missing from the resolved Chatter dependency at {}",
         corpus_root.display(),
     );
 

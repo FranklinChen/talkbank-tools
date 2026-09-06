@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-06 00:42 EDT
+**Last updated:** 2026-09-06 01:08 EDT
 
 ## Philosophy
 
@@ -12,7 +12,7 @@ The manually dispatched Coverage job runs Rust coverage once over the workspace,
 including `batchalign-pyo3`, and excludes the experimental desktop shell:
 
 ```bash
-cargo llvm-cov --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
+cargo llvm-cov --no-fail-fast --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
 ```
 
 The desktop shell needs GTK/WebKit on Linux and is outside the headless CI
@@ -32,6 +32,14 @@ This is an execution budget for coverage, not a disabled memory guard or a
 skipped test. Explicit concurrency inside a test still runs. Ordinary local
 and push tests retain their existing scheduling. Reproduce the affected suite
 with `cargo test -p batchalign --test cli_integration_suite --locked -- --test-threads=1`.
+
+Coverage uses `--no-fail-fast` to collect failures across test executables in
+one run. The ordinary Rust gate runs the entire fast `contract_suite` once,
+replacing two filtered invocations that omitted most contracts. Reference-corpus
+parity locates fixtures through the pinned Chatter test-support dependency, so
+it checks the same release as the linked parser without a sibling checkout.
+Directory and file read failures are fatal; only parser-rejected fixtures are
+excluded from this valid-content parity measurement.
 
 Coverage caches `target/llvm-cov-target` under its own shared key and saves
 compiled dependencies after failed tests. The ordinary build's full cache hit
@@ -521,7 +529,7 @@ uv run --no-sync pytest -n0 --cov=batchalign --cov-report=term \
 # Rust coverage
 cargo llvm-cov --manifest-path crates/batchalign-pyo3/Cargo.toml \
   --lcov --output-path lcov-rust.info
-cargo llvm-cov --workspace \
+cargo llvm-cov --no-fail-fast --workspace \
   --lcov --output-path lcov-rust-workspace.info
 ```
 

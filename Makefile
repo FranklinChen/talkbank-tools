@@ -123,8 +123,7 @@ batchalign-test-integration:
 	@echo "==> Running imported Batchalign CI hygiene..."
 	cargo run -q -p xtask -- lint-ci-hygiene
 	@echo "==> Testing imported batchalign focused integration gates..."
-	cargo test -p batchalign --test contract_suite json_compat:: -q
-	cargo test -p batchalign --test contract_suite workflow_helpers:: -q
+	cargo test -p batchalign --test contract_suite --locked -q
 
 batchalign-build-pyo3:
 	@echo "==> Building imported standalone PyO3 crate..."

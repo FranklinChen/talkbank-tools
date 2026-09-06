@@ -350,7 +350,7 @@ jobs:
           # test's resource budget; tests retain their internal concurrency.
           RUST_TEST_THREADS: "1"
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: cargo llvm-cov --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
+        run: cargo llvm-cov --no-fail-fast --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
 
   dashboard-smoke:
     name: Dashboard Smoke

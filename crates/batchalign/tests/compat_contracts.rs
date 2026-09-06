@@ -25,7 +25,7 @@ use batchalign::options::{
 use clap::Parser;
 use predicates::prelude::*;
 
-use cli_common::cli_cmd as cmd;
+use cli_common::CliHarness;
 
 /// Parse one synthetic CLI invocation through the published clap surface.
 fn parse_cli(args: &[&str]) -> Cli {
@@ -51,7 +51,9 @@ fn dispatch_command(args: &[&str]) -> &'static str {
 
 /// Assert that a compat path reaches the normal missing-input validation path.
 fn assert_missing_input_usage_error(args: &[&str]) {
-    cmd()
+    let harness = CliHarness::new();
+    harness
+        .cmd()
         .args(args)
         .assert()
         .failure()

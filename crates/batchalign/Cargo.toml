@@ -168,6 +168,8 @@ whisper-rs = { workspace = true, features = ["metal"], optional = true }
 whisper-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Locate reference fixtures in the same pinned Chatter source as the parser.
+talkbank-parser-tests = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 reqwest = { workspace = true }
