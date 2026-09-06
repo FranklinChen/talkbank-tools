@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-05 23:59 EDT
+**Last updated:** 2026-09-06 00:02 EDT
 
 ## Philosophy
 
@@ -24,6 +24,10 @@ workflow before compiling the embedded server assets. It installs and probes
 `protoc`, `ffmpeg` and `ffprobe` before the instrumented build, because coverage
 also exercises real media boundaries. PyO3 uses the same virtual-environment
 interpreter as the installed wheel.
+Coverage caches `target/llvm-cov-target` under its own shared key and saves
+compiled dependencies after failed tests. The ordinary build's full cache hit
+cannot stand in for those instrumented artifacts; sharing that immutable key
+previously forced the dependency graph to rebuild on each coverage retry.
 
 The memory-tier architecture test scans Rust files in process and parses the
 embedded runtime TOML. It requires no `rg` subprocess or workspace-root search;

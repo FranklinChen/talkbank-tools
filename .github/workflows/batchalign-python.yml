@@ -311,9 +311,14 @@ jobs:
           protoc --version
           ffmpeg -version
           ffprobe -version
+      # Instrumented dependencies live in a different target directory. Sharing
+      # the ordinary build key restored an immutable full match, then rebuilt
+      # the entire coverage graph on every attempt without ever caching it.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: rust-workspace
+          shared-key: rust-workspace-coverage
+          workspaces: ". -> target/llvm-cov-target"
+          cache-on-failure: true
       - uses: taiki-e/install-action@cargo-llvm-cov
       # Coverage recompiles the native library, whose default features embed
       # the dashboard. The wheel does not populate this checkout's frontend
