@@ -28,7 +28,7 @@ def test_load_utterance_model_loads_zho_boundary_model(monkeypatch) -> None:
                 self.lang = lang
 
         monkeypatch.setattr(
-            "batchalign.worker._model_loading.utterance.BertUtteranceModel",
+            "batchalign.models.utterance.infer.BertUtteranceModel",
             FakeBoundaryModel,
         )
 
@@ -55,7 +55,7 @@ def test_load_utterance_model_loads_yue_boundary_model(monkeypatch) -> None:
                 self.lang = lang
 
         monkeypatch.setattr(
-            "batchalign.worker._model_loading.utterance.BertUtteranceModel",
+            "batchalign.models.utterance.infer.BertUtteranceModel",
             FakeBoundaryModel,
         )
 
@@ -87,7 +87,7 @@ def test_load_utterance_model_loads_cmn_boundary_model(monkeypatch) -> None:
                 self.lang = lang
 
         monkeypatch.setattr(
-            "batchalign.worker._model_loading.utterance.BertUtteranceModel",
+            "batchalign.models.utterance.infer.BertUtteranceModel",
             FakeBoundaryModel,
         )
 

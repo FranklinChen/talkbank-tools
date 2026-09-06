@@ -61,11 +61,15 @@ def _gpu_has_cuda_device(force_cpu: bool) -> bool:
     kernels. On CPU, this causes thread oversubscription because each thread's
     PyTorch ops use all cores via OpenMP.
 
-    Called after model loading, so ``torch`` is already imported.
+    Forced CPU serving needs no device probe, including lazy and echo workers
+    that have not loaded any models.
     """
+    if force_cpu:
+        return False
+
     import torch
 
-    return torch.cuda.is_available() and not force_cpu
+    return torch.cuda.is_available()
 
 
 def build_arg_parser():

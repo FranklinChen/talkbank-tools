@@ -1,13 +1,5 @@
-"""Utterance segmentation model runtime + training."""
+"""Utterance segmentation evidence, inference, and training.
 
-from batchalign.models.utterance.infer import (
-    BertUtteranceModel,
-    normalize_utterance_words,
-    resolve_utterance_model,
-)
-
-__all__ = [
-    "BertUtteranceModel",
-    "normalize_utterance_words",
-    "resolve_utterance_model",
-]
+Import model operations from ``.infer`` explicitly. Importing pure ``.evidence``
+types must not load the BERT runtime or its training dependencies.
+"""

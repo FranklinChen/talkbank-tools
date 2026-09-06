@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
     from batchalign.inference.types import ConstituencyTree, StanzaNLP
-    from batchalign.models.utterance import BertUtteranceModel
+    from batchalign.models.utterance.infer import BertUtteranceModel
 
 from batchalign.models.utterance.evidence import (
     ClassifiedBoundaryEvidence,

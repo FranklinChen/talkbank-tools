@@ -1,13 +1,80 @@
 # CPU Profiling
 
 **Status:** Current
-**Last updated:** 2026-05-27 22:02 EDT
+**Last updated:** 2026-09-06 04:35 EDT
 
 How to profile CPU usage across batchalign's two languages, Python
 (worker process: ML inference, audio decoding, transcript
 postprocessing) and Rust (dispatch, FA orchestration, cache,
 server). Pick the tool that matches the side and shape of the
 question; both can run on the same host without conflict.
+
+## Separate worker startup from inference and shutdown
+
+Measure the ready handshake before blaming test counts or process teardown.
+On the development M3 Ultra with CPython 3.13.12, a fresh GPU echo worker
+with `--force-cpu` took 6.15 seconds to become ready at `050225f0`.
+`-X importtime` attributed 5.64 seconds to the eagerly imported BERT
+utterance module, including Torch and Transformers. After moving model
+imports into the loading operation and removing the eager package re-export,
+the same probe took 0.88 seconds. Shutdown after its acknowledgement took
+0.60 seconds before and 0.21 seconds afterward. These are single local
+observations under concurrent corpus work, not a benchmark distribution or
+a measured CI speedup.
+
+The lightweight `models.utterance.evidence` types are available without
+loading the model runtime. Model consumers now import
+`batchalign.models.utterance.infer` explicitly; the former package-level
+`BertUtteranceModel`, `normalize_utterance_words`, and
+`resolve_utterance_model` re-exports are removed. Forced CPU serving returns
+before importing Torch to probe CUDA. Ordinary GPU device detection and real
+model loading retain their existing behavior.
+
+Reproduce the measurement from the repository root with the same environment
+and source revision on both sides:
+
+```bash
+uv run --no-sync python - <<'PY'
+import json
+import subprocess
+import sys
+import time
+
+with open("worker-imports.log", "w") as imports:
+    started = time.monotonic()
+    with subprocess.Popen(
+        [sys.executable, "-X", "importtime", "-m", "batchalign.worker",
+         "--test-echo", "--profile", "gpu", "--force-cpu"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=imports,
+        text=True,
+    ) as worker:
+        assert worker.stdin is not None and worker.stdout is not None
+        try:
+            ready = json.loads(worker.stdout.readline())
+            assert ready["ready"] is True
+            ready_at = time.monotonic()
+            worker.stdin.write('{"op":"shutdown"}\n')
+            worker.stdin.flush()
+            assert json.loads(worker.stdout.readline()) == {"op": "shutdown"}
+            acknowledged = time.monotonic()
+            worker.wait(timeout=15)
+            print({"ready_seconds": ready_at - started,
+                   "ack_seconds": acknowledged - ready_at,
+                   "exit_seconds": time.monotonic() - acknowledged,
+                   "exit_code": worker.returncode})
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait()
+PY
+```
+
+`test_worker_import_boundary.py` runs in the ordinary Python suite: three
+fresh echo subprocesses reject Torch, Transformers, and Stanza imports while
+exercising ready, health, and shutdown. It asserts the import boundary rather
+than a machine-dependent timing threshold. It loads no models and requires
+no network. The separate utterance-loader and serving-mode tests verify that
+actual model requests and CUDA/CPU policy still select their intended paths.
 
 ## Python: `py-spy`
 

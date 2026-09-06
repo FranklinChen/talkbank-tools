@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 from batchalign.inference._domain_types import LanguageCode
-from batchalign.models.utterance import BertUtteranceModel, resolve_utterance_model
 from batchalign.worker._types import _state
 
 L = logging.getLogger("batchalign.worker")
@@ -13,6 +12,13 @@ L = logging.getLogger("batchalign.worker")
 
 def load_utterance_model(lang: LanguageCode) -> None:
     """Load the BA2 utterance model for one language when available."""
+    # Bootstrap imports this loader for every profile, including model-free
+    # echo workers. Only the loading operation owns the heavy model import.
+    from batchalign.models.utterance.infer import (
+        BertUtteranceModel,
+        resolve_utterance_model,
+    )
+
     _state.utterance_boundary_model = None
     _state.utterance_model_name = ""
 
