@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-05 23:26 EDT
+**Last updated:** 2026-09-05 23:59 EDT
 
 ## Philosophy
 
@@ -20,7 +20,10 @@ package set. This exclusion does not remove PyO3 coverage; the former separate
 PyO3 step repeated tests that the workspace command already selects. Coverage
 remains an explicit measurement job, not an inner-loop test command.
 Its native compile restores the dashboard artifact produced by the same
-workflow before compiling the embedded server assets.
+workflow before compiling the embedded server assets. It installs and probes
+`protoc`, `ffmpeg` and `ffprobe` before the instrumented build, because coverage
+also exercises real media boundaries. PyO3 uses the same virtual-environment
+interpreter as the installed wheel.
 
 The memory-tier architecture test scans Rust files in process and parses the
 embedded runtime TOML. It requires no `rg` subprocess or workspace-root search;
@@ -34,7 +37,11 @@ checks the running child's actual `--workers` arguments, then checks that a
 completed job respects that ceiling. Granted workers may be lower because CPU
 and memory admission remain active. The daemon binds an OS-selected port and
 publishes its handshake, so a startup failure is a failure rather than a skipped
-port-collision test.
+port-collision test. Its echo daemon owns a separate memory ledger and declares
+a minimal positive headroom floor, so unrelated live-model tests do not consume
+its synthetic reservations. Zero is not used: YAML maps that legacy value back
+to automatic sizing. An owned daemon session stops the process on both normal
+completion and unwinding; failures include its log.
 
 Both the Python wheel job and standalone PyO3 build cache the root Cargo
 workspace's `target` directory. The extension lives at

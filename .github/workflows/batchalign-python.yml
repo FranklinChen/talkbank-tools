@@ -305,8 +305,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install native coverage prerequisites
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler ffmpeg
+          protoc --version
+          ffmpeg -version
+          ffprobe -version
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-workspace
@@ -334,6 +338,8 @@ jobs:
       # shell is outside CI's supported package set and requires GTK/WebKit;
       # do not accidentally pull it into this headless coverage job.
       - name: Rust workspace coverage
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: cargo llvm-cov --workspace --exclude batchalign-dashboard-desktop --locked --lcov --output-path lcov-rust-workspace.info
 
   dashboard-smoke:

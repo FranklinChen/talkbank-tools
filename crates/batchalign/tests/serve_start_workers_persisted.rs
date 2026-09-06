@@ -54,15 +54,27 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
         return;
     };
 
-    let harness = CliHarness::new();
+    let daemon = DaemonSession(CliHarness::new());
+    let harness = &daemon.0;
 
-    harness.write_server_config("host: 127.0.0.1\nport: 0\nauto_daemon: false\n");
+    // This test exercises flag forwarding with echo workers, not production
+    // headroom sizing. A positive explicit floor survives YAML deserialization
+    // (zero means automatic) and keeps a small CI host from queuing for RAM
+    // reserved for unrelated live-model tests.
+    harness
+        .write_server_config("host: 127.0.0.1\nport: 0\nauto_daemon: false\nmemory_gate_mb: 1\n");
 
     // Explicit background-mode `serve start --workers 4`. NOT
     // `transcribe`, which would go through the separate
     // `ensure_daemon_locked` auto-start path and miss this seam.
     let start_output = harness
         .cmd()
+        // This daemon owns its test workload, so synthetic reservations from
+        // other servers in this test binary must not occupy its ledger.
+        .env(
+            "BATCHALIGN_HOST_MEMORY_LEDGER",
+            harness.state_dir().join("host-memory.json"),
+        )
         .args([
             "serve",
             "start",
@@ -107,7 +119,6 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
     // on first launch).
     let ready = wait_for_health(&client, &base_url, 30).await;
     if !ready {
-        stop_daemon(&harness);
         panic!("daemon never became healthy on port {port}");
     }
 
@@ -164,7 +175,7 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
 
     // Cleanup: stop daemon before assertion so a failure doesn't leak a
     // background process across test runs.
-    stop_daemon(&harness);
+    drop(daemon);
 
     let child_args = child_args.expect("inspect the running daemon's arguments");
     assert!(
@@ -193,10 +204,22 @@ async fn wait_for_health(client: &reqwest::Client, base_url: &str, timeout_s: u6
     false
 }
 
-fn stop_daemon(harness: &CliHarness) {
-    let _ = harness
-        .cmd()
-        .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
-        .output();
+/// Own daemon teardown even when a poll or assertion unwinds the test.
+struct DaemonSession(CliHarness);
+
+impl Drop for DaemonSession {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "daemon log: {:?}",
+                std::fs::read_to_string(self.0.server_log_path())
+            );
+        }
+        let _ = self
+            .0
+            .cmd()
+            .args(["serve", "stop"])
+            .timeout(std::time::Duration::from_secs(10))
+            .output();
+    }
 }
