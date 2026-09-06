@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-05 22:52 EDT
+**Last updated:** 2026-09-05 23:26 EDT
 
 ## Philosophy
 
@@ -26,6 +26,15 @@ The memory-tier architecture test scans Rust files in process and parses the
 embedded runtime TOML. It requires no `rg` subprocess or workspace-root search;
 unreadable source files fail the check. This keeps ordinary test and coverage
 environments equivalent without adding a search executable to every runner.
+
+Processing-command subprocess tests own a `CliHarness`, which seeds an isolated
+HOME with setup configuration. They must not inherit the developer's setup:
+coverage runners correctly start without it. The detached-server worker test
+checks the running child's actual `--workers` arguments, then checks that a
+completed job respects that ceiling. Granted workers may be lower because CPU
+and memory admission remain active. The daemon binds an OS-selected port and
+publishes its handshake, so a startup failure is a failure rather than a skipped
+port-collision test.
 
 Both the Python wheel job and standalone PyO3 build cache the root Cargo
 workspace's `target` directory. The extension lives at
@@ -478,7 +487,7 @@ make ci-local
 
 ## Coverage
 
-There is a coverage workflow in `.github/workflows/test.yml` (manual
+There is a coverage workflow in `.github/workflows/batchalign-python.yml` (manual
 `workflow_dispatch`, not a release gate).
 
 - Python: full inference adapter surface covered

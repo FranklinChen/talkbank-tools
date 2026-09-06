@@ -1,9 +1,9 @@
 //! Binary subprocess tests for `batchalign3`.
 //!
 //! Uses `assert_cmd` to run the binary and verify exit codes, stdout, stderr.
-//! No server is required: these tests exercise the CLI argument parsing,
-//! help output, hidden command redirects, and utility commands against a
-//! HOME-isolated tempdir.
+//! Argument-only tests use the shared baseline environment. Processing tests
+//! own a CliHarness with isolated HOME and explicit setup configuration; live
+//! dispatch tests additionally own their local server session.
 // Integration tests are exempt from the crate's deny-level panic lints,
 // matching the src/lib.rs `#![cfg_attr(test, allow(...))]` pattern
 // (see docs/panic-audit/).
@@ -364,7 +364,9 @@ fn unknown_subcommand() {
 #[test]
 fn processing_cmd_no_paths() {
     // morphotag with no paths is caught by resolve_inputs (not clap), exits usage(2)
-    cmd()
+    let harness = CliHarness::new();
+    harness
+        .cmd()
         .arg("morphotag")
         .assert()
         .failure()
@@ -374,12 +376,14 @@ fn processing_cmd_no_paths() {
 
 #[test]
 fn processing_cmd_nonexistent_path() {
-    cmd()
+    let harness = CliHarness::new();
+    harness
+        .cmd()
         .args(["morphotag", "/nonexistent_path_abc123"])
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("does not exist").or(predicate::str::contains("error")));
+        .stderr(predicate::str::contains("does not exist"));
 }
 
 #[test]
@@ -562,7 +566,8 @@ async fn cli_morphotag_real_server() {
     let out_str = out_dir.to_str().unwrap().to_string();
     let url = server.base_url().to_string();
     let cli_result = tokio::task::spawn_blocking(move || {
-        let mut command = cmd();
+        let harness = CliHarness::new();
+        let mut command = harness.cmd();
         command
             .args(["morphotag", &in_str, &out_str, "--server", &url])
             .output()
@@ -664,7 +669,8 @@ async fn cli_align_real_server_live_fa_succeeds() {
     let out_str = out_dir.to_str().unwrap().to_string();
     let url = server.base_url().to_string();
     let cli_result = tokio::task::spawn_blocking(move || {
-        let mut command = cmd();
+        let harness = CliHarness::new();
+        let mut command = harness.cmd();
         command
             .args([
                 "align",

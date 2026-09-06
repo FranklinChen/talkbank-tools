@@ -43,14 +43,10 @@ use batchalign::options::{AsrEngineName, CommandOptions, CommonOptions, Transcri
 
 use cli_common::{CliHarness, poll_job_done, resolve_python};
 
-/// Pin the user-visible invariant: `serve start --workers 4`
-/// followed by a 6-file batch must result in
-/// `JobInfo.num_workers == Some(4)`.
-///
-/// A 6-file batch is deliberately above the single-file `num_workers=1`
-/// floor: `granted_workers` cannot exceed file count, so `<= 4 files`
-/// would be a confound. With 6 files and `--workers 4`, the planner has
-/// no excuse to grant fewer than 4.
+/// The detached server must receive the operator's worker override. Completed
+/// jobs respect that ceiling, with CPU and memory admission allowed to grant less.
+/// Inspect the actual child's arguments so a constrained CI host still detects a
+/// missing forwarded override even when both runs would grant a single worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
     let Some(python) = resolve_python() else {
@@ -60,12 +56,7 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
 
     let harness = CliHarness::new();
 
-    // Pick a non-default port to avoid colliding with any local daemon
-    // running on the operator's machine. Range chosen to be high and
-    // unlikely to overlap other tests.
-    let port: u16 = 19500 + (std::process::id() as u16 % 500);
-    let config = format!("host: 127.0.0.1\nport: {port}\nauto_daemon: false\n");
-    std::fs::write(harness.server_config_path(), &config).expect("write server.yaml");
+    harness.write_server_config("host: 127.0.0.1\nport: 0\nauto_daemon: false\n");
 
     // Explicit background-mode `serve start --workers 4`. NOT
     // `transcribe`, which would go through the separate
@@ -79,30 +70,36 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
             "--python",
             &python,
             "--port",
-            &port.to_string(),
+            "0",
             "--workers",
             "4",
             "--config",
             harness.server_config_path().to_str().unwrap(),
         ])
         .timeout(std::time::Duration::from_secs(15))
-        .output();
+        .output()
+        .expect("start daemon");
 
-    match &start_output {
-        Ok(o) if !o.status.success() => {
-            eprintln!(
-                "SKIP: serve start failed (port {port} conflict?): stderr={:?}",
-                String::from_utf8_lossy(&o.stderr)
-            );
-            return;
-        }
-        Err(e) => {
-            eprintln!("SKIP: serve start errored: {e}");
-            return;
-        }
-        _ => {}
-    }
-
+    assert!(
+        start_output.status.success(),
+        "serve start failed: {}",
+        String::from_utf8_lossy(&start_output.stderr),
+    );
+    let handshake = batchalign::server_handshake::ServerHandshake::read(
+        harness.state_dir(),
+        batchalign::server_handshake::HandshakeSlot::Main,
+    )
+    .expect("read handshake")
+    .expect("started daemon publishes handshake");
+    let port = handshake.bound_port().expect("daemon bound its port").get();
+    let pid = sysinfo::Pid::from_u32(handshake.pid());
+    let mut processes = sysinfo::System::new();
+    processes.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always),
+    );
+    let child_args = processes.process(pid).map(|process| process.cmd().to_vec());
     let base_url = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
 
@@ -169,19 +166,18 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
     // background process across test runs.
     stop_daemon(&harness);
 
-    // The intent of `--workers 4` on the explicit serve-start path is
-    // that the daemon grants up to 4 parallel workers per job. With 6
-    // files in the batch, `granted_workers` should be exactly 4 (the
-    // requested cap, not file-count-limited).
-    assert_eq!(
-        final_info.num_workers,
-        Some(4),
-        "`serve start --workers 4` did not propagate to job execution. \
-         Expected num_workers=4 on a 6-file batch, got {:?}. \
-         Job status: {:?}.",
-        final_info.num_workers,
-        final_info.status,
+    let child_args = child_args.expect("inspect the running daemon's arguments");
+    assert!(
+        child_args
+            .windows(2)
+            .any(|pair| pair[0] == "--workers" && pair[1] == "4"),
+        "detached daemon lost --workers 4: {child_args:?}",
     );
+    assert!(
+        matches!(final_info.num_workers, Some(1..=4)),
+        "job must respect --workers 4 and host admission: {final_info:?}",
+    );
+    assert_eq!(final_info.status, batchalign::api::JobStatus::Completed);
 }
 
 async fn wait_for_health(client: &reqwest::Client, base_url: &str, timeout_s: u64) -> bool {
