@@ -73,7 +73,10 @@ dependencies = [
     "aliyun-python-sdk-core>=2.13.3",
     "aliyun-python-sdk-alimt>=3.2.0",
     "alibabacloud-nls-python-sdk>=1.0.0",
-    "funasr",
+    # 1.4.13 and 1.4.14 require NumPy<2, downgrading the shared ML stack to
+    # NumPy 1.26 (supports Python <=3.12). Revisit when upstream restores
+    # compatibility with this package's Python >=3.13 environment.
+    "funasr<1.4.13",
     # Qwen3-ASR: Alibaba's open-weight Cantonese-capable ASR. Local
     # model (~3.4 GB fp16) downloaded from HuggingFace on first use.
     # Recommended default for ``yue`` per Lee et al. (2026).

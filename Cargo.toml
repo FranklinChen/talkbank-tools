@@ -62,7 +62,7 @@ chrono = "0.4"
 
 # CLI and tools
 clap = { version = "4.6", features = ["derive", "env"] }
-comrak = "0.54.0"
+comrak = "0.55.0"
 
 # Concurrency
 crossbeam-channel = "0.5"
@@ -73,7 +73,7 @@ csv = "1"
 futures = "0.3"
 
 # Utilities
-dirs = "6.0"
+dirs = "7.0"
 divan = "0.1"
 fs2 = "0.4"
 include_dir = "0.7"
@@ -82,7 +82,7 @@ indicatif = "0.18"
 
 # Testing
 insta = { version = "1.48", features = ["json", "yaml"] }
-jsonschema = { version = "0.52", default-features = false, features = ["resolve-file"] }
+jsonschema = { version = "0.54", default-features = false, features = ["resolve-file"] }
 miette = { version = "7.6.0", features = ["derive"] }
 notify = "8.2"
 num_cpus = "1.17"
@@ -102,7 +102,7 @@ ratatui = { version = "0.30", features = ["serde"] }
 rayon = "1.12"
 regex = "1.13"
 reqwest = { version = "0.13", features = ["multipart", "json", "blocking"] }
-rstest = "0.26.1"
+rstest = { version = "0.27.0", default-features = false }
 schemars = { version = "1.2", features = ["indexmap2", "smol_str03"] }
 serde_yaml = "0.9"
 
@@ -119,7 +119,7 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 shellexpand = "3.1"
 similar = "3.2"
-smallvec = { version = "1.15", features = ["serde", "union", "const_generics"] }
+smallvec = { version = "1.16", features = ["serde", "union", "const_generics"] }
 smol_str = { version = "0.3", features = ["serde"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 strsim = "0.11.1"
@@ -148,7 +148,7 @@ thiserror = "^2.0.20"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
-toml = "^1.1.4"
+toml = "^1.1.5"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.33"
 tower-http = { version = "0.7", features = ["cors", "fs", "limit", "trace", "compression-gzip", "compression-br", "catch-panic", "timeout"] }
@@ -169,8 +169,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Tree-sitter parsing
-tree-sitter = "0.26"
-tree-sitter-highlight = "0.26"
+tree-sitter = "0.27"
+tree-sitter-highlight = "0.27"
 ferrous-opencc = "0.4.0"
 
 trybuild = "1.0"
