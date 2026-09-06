@@ -92,58 +92,8 @@ pub enum MatchMode {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Alignable trait: unifies String and char element types
-// ---------------------------------------------------------------------------
-
-/// Element type that can participate in Hirschberg alignment.
-///
-/// Implemented for `String` (word-level) and `char` (character-level).
-/// Monomorphization ensures zero overhead compared to the previous
-/// copy-pasted implementations.
-trait Alignable {
-    fn matches(&self, other: &Self, mode: MatchMode) -> bool;
-    fn to_key(&self) -> String;
-}
-
-impl Alignable for String {
-    fn matches(&self, other: &Self, mode: MatchMode) -> bool {
-        match mode {
-            MatchMode::Exact => self == other,
-            MatchMode::CaseInsensitive => self.eq_ignore_ascii_case(other),
-            MatchMode::Fuzzy { threshold } => {
-                // Fast path: exact case-insensitive match
-                if self.eq_ignore_ascii_case(other) {
-                    return true;
-                }
-                // Fuzzy: Jaro-Winkler on lowercased strings
-                let sim = strsim::jaro_winkler(&self.to_lowercase(), &other.to_lowercase());
-                sim >= threshold
-            }
-        }
-    }
-
-    fn to_key(&self) -> String {
-        self.clone()
-    }
-}
-
-impl Alignable for char {
-    fn matches(&self, other: &Self, mode: MatchMode) -> bool {
-        match mode {
-            MatchMode::Exact => self == other,
-            // Fuzzy at char level degrades to case-insensitive (single chars
-            // can't meaningfully fuzzy-match).
-            MatchMode::CaseInsensitive | MatchMode::Fuzzy { .. } => {
-                self.eq_ignore_ascii_case(other)
-            }
-        }
-    }
-
-    fn to_key(&self) -> String {
-        self.to_string()
-    }
-}
+mod comparison;
+use comparison::{Alignable, FuzzyComparison, LiteralMatchMode, PreparedFuzzyWord};
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -158,7 +108,23 @@ impl Alignable for char {
 ///
 /// Returns a list of `AlignResult` items in sequence order.
 pub fn align(payload: &[String], reference: &[String], mode: MatchMode) -> Vec<AlignResult> {
-    align_generic(payload, reference, mode)
+    match mode {
+        MatchMode::Exact => align_generic(payload, reference, LiteralMatchMode::Exact),
+        MatchMode::CaseInsensitive => {
+            align_generic(payload, reference, LiteralMatchMode::AsciiInsensitive)
+        }
+        MatchMode::Fuzzy { threshold } => {
+            let payload: Vec<_> = payload
+                .iter()
+                .map(|word| PreparedFuzzyWord::new(word))
+                .collect();
+            let reference: Vec<_> = reference
+                .iter()
+                .map(|word| PreparedFuzzyWord::new(word))
+                .collect();
+            align_generic(&payload, &reference, FuzzyComparison::new(threshold))
+        }
+    }
 }
 
 /// Align two character sequences using the Hirschberg algorithm.
@@ -169,6 +135,11 @@ pub fn align(payload: &[String], reference: &[String], mode: MatchMode) -> Vec<A
 ///
 /// Applies the same prefix/suffix stripping optimization as [`align`].
 pub fn align_chars(payload: &[char], reference: &[char], mode: MatchMode) -> Vec<AlignResult> {
+    // Single-character fuzzy matching retains ASCII-insensitive semantics.
+    let mode = match mode {
+        MatchMode::Exact => LiteralMatchMode::Exact,
+        MatchMode::CaseInsensitive | MatchMode::Fuzzy { .. } => LiteralMatchMode::AsciiInsensitive,
+    };
     align_generic(payload, reference, mode)
 }
 
@@ -180,7 +151,7 @@ pub fn align_chars(payload: &[char], reference: &[char], mode: MatchMode) -> Vec
 fn align_generic<T: Alignable>(
     payload: &[T],
     reference: &[T],
-    mode: MatchMode,
+    mode: T::Policy,
 ) -> Vec<AlignResult> {
     // Strip common prefix
     let prefix_len = payload
@@ -232,7 +203,7 @@ fn hirschberg<T: Alignable>(
     reference: &[T],
     pay_offset: usize,
     ref_offset: usize,
-    mode: MatchMode,
+    mode: T::Policy,
 ) -> Vec<AlignResult> {
     if reference.is_empty() {
         return payload
@@ -295,7 +266,7 @@ fn hirschberg<T: Alignable>(
 /// Reuses a scratch buffer (`cur`) across rows instead of allocating a fresh
 /// `Vec` per reference item. See `book/src/batchalign/developer/arena-allocators.md`
 /// Pattern 2 (scratch buffers).
-fn row_costs<T: Alignable>(reference: &[T], payload: &[T], mode: MatchMode) -> Vec<usize> {
+fn row_costs<T: Alignable>(reference: &[T], payload: &[T], mode: T::Policy) -> Vec<usize> {
     let pay_len = payload.len();
     let mut prev: Vec<usize> = (0..=pay_len).collect();
     let mut cur = Vec::with_capacity(pay_len + 1);
@@ -316,7 +287,7 @@ fn row_costs<T: Alignable>(reference: &[T], payload: &[T], mode: MatchMode) -> V
 }
 
 /// Compute `row_costs` on reversed reference and payload without cloning.
-fn row_costs_rev<T: Alignable>(reference: &[T], payload: &[T], mode: MatchMode) -> Vec<usize> {
+fn row_costs_rev<T: Alignable>(reference: &[T], payload: &[T], mode: T::Policy) -> Vec<usize> {
     let pay_len = payload.len();
     let mut prev: Vec<usize> = (0..=pay_len).collect();
     let mut cur = Vec::with_capacity(pay_len + 1);
@@ -356,7 +327,7 @@ fn align_small<T: Alignable>(
     reference: &[T],
     pay_offset: usize,
     ref_offset: usize,
-    mode: MatchMode,
+    mode: T::Policy,
 ) -> Vec<AlignResult> {
     let rows = reference.len() + 1;
     let cols = payload.len() + 1;

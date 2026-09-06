@@ -4,6 +4,144 @@ fn s(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
 }
 
+struct LegacyWord(String);
+
+impl Alignable for LegacyWord {
+    type Policy = MatchMode;
+
+    fn matches(&self, other: &Self, policy: MatchMode) -> bool {
+        match policy {
+            MatchMode::Exact => self.0 == other.0,
+            MatchMode::CaseInsensitive => self.0.eq_ignore_ascii_case(&other.0),
+            MatchMode::Fuzzy { threshold } => {
+                self.0.eq_ignore_ascii_case(&other.0)
+                    || strsim::jaro_winkler(&self.0.to_lowercase(), &other.0.to_lowercase())
+                        >= threshold
+            }
+        }
+    }
+
+    fn to_key(&self) -> String {
+        self.0.clone()
+    }
+}
+
+/// Preserve the pre-preparation comparison as an independent oracle. Compare
+/// complete plans so a changed tie break or original result spelling is visible.
+#[test]
+fn prepared_comparison_preserves_legacy_plans() {
+    let vocabulary = [
+        "ΟΣ", "ος", "οσ", "İ", "i", "i\u{307}", "Café", "CAFÉ", "Straße", "STRASSE", "a", "A", "",
+        "word",
+    ];
+    let cases = [
+        (Vec::new(), s(&["Café"])),
+        (s(&["İ"]), Vec::new()),
+        (s(&vocabulary), s(&["word", "i", "CAFÉ", "οσ", "STRASSE"])),
+        (
+            (0..70)
+                .map(|i| vocabulary[(i * 3) % vocabulary.len()].to_owned())
+                .collect(),
+            (0..73)
+                .map(|i| vocabulary[(i * 5 + 1) % vocabulary.len()].to_owned())
+                .collect(),
+        ),
+    ];
+    let modes = [
+        MatchMode::Exact,
+        MatchMode::CaseInsensitive,
+        MatchMode::Fuzzy { threshold: 0.0 },
+        MatchMode::Fuzzy { threshold: 0.85 },
+        MatchMode::Fuzzy { threshold: 1.0 },
+        MatchMode::Fuzzy { threshold: 1.1 },
+        MatchMode::Fuzzy {
+            threshold: f64::NAN,
+        },
+    ];
+    for (case, (payload, reference)) in cases.iter().enumerate() {
+        let legacy_payload: Vec<_> = payload.iter().cloned().map(LegacyWord).collect();
+        let legacy_reference: Vec<_> = reference.iter().cloned().map(LegacyWord).collect();
+        for mode in modes {
+            assert_eq!(
+                align(payload, reference, mode),
+                align_generic(&legacy_payload, &legacy_reference, mode),
+                "case {case}, mode {mode:?}",
+            );
+        }
+    }
+}
+
+/// Manual comparison-cost probe in the existing test binary, with no timing
+/// threshold in CI. Run with `--ignored --nocapture`; compare the same profile
+/// and result digest before and after changing comparison preparation.
+#[test]
+#[ignore = "manual fuzzy-alignment performance probe"]
+fn fuzzy_comparison_performance_probe() {
+    let vocabulary = [
+        "conversation",
+        "morning",
+        "research",
+        "together",
+        "utterance",
+        "window",
+        "hospital",
+        "memory",
+        "coffee",
+        "walking",
+        "beautiful",
+        "question",
+        "Straße",
+        "İstanbul",
+        "CAFÉ",
+        "café",
+        "answer",
+        "suddenly",
+        "tomorrow",
+        "perhaps",
+        "because",
+        "language",
+        "different",
+        "people",
+        "through",
+    ];
+    let payload: Vec<_> = (0..400)
+        .map(|i| vocabulary[(i * 7) % vocabulary.len()].to_owned())
+        .collect();
+    let reference: Vec<_> = (0..430)
+        .map(|i| vocabulary[(i * 11 + 3) % vocabulary.len()].to_owned())
+        .collect();
+    let legacy_payload: Vec<_> = payload.iter().cloned().map(LegacyWord).collect();
+    let legacy_reference: Vec<_> = reference.iter().cloned().map(LegacyWord).collect();
+    let mode = MatchMode::Fuzzy { threshold: 0.85 };
+    let mut legacy_time = std::time::Duration::ZERO;
+    let mut prepared_time = std::time::Duration::ZERO;
+    let mut digest = blake3::Hasher::new();
+    for round in 0..4 {
+        // Alternate order to reduce drift from concurrent machine activity.
+        for prepared_first in [round % 2 == 0, round % 2 != 0] {
+            let start = std::time::Instant::now();
+            let result = std::hint::black_box(if prepared_first {
+                align(&payload, &reference, mode)
+            } else {
+                align_generic(&legacy_payload, &legacy_reference, mode)
+            });
+            let elapsed = start.elapsed();
+            if prepared_first {
+                prepared_time += elapsed;
+            } else {
+                legacy_time += elapsed;
+            }
+            digest.update(format!("{result:?}").as_bytes());
+        }
+    }
+    eprintln!(
+        "fuzzy paired probe: legacy_us={} prepared_us={} digest={}",
+        legacy_time.as_micros(),
+        prepared_time.as_micros(),
+        digest.finalize()
+    );
+}
+
 #[test]
 fn test_identical() {
     let result = align(&s(&["a", "b", "c"]), &s(&["a", "b", "c"]), MatchMode::Exact);

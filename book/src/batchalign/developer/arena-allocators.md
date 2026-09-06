@@ -33,7 +33,29 @@ for ref_item in reference {
 }
 ```
 
-Used in `dp_align.rs` (Hirschberg alignment).
+Used in `dp_align/mod.rs` (Hirschberg alignment).
+
+### Prepare Fuzzy Comparison Inputs Once
+
+Word alignment admits fuzzy inputs as `PreparedFuzzyWord`, which retains the
+original spelling and computes its Unicode lowercase form once. The DP core
+accepts the comparison policy associated with its element type: unprepared
+strings and characters cannot request fuzzy comparison. Exact and ASCII-only
+paths retain their allocation-free comparisons. Result keys use the original
+spelling, and the existing ASCII equality fast path remains authoritative.
+
+This trades storage proportional to the input text for eliminating repeated
+lowercase allocations inside DP cells. It does not change the quadratic
+comparison count or the alignment tie-breaking rules. Mostly matching inputs
+can have little repeated work to save, so this is not a universal speedup.
+
+The ignored `fuzzy_comparison_performance_probe` in the existing library test
+binary compares prepared and legacy comparisons in alternating order. Run it
+with `cargo test -p batchalign-transform --lib
+fuzzy_comparison_performance_probe -- --ignored --nocapture`. It reports time
+inside the test, excluding compilation, and has no CI timing threshold. The
+separate differential test compares complete plans, including Unicode cases,
+original spellings, and threshold edge behavior.
 
 ### Flat Table Instead of Vec-of-Vec
 
