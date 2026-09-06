@@ -311,6 +311,14 @@ jobs:
         with:
           shared-key: rust-workspace
       - uses: taiki-e/install-action@cargo-llvm-cov
+      # Coverage recompiles the native library, whose default features embed
+      # the dashboard. The wheel does not populate this checkout's frontend
+      # directory; consume the dashboard built from this exact workflow commit.
+      - name: Restore dashboard for instrumented native build
+        uses: actions/download-artifact@v8
+        with:
+          name: dashboard-dist
+          path: frontend/dist/
       - uses: actions/download-artifact@v8
         with:
           name: wheel
