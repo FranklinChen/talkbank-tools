@@ -5,10 +5,60 @@ use talkbank_model::{UtteranceIdx, WordIdx};
 
 use batchalign_transform::decisions::{DecisionRecord, DecisionStrategy, FaStrategy};
 
-use super::coordinates::{Clamped, FileMs, Ms, Recording};
+use super::coordinates::{Clamped, FaWindow, FileMs, Ms, Recording, WindowFault};
 use super::extraction::collect_fa_words;
 use super::speech_rate::SpeechRate;
-use super::{FaGroup, FaWord, TimeSpan};
+use super::{FaWord, TimeSpan};
+
+/// A group of utterances clustered for a single FA call.
+#[derive(Debug)]
+pub struct FaGroup {
+    /// Audio window for this group.
+    audio_window: FaWindow,
+    /// Words in this group with positional indices.
+    pub words: Vec<FaWord>,
+    /// Utterance indices included in this group.
+    pub utterance_indices: Vec<UtteranceIdx>,
+}
+
+impl FaGroup {
+    /// Supply raw groups only in unit tests of downstream timing/recovery code.
+    /// Production callers obtain groups exclusively from `group_utterances`.
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        audio_span: TimeSpan,
+        words: Vec<FaWord>,
+        utterance_indices: Vec<UtteranceIdx>,
+    ) -> Self {
+        // These downstream fixtures declare a recording ending at their window.
+        let recording = Recording::of_duration(Ms(audio_span.end_ms)).expect("fixture recording");
+        Self {
+            audio_window: FaWindow::within(
+                &recording,
+                FileMs::new(audio_span.start_ms),
+                FileMs::new(audio_span.end_ms),
+            )
+            .expect("fixture window"),
+            words,
+            utterance_indices,
+        }
+    }
+
+    /// The recording-bound window admitted by grouping, used by live and cached inference.
+    pub(crate) fn window(&self) -> FaWindow {
+        self.audio_window
+    }
+
+    /// Start of the audio window (ms).
+    pub fn audio_start_ms(&self) -> u64 {
+        self.audio_window.audio_start().get()
+    }
+
+    /// End of the audio window (ms).
+    pub fn audio_end_ms(&self) -> u64 {
+        self.audio_window.end().get()
+    }
+}
 
 /// Where an utterance's audio is, or why it has none.
 ///
@@ -61,15 +111,9 @@ const TRAILING_GAP_EXTENSION_MS: u64 = 1500;
 
 /// What grouping produced.
 ///
-/// # Why the refusals come back rather than going to a log
-///
-/// An utterance this pass declines to place will have NO timing in the output,
-/// permanently, and a reader of the CHAT file cannot distinguish that from an
-/// aligner that simply failed. The program knows which; a `tracing::warn!` is
-/// where that knowledge used to stop. `rescue_narrow_bullets` already returns
-/// its decisions for the same reason, and this is the same kind of fact told
-/// the other way round: the rescue says "we fixed it", this says "these words
-/// cannot be aligned by anyone".
+/// Refusals are durable evidence, not just log messages: no request was made
+/// for those utterances. They include physically unplaceable runs and windows
+/// requiring narrower evidence before this engine can safely align them.
 pub struct Grouping {
     /// Windows to send to the aligner.
     pub groups: Vec<FaGroup>,
@@ -88,7 +132,9 @@ pub struct Grouping {
 
 /// Group utterances from a ChatFile into FA segments.
 ///
-/// Groups are split when the cumulative duration exceeds `max_group_ms`.
+/// Every returned window fits `max_group_ms`, including trailing padding.
+/// A single utterance that cannot fit is refused with durable evidence; its
+/// supplied timing and words are preserved rather than clipped or fabricated.
 ///
 /// Utterances with no timing bullet are placed by distributing the surrounding
 /// gap across them in proportion to word count, EXCEPT where the audio could not
@@ -122,123 +168,89 @@ pub fn group_utterances(
         );
     }
 
-    let mut groups: Vec<FaGroup> = Vec::new();
-    let mut refusals: Vec<DecisionRecord> = Vec::new();
-    let mut current_words: Vec<FaWord> = Vec::new();
-    let mut current_utt_indices: Vec<UtteranceIdx> = Vec::new();
-    let mut current_chars: usize = 0;
-    let mut seg_start: u64 = 0;
-    let mut seg_end: u64 = 0;
-
-    let mut utt_idx: usize = 0;
-
+    let mut groups = Vec::new();
+    let mut refusals = Vec::new();
+    let mut pending: Option<PendingGroup> = None;
+    let budget = Ms(max_group_ms);
     let mut extracted = Vec::new();
-    for line in &chat_file.lines {
-        let utt = match line {
-            Line::Utterance(u) => u,
-            _ => continue,
-        };
-
-        // Taking a `Recording` rather than an `Option<u64>` deleted the third
-        // arm here. It used to warn and SKIP an untimed utterance whenever the
-        // audio length was unknown, which meant the words of that utterance
-        // were silently never aligned; and "unknown audio length" was a state
-        // only reachable because the duration was optional. It is not optional
-        // now, so an estimate always exists.
-        let utt_span = match &utt.main.content.bullet {
+    let utterances = chat_file
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line_idx, line)| match line {
+            Line::Utterance(utterance) => Some((line_idx, utterance)),
+            _ => None,
+        });
+    for (utt_idx, (line_idx, utt)) in utterances.enumerate() {
+        let span = match &utt.main.content.bullet {
             Some(b) => TimeSpan::new(b.timing.start_ms, b.timing.end_ms),
-            // An unplaceable run is skipped, and the estimator has already said
-            // why in one line for the whole run. Its words stay unaligned,
-            // which is what they would have been anyway: no aligner can place
-            // words in audio too short to contain them, and the one that cannot
-            // detect that invents timings instead.
             None => match estimates[utt_idx] {
                 Placement::Placed(span) => span,
-                // Recorded, not merely skipped: these words reach the output
-                // with no timing, and the reason is a physical fact worth
-                // telling a reviewer.
                 Placement::Unplaceable(rate) => {
-                    if let Some(line_idx) =
-                        super::utterance_line_idx(chat_file, UtteranceIdx::new(utt_idx))
-                    {
-                        refusals.push(DecisionRecord::new_and_trace(
-                            line_idx.raw(),
-                            utt.main.speaker.as_str().to_string(),
-                            DecisionStrategy::Fa(FaStrategy::UnplaceableRun),
-                            format!("{rate}"),
-                            true,
-                        ));
-                    }
-                    utt_idx += 1;
+                    refusals.push(DecisionRecord::new_and_trace(
+                        line_idx,
+                        utt.main.speaker.as_str().to_owned(),
+                        DecisionStrategy::Fa(FaStrategy::UnplaceableRun),
+                        rate.to_string(),
+                        true,
+                    ));
                     continue;
                 }
             },
         };
-
-        // Extract words first so we can count chars before deciding to flush.
-        // (drain(..) in the loop below empties `extracted` each iteration)
         collect_fa_words(&utt.main.content.content, &mut extracted);
-        let utt_chars: usize = extracted.iter().map(|w| w.len()).sum();
-
-        // Start a new group when this utterance would push the current group past
-        // either the time window or Whisper's character-token limit.
-        //
-        // The char-limit guard is necessary because Whisper CTC FA fails with
-        // "Labels' sequence length N cannot exceed the maximum allowed length of
-        // 448 tokens" when the total character count in a group exceeds 448.
-        // Dense transcripts (fast speech, Spanish/long-word languages) can hit
-        // this within a normal time window.
-        //
-        // Exception: if the current group is empty, we include the utterance
-        // regardless: an utterance that alone exceeds the limit still needs to
-        // be sent (and will produce a graceful Python-side error rather than
-        // silently dropping the utterance).
-        let over_time =
-            utt_span.end_ms <= seg_start || (utt_span.end_ms - seg_start) > max_group_ms;
-        let over_chars = current_chars + utt_chars > WHISPER_FA_MAX_LABEL_TOKENS;
-        if !current_words.is_empty() && (over_time || over_chars) {
-            // Extend the audio window into the gap before this next utterance
-            // so the FA engine can hear trailing fillers at utterance boundaries.
-            let extended_end = extend_into_trailing_gap(seg_end, utt_span.start_ms);
-            groups.push(FaGroup {
-                audio_span: TimeSpan::new(seg_start, extended_end),
-                words: std::mem::take(&mut current_words),
-                utterance_indices: std::mem::take(&mut current_utt_indices),
-            });
-            seg_start = utt_span.start_ms;
-            current_chars = 0;
+        if extracted.is_empty() {
+            continue;
         }
-
-        if current_words.is_empty() {
-            seg_start = utt_span.start_ms;
-        }
-        seg_end = utt_span.end_ms;
-        current_chars += utt_chars;
-
-        for (word_idx, w) in extracted.drain(..).enumerate() {
-            current_words.push(FaWord {
+        let window = match GroupWindow::admit(span, budget, recording) {
+            Ok(window) => window,
+            Err(reason) => {
+                // Do not clip a long uncertain window or invent word positions.
+                // Preserve the supplied CHAT and record why no request was made.
+                if let Some(previous) = pending.take() {
+                    groups.push(previous.finish(span.start_ms));
+                }
+                refusals.push(DecisionRecord::new_and_trace(
+                    line_idx,
+                    utt.main.speaker.as_str().to_owned(),
+                    DecisionStrategy::Fa(FaStrategy::WindowRefused),
+                    reason.to_string(),
+                    true,
+                ));
+                extracted.clear();
+                continue;
+            }
+        };
+        let characters = extracted.iter().map(String::len).sum();
+        let words = extracted
+            .drain(..)
+            .enumerate()
+            .map(|(word_idx, text)| FaWord {
                 utterance_index: UtteranceIdx::new(utt_idx),
                 utterance_word_index: WordIdx::new(word_idx),
-                text: w,
-            });
-        }
-
-        current_utt_indices.push(UtteranceIdx::new(utt_idx));
-        utt_idx += 1;
-    }
-
-    // Push the last group, extending into the trailing audio. The "don't extend
-    // blindly" arm went with the `Option`: there is no longer an unknown length
-    // to be blind about.
-    if !current_words.is_empty() {
-        let extended_end = extend_into_trailing_gap(seg_end, total_audio_ms);
-        groups.push(FaGroup {
-            audio_span: TimeSpan::new(seg_start, extended_end),
-            words: current_words,
-            utterance_indices: current_utt_indices,
+                text,
+            })
+            .collect();
+        let next = PendingGroup {
+            window,
+            words,
+            utterance_indices: vec![UtteranceIdx::new(utt_idx)],
+            characters,
+        };
+        pending = Some(match pending.take() {
+            None => next,
+            Some(mut previous) => match previous.append(next) {
+                Ok(()) => previous,
+                Err(next) => {
+                    groups.push(previous.finish(next.window.window.audio_start().get()));
+                    next
+                }
+            },
         });
     }
-
+    if let Some(last) = pending {
+        groups.push(last.finish(total_audio_ms));
+    }
     Grouping {
         groups,
         refusals,
@@ -246,18 +258,98 @@ pub fn group_utterances(
     }
 }
 
-/// Extend an audio window's end into the gap before the next utterance.
-///
-/// Returns `seg_end + min(gap / 2, TRAILING_GAP_EXTENSION_MS)`; we take
-/// at most half the gap to avoid bleeding into the next utterance's audio,
-/// capped at the configured maximum extension.
-fn extend_into_trailing_gap(seg_end: u64, next_utt_start: u64) -> u64 {
-    if next_utt_start <= seg_end {
-        return seg_end; // no gap (overlap or adjacent)
+/// An admitted window carries its maximum end, including any later padding.
+/// Only this module can construct or extend it.
+struct GroupWindow {
+    window: FaWindow,
+    end_limit: FileMs,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum WindowRefusal {
+    #[error(transparent)]
+    OutsideRecording(#[from] WindowFault),
+    #[error("audio window at {start} ms has no positive extent")]
+    Empty { start: FileMs },
+    #[error(
+        "audio window duration {duration} ms exceeds alignment budget {budget} ms; narrower evidence is required"
+    )]
+    Oversized { duration: Ms, budget: Ms },
+}
+
+impl GroupWindow {
+    fn admit(span: TimeSpan, budget: Ms, recording: &Recording) -> Result<Self, WindowRefusal> {
+        let window = FaWindow::within(
+            recording,
+            FileMs::new(span.start_ms),
+            FileMs::new(span.end_ms),
+        )?;
+        let duration = window.len();
+        if duration.0 == 0 {
+            return Err(WindowRefusal::Empty {
+                start: window.audio_start(),
+            });
+        }
+        if duration.0 > budget.0 {
+            return Err(WindowRefusal::Oversized { duration, budget });
+        }
+        Ok(Self {
+            window,
+            end_limit: FileMs::new(
+                span.start_ms
+                    .saturating_add(budget.0)
+                    .min(recording.duration().get()),
+            ),
+        })
     }
-    let gap = next_utt_start - seg_end;
-    let extension = (gap / 2).min(TRAILING_GAP_EXTENSION_MS);
-    seg_end + extension
+
+    fn extend_into_trailing_gap(&mut self, next_start: u64) {
+        let gap = next_start.saturating_sub(self.window.end().get());
+        let extension = (gap / 2)
+            .min(TRAILING_GAP_EXTENSION_MS)
+            .min(self.end_limit.get() - self.window.end().get());
+        self.window = self.window.extend_by(Ms(extension));
+    }
+}
+
+/// A nonempty group under construction, before bounded trailing padding.
+/// Its words, indices and window move together when a split is necessary.
+struct PendingGroup {
+    window: GroupWindow,
+    words: Vec<FaWord>,
+    utterance_indices: Vec<UtteranceIdx>,
+    characters: usize,
+}
+
+impl PendingGroup {
+    fn append(&mut self, mut next: Self) -> Result<(), Self> {
+        if next.window.window.audio_start().get() < self.window.window.audio_start().get()
+            || next.window.window.end().get() > self.window.end_limit.get()
+            || self.characters + next.characters > WHISPER_FA_MAX_LABEL_TOKENS
+        {
+            return Err(next);
+        }
+        let extension = next
+            .window
+            .window
+            .end()
+            .get()
+            .saturating_sub(self.window.window.end().get());
+        self.window.window = self.window.window.extend_by(Ms(extension));
+        self.characters += next.characters;
+        self.words.append(&mut next.words);
+        self.utterance_indices.append(&mut next.utterance_indices);
+        Ok(())
+    }
+
+    fn finish(mut self, next_start: u64) -> FaGroup {
+        self.window.extend_into_trailing_gap(next_start);
+        FaGroup {
+            audio_window: self.window.window,
+            words: self.words,
+            utterance_indices: self.utterance_indices,
+        }
+    }
 }
 
 /// Count utterances with and without timing bullets.

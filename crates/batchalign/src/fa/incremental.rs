@@ -123,7 +123,7 @@ pub(crate) async fn process_fa_incremental(
     let recording = audio.recording().await?;
     let Grouping {
         groups,
-        refusals: unplaceable_decisions,
+        refusals: grouping_decisions,
         windows_clamped,
     } = group_utterances(&chat_file, fa_params.max_group_ms().0, &recording);
     if groups.is_empty() {
@@ -148,7 +148,7 @@ pub(crate) async fn process_fa_incremental(
             &mut chat_file,
             crate::chat_ops::fa::FaDecisions::without_injection(
                 Vec::new(),
-                unplaceable_decisions,
+                grouping_decisions,
                 finalized,
             ),
         );
@@ -270,7 +270,6 @@ pub(crate) async fn process_fa_incremental(
             services.engine_version,
             i,
             &groups[i],
-            &recording,
         )
         .resolve(cached_raw.get(key.as_str()), cached.get(key.as_str()));
         for refusal in resolution.refusals {
@@ -321,10 +320,8 @@ pub(crate) async fn process_fa_incremental(
     if let FaInferencePlan::Authorized(authorization) =
         plan_fa_inference(fa_params.cache_policy, &miss_indices)?
     {
-        // Resolved before dispatch so every group's reply can be checked
-        // against the audio it describes. Fails the file rather than running
-        // unbounded: a pass that cannot state the recording's length cannot
-        // tell a measurement from a moment that does not exist.
+        // Every group already owns the recording-bound window admitted by
+        // grouping; live inference and cache replay consume that same proof.
         let parsed_results = transport
             .infer_groups(
                 UncheckedFaWorkerBatch {
@@ -336,7 +333,6 @@ pub(crate) async fn process_fa_incremental(
                     worker_lang: worker_lang.into(),
                     engine: fa_params.engine,
                     gap_healing: fa_params.gap_healing,
-                    recording,
                 }
                 .admit()?,
             )
@@ -465,7 +461,7 @@ pub(crate) async fn process_fa_incremental(
         &mut chat_file,
         crate::chat_ops::fa::FaDecisions {
             rescue: Vec::new(),
-            unplaceable: unplaceable_decisions,
+            unplaceable: grouping_decisions,
             finalized,
         },
     );
@@ -769,24 +765,24 @@ mod tests {
         // Two single-word groups: one per utterance.
         // Group 0 is forward (731556 ms); group 1 is BACKWARD (639095 < 733418).
         let groups = vec![
-            FaGroup {
-                audio_span: TimeSpan::new(731000, 734000),
-                words: vec![FaWord {
+            FaGroup::test_fixture(
+                TimeSpan::new(731000, 734000),
+                vec![FaWord {
                     utterance_index: UtteranceIdx::new(0),
                     utterance_word_index: WordIdx::new(0),
                     text: "alright".into(),
                 }],
-                utterance_indices: vec![UtteranceIdx::new(0)],
-            },
-            FaGroup {
-                audio_span: TimeSpan::new(639000, 641000),
-                words: vec![FaWord {
+                vec![UtteranceIdx::new(0)],
+            ),
+            FaGroup::test_fixture(
+                TimeSpan::new(639000, 641000),
+                vec![FaWord {
                     utterance_index: UtteranceIdx::new(1),
                     utterance_word_index: WordIdx::new(0),
                     text: "look".into(),
                 }],
-                utterance_indices: vec![UtteranceIdx::new(1)],
-            },
+                vec![UtteranceIdx::new(1)],
+            ),
         ];
 
         // Group 0: forward timing (correct).

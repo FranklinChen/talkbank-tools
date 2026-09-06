@@ -123,9 +123,9 @@ fn test_apply_fa_results_preserves_pretimed_bullet() {
     let input = include_str!("../../../../../../test-fixtures/fa_pretimed_with_fillers.cha");
     let mut chat = parse_chat(input);
 
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(37397, 42983),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(37397, 42983),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -142,8 +142,8 @@ fn test_apply_fa_results_preserves_pretimed_bullet() {
                 text: "home".into(),
             },
         ],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
 
     let responses = vec![vec![
         WordTiming::fixture(42221, 42582),

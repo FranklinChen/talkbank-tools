@@ -31,6 +31,84 @@ fn test_group_utterances_single_group() {
 }
 
 #[test]
+fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next() {
+    let mut chat = parse_chat(include_str!(
+        "../../../../../../test-fixtures/fa_two_timed_utterances.cha"
+    ));
+    get_test_utterance(&mut chat, 0)
+        .main
+        .content
+        .bullet
+        .as_mut()
+        .unwrap()
+        .timing
+        .end_ms = 3_035_820;
+    let grouped = group_utterances(&chat, 15_000, &test_recording(4_000_000));
+    assert_eq!(
+        grouped.refusals.len(),
+        1,
+        "oversized input needs durable refusal"
+    );
+    assert_eq!(grouped.groups.len(), 1);
+    assert_eq!(
+        grouped.groups[0].utterance_indices,
+        vec![UtteranceIdx::new(1)]
+    );
+    assert_eq!(grouped.groups[0].words.len(), 3);
+    assert_eq!(
+        get_test_utterance(&mut chat, 0)
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .unwrap()
+            .timing
+            .end_ms,
+        3_035_820,
+        "grouping must not rewrite the supplied timing to make it fit"
+    );
+}
+
+#[test]
+fn group_window_budget_includes_trailing_padding() {
+    let chat = parse_chat(include_str!(
+        "../../../../../../test-fixtures/fa_two_timed_utterances.cha"
+    ));
+    let grouped = group_utterances(&chat, 10_000, &test_recording(20_000));
+    assert_eq!(grouped.groups.len(), 1);
+    assert_eq!(grouped.groups[0].audio_start_ms(), 0);
+    assert_eq!(grouped.groups[0].audio_end_ms(), 10_000);
+    assert_eq!(grouped.groups[0].words.len(), 5);
+}
+
+#[test]
+fn group_window_budget_preserves_the_extent_of_overlapping_utterances() {
+    let mut chat = parse_chat(include_str!(
+        "../../../../../../test-fixtures/fa_two_timed_utterances.cha"
+    ));
+    get_test_utterance(&mut chat, 0)
+        .main
+        .content
+        .bullet
+        .as_mut()
+        .unwrap()
+        .timing
+        .end_ms = 10_000;
+    get_test_utterance(&mut chat, 1)
+        .main
+        .content
+        .bullet
+        .as_mut()
+        .unwrap()
+        .timing
+        .end_ms = 6_000;
+    let grouped = group_utterances(&chat, 10_000, &test_recording(10_000));
+    assert_eq!(grouped.groups.len(), 1);
+    assert_eq!(grouped.groups[0].audio_end_ms(), 10_000);
+    assert_eq!(grouped.groups[0].words.len(), 5);
+}
+
+#[test]
 fn test_wor_policy_fillers_match_between_fa_extraction_and_wor_generation() {
     let main = "&-um there .";
 

@@ -156,9 +156,9 @@ fn test_apply_fa_results() {
     let input = include_str!("../../../../../../test-fixtures/fa_hello_world_goodbye_timed.cha");
     let mut chat = parse_chat(input);
 
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(0, 10000),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(0, 10000),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -175,8 +175,8 @@ fn test_apply_fa_results() {
                 text: "goodbye".into(),
             },
         ],
-        utterance_indices: vec![UtteranceIdx::new(0), UtteranceIdx::new(1)],
-    }];
+        vec![UtteranceIdx::new(0), UtteranceIdx::new(1)],
+    )];
 
     let responses = vec![vec![
         WordTiming::fixture(100, 1000),
@@ -767,9 +767,9 @@ fn test_apply_fa_results_excludes_xxx_from_wor_tier() {
 
     // FA group: 5 words extracted by collect_fa_words, xxx is excluded because
     // untranscribed tokens have no alignable phoneme sequence.
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(27602, 28323),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(27602, 28323),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -797,8 +797,8 @@ fn test_apply_fa_results_excludes_xxx_from_wor_tier() {
             },
             // xxx is NOT in the FA group, not sent to the aligner.
         ],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
 
     // FA response: 5 timings for the 5 real words.
     let responses = vec![vec![

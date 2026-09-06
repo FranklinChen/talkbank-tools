@@ -65,7 +65,7 @@
 //!   the whole point of the type; and the utterance-boundary pair feeds
 //!   `clamped_to_bullet`, which is the named operation. Converting either would
 //!   move information that is already carried.
-//! * `grouping.rs::extend_into_trailing_gap` and `expand_for_fillers.rs` cap an
+//! * `grouping.rs::GroupWindow::extend_into_trailing_gap` and `expand_for_fillers.rs` cap an
 //!   INCREMENT (`(gap / 2).min(MAX_..)`), not a position cut down to a domain
 //!   bound. Nothing upstream is wrong when that cap binds; it is the policy
 //!   working. A `Clamped` here would report a non-event on most utterances.
@@ -459,12 +459,28 @@ impl FaWindow {
 
     /// The window's end, in file coordinates.
     ///
-    /// `start()` was deleted with no caller: handing out a bare `FileMs` is the
-    /// raw-coordinate path `to_file` exists to be the only route through, and a
-    /// public accessor is an invitation to re-open it. This one survives because
-    /// an assumed duration must be capped somewhere.
+    /// Engine reports cross into file coordinates through `to_file`; audio
+    /// request construction uses the crate-private `audio_start` accessor.
     pub const fn end(&self) -> FileMs {
         self.end
+    }
+
+    /// Start coordinate used to build the audio request for this admitted window.
+    pub(crate) const fn audio_start(&self) -> FileMs {
+        self.start
+    }
+
+    /// Extend coverage without leaving the recording that admitted this window.
+    pub(crate) fn extend_by(self, extension: Ms) -> Self {
+        Self {
+            end: FileMs::new(
+                self.end
+                    .get()
+                    .saturating_add(extension.0)
+                    .min(self.recording.duration().get()),
+            ),
+            ..self
+        }
     }
 
     /// The window's length.

@@ -220,7 +220,6 @@ fn replay_cached_raw_evidence(
     engine_version: &crate::api::EngineVersion,
     group_index: usize,
     group: &crate::chat_ops::fa::FaGroup,
-    recording: &crate::chat_ops::fa::coordinates::Recording,
 ) -> Result<transport::FaWorkerEvidenceResult, ServerError> {
     let evidence = raw_evidence::ReplayableFaRawEvidence::decode(
         value,
@@ -234,7 +233,7 @@ fn replay_cached_raw_evidence(
             "cached raw FA evidence for group {group_index} was refused: {error}"
         ))
     })?;
-    transport::replay_group_evidence(evidence, group_index, group, recording)
+    transport::replay_group_evidence(evidence, group_index, group)
 }
 
 /// A cache layer whose value was present but could not be admitted.
@@ -276,7 +275,6 @@ struct FaCacheGroupAdmission<'a> {
     engine_version: &'a crate::api::EngineVersion,
     group_index: usize,
     group: &'a crate::chat_ops::fa::FaGroup,
-    recording: &'a crate::chat_ops::fa::coordinates::Recording,
 }
 
 impl<'a> FaCacheGroupAdmission<'a> {
@@ -286,7 +284,6 @@ impl<'a> FaCacheGroupAdmission<'a> {
         engine_version: &'a crate::api::EngineVersion,
         group_index: usize,
         group: &'a crate::chat_ops::fa::FaGroup,
-        recording: &'a crate::chat_ops::fa::coordinates::Recording,
     ) -> Self {
         Self {
             cache_key,
@@ -294,7 +291,6 @@ impl<'a> FaCacheGroupAdmission<'a> {
             engine_version,
             group_index,
             group,
-            recording,
         }
     }
 
@@ -313,7 +309,6 @@ impl<'a> FaCacheGroupAdmission<'a> {
                 self.engine_version,
                 self.group_index,
                 self.group,
-                self.recording,
             ) {
                 Ok(evidence) => {
                     return FaCacheResolution {
@@ -622,7 +617,7 @@ pub(crate) async fn run_fa_from_ast(
     // 2c. Group utterances
     let Grouping {
         groups,
-        refusals: unplaceable_decisions,
+        refusals: grouping_decisions,
         windows_clamped,
     } = group_utterances(&chat_file, fa_params.max_group_ms().0, &recording);
 
@@ -658,7 +653,7 @@ pub(crate) async fn run_fa_from_ast(
             &mut chat_file,
             crate::chat_ops::fa::FaDecisions::without_injection(
                 rescue_decisions,
-                unplaceable_decisions,
+                grouping_decisions,
                 finalized,
             ),
         );
@@ -782,7 +777,6 @@ pub(crate) async fn run_fa_from_ast(
             services.engine_version,
             i,
             &groups[i],
-            &recording,
         )
         .resolve(cached_raw.get(key.as_str()), cached.get(key.as_str()));
         for refusal in resolution.refusals {
@@ -838,10 +832,8 @@ pub(crate) async fn run_fa_from_ast(
     if let FaInferencePlan::Authorized(authorization) =
         plan_fa_inference(fa_params.cache_policy, &miss_indices)?
     {
-        // Resolved before dispatch so every group's reply can be checked
-        // against the audio it describes. Fails the file rather than running
-        // unbounded: a pass that cannot state the recording's length cannot
-        // tell a measurement from a moment that does not exist.
+        // Every group already owns the recording-bound window admitted by
+        // grouping; live inference and cache replay consume that same proof.
         let parsed_results = transport
             .infer_groups(
                 UncheckedFaWorkerBatch {
@@ -853,7 +845,6 @@ pub(crate) async fn run_fa_from_ast(
                     worker_lang: worker_lang.into(),
                     engine: fa_params.engine,
                     gap_healing: fa_params.gap_healing,
-                    recording,
                 }
                 .admit()?,
             )
@@ -985,7 +976,7 @@ pub(crate) async fn run_fa_from_ast(
         &mut chat_file,
         crate::chat_ops::fa::FaDecisions {
             rescue: rescue_decisions,
-            unplaceable: unplaceable_decisions,
+            unplaceable: grouping_decisions,
             finalized,
         },
     );
@@ -1193,7 +1184,6 @@ mod tests {
     #[test]
     fn raw_evidence_is_replayed_before_a_derived_timing_hit() {
         use crate::api::DurationSeconds;
-        use crate::chat_ops::fa::coordinates::{Ms, Recording};
         use crate::chat_ops::fa::{FaGroup, FaWord, TimeSpan};
         use crate::chat_ops::{UtteranceIdx, WordIdx};
         use crate::types::engines::FaEngineName;
@@ -1202,15 +1192,15 @@ mod tests {
         };
 
         let key = CacheKey::from_content("raw-first");
-        let group = FaGroup {
-            audio_span: TimeSpan::new(100, 900),
-            words: vec![FaWord {
+        let group = FaGroup::test_fixture(
+            TimeSpan::new(100, 900),
+            vec![FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
                 text: "hello".to_owned(),
             }],
-            utterance_indices: vec![UtteranceIdx::new(0)],
-        };
+            vec![UtteranceIdx::new(0)],
+        );
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("raw-first"),
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
@@ -1239,7 +1229,6 @@ mod tests {
         .expect("positive derived timing");
         let derived_json =
             serde_json::to_value(vec![Some(derived_timing)]).expect("serialize derived timing");
-        let recording = Recording::of_duration(Ms(1_000)).expect("non-empty recording");
 
         let resolution = FaCacheGroupAdmission::new(
             &key,
@@ -1247,7 +1236,6 @@ mod tests {
             &crate::api::EngineVersion::from("test-fa-wave-v1"),
             0,
             &group,
-            &recording,
         )
         .resolve(Some(&raw_json), Some(&derived_json));
 

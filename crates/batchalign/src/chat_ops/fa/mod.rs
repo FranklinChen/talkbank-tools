@@ -40,7 +40,7 @@ pub use self::alignment::parse_fa_response;
 pub use self::expand_for_fillers::expand_bullets_for_edge_fillers;
 pub use self::extraction::collect_fa_words;
 pub use self::grouping::{
-    Estimates, Grouping, Placement, WHISPER_FA_MAX_LABEL_TOKENS, count_utterance_timing,
+    Estimates, FaGroup, Grouping, Placement, WHISPER_FA_MAX_LABEL_TOKENS, count_utterance_timing,
     estimate_untimed_boundaries, group_utterances,
 };
 pub use self::injection::inject_timings_for_utterance;
@@ -479,30 +479,6 @@ impl FaWord {
     /// Stable word identifier for callback protocols.
     pub fn stable_id(&self) -> String {
         format!("u{}:w{}", self.utterance_index, self.utterance_word_index)
-    }
-}
-
-/// A group of utterances clustered for a single FA call.
-#[derive(Debug)]
-pub struct FaGroup {
-    /// Audio window for this group.
-    #[allow(dead_code)]
-    pub audio_span: TimeSpan,
-    /// Words in this group with positional indices.
-    pub words: Vec<FaWord>,
-    /// Utterance indices included in this group.
-    pub utterance_indices: Vec<UtteranceIdx>,
-}
-
-impl FaGroup {
-    /// Start of the audio window (ms).
-    pub fn audio_start_ms(&self) -> u64 {
-        self.audio_span.start_ms
-    }
-
-    /// End of the audio window (ms).
-    pub fn audio_end_ms(&self) -> u64 {
-        self.audio_span.end_ms
     }
 }
 

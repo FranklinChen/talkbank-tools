@@ -16,9 +16,9 @@ fn pass1_stripped_utterance_gets_no_wor_tier() {
     let input = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|x|CHI|||||Child|||\n*CHI:\thello . \u{15}5000_6000\u{15}\n*CHI:\tworld . \u{15}2000_3000\u{15}\n@End\n";
     let mut chat = parse_chat(input);
 
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(0, 10_000),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(0, 10_000),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -30,8 +30,8 @@ fn pass1_stripped_utterance_gets_no_wor_tier() {
                 text: "world".into(),
             },
         ],
-        utterance_indices: vec![UtteranceIdx::new(0), UtteranceIdx::new(1)],
-    }];
+        vec![UtteranceIdx::new(0), UtteranceIdx::new(1)],
+    )];
     let responses = vec![vec![
         WordTiming::fixture(5000, 5500),
         WordTiming::fixture(2000, 2500),
@@ -71,15 +71,15 @@ fn untimed_word_with_inherited_bullet_gets_no_wor_tier() {
     let input = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|x|CHI|||||Child|||\n*CHI:\thello . \u{15}29500_30980\u{15}\n@End\n";
     let mut chat = parse_chat(input);
 
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(0, 40_000),
-        words: vec![FaWord {
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(0, 40_000),
+        vec![FaWord {
             utterance_index: UtteranceIdx::new(0),
             utterance_word_index: WordIdx::new(0),
             text: "hello".into(),
         }],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
     // The aligner returned nothing for the one word in this group.
     let responses = vec![vec![None]];
 

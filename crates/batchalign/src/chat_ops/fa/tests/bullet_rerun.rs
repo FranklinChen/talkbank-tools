@@ -26,9 +26,9 @@ fn test_rerun_fa_strips_stale_x_tiers_even_when_no_new_decisions() {
     let mut chat = parse_chat(input);
 
     // Re-run: apply FA with clean word timings (no decisions expected).
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(0, 5000),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(0, 5000),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -40,8 +40,8 @@ fn test_rerun_fa_strips_stale_x_tiers_even_when_no_new_decisions() {
                 text: "world".into(),
             },
         ],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
     let responses = vec![vec![
         WordTiming::fixture(1000, 1500),
         WordTiming::fixture(1500, 3000),
@@ -121,9 +121,9 @@ fn test_fa_bullet_overwrites_utr_hint_with_word_derived_timing() {
         bullet.source = BulletSource::Utr;
     }
 
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(800, 3000),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(800, 3000),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -135,8 +135,8 @@ fn test_fa_bullet_overwrites_utr_hint_with_word_derived_timing() {
                 text: "world".into(),
             },
         ],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
 
     let responses = vec![vec![
         WordTiming::fixture(1000, 1500),
@@ -192,9 +192,9 @@ fn test_fa_preserves_utr_hint_when_all_words_untimed() {
         bullet.source = BulletSource::Utr;
     }
 
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(1000, 3000),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(1000, 3000),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -206,8 +206,8 @@ fn test_fa_preserves_utr_hint_when_all_words_untimed() {
                 text: "world".into(),
             },
         ],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
 
     // FA total failure: all words return None.
     let responses = vec![vec![None, None]];
@@ -305,9 +305,9 @@ fn test_fa_sets_bullet_from_word_span_when_no_prior_bullet() {
         "test requires utterance to have no bullet initially"
     );
 
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(0, 5000),
-        words: vec![
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(0, 5000),
+        vec![
             FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
@@ -319,8 +319,8 @@ fn test_fa_sets_bullet_from_word_span_when_no_prior_bullet() {
                 text: "world".into(),
             },
         ],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
 
     let responses = vec![vec![
         WordTiming::fixture(1000, 1500),
@@ -366,15 +366,15 @@ fn test_fa_clears_zero_duration_authoritative_bullet_when_fa_produces_no_word_ti
     );
 
     // FA returns all None, e.g. the FA engine cannot align a single letter.
-    let groups = vec![FaGroup {
-        audio_span: TimeSpan::new(245000, 247000),
-        words: vec![FaWord {
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(245000, 247000),
+        vec![FaWord {
             utterance_index: UtteranceIdx::new(0),
             utterance_word_index: WordIdx::new(0),
             text: "z".into(),
         }],
-        utterance_indices: vec![UtteranceIdx::new(0)],
-    }];
+        vec![UtteranceIdx::new(0)],
+    )];
     let responses = vec![vec![None]];
 
     let _ = apply_fa_results(
@@ -419,18 +419,18 @@ fn test_fa_backward_timestamp_from_wrong_audio_window_is_stripped() {
     // Group 1 (wrong window): "so take a look …" aligned to earlier window at
     //   639000-641000ms: FA returns timings relative to that wrong window.
     let groups = vec![
-        FaGroup {
-            audio_span: TimeSpan::new(731000, 735000),
-            words: vec![FaWord {
+        FaGroup::test_fixture(
+            TimeSpan::new(731000, 735000),
+            vec![FaWord {
                 utterance_index: UtteranceIdx::new(0),
                 utterance_word_index: WordIdx::new(0),
                 text: "alright".into(),
             }],
-            utterance_indices: vec![UtteranceIdx::new(0)],
-        },
-        FaGroup {
-            audio_span: TimeSpan::new(637000, 645000),
-            words: vec![
+            vec![UtteranceIdx::new(0)],
+        ),
+        FaGroup::test_fixture(
+            TimeSpan::new(637000, 645000),
+            vec![
                 FaWord {
                     utterance_index: UtteranceIdx::new(1),
                     utterance_word_index: WordIdx::new(0),
@@ -472,8 +472,8 @@ fn test_fa_backward_timestamp_from_wrong_audio_window_is_stripped() {
                     text: "them".into(),
                 },
             ],
-            utterance_indices: vec![UtteranceIdx::new(1)],
-        },
+            vec![UtteranceIdx::new(1)],
+        ),
     ];
 
     // FA responses: group 1 returns timings from the wrong window (backward

@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-06 07:25 EDT
+**Last updated:** 2026-09-06 07:47 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -564,6 +564,44 @@ permission-denied" → distinct user-facing remediation):
 6. Update the test in `runner/util/mod.rs::worker_error_classification_is_stable`
    to lock in the classification.
 7. Update this chapter's tables.
+
+## Alignment window admission
+
+Grouping owns the audio window sent to an aligner. Every production `FaGroup`
+comes from that stage with a private, admitted `FaWindow`; live dispatch and raw
+cache replay use that same value. They no longer receive a separately supplied
+recording and reconstruct the window from timestamps. Unit tests of downstream
+injection can declare fixtures through a test-only constructor, which is absent
+from production builds.
+
+The engine's time budget includes trailing gap padding. A pending group owns
+its words, utterance indices and bounded window together; appending overlapping
+utterances extends its coverage without shrinking the earlier extent. When a
+new utterance cannot join, the pending group is finished before the new one
+starts. Utterances with no alignable words cannot alter a pending audio window.
+
+A single utterance with an oversized, empty, inverted or out-of-recording window
+receives a durable FA `window_refused` decision. No request is dispatched for
+it. Grouping preserves the supplied words and timing rather than clipping an
+uncertain long window or guessing finer word positions. Later pipeline timing
+repair remains a separate, recorded operation. Refusal means narrower timing
+evidence is required; it does not mean the source speech is invalid or that the
+corpus is complete.
+
+The existing character-count grouping policy remains separate. A single
+utterance exceeding the Whisper label budget can still reach its model error
+path; this audio-window change does not claim tokenizer-budget admission.
+
+Reproduce the window-policy checks with the repository fixture:
+
+```bash
+cargo test -p batchalign --lib group_window_budget
+```
+
+Before the fix, the oversized-utterance case produced no refusal, and padding
+expanded a requested 10,000 ms window to 11,500 ms. The private group field also
+made 19 old unit-test struct literals fail to compile, removing that raw
+construction route from production callers.
 
 ## FA evidence after a group-local failure
 

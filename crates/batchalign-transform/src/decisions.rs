@@ -107,6 +107,8 @@ pub enum FaStrategy {
     /// from an alignment failure, which is why it is a recorded decision rather
     /// than a log line.
     UnplaceableRun,
+    /// No request was made because the utterance window cannot fit the recording or engine budget.
+    WindowRefused,
 }
 
 impl FaStrategy {
@@ -119,6 +121,7 @@ impl FaStrategy {
             Self::TimingStripped => "timing_stripped",
             Self::TimingProvenance => "timing_provenance",
             Self::UnplaceableRun => "unplaceable_run",
+            Self::WindowRefused => "window_refused",
             Self::WordsTimingDropped => "words_timing_dropped",
             Self::NarrowBulletRescued => "narrow_bullet_rescued",
         }
