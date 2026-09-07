@@ -7,6 +7,10 @@ This is the required checklist for a public `batchalign3` release. The
 supported distribution channel is a GitHub Release; BA3 is not published to
 PyPI. A failed or unknown gate blocks the tag.
 
+Review dependency changes and queued advisory remediation before building or
+pushing the candidate. Settle that scope before the final gates so a known
+cleanup does not force another candidate and release rehearsal.
+
 ## Release artifact topology
 
 ```mermaid

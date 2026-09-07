@@ -63,7 +63,6 @@ dependencies = [
     "typing-extensions",
     "certifi",
     # Utilities
-    "nltk>=3.8",
     "praatio>=6.0.0",
     # Cloud ASR + MT providers
     "tencentcloud-sdk-python-common",

@@ -8,19 +8,9 @@ name: Dependency Audit
 # cannot fix by fixing their work. On 2026-08-14 a deploy-day push was stopped by
 # a newly-published `lightning` advisory that had no released fix at all.
 #
-# The record also shows what the gate was actually finding. Every advisory
-# allowlisted below reached the same verdict: batchalign loads only pinned
-# first-party models (Whisper / Stanza from known sources) and hardcoded nltk
-# resource names, so no attacker-controlled model or resource path reaches the
-# vulnerable API. Six advisories, six identical answers, each costing a red build
-# and a hand-written rationale.
-#
-# What is kept: the signal. A weekly report tells a maintainer, including whoever
-# inherits this, that a dependency has a known advisory. Dependabot separately
-# opens PRs for the ones with real fixes. What is dropped is only the blocking.
-#
-# This mirrors how the operator workspace already handles its own lockfiles: a
-# periodic human-readable audit, not a gate.
+# Audit the committed lockfiles. Re-resolving first can hide an advisory in
+# the versions actually shipped. The one retained Python exception below is
+# scoped to the packaged Pyannote model graph; new advisories still report.
 
 on:
   schedule:
@@ -40,40 +30,21 @@ jobs:
         with:
           enable-cache: true
       - name: Python audit
-        # Allowlisted advisories, each with rationale. Kept verbatim from the
-        # push-gated job this replaces, because the reasoning is still what a
-        # reader needs; only the trigger changed.
-        #
-        # - PYSEC-2025-217, CVE-2026-1839 (transformers 4.x): no stable fix
-        #   existed when allowlisted (only 5.0.0rc3, breaking-major).
-        # - CVE-2026-4372 (transformers, RCE via untrusted model loading;
-        #   fixed in 5.3.0): the fix is an untested 4.x -> 5.x major bump.
-        #   EXPIRY: if the handover has not completed by 2026-09-01, do the
-        #   bump properly instead of extending this ignore.
-        # - PYSEC-2026-597 (nltk percent-encoded path traversal in
-        #   nltk.data.load()): NO fixed release exists; resource names here
-        #   are hardcoded, never user input.
-        # - PYSEC-2026-2290 / CVE-2026-5241 (transformers, LightGlue
-        #   config.json overrides trust_remote_code=False): NO fixed release
-        #   exists. Batchalign never loads LightGlue models.
-        # - PYSEC-2026-3624 / CVE-2026-58659 (lightning, RCE in
-        #   `LightningModule.load_from_checkpoint` via attacker-controlled
-        #   module names in checkpoint `_instantiator` hyperparameters,
-        #   bypassing weights_only=True): fixed in COMMIT d710d68, with no
-        #   release carrying it, so there is nothing to upgrade to. The OSV
-        #   range is additionally mis-stated as `fixed: 2022.6.15` against
-        #   affected versions 1.8.0-2.6.5, an artifact of lightning's
-        #   CalVer-to-SemVer switch, so the declared fix predates everything
-        #   it claims to fix. Batchalign loads pinned first-party checkpoints.
-        #   Re-check once a release carries d710d68.
+        # Reviewed 2026-09-06: PYSEC-2026-3624 / CVE-2026-58659 affects
+        # Lightning 2.6.5 checkpoint instantiators. Pyannote reaches the loader,
+        # so this is not an unreachable-function claim. pyannote_local.py admits
+        # the packaged full-revision model graph; jobs cannot supply arbitrary
+        # checkpoint paths. Local model caches remain trusted artifacts.
+        # Both Lightning packages still publish 2.6.5 as latest. Adopt a released
+        # compatible fix for upstream commit d710d68 when available; do not treat
+        # the advisory's 2022.6.15 version as an upgrade instruction.
+        # NLTK is removed; the old Transformers 4.x exemptions are obsolete.
+        # Audit exact locked versions without pip re-resolution. The intentionally
+        # excluded TorchCodec marker has no artifact hash in uv's export, so a
+        # require-hashes audit rejects that non-installable entry before filtering.
         run: |
-          uv export --no-hashes --no-dev --no-emit-project > requirements-audit.txt
-          uvx pip-audit -r requirements-audit.txt \
-            --ignore-vuln PYSEC-2025-217 \
-            --ignore-vuln CVE-2026-1839 \
-            --ignore-vuln CVE-2026-4372 \
-            --ignore-vuln PYSEC-2026-597 \
-            --ignore-vuln PYSEC-2026-2290 \
+          uv export --locked --no-hashes --no-dev --no-emit-project > requirements-audit.txt
+          uvx pip-audit --no-deps --disable-pip -r requirements-audit.txt \
             --ignore-vuln PYSEC-2026-3624
 
   rust-audit:
@@ -87,8 +58,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-workspace
-      - name: Generate lockfile
-        run: cargo generate-lockfile
+      - name: Validate committed lockfile
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: RustSec audit
         uses: rustsec/audit-check@v2
         with:
