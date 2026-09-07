@@ -67,6 +67,16 @@ mod tests {
 
     #[test]
     fn asr_backend_mapping_distinguishes_live_v2_worker_modes() {
+        use crate::options::UtrEngine;
+        assert_eq!(AsrBackend::from(&UtrEngine::RevAi), AsrBackend::RustRevAi);
+        assert_eq!(
+            AsrBackend::from(&UtrEngine::Whisper),
+            AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2)
+        );
+        assert_eq!(
+            AsrBackend::from(&UtrEngine::HkTencent),
+            AsrBackend::Worker(AsrWorkerMode::HkTencentV2)
+        );
         assert_eq!(AsrBackend::from_engine_name("rev"), AsrBackend::RustRevAi);
         assert_eq!(
             AsrBackend::from_engine_name("tencent"),

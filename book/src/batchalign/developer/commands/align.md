@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-05 02:30 EDT
+**Last updated:** 2026-09-06 23:14 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -16,7 +16,7 @@ see [User Guide: align](../../user-guide/commands/align.md).
 | Options builder | `crates/batchalign/src/cli/args/options.rs:130-194` (inline dispatch) | Maps `AlignArgs` → `CommandOptions::Align(AlignOptions)` |
 | Command definition | `crates/batchalign/src/commands/align.rs`: `AlignCommand` | `CommandDefinition` impl, pre-validation gate |
 | FA pipeline | `crates/batchalign/src/runner/dispatch/fa_pipeline.rs` | Per-file FA orchestration: UTR → grouping → FA → injection |
-| UTR dispatch | `crates/batchalign/src/runner/dispatch/utr.rs` | `resolve_strategy()`, language-aware strategy gate |
+| UTR dispatch | `crates/batchalign/src/runner/dispatch/utr.rs` | Resolved strategy construction and per-recording grouping context |
 | UTR library | `crates/batchalign/src/chat_ops/fa/utr.rs` | `run_utr_pass()`, `inject_utr_timing()`, partial-window logic |
 | FA library | `crates/batchalign/src/chat_ops/fa/` | Grouping, extraction, DP alignment, injection, postprocessing |
 | Worker boundary | `batchalign/worker/_fa_v2.py` + `crates/batchalign-pyo3/src/worker_fa_exec.rs` | Rust owns request validation and V2 response shaping; Python hosts model callbacks |
@@ -265,7 +265,11 @@ probability.
 
 ## UTR strategy resolution
 
-`resolve_strategy()` in `crates/batchalign/src/runner/dispatch/utr.rs:80-114`:
+`ResolvedUtrStrategy::from_options()` in
+`crates/batchalign/src/runner/dispatch/options.rs` resolves the submitted policy.
+The two-pass variant owns its tuning and travels through both initial and
+fallback recovery. `resolve_strategy()` in `runner/dispatch/utr.rs` adds the
+recording grouping limits without replacing the submitted configuration:
 
 **Auto strategy (default):** Always returns `GlobalUtr` regardless of language or overlap markers.
 

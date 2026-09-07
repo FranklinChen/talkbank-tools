@@ -284,11 +284,6 @@ impl Default for AlignOptions {
 }
 
 impl AlignOptions {
-    /// Get the two-pass UTR configuration.
-    pub fn two_pass_config(&self) -> &crate::chat_ops::fa::TwoPassConfig {
-        &self.utr.two_pass
-    }
-
     /// Return the effective FA engine after applying any shared `fa` override.
     pub fn effective_fa_engine(&self) -> FaEngineName {
         self.common.engine_overrides.fa.unwrap_or(self.fa_engine)

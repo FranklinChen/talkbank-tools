@@ -141,10 +141,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # The dry run and tag release build the same commit and target matrix.
-      # Preserve Cargo's target artifacts so the tag run reuses the binaries
-      # already exercised by the dry run instead of repeating a 12-20 minute
-      # cold native build on every platform.
+      # Share dependency artifacts between rehearsal and tag builds. rust-cache
+      # excludes workspace crates by default; this does not reuse the rehearsed
+      # CLI binary. The tag also changes the CLI's embedded build identity.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: batchalign-release-${{ matrix.target }}

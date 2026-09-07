@@ -1,7 +1,7 @@
 # Algorithms, Language, and Alignment Migration
 
 **Status:** Current
-**Last updated:** 2026-05-19 13:34 EDT
+**Last updated:** 2026-09-06 23:14 EDT
 
 Comparison anchors:
 
@@ -171,19 +171,12 @@ One especially important `align` sub-change is UTR:
 
 #### Fuzzy UTR matching (new in BA3)
 
-BA2 used exact string matching between transcript words and ASR tokens.
-BA3 adds fuzzy matching via Jaro-Winkler similarity (threshold 0.85,
-configurable via `--utr-fuzzy`). This improves UTR coverage on files
-with ASR substitutions, dialectal variants, and backchannel
-normalizations (e.g., transcript "mhm" matching ASR "mm-hmm").
-
-Validated on 6 corpora (59 files):
-- SBCSAE: 76.8% coverage (vs lower with exact), 140ms median precision
-- APROCSA, TaiwanHakka, Welsh, German: identical to exact matching
-- No regressions on any corpus
-
-Fuzzy matching is now the default. Exact matching remains available
-via `--utr-fuzzy 1.0`.
+BA3's experimental two-pass strategy supports Jaro-Winkler matching
+(threshold 0.85 by default, configurable via `--utr-fuzzy`). The default
+`auto` and explicit `global` strategies use case-insensitive exact matching;
+`--utr-fuzzy` applies only with `--utr-strategy two-pass`. Historical
+coverage measurements do not establish the behavior or accuracy of a current
+run; retain its strategy, configuration, source and timing evidence.
 
 #### Two-pass overlap-aware UTR (BA3 mechanism, currently opt-in only)
 

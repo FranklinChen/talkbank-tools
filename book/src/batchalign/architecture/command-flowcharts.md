@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-08-31 22:01 EDT
+**Last updated:** 2026-09-06 23:15 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -124,9 +124,9 @@ TwoPassOverlapUtr) are retained here as historical context for the
 benchmark numbers that motivated the original gate, not as a description
 of current behavior.
 
-**Implementation:** `resolve_strategy()` in
-`crates/batchalign/src/runner/dispatch/utr.rs` (the inline comment in the
-`Auto` arm carries the disable rationale). The language-agnostic
+**Implementation:** `ResolvedUtrStrategy::from_options()` in
+`crates/batchalign/src/runner/dispatch/options.rs` resolves Auto to global
+and retains explicit two-pass tuning. The language-agnostic
 overlap-detection helper `select_strategy()` in
 `crates/batchalign/src/chat_ops/fa/utr.rs` (library) remains, but is no
 longer called from the `Auto` path.

@@ -1,7 +1,7 @@
 # Persistent State and Behavioral Changes
 
 **Status:** Current
-**Last updated:** 2026-05-19 13:34 EDT
+**Last updated:** 2026-09-06 23:59 EDT
 
 Batchalign3 introduces several stateful behaviors that did not exist in
 Batchalign2. This page documents every form of persistent state, where it
@@ -56,20 +56,25 @@ forced alignment (`forced_alignment`). Text-NLP commands (`morphotag`,
 recomputes from scratch so that model or pipeline changes always take
 effect immediately.
 
-For the cached audio tasks, Batchalign computes a BLAKE3 hash of the
-input content plus command parameters. If the cache contains a result
-for that hash, it returns the cached result without invoking the audio
-model.
+Audio cache keys combine media identity with the parameters owned by each
+cache layer. Media identity currently uses canonical path, modification time and size;
+it is not a content digest. The UTR normalized-response keys include the
+selected ASR provider, language and, for segments, window bounds. Provider-free
+legacy UTR entries are not automatically replayed because their producing
+backend is unknown.
 
-**When this matters:**
+- Repeated alignment can reuse matching retained UTR and FA entries, but still
+  performs orchestration and may load workers. Reuse does not imply instant output.
+- Transcript edits can reuse raw ASR while changing downstream FA groups.
+- UTR matching tuning changes projection of retained ASR; it does not change
+  the raw ASR request. Selecting another UTR provider changes its key.
+- Symlinks and alternate spellings of the same path share media identity.
+  Moving identical audio can miss the metadata-based identity. Changing only
+  FA can also miss UTR's current outer worker-version partition.
+- Text-NLP commands re-run rather than returning cached analysis.
 
-- Re-running `align` on the same media is near-instant, both the ASR
-  pass (UTR) and the forced alignment pass are cached.
-- Editing a file invalidates its cache entry (different content hash).
-- Changing audio-task parameters that affect the cache key (e.g.
-  `--utr-fuzzy`) invalidates the relevant entries.
-- `morphotag`, `translate`, `utseg`, and `coref` are never returned
-  from cache, they re-run every invocation.
+The [forced-alignment cache reference](../reference/forced-alignment.md#utr-asr-cache)
+describes the two key spaces and their current limitations.
 
 **Managing the cache:**
 

@@ -1,7 +1,7 @@
 # Dynamic Programming
 
 **Status:** Current
-**Last updated:** 2026-05-19 16:54 EDT
+**Last updated:** 2026-09-06 23:14 EDT
 
 Where dynamic programming is used at runtime across the workspace,
 which uses are intrinsically necessary, and which are
@@ -184,9 +184,12 @@ flowchart TD
 
 ### Configurable parameters
 
+All tuning flags below apply only to explicit `two-pass`. Global and auto
+use case-insensitive exact matching.
+
 | Flag | Default | Controls |
 |---|---|---|
-| `--utr-strategy` | `auto` | `auto` (detect overlaps) / `global` / `two-pass` |
+| `--utr-strategy` | `auto` | `auto` (currently global) / `global` / `two-pass` |
 | `--utr-ca-markers` | `enabled` | Use ⌈⌉⌊⌋ for onset windowing |
 | `--utr-density-threshold` | `0.30` | Max overlap fraction before skipping exclusion |
 | `--utr-tight-buffer` | `500` | Pass-2 tight window ±ms |

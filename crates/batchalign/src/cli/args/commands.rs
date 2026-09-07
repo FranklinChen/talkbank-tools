@@ -28,9 +28,8 @@ pub enum UtrOverlapStrategy {
     /// Currently equivalent to `global`, the language/content-aware
     /// gate was disabled 2026-03-30 because the two-pass algorithm had
     /// not been validated on operator-reported regression files. See
-    /// `runner/dispatch/utr.rs::resolve_strategy()` for the inline
-    /// rationale and the book chapter on align for the historical
-    /// context. Pass `two-pass` explicitly to opt into the
+    /// the book chapter on align for the historical context. Pass
+    /// `two-pass` explicitly to opt into the
     /// experimental TwoPassOverlapUtr path.
     #[default]
     Auto,
@@ -133,7 +132,9 @@ pub struct AlignUtrTuningArgs {
     #[arg(long, default_value_t = 500)]
     pub utr_tight_buffer: u64,
 
-    /// UTR word matching threshold; 1.0 requests exact matching.
+    /// Two-pass UTR word matching threshold (default 0.85); 1.0 requests
+    /// exact matching. Applies only with --utr-strategy two-pass. Global
+    /// and auto use case-insensitive exact matching.
     #[arg(long)]
     pub utr_fuzzy: Option<UtrFuzzyThreshold>,
 }

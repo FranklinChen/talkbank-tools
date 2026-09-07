@@ -1,21 +1,21 @@
 # Overlap-Aware Alignment Improvements
 
 **Status:** Current
-**Last updated:** 2026-05-19 22:37 EDT
+**Last updated:** 2026-09-06 23:14 EDT
 
 This page documents overlap-aware alignment improvements: what is shipped
 and known limitations.
 
 ## Shipped Features
 
-The following features are **live in production** as defaults. They are not
-behind experimental flags, any `batchalign3 align` run on a file with overlaps
-uses them automatically.
+Two-pass UTR and its tuning require explicit opt-in. The default global
+strategy uses case-insensitive exact matching and does not apply two-pass
+fuzzy matching, CA window narrowing, density exclusion or tight-buffer tuning.
 
 | Feature | Default | CLI override |
 |---------|---------|-------------|
 | Two-pass overlap UTR | **Gated**: requires `--utr-strategy two-pass` | `--utr-strategy two-pass` to enable |
-| Fuzzy word matching (Jaro-Winkler) | Threshold 0.85 | `--utr-fuzzy 1.0` for exact-only |
+| Fuzzy word matching (Jaro-Winkler) | Two-pass only: threshold 0.85 | `--utr-fuzzy 1.0` for exact-only |
 | CA marker window narrowing | Enabled (when two-pass active) | `--utr-ca-markers disabled` |
 | Density-aware fallback | 30% threshold | `--utr-density-threshold` |
 | Tight buffer for pass-2 | 500ms | `--utr-tight-buffer` |

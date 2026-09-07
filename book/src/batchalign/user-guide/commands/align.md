@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-09-05 02:30 EDT
+**Last updated:** 2026-09-06 23:14 EDT
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -162,9 +162,8 @@ When `--utr-strategy auto` (the default), the strategy is currently
 always `GlobalUtr` regardless of file content or language. The
 previous content/language-aware auto-routing (which auto-picked
 `TwoPassOverlapUtr` for English files containing `+<` or `⌊` markers)
-was disabled 2026-03-30, see the inline comment in the `Auto` arm of
-`resolve_strategy()` at
-`crates/batchalign/src/runner/dispatch/utr.rs`. Two-pass overlap-aware
+was disabled 2026-03-30. `ResolvedUtrStrategy` in
+`crates/batchalign/src/runner/dispatch/options.rs` resolves this policy once. Two-pass overlap-aware
 recovery is reachable only via the explicit `--utr-strategy two-pass`
 override.
 
@@ -371,7 +370,7 @@ is more conservative about turning real pauses/fillers into dominant words.
 | `--utr-engine-custom NAME` |: | **Deprecated alias for `--utr-engine`**, still honoured, hidden from `--help`. |
 | `--utr` / `--no-utr` | enabled | Enable or skip the UTR pre-pass entirely |
 | `--utr-strategy {auto,global,two-pass}` | `auto` | Overlap strategy: `auto` currently always returns `GlobalUtr` (the language/content-aware gate was disabled 2026-03-30; see §"UTR strategy selection" above). `two-pass` is the only way to reach `TwoPassOverlapUtr` today. |
-| `--utr-fuzzy THRESHOLD` | `0.85` | Jaro-Winkler similarity threshold for word matching. `1.0` = exact only |
+| `--utr-fuzzy THRESHOLD` | `0.85` | Two-pass only: Jaro-Winkler similarity threshold. Global/auto remain case-insensitive exact; `1.0` = exact only |
 | `--utr-ca-markers {enabled,disabled}` | `enabled` | Use CA overlap markers (⌈⌉⌊⌋) to set alignment windows |
 | `--utr-density-threshold N` | `0.30` | Max overlap fraction before skipping pass-1 exclusion (0.0-1.0) |
 | `--utr-tight-buffer MS` | `500` | Pass-2 tight window buffer in milliseconds |

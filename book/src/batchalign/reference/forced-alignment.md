@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-09-06 15:57 EDT
+**Last updated:** 2026-09-06 23:59 EDT
 
 ## Overview
 
@@ -194,9 +194,8 @@ production CHAT files from CLAN).
    word list. If that match is unique, timing assignment is linear-time and no
    DP is needed. If the match is missing or ambiguous, UTR falls back to a
    **single global Hirschberg DP alignment** of all document words (timed +
-   untimed) against all ASR tokens, using **fuzzy matching** (Jaro-Winkler
-   similarity at threshold 0.85 by default) to tolerate ASR substitutions
-   like "gonna"/"gona" and "mhm"/"mmhm". Timed utterances participate in
+   untimed) against the projected ASR words, using **case-insensitive exact
+   matching** for the default global strategy. Timed utterances participate in
    the alignment to anchor their neighbors but their bullets are left
    unchanged. For each untimed utterance, the min/max matched ASR token
    indices determine the utterance bullet's time span. The global alignment
@@ -204,8 +203,9 @@ production CHAT files from CLAN).
    suffer from. It is still a monotonic aligner, so dense overlap /
    text-audio reordering remains a known limitation.
 
-   **Configurable via:** `--utr-fuzzy <threshold>` (default 0.85; set to 1.0
-   for exact-only matching).
+   **Two-pass only:** `--utr-fuzzy <threshold>` configures the experimental
+   `--utr-strategy two-pass` strategy (default 0.85; 1.0 for exact-only
+   matching). It does not change the default global strategy.
 5. Re-serializes the CHAT with recovered bullets.
 
 ```mermaid
@@ -330,7 +330,7 @@ in a single pass instead.
 | `--utr-ca-markers enabled\|disabled` | `enabled` | Whether Pass 2 uses CA markers for window narrowing |
 | `--utr-density-threshold <0.0-1.0>` | `0.30` | Overlap fraction above which two-pass falls back to global |
 | `--utr-tight-buffer <ms>` | `500` | Buffer around previous utterance for Pass 2 recovery window |
-| `--utr-fuzzy <threshold>` | `0.85` | Jaro-Winkler similarity threshold for fuzzy word matching |
+| `--utr-fuzzy <threshold>` | `0.85` | Two-pass only: Jaro-Winkler similarity threshold |
 
 The fuzzy threshold and overlap-density threshold are finite closed-interval
 types. CLI and serialized configuration inputs outside `0.0` through `1.0`
@@ -1157,20 +1157,28 @@ Two cache key schemes are used:
 ```mermaid
 flowchart LR
     subgraph full ["Full-file cache key"]
-        ff_input["BLAKE3(utr_asr | audio_identity | lang)"]
+        ff_input["BLAKE3(utr_asr_v2 | ASR provider | audio_identity | lang)"]
         ff_input --> ff_entry["Single AsrResponse"]
     end
 
     subgraph partial ["Segment cache keys"]
-        seg_input["BLAKE3(utr_asr_segment | audio_identity | start_ms | end_ms | lang)"]
+        seg_input["BLAKE3(utr_asr_segment_v2 | ASR provider | audio_identity | start_ms | end_ms | lang)"]
         seg_input --> seg_entry["Per-window AsrResponse"]
     end
 ```
 
 Full-file keys are used for mostly-untimed files. Segment keys are used when
-partial-window mode activates (>50% timed, audio >60s). Once the full-file
-result is cached (after the first run), subsequent runs always hit the cache
-regardless of which mode was used initially.
+partial-window mode activates (>50% timed, audio >60s). Full-file and segment
+entries are separate: a full-file entry does not guarantee a segment hit.
+Provider identity is mandatory in both key constructors. Old normalized entries
+without provider identity are retained on disk but are not automatically replayed;
+they cannot establish which ASR backend produced their tokens. Separately retained
+raw Rev evidence still has its own provider-aware request identity.
+
+The current outer cache lookup also checks the FA worker's engine-version
+partition. This conservative extra partition can cause an ASR miss when only FA
+changes; it is not an attestation of the loaded ASR model revision. Retain model
+provenance when comparing runs.
 
 `--override-media-cache` bypasses lookups but still stores results for future use.
 
@@ -1199,12 +1207,14 @@ Both caches use the same SQLite database (the analysis cache, see [Filesystem Pa
 |--------|-----------|----------|
 | Edit transcript text | Stays cached (audio unchanged) | Groups with changed words re-run |
 | Re-record audio | Re-runs (audio identity changed) | Re-runs (audio identity changed) |
-| Change `--fa-engine` | Stays cached (engine not in UTR key) | Misses (engine is part of FA key) |
+| Change `--fa-engine` | May miss when the worker-version partition changes | Misses (engine is part of FA key) |
 | Change `--lang` | Re-runs (lang is part of UTR key) | Re-runs (lang is part of FA key) |
-| Second run, nothing changed | Hits cache | Hits cache, instant output |
+| Change `--utr-engine` | Misses: ASR provider is part of the key | Reuse depends on resulting windows and words |
+| Second run, nothing changed | Can reuse matching retained entries | Can reuse matching retained entries |
 
-**Audio identity** is computed from the file's path, modification time, and size, not
-a content hash. If you move or rename the audio file, the cache will miss even if the
+**Audio identity** is computed from the file's canonical path, modification time, and size, not
+a content hash. Symlinks and alternate path spellings resolve to the same identity.
+If you move or rename the audio file, the cache will miss even if the
 content is identical. Conversely, overwriting a file in place with different content
 will miss only if the modification time or size changes (which the OS updates on write).
 

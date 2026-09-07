@@ -146,6 +146,16 @@ impl AsrWorkerMode {
     }
 }
 
+impl From<&crate::options::UtrEngine> for AsrBackend {
+    fn from(engine: &crate::options::UtrEngine) -> Self {
+        match engine {
+            crate::options::UtrEngine::RevAi => Self::RustRevAi,
+            crate::options::UtrEngine::Whisper => Self::Worker(AsrWorkerMode::LocalWhisperV2),
+            crate::options::UtrEngine::HkTencent => Self::Worker(AsrWorkerMode::HkTencentV2),
+        }
+    }
+}
+
 impl AsrBackend {
     /// Select the runtime boundary from the configured ASR engine string.
     pub(crate) fn from_engine_name(engine_name: &str) -> Self {

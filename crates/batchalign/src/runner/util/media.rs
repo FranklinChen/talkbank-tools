@@ -85,7 +85,9 @@ pub(in crate::runner) async fn preflight_validate_media(
 pub(in crate::runner) async fn compute_audio_identity(
     audio_path: &str,
 ) -> Option<crate::chat_ops::fa::AudioIdentity> {
-    let meta = tokio::fs::metadata(audio_path).await.ok()?;
+    let canonical_path = tokio::fs::canonicalize(audio_path).await.ok()?;
+    let audio_path = canonical_path.to_str()?;
+    let meta = tokio::fs::metadata(&canonical_path).await.ok()?;
     let size = meta.len();
     let mtime = meta
         .modified()

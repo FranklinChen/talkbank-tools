@@ -7,13 +7,14 @@
 
 use std::path::Path;
 
+use super::options::ResolvedUtrStrategy;
 use crate::api::{DurationMs, EngineVersion, LanguageCode3, NumSpeakers};
 use crate::cache::{CacheBackend, UtteranceCache};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Recording, WindowMs};
 use crate::chat_ops::fa::origin::EngineId;
 use crate::chat_ops::fa::timing::{SpanRejections, WordSpan};
-use crate::options::{UtrEngine, UtrOverlapStrategy};
+use crate::options::UtrEngine;
 use crate::params::CachePolicy;
 use crate::pipeline::PipelineServices;
 use crate::runner::debug_dumper::DebugDumper;
@@ -42,8 +43,8 @@ pub(in crate::runner) struct UtrPassContext<'a> {
     pub filename: &'a str,
     /// Selected UTR backend.
     pub engine: &'a UtrEngine,
-    /// Overlap strategy for `+<` utterances.
-    pub overlap_strategy: UtrOverlapStrategy,
+    /// Resolved strategy and its submitted tuning, shared by both recovery paths.
+    pub strategy: &'a ResolvedUtrStrategy,
     /// Debug artifact writer for offline replay.
     pub dumper: &'a DebugDumper,
 }
@@ -67,29 +68,10 @@ impl<'a> UtrPassContext<'a> {
     }
 }
 
-/// Resolve the UTR overlap strategy for a specific CHAT file.
-///
-/// `Auto` currently always returns `GlobalUtr` regardless of file content
-/// or language: the previous content/language-aware selection (which
-/// auto-picked `TwoPassOverlapUtr` for English files containing `+<` or
-/// `⌊` markers) was disabled 2026-03-30 after operator-reported alignment
-/// regressions and the discovery that `enforce_monotonicity()` only checks
-/// start times. See the inline comment in the `Auto` arm below for the
-/// full rationale. `_chat_file` is retained on the signature so re-enabling
-/// content inspection later does not require a function-shape change.
-///
-/// `Global` and `TwoPass` are explicit user overrides and are used as-is.
-///
-/// When `total_audio_ms` and `max_group_ms` are both available, a
-/// [`GroupingContext`](crate::chat_ops::fa::GroupingContext) is passed to
-/// the two-pass strategy so it can compare FA group counts and avoid the
-/// wider-window regression on non-English files. This is only consulted on
-/// the `TwoPass` override path; `Auto` no longer reaches it.
-fn resolve_strategy(
-    strategy: UtrOverlapStrategy,
-    _chat_file: &crate::chat_ops::ChatFile,
-    context: &UtrPassContext<'_>,
-) -> Box<dyn crate::chat_ops::fa::UtrStrategy> {
+/// Instantiate the already-resolved strategy with this recording's grouping
+/// limits. Auto has been resolved to global at option extraction; two-pass
+/// carries the submitted configuration instead of constructing defaults here.
+fn resolve_strategy(context: &UtrPassContext<'_>) -> Box<dyn crate::chat_ops::fa::UtrStrategy> {
     let grouping_context = match (context.total_audio_ms, context.max_group_ms) {
         (Some(total_audio_ms), Some(max_group_ms)) => Some(crate::chat_ops::fa::GroupingContext {
             total_audio_ms: total_audio_ms.0,
@@ -98,25 +80,11 @@ fn resolve_strategy(
         _ => None,
     };
 
-    match strategy {
-        UtrOverlapStrategy::Auto => {
-            // Two-pass overlap strategy is experimental and gated behind
-            // --utr-strategy two-pass.  Auto always uses GlobalUtr until
-            // the two-pass algorithm is validated on an operator's problem files
-            // and the end-time overlap bug is resolved.
-            //
-            // Previous behavior: auto-selected TwoPassOverlapUtr for English
-            // files with +< or ⌊ markers.  Disabled 2026-03-30 because:
-            // 1. an operator reported alignment regressions on real files.
-            // 2. enforce_monotonicity() only checks start times, not end
-            //    times, so overlapping utterance bullets go uncorrected.
-            // 3. Two-pass was tuned on 4 corpora but not broadly validated.
-            Box::new(crate::chat_ops::fa::GlobalUtr)
-        }
-        UtrOverlapStrategy::Global => Box::new(crate::chat_ops::fa::GlobalUtr),
-        UtrOverlapStrategy::TwoPass => Box::new(crate::chat_ops::fa::TwoPassOverlapUtr {
+    match context.strategy {
+        ResolvedUtrStrategy::Global => Box::new(crate::chat_ops::fa::GlobalUtr),
+        ResolvedUtrStrategy::TwoPass(config) => Box::new(crate::chat_ops::fa::TwoPassOverlapUtr {
             grouping_context,
-            config: crate::chat_ops::fa::TwoPassConfig::default(),
+            config: config.clone(),
         }),
     }
 }
@@ -216,6 +184,7 @@ pub(in crate::runner) async fn run_utr_pass(
                 let (start_ms, end_ms) = (window.start().get(), window.end().get());
                 let seg_cache_key = crate::chat_ops::fa::utr_asr_segment_cache_key(
                     context.audio_identity,
+                    context.engine,
                     start_ms,
                     end_ms,
                     context.lang,
@@ -338,7 +307,7 @@ pub(in crate::runner) async fn run_utr_pass(
                 .dumper
                 .dump_utr_tokens(context.filename, &all_tokens);
 
-            let strategy = resolve_strategy(context.overlap_strategy, chat_file, &context);
+            let strategy = resolve_strategy(&context);
             let utr_result = strategy.inject(chat_file, &all_tokens);
 
             info!(
@@ -379,7 +348,11 @@ async fn run_utr_pass_full(
 ) -> Result<crate::chat_ops::fa::utr::UtrResult, crate::error::ServerError> {
     use crate::chat_ops::CacheTaskName;
 
-    let cache_key = crate::chat_ops::fa::utr_asr_cache_key(context.audio_identity, context.lang);
+    let cache_key = crate::chat_ops::fa::utr_asr_cache_key(
+        context.audio_identity,
+        context.engine,
+        context.lang,
+    );
     let asr_response = match lookup_utr_asr_cache(
         context.services.cache,
         &cache_key,
@@ -457,7 +430,7 @@ async fn run_utr_pass_full(
         .dumper
         .dump_utr_tokens(context.filename, &asr_tokens);
 
-    let strategy = resolve_strategy(context.overlap_strategy, chat_file, &context);
+    let strategy = resolve_strategy(&context);
     let utr_result = strategy.inject(chat_file, &asr_tokens);
 
     info!(
@@ -483,8 +456,8 @@ async fn infer_utr_asr_response(
     audio_path: &Path,
     context: UtrPassContext<'_>,
 ) -> Result<crate::transcribe::AsrResponse, crate::error::ServerError> {
-    match context.engine {
-        UtrEngine::RevAi => {
+    match crate::transcribe::AsrBackend::from(context.engine).as_non_rev() {
+        None => {
             let lang = crate::api::LanguageSpec::Resolved(context.lang.clone());
             let provider_media = crate::revai::PreparedRevProviderMedia::from_source(audio_path)
                 .await
@@ -509,7 +482,7 @@ async fn infer_utr_asr_response(
             )
             .await
         }
-        UtrEngine::Whisper | UtrEngine::HkTencent => {
+        Some(backend) => {
             // UTR uses the default per-engine configuration; there are
             // no UTR-specific knobs in `EngineOverrides.extras` today.
             // An empty extras map preserves the current behavior and
@@ -519,9 +492,7 @@ async fn infer_utr_asr_response(
             crate::transcribe::infer_asr(
                 context.services.pool,
                 &crate::transcribe::AsrInferParams {
-                    backend: crate::transcribe::NonRevAsrBackend::Worker(
-                        crate::transcribe::AsrWorkerMode::LocalWhisperV2,
-                    ),
+                    backend,
                     audio_path,
                     lang: &crate::api::LanguageSpec::Resolved(context.lang.clone()),
                     num_speakers: NumSpeakers(1),
@@ -562,7 +533,7 @@ impl UtrAsrCacheMiss {
             }
             (CachePolicy::RequireCache, UtrEngine::Whisper | UtrEngine::HkTencent) => {
                 Err(crate::error::ServerError::Persistence(
-                    "required UTR ASR evidence is missing for an uncached local backend".to_owned(),
+                    "required UTR ASR evidence is missing for the selected ASR backend".to_owned(),
                 ))
             }
             (CachePolicy::UseCache | CachePolicy::SkipCache, _) => {

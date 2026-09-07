@@ -774,26 +774,35 @@ fn lexical_relation(chat_text: &str, asr_text: &str) -> UtrLexicalRelation {
 
 /// Cache key for a full-file UTR ASR result.
 ///
-/// Key = BLAKE3("utr_asr|{audio_identity}|{lang}").
+/// The versioned identity includes the selected ASR provider. Legacy keys
+/// lacked provider provenance and are deliberately not replayed.
 pub fn utr_asr_cache_key(
     audio_identity: &super::AudioIdentity,
+    engine: &crate::options::UtrEngine,
     lang: &str,
 ) -> crate::chat_ops::CacheKey {
-    let input = format!("utr_asr|{}|{lang}", audio_identity.as_str());
+    let input = format!(
+        "utr_asr_v2|{}|{}|{lang}",
+        engine.as_wire_name(),
+        audio_identity.as_str()
+    );
     crate::chat_ops::CacheKey::from_content(&input)
 }
 
 /// Cache key for a segment-level UTR ASR result (partial-window mode).
 ///
-/// Key = BLAKE3("utr_asr_segment|{audio_identity}|{start_ms}|{end_ms}|{lang}").
+/// Includes the selected ASR provider and window. Legacy provider-agnostic
+/// keys cannot safely establish which backend produced their response.
 pub fn utr_asr_segment_cache_key(
     audio_identity: &super::AudioIdentity,
+    engine: &crate::options::UtrEngine,
     start_ms: u64,
     end_ms: u64,
     lang: &str,
 ) -> crate::chat_ops::CacheKey {
     let input = format!(
-        "utr_asr_segment|{}|{start_ms}|{end_ms}|{lang}",
+        "utr_asr_segment_v2|{}|{}|{start_ms}|{end_ms}|{lang}",
+        engine.as_wire_name(),
         audio_identity.as_str()
     );
     crate::chat_ops::CacheKey::from_content(&input)
@@ -1623,8 +1632,8 @@ mod tests {
     fn test_utr_asr_cache_key_deterministic() {
         use super::super::AudioIdentity;
         let identity = AudioIdentity::from_metadata("/tmp/audio.wav", 1234, 5678);
-        let a = super::utr_asr_cache_key(&identity, "eng");
-        let b = super::utr_asr_cache_key(&identity, "eng");
+        let a = super::utr_asr_cache_key(&identity, &crate::options::UtrEngine::Whisper, "eng");
+        let b = super::utr_asr_cache_key(&identity, &crate::options::UtrEngine::Whisper, "eng");
         assert_eq!(a, b);
     }
 
@@ -1633,21 +1642,51 @@ mod tests {
         use super::super::AudioIdentity;
         let id1 = AudioIdentity::from_metadata("/tmp/a.wav", 1234, 5678);
         let id2 = AudioIdentity::from_metadata("/tmp/b.wav", 1234, 5678);
-        let key1 = super::utr_asr_cache_key(&id1, "eng");
-        let key2 = super::utr_asr_cache_key(&id2, "eng");
+        let key1 = super::utr_asr_cache_key(&id1, &crate::options::UtrEngine::Whisper, "eng");
+        let key2 = super::utr_asr_cache_key(&id2, &crate::options::UtrEngine::Whisper, "eng");
         assert_ne!(key1, key2, "different audio should produce different keys");
 
-        let key3 = super::utr_asr_cache_key(&id1, "spa");
+        let key3 = super::utr_asr_cache_key(&id1, &crate::options::UtrEngine::Whisper, "spa");
         assert_ne!(key1, key3, "different lang should produce different keys");
+        for engine in [
+            crate::options::UtrEngine::RevAi,
+            crate::options::UtrEngine::HkTencent,
+        ] {
+            let other = super::utr_asr_cache_key(&id1, &engine, "eng");
+            assert_ne!(
+                key1, other,
+                "different ASR providers must never share evidence"
+            );
+        }
     }
 
     #[test]
     fn test_utr_asr_segment_cache_key_differs_for_windows() {
         use super::super::AudioIdentity;
         let identity = AudioIdentity::from_metadata("/tmp/audio.wav", 1234, 5678);
-        let a = super::utr_asr_segment_cache_key(&identity, 0, 5000, "eng");
-        let b = super::utr_asr_segment_cache_key(&identity, 5000, 10000, "eng");
+        let a = super::utr_asr_segment_cache_key(
+            &identity,
+            &crate::options::UtrEngine::Whisper,
+            0,
+            5000,
+            "eng",
+        );
+        let b = super::utr_asr_segment_cache_key(
+            &identity,
+            &crate::options::UtrEngine::Whisper,
+            5000,
+            10000,
+            "eng",
+        );
         assert_ne!(a, b, "different windows should produce different keys");
+        let other = super::utr_asr_segment_cache_key(
+            &identity,
+            &crate::options::UtrEngine::HkTencent,
+            0,
+            5000,
+            "eng",
+        );
+        assert_ne!(a, other, "segment evidence belongs to its ASR provider");
     }
 
     #[test]

@@ -32,13 +32,33 @@ use crate::transcribe::TranscribeCachePolicies;
 // Align
 // ---------------------------------------------------------------------------
 
+/// Executable UTR strategy, resolved once from submitted options.
+///
+/// A two-pass choice carries its tuning through initial and fallback recovery;
+/// dispatch cannot represent that choice while dropping its configuration.
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) enum ResolvedUtrStrategy {
+    Global,
+    TwoPass(crate::chat_ops::fa::TwoPassConfig),
+}
+
+impl ResolvedUtrStrategy {
+    fn from_options(options: &crate::options::AlignUtrOptions) -> Self {
+        match options.overlap_strategy {
+            // Auto remains global until the experimental strategy is validated.
+            UtrOverlapStrategy::Auto | UtrOverlapStrategy::Global => Self::Global,
+            UtrOverlapStrategy::TwoPass => Self::TwoPass(options.two_pass.clone()),
+        }
+    }
+}
+
 /// Extracted parameters for the FA dispatch path.
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct FaDispatchParams {
     pub fa_params: FaParams,
     pub merge_abbrev: MergeAbbrevPolicy,
     pub utr_engine: Option<UtrEngine>,
-    pub utr_overlap_strategy: UtrOverlapStrategy,
+    pub utr_strategy: ResolvedUtrStrategy,
 }
 
 /// Extract FA dispatch parameters from [`CommandOptions`].
@@ -48,34 +68,8 @@ pub(crate) fn extract_fa_dispatch_params(
     options: &CommandOptions,
     cache_policy: CachePolicy,
 ) -> Option<FaDispatchParams> {
-    let (
-        fa_engine,
-        pauses,
-        existing_wor_boundaries,
-        end_overlap_policy,
-        wor,
-        utr_engine,
-        utr_overlap_strategy,
-        merge_abbrev,
-        bullet_repair,
-        review_level,
-    ) = match options {
-        CommandOptions::Align(a) => (
-            a.effective_fa_engine(),
-            a.pauses,
-            a.boundaries.existing_wor_boundaries,
-            a.boundaries.end_overlap_policy,
-            a.wor,
-            // `effective_`, not the raw field. FA read its override here and
-            // UTR read the flag, so `--engine-overrides '{"utr":...}'` was
-            // ignored at this line even once the key was typed upstream.
-            a.effective_utr_engine(),
-            a.utr.overlap_strategy,
-            a.merge_abbrev,
-            a.bullet_repair,
-            a.review_level,
-        ),
-        _ => return None,
+    let CommandOptions::Align(align) = options else {
+        return None;
     };
 
     // `--pauses` asks for silence between words to survive, which is exactly
@@ -87,7 +81,7 @@ pub(crate) fn extract_fa_dispatch_params(
     // `(timing_resolution, pauses)` reads as though the engine's resolution
     // participates, and it does not: post-processing takes the resolution
     // separately and decides what the policy MEANS for that engine.
-    let gap_healing = if pauses {
+    let gap_healing = if align.pauses {
         WordGapHealing::PreserveMeasured
     } else {
         WordGapHealing::Heal
@@ -96,17 +90,17 @@ pub(crate) fn extract_fa_dispatch_params(
     Some(FaDispatchParams {
         fa_params: FaParams {
             gap_healing,
-            existing_wor_boundaries,
-            end_overlap_policy,
-            engine: fa_engine,
+            existing_wor_boundaries: align.boundaries.existing_wor_boundaries,
+            end_overlap_policy: align.boundaries.end_overlap_policy,
+            engine: align.effective_fa_engine(),
             cache_policy,
-            wor_tier: wor,
-            bullet_repair,
-            review_level,
+            wor_tier: align.wor,
+            bullet_repair: align.bullet_repair,
+            review_level: align.review_level,
         },
-        merge_abbrev,
-        utr_engine,
-        utr_overlap_strategy,
+        merge_abbrev: align.merge_abbrev,
+        utr_engine: align.effective_utr_engine(),
+        utr_strategy: ResolvedUtrStrategy::from_options(&align.utr),
     })
 }
 
@@ -451,6 +445,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p3.utr_engine, Some(UtrEngine::HkTencent));
+    }
+
+    #[test]
+    fn fa_dispatch_preserves_two_pass_tuning() {
+        use crate::chat_ops::fa::{CaMarkerPolicy, TwoPassConfig, UtrMatchMode};
+        let config = TwoPassConfig {
+            ca_markers: CaMarkerPolicy::Disabled,
+            tight_buffer_ms: 123,
+            match_mode: UtrMatchMode::Exact,
+            max_exclusion_density: "0.75".parse().expect("valid density"),
+        };
+        for strategy in [
+            UtrOverlapStrategy::Auto,
+            UtrOverlapStrategy::Global,
+            UtrOverlapStrategy::TwoPass,
+        ] {
+            let options = CommandOptions::Align(AlignOptions {
+                utr: crate::options::AlignUtrOptions {
+                    engine: Some(UtrEngine::RevAi),
+                    overlap_strategy: strategy,
+                    two_pass: config.clone(),
+                },
+                ..Default::default()
+            });
+            let params = extract_fa_dispatch_params(&options, CachePolicy::UseCache)
+                .expect("align dispatch");
+            let expected = match strategy {
+                UtrOverlapStrategy::TwoPass => ResolvedUtrStrategy::TwoPass(config.clone()),
+                UtrOverlapStrategy::Auto | UtrOverlapStrategy::Global => {
+                    ResolvedUtrStrategy::Global
+                }
+            };
+            assert_eq!(params.utr_strategy, expected);
+        }
     }
 
     #[test]

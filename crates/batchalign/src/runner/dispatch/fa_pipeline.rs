@@ -128,7 +128,7 @@ struct FaFileContext<'a> {
     /// Optional UTR engine for the pre-pass and fallback paths.
     utr_engine: Option<&'a crate::options::UtrEngine>,
     /// Overlap strategy for `+<` utterances during UTR.
-    utr_overlap_strategy: crate::options::UtrOverlapStrategy,
+    utr_strategy: super::options::ResolvedUtrStrategy,
     /// Fallback language from job submission, only present when the user
     /// passed an explicit `--lang <iso3>`. The per-file language from
     /// `@Languages:` takes priority; this is consulted only when the
@@ -187,7 +187,7 @@ struct AlignAudioTask<'a> {
     had_unrecovered_untimed: bool,
     utr_fallback_attempted: bool,
     utr_engine: Option<crate::options::UtrEngine>,
-    utr_overlap_strategy: crate::options::UtrOverlapStrategy,
+    utr_strategy: super::options::ResolvedUtrStrategy,
     dumper: &'a DebugDumper,
     debug_traces: bool,
     output: AlignOutputPolicy,
@@ -338,7 +338,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
                     max_group_ms: Some(self.fa_params.max_group_ms()),
                     filename: &self.filename,
                     engine: utr_engine,
-                    overlap_strategy: self.utr_overlap_strategy,
+                    strategy: &self.utr_strategy,
                     dumper: self.dumper,
                 },
                 None,
@@ -398,7 +398,7 @@ pub(crate) async fn dispatch_fa_infer(
     let utr_cache_policy = plan.utr_cache_policy;
     let should_merge_abbrev = plan.options.merge_abbrev.should_merge();
     let utr_engine = plan.options.utr_engine;
-    let utr_overlap_strategy = plan.options.utr_overlap_strategy;
+    let utr_strategy = plan.options.utr_strategy;
     let file_parallelism = runtime
         .num_workers
         .0
@@ -436,6 +436,7 @@ pub(crate) async fn dispatch_fa_infer(
             None
         };
         let utr_engine = utr_engine.clone();
+        let utr_strategy = utr_strategy.clone();
         let job_lang_fallback = job_lang_fallback.clone();
         let filename = file.filename.clone();
 
@@ -463,7 +464,7 @@ pub(crate) async fn dispatch_fa_infer(
                     should_merge_abbrev,
                     before_path: before_path.as_ref().map(|p| p.as_path()),
                     utr_engine: utr_engine.as_ref(),
-                    utr_overlap_strategy,
+                    utr_strategy,
                     lang_fallback: job_lang_fallback.as_ref(),
                     dumper,
                     media_dir: media_dir_ref,
@@ -499,7 +500,7 @@ async fn process_one_fa_file(
         should_merge_abbrev,
         before_path,
         utr_engine,
-        utr_overlap_strategy: _,
+        utr_strategy: _,
         lang_fallback,
         ref dumper,
         media_dir,
@@ -673,7 +674,7 @@ async fn process_one_fa_file(
                         max_group_ms: Some(fa_params.max_group_ms()),
                         filename,
                         engine: utr_engine,
-                        overlap_strategy: context.utr_overlap_strategy,
+                        strategy: &context.utr_strategy,
                         dumper,
                     },
                     Some(&utr_progress),
@@ -725,7 +726,7 @@ async fn process_one_fa_file(
         had_unrecovered_untimed,
         utr_fallback_attempted: false,
         utr_engine: utr_engine.cloned(),
-        utr_overlap_strategy: context.utr_overlap_strategy,
+        utr_strategy: context.utr_strategy.clone(),
         dumper,
         debug_traces: job.dispatch.debug_traces,
         output: AlignOutputPolicy {

@@ -54,6 +54,32 @@ mod tests {
     use crate::store::PendingJobFile;
     use crate::worker::error::WorkerError;
 
+    #[tokio::test]
+    async fn audio_identity_resolves_media_aliases() {
+        let directory = tempfile::tempdir().expect("temporary media directory");
+        let media = directory.path().join("audio.wav");
+        std::fs::write(&media, b"media identity fixture").expect("write media");
+        let direct = compute_audio_identity(media.to_str().expect("UTF-8 path"))
+            .await
+            .expect("media identity");
+        let dotted = directory.path().join(".").join("audio.wav");
+        assert_eq!(
+            Some(direct.clone()),
+            compute_audio_identity(dotted.to_str().expect("UTF-8 alias")).await,
+            "path spelling must not trigger another ASR run"
+        );
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("staged.wav");
+            std::os::unix::fs::symlink(&media, &alias).expect("media symlink");
+            assert_eq!(
+                Some(direct),
+                compute_audio_identity(alias.to_str().expect("UTF-8 alias")).await,
+                "staging symlinks must share the original media identity"
+            );
+        }
+    }
+
     #[test]
     fn apply_result_filename_basic() {
         use std::path::PathBuf;
