@@ -361,7 +361,7 @@ batchalign-ci-rust:
 	@# Shellcheck and actionlint are separate CI JOBS with their own setup, and
 	@# calling them here made the Rust workflow die with `Error 127` on a runner
 	@# that has neither. The developer-facing target that mirrors ALL of CI is
-	@# `make ci-local`; use that before pushing.
+	@# `make gate`; use that before pushing.
 	@$(MAKE) lint
 	@$(MAKE) batchalign-check
 	@$(MAKE) batchalign-test-rust
@@ -465,7 +465,7 @@ ci-local:
 	@$(MAKE) lint
 	@echo "✓ ci-local passed"
 
-# Full local CI: mirrors the stricter CI-style gate.
+# Full release-source verification, including the one pre-push gate.
 ci-full:
 	@# Build the assets that the default `embed-dashboard` feature compiles into
 	@# the Rust binary. The GitHub Rust job does this before batchalign-ci-rust;
@@ -481,8 +481,11 @@ ci-full:
 		--all-targets -- -D warnings
 	@echo "==> runtime_constants.toml drift check"
 	@cargo run -p xtask --quiet -- gen-runtime-toml --check
-	@echo "==> imported Batchalign Rust/PyO3 gate"
-	@$(MAKE) batchalign-ci-rust
+	@# The gate owns Rust/PyO3 verification plus shell, Python-source, schema
+	@# and book checks. Calling it here also records the push receipt, avoiding
+	@# a second Rust suite when preparing a release with ci-full then gate.
+	@echo "==> complete pre-push gate"
+	@$(MAKE) gate
 	@echo "✓ ci-full passed"
 
 # Verify the complete local pre-push gate once; the hook only checks its receipt.

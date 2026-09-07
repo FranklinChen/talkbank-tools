@@ -1,3 +1,3 @@
-0.5.4
+0.6.0
 September 6th 2026
-Adopted Chatter 0.20.2, recovered dead GPU workers, bounded alignment windows, preserved failed evidence, and fixed concurrent worker shutdown.
+Adopted Chatter 0.21.0; UTR matches lexical words while retaining original provider-token and within-token addresses. Offline UTR evidence uses schema version 2; provider timing remains unchanged.

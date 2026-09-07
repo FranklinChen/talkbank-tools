@@ -413,7 +413,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "batchalign"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "batchalign-transform"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -1225,9 +1225,9 @@ checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "comrak"
-version = "0.54.0"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d5910408554659ed848ff469e67ec83b30f179e72cec286cfdae64d1616f466"
+checksum = "daa3d1ea6b01ce72405fa3f826768f51c7a44917527c89b37856ffdd17ee57e4"
 dependencies = [
  "bon",
  "caseless",
@@ -3978,9 +3978,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.52.1"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93e842fa72fd1e50ca4676a527641c13f5ee0d423ac699bfe1cd2afa3a4fdbac"
+checksum = "7070bf0681439ff992bb94947cb3a361f57c880561c1e9e90ddb5941c7ec2d04"
 dependencies = [
  "ahash",
  "bytecount",
@@ -4006,22 +4006,23 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.52.1"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5d90ea83fa606c96f0b4737ecedf1fa6b624272022edc42039565f8d8af0b78"
+checksum = "b6525f2f72c37c1a09f59a6d0d33f60ecf8beabd00be92fe8d49555cae15289c"
 dependencies = [
  "regex-syntax 0.8.11",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.52.1"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da4ab4cbe58181a117d8c3582844ce20b07184319b51ba6d756596c1c451aebc"
+checksum = "4309c6b52390b1ebdd2053e513e9f23d4bb18d0c3c2df8142eded3eb188a85bf"
 dependencies = [
  "ahash",
  "bytecount",
  "fraction",
+ "getrandom 0.3.4",
  "num-cmp",
  "num-traits",
  "serde_json",
@@ -6348,9 +6349,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.52.1"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d38a014525040cdc9893361b7419bcf1f43b7ba7055eabaf6d91d6b75caa8b3f"
+checksum = "0304d4734d208eaf24528093715e2cb5260c977b1be1eb81cd487f601e3ff35d"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -8040,13 +8041,13 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "talkbank-build"
-version = "0.20.2"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+version = "0.21.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 
 [[package]]
 name = "talkbank-derive"
-version = "0.20.2"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+version = "0.21.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8055,8 +8056,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-model"
-version = "0.20.2"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+version = "0.21.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "dashmap",
  "indexmap 2.14.2",
@@ -8078,8 +8079,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-parser"
-version = "0.20.2"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+version = "0.21.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "indexmap 2.14.2",
  "smallvec",
@@ -8094,8 +8095,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-parser-re2c"
-version = "0.20.2"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+version = "0.21.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "chumsky",
  "indexmap 2.14.2",
@@ -8112,8 +8113,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-parser-tests"
-version = "0.20.2"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+version = "0.21.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "clap",
  "comrak",
@@ -8136,7 +8137,7 @@ dependencies = [
 [[package]]
 name = "talkbank-spec-vocabulary"
 version = "0.0.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -8146,8 +8147,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-transform"
-version = "0.20.2"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+version = "0.21.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "chrono",
  "jsonschema",
@@ -9340,7 +9341,7 @@ checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 [[package]]
 name = "tree-sitter-talkbank"
 version = "0.1.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.20.2#c6cecf3f7171a00eb02e5a67c49404e849815454"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.21.0#71fddcad1277f240ba775d0f178e4dee80d74af6"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10873,7 +10874,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "batchalign-types",
  "blake3",

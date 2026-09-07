@@ -1,12 +1,12 @@
 # Platform Support Matrix
 
 **Status:** Current
-**Last updated:** 2026-08-30 21:00 EDT
+**Last updated:** 2026-09-06
 
-This page is the Batchalign-only view of platform support. The
-operator-facing repo-wide platform-support matrix (covering `chatter`,
-Rust core, grammar, and the desktop app) lives outside the
-public book.
+This is the canonical Batchalign platform-support matrix. Chatter owns the
+CHAT core, CLI, LSP and grammar in its own repository, with independent
+platform guarantees. The repository's `docs/PLATFORM-SUPPORT.md` points here
+instead of maintaining a second matrix.
 
 ## CLI + Server (`batchalign3`)
 

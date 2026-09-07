@@ -1,6 +1,6 @@
 [package]
 name = "batchalign"
-version = "0.5.4"
+version = "0.6.0"
 description = "batchalign3: command-line interface, application, server, worker pool, cache"
 edition.workspace = true
 license.workspace = true
