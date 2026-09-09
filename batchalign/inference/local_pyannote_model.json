@@ -3,16 +3,19 @@
   "pipeline": {
     "repo_id": "talkbank/dia-fork",
     "revision": "df67acf78543ba69e9d120a3a06ad5e0e56fac41",
-    "filename": "config.yaml"
+    "filename": "config.yaml",
+    "sha256": "cc5351fd71141fb6e64b1a1a6e3444e9326a8d8e9344d181fe86bcfe119fe06e"
   },
   "segmentation": {
     "repo_id": "talkbank/seg-fork-3.0",
     "revision": "28fe728a6fe524c67ed3958a6e9ec8980df7a41a",
-    "filename": "pytorch_model.bin"
+    "filename": "pytorch_model.bin",
+    "sha256": "da85c29829d4002daedd676e012936488234d9255e65e86dfab9bec6b1729298"
   },
   "embedding": {
     "repo_id": "hbredin/wespeaker-voxceleb-resnet34-LM",
     "revision": "0ae88dcaf48cacdf741275d6d1a8101f45eee220",
-    "filename": "speaker-embedding.onnx"
+    "filename": "speaker-embedding.onnx",
+    "sha256": "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068"
   }
 }

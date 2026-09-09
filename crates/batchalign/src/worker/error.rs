@@ -208,12 +208,11 @@ pub enum WorkerError {
         lang: crate::api::WorkerLanguage,
     },
 
-    /// A worker spawn completed after the pool began shutting down, so the
-    /// worker was retired instead of being handed to the caller.
+    /// The pool or shared worker has begun shutting down. Dispatch, health
+    /// checks and task loading refuse admission with this lifecycle fact,
+    /// rather than claiming that an IPC protocol was violated.
     ///
-    /// Only reachable on the shared-GPU path, and only because that path no
-    /// longer holds the worker map's lock across a spawn (see
-    /// `pool/gpu_slot.rs`): a spawn can now still be running when
+    /// A shared-GPU spawn can also still be running when
     /// `WorkerPool::shutdown` drains the map. The spawning task retires its own
     /// worker in that case rather than return one nothing would ever reap.
     ///

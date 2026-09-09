@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-05-20 20:31 EDT
+**Last updated:** 2026-09-10 01:43 EDT
 
 ## Overview
 
@@ -63,7 +63,7 @@ batchalign3 [--server http://<your-server>:8001] align input/ output/ --lang eng
   │  │  3. MEDIA CONVERSION (ensure_wav)                ◄── THIS STEP    │
   │  │     .wav/.mp3/.flac/.ogg → pass through unchanged                │
   │  │     .mp4/.m4a/.webm/.wma → ffmpeg convert to WAV, cache result   │
-  │  │       fingerprint: BLAKE3(file_size + first 64KB + last 64KB)    │
+  │  │       fingerprint: full-file BLAKE3 + versioned recipe    │
   │  │       cache dir: platform data_dir/batchalign3/media_cache/      │
   │  │       file lock: per-fingerprint .lock prevents concurrent ffmpeg │
   │  │       output: 16kHz mono PCM_S16LE WAV                           │
@@ -116,8 +116,11 @@ Implements content-fingerprinted WAV conversion with file-locking and atomic wri
 
 1. **Check extension**: if `.wav`/`.mp3`/`.flac`/`.ogg`, return unchanged.
 2. **Check ffmpeg**: if not on PATH, return a clear error with install hint.
-3. **Fingerprint**: `BLAKE3(file_size_be_bytes ++ first_64KB ++ last_64KB)`
-   truncated to 24 hex chars. Reads at most ~128 KB regardless of file size.
+3. **Fingerprint**: stream every source byte through BLAKE3 and retain its full
+   digest in the `whole-pcm16-mono16k-strict-v3` recipe namespace. This reads
+   the complete file with bounded memory; same-size edits in the middle of a
+   recording cannot reuse the old key. Segment keys additionally bind the
+   requested time window in their own strict-recipe namespace.
 4. **Cache lookup**: check the media cache directory for
    `{fingerprint}.wav`. If it exists, return immediately (cache hit).
 5. **Lock**: acquire exclusive `fs2` file lock on `{fingerprint}.wav.lock`
@@ -125,14 +128,20 @@ Implements content-fingerprinted WAV conversion with file-locking and atomic wri
    is important for parallel FA processing where multiple groups reference
    the same audio.
 6. **Re-check**: another task may have completed conversion while we waited.
-7. **Convert**: `ffmpeg -y -i source -acodec pcm_s16le -ar 16000 -ac 1 tmp.wav`
-8. **Atomic rename**: `rename(tmp.wav, {fingerprint}.wav)`.
+7. **Convert**: `ffmpeg -y -nostdin -v error -xerror -i source -acodec pcm_s16le -ar 16000 -ac 1 tmp.wav`.
+   The locked slot becomes a produced slot only after its own temporary path
+   passes strict conversion.
+8. **Atomic rename**: publish the produced slot while retaining its lock;
+   release the lock only after the rename succeeds.
 
 ### ffmpeg Arguments
 
 | Flag | Purpose |
 |------|---------|
 | `-y` | Overwrite output without asking |
+| `-nostdin` | Prevent an unattended conversion from consuming terminal input |
+| `-v error` | Emit error diagnostics, which prevent output admission |
+| `-xerror` | Stop decoding at the first error |
 | `-i source` | Input file (mp4, m4a, etc.) |
 | `-acodec pcm_s16le` | 16-bit signed PCM (what soundfile reads natively) |
 | `-ar 16000` | 16 kHz sample rate (FA/ASR model input rate) |
@@ -165,6 +174,14 @@ resolution and **before** the audio path is passed to Python workers:
 | Media analysis | `runner/dispatch/media_analysis_v2.rs` | Before openSMILE/AVQI prepared-audio execution |
 
 ### Error Handling
+
+Whole-file and segment conversions use strict ffmpeg decoding (`-xerror`),
+with error-level diagnostics. A zero exit status accompanied by decoding
+errors is also rejected. Partial output is removed before returning the
+conversion error; it cannot be published as a successful new conversion.
+The strict conversion recipe uses a new cache namespace, preserving old
+entries without accepting them as strict-recipe hits. This does not certify
+preexisting cache bytes or media formats passed through without conversion.
 
 If conversion fails, the file is marked with a clear error:
 

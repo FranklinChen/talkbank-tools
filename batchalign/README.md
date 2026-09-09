@@ -3,7 +3,7 @@
 **Status:** Current
 **Last updated:** 2026-06-21 19:53 EDT
 
-[![CI](https://github.com/TalkBank/talkbank-tools/actions/workflows/batchalign-python.yml/badge.svg)](https://github.com/TalkBank/talkbank-tools/actions/workflows/batchalign-python.yml)
+[![CI](https://github.com/FranklinChen/talkbank-tools/actions/workflows/batchalign-python.yml/badge.svg)](https://github.com/FranklinChen/talkbank-tools/actions/workflows/batchalign-python.yml)
 
 Turn audio recordings into fully annotated [CHAT](https://talkbank.org/0info/manuals/CHAT.html)
 transcripts, or enrich existing transcripts, from the command line.
@@ -28,13 +28,13 @@ it upgrades to the latest release. There is no PyPI package.
 **macOS / Linux:**
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
+irm https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
 ```
 
 Open a new terminal, then run `batchalign3 --help`. The repo-hosted
@@ -81,7 +81,7 @@ walkthrough.
 Re-run the installer one-liner to upgrade in place:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 ```
 
 ## Usage
@@ -199,7 +199,7 @@ make batchalign-python-prepare && make build
 
 ## Support
 
-- Bug reports and feature requests: <https://github.com/TalkBank/talkbank-tools/issues>
+- Bug reports and feature requests: <https://github.com/FranklinChen/talkbank-tools/issues>
 - General TalkBank questions: <https://talkbank.org/>
 
 ---

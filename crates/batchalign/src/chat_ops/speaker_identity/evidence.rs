@@ -25,13 +25,20 @@ use super::embedding::{EmbeddingDimension, MinimumEmbeddingFrames};
 use super::enrollment::{EnrolledLabel, EnrollmentSet};
 use super::model::EmbeddingModelRevision;
 use super::policy::{LabelledScore, MatchThreshold, SpeakerVerdict, ThresholdPolicy};
+use super::tracks::{PermutationPlan, TrackAnalysis, TrackContrast, TrackIdentity};
 use crate::types::worker_v2::SpeakerEmbeddingBackendV2;
 
 /// Schema version of the `<stem>_speaker_identity.json` artifact.
 ///
 /// Bumped whenever a reader that understood the previous version would
 /// misread this one. A new optional field is not a bump; a changed meaning is.
-pub const SPEAKER_IDENTITY_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 (2026-09-09) added the track-level verdicts: `tracks`,
+/// `track_contrasts` and `provenance.permutation`, all REQUIRED. A reader of
+/// version 1 that ignored them would silently keep judging tracks by the
+/// mean of their line scores, which is the verdict version 2 exists to
+/// replace, so the change is a bump and not an optional field.
+pub const SPEAKER_IDENTITY_SCHEMA_VERSION: u32 = 2;
 
 /// The sentence every consumer has to have read.
 ///
@@ -85,6 +92,8 @@ pub struct SpeakerIdentityProvenance {
     pub tiers: Vec<String>,
     /// Every enrolled span, in recording order.
     pub enrollments: Vec<EnrolledSpanRecord>,
+    /// The seed and count behind every `track_contrasts` p-value.
+    pub permutation: PermutationPlan,
     /// Build identity of the batchalign3 that wrote this.
     pub produced_by: String,
 }
@@ -122,6 +131,10 @@ pub struct SpeakerIdentityEvidence {
     pub provenance: SpeakerIdentityProvenance,
     /// One entry per utterance of the named tiers, in transcript order.
     pub utterances: Vec<UtteranceIdentity>,
+    /// One entry per speaker code among those utterances, as a voice.
+    pub tracks: Vec<TrackIdentity>,
+    /// One entry per enrolled voice: how far its best track stands out.
+    pub track_contrasts: Vec<TrackContrast>,
 }
 
 /// Everything about a run that is not per-utterance, gathered so the document
@@ -175,7 +188,9 @@ impl SpeakerIdentityEvidence {
         embedding: EmbeddingRunFacts,
         enrollments: &EnrollmentSet,
         policy: &ThresholdPolicy,
+        permutation: PermutationPlan,
         utterances: Vec<UtteranceIdentity>,
+        tracks: TrackAnalysis,
     ) -> Self {
         Self {
             provenance: SpeakerIdentityProvenance {
@@ -199,9 +214,12 @@ impl SpeakerIdentityEvidence {
                         end_ms: enrollment.window().end().get(),
                     })
                     .collect(),
+                permutation,
                 produced_by: facts.produced_by,
             },
             utterances,
+            tracks: tracks.tracks,
+            track_contrasts: tracks.contrasts,
         }
     }
 }
@@ -253,6 +271,11 @@ mod tests {
             },
             &enrollments,
             &policy,
+            PermutationPlan {
+                seed: 0,
+                count: super::super::tracks::PermutationCount::try_from(10)
+                    .expect("test: a positive count"),
+            },
             vec![
                 UtteranceIdentity {
                     utterance_index: 0,
@@ -287,6 +310,10 @@ mod tests {
                     },
                 },
             ],
+            TrackAnalysis {
+                tracks: Vec::new(),
+                contrasts: Vec::new(),
+            },
         )
     }
 

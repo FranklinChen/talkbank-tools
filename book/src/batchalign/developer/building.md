@@ -35,7 +35,7 @@ decommissioned 2026-04-28; there are no longer two siblings to clone).
 A development checkout is one repo:
 
 ```bash
-git clone https://github.com/TalkBank/talkbank-tools.git
+git clone https://github.com/FranklinChen/talkbank-tools.git
 cd talkbank-tools
 make build
 ```

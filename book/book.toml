@@ -26,5 +26,5 @@ command = "mdbook-mermaid"
 command = "python3 ../scripts/mdbook_git_dates.py"
 
 [output.html]
-git-repository-url = "https://github.com/TalkBank/talkbank-tools"
-edit-url-template = "https://github.com/TalkBank/talkbank-tools/edit/main/book/{path}"
+git-repository-url = "https://github.com/FranklinChen/talkbank-tools"
+edit-url-template = "https://github.com/FranklinChen/talkbank-tools/edit/main/book/{path}"

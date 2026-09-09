@@ -79,10 +79,10 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/chat_ops/speaker_identity/evidence.rs",
         struct_name: "SpeakerIdentityProvenance",
-        max_fields: 13,
+        max_fields: 14,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
-        reason: "the complete recipe for one speaker-identification run, written beside its own verdicts: schema version, the agreement-not-accuracy caveat, the transcript and media it read, the prepared decode's sample rate, the embedding backend, model revision, vector width and minimum span the worker reported, the threshold the caller stated, the tiers scored, the enrolled spans, and the build that wrote it; narrowing it would move a fact out of the artifact and into a runbook, which is what makes a generated file read as unreproducible",
+        reason: "the complete recipe for one speaker-identification run, written beside its own verdicts: schema version, the agreement-not-accuracy caveat, the transcript and media it read, the prepared decode's sample rate, the embedding backend, model revision, vector width and minimum span the worker reported, the threshold the caller stated, the tiers scored, the enrolled spans, the typed permutation plan (seed and count), and the build that wrote it; narrowing it would move a fact out of the artifact and into a runbook, which is what makes a generated file read as unreproducible",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/worker/handle/mod.rs",

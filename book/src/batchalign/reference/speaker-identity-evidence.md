@@ -1,7 +1,7 @@
 # Speaker Identity Evidence
 
 **Status:** Current
-**Last updated:** 2026-09-04 23:35 EDT
+**Last updated:** 2026-09-09 13:24 EDT
 
 Field-by-field reference for the `<stem>_speaker_identity.json` artifact
 written by [`speaker-identify`](../user-guide/commands/speaker-identify.md).
@@ -10,11 +10,19 @@ consumer parses.
 
 ## Schema version
 
-`provenance.schema_version` is `1`.
+`provenance.schema_version` is `2`.
 
 It is bumped when a reader that understood the previous version would
 **misread** this one. Adding an optional field is not a bump; changing what an
 existing field means is.
+
+Version 2 added `tracks`, `track_contrasts` and `provenance.permutation`,
+all required. A version-1 reader that ignored them would go on judging a
+speaker code by the mean of its line scores, which is the reading the
+track-level fields exist to replace, so the addition is a bump rather than
+an optional field. A version-1 file has no track fields at all; a consumer
+that reads both versions must type that absence rather than treat it as "no
+tracks".
 
 ## Top level
 
@@ -22,6 +30,8 @@ existing field means is.
 | --- | --- | --- |
 | `provenance` | object | How this file was made. See below. |
 | `utterances` | array | One entry per utterance of the scored tiers, in transcript order. |
+| `tracks` | array | One entry per speaker code among those utterances, scored as ONE voice. See below. |
+| `track_contrasts` | array | One entry per enrolled voice: how far its best track stands out, with a permutation p-value. See below. |
 
 ## `provenance`
 
@@ -43,6 +53,7 @@ cannot reconstruct those choices treats the file as unreproducible.
 | `match_threshold` | number | The threshold the caller stated. Taken from the policy that produced the verdicts, so the file cannot state one number and have been decided under another. |
 | `tiers` | array of string | Tiers scored. `["*"]` means every tier. |
 | `enrollments` | array | Each `{ label, start_ms, end_ms }`, in recording order. |
+| `permutation` | object | `{ seed, count }` behind every `track_contrasts` p-value, so each is reproducible byte for byte. |
 | `produced_by` | string | Build identity of the batchalign3 that wrote this. |
 
 `embedding_dimension` and `embedding_minimum_frames` are **reported by the
@@ -94,6 +105,60 @@ Internally tagged on `verdict`.
 An unscored utterance carries **no** `score` field at all, rather than a zero.
 A zero similarity is a real measurement, and a file that used one to mean
 "not measured" would be indistinguishable from one that measured zero.
+
+## `tracks[]`
+
+Internally tagged on `kind`. A track is the speaker code the transcript
+carries; it is a claim that these lines belong together, and this section
+scores the claim as a voice.
+
+```json
+{ "kind": "voiced", "track": "PAR0", "lines_embedded": 212, "lines_refused": 3,
+  "centroid": [0.031, -0.118, "..."], "scores": [{ "label": "INV", "score": 0.71 }] }
+{ "kind": "unvoiced", "track": "CHI", "lines_refused": 5 }
+```
+
+- **`voiced`**: at least one line embedded. `centroid` is the unit-normalized
+  mean of the track's unit line vectors, `embedding_dimension` wide, written
+  so a later cross-session question needs no re-run. `scores` is the
+  centroid's cosine to every enrolled voice, the same shape as a line's.
+  `lines_refused` counts the track's lines the run could not embed; they are
+  counted, never imputed.
+- **`unvoiced`**: every line of the track was refused. There is no voice to
+  score and no `scores` field at all.
+
+Per-line vectors are **not** written. At 256 floats per line they would add
+several megabytes per session for no consumer this artifact has.
+
+## `track_contrasts[]`
+
+Internally tagged on `kind`, one entry per enrolled voice.
+
+```json
+{ "kind": "tested", "label": "INV", "best": "PAR0", "runner_up": "PAR1",
+  "observed_margin": 0.42, "permutations": { "seed": 0, "count": 1000 },
+  "at_or_above": 0, "p_value": 0.000999 }
+{ "kind": "one_track", "label": "INV", "track": "PAR0" }
+{ "kind": "no_voiced_track", "label": "INV" }
+```
+
+- **`tested`**: two or more voiced tracks. `observed_margin` is the best
+  track's centroid score minus the runner-up's on the labelling the
+  transcript carries. The null shuffles line-to-track membership with track
+  sizes preserved, recomputes every centroid and the margin, and
+  `at_or_above` counts the shuffles whose margin reached the observed one.
+  `p_value` is `(at_or_above + 1) / (count + 1)`, so the observed labelling
+  counts once and the value can never be zero. A tie with the observed
+  margin counts, which is why a perfectly separable session at a thousand
+  draws reports about `0.001` rather than exactly the floor.
+- **`one_track`**: a single voiced track. No margin exists, so nothing is
+  invented.
+- **`no_voiced_track`**: nothing was embedded on any track.
+
+The p-value answers "are the tracks distinguishable voices, and is one of
+them this enrolled voice, beyond what random membership would give?". It is
+not the probability that `best` is the enrolled speaker, and like every
+number here it is agreement under one model against a human-claimed span.
 
 ## Consuming it
 

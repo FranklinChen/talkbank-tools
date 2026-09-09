@@ -8,8 +8,8 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::api::{DisplayPath, JobId};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition};
@@ -29,8 +29,9 @@ pub(crate) struct SpawnedFileTask {
     pub role: &'static str,
     /// Logical filename owned by this task.
     pub filename: DisplayPath,
-    /// Join handle for the spawned task.
-    pub handle: JoinHandle<FileTaskOutcome>,
+    /// Owned task: losing the supervisor aborts it rather than detaching work
+    /// that could write errors after the worker pool or registry shuts down.
+    pub handle: AbortOnDropHandle<FileTaskOutcome>,
 }
 
 /// Spawn one supervised file task.
@@ -46,7 +47,7 @@ pub(crate) fn spawn_supervised_file_task<F>(
 where
     F: Future<Output = FileTaskOutcome> + Send + 'static,
 {
-    let handle = tokio::spawn(future);
+    let handle = AbortOnDropHandle::new(tokio::spawn(future));
 
     SpawnedFileTask {
         role,

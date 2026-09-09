@@ -10,12 +10,12 @@ default), and re-running it upgrades to the latest release.
 
 ```bash
 # macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-irm https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
+irm https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
 ```
 
 After installing, **open a new terminal** so the `batchalign3` command is on
@@ -47,7 +47,7 @@ different supported version, set `BATCHALIGN3_PYTHON` before running it:
 
 ```bash
 BATCHALIGN3_PYTHON=3.13 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+  https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 ```
 
 ## Double-click helpers
@@ -55,12 +55,12 @@ BATCHALIGN3_PYTHON=3.13 curl --proto '=https' --tlsv1.2 -LsSf \
 If you prefer not to use a terminal, the repo ships double-click wrappers that
 run the same installer:
 
-- **macOS:** [install-batchalign3.command](https://github.com/TalkBank/talkbank-tools/raw/main/installers/macos/install-batchalign3.command)
-- **Windows:** [install-batchalign3.bat](https://github.com/TalkBank/talkbank-tools/raw/main/installers/windows/install-batchalign3.bat)
+- **macOS:** [install-batchalign3.command](https://github.com/FranklinChen/talkbank-tools/raw/main/installers/macos/install-batchalign3.command)
+- **Windows:** [install-batchalign3.bat](https://github.com/FranklinChen/talkbank-tools/raw/main/installers/windows/install-batchalign3.bat)
 
 The downloaded helpers are not code-signed, so macOS Gatekeeper / Windows
 SmartScreen may warn on first run; see the
-[installers README](https://github.com/TalkBank/talkbank-tools/blob/main/installers/README.md)
+[installers README](https://github.com/FranklinChen/talkbank-tools/blob/main/installers/README.md)
 for the click-through. They install `uv` if needed and then run the canonical
 installer.
 
@@ -69,7 +69,7 @@ installer.
 Re-run the installer one-liner; it reinstalls the latest release in place:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 ```
 
 ## Offline / manual install from a wheel
@@ -77,7 +77,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TalkBank/talkbank-tools
 Every release attaches per-platform wheels plus a `sha256.sum`. To install
 without the script (for example on an air-gapped machine), download the wheel
 for your platform from the
-[latest release](https://github.com/TalkBank/talkbank-tools/releases/latest)
+[latest release](https://github.com/FranklinChen/talkbank-tools/releases/latest)
 and install it with `uv`:
 
 ```bash
@@ -146,7 +146,7 @@ See [Rev.AI Integration](rev-ai.md) for details.
 For contributors working from a source checkout:
 
 ```bash
-git clone https://github.com/TalkBank/talkbank-tools.git
+git clone https://github.com/FranklinChen/talkbank-tools.git
 cd talkbank-tools
 make batchalign-python-prepare    # build wheel + sync uv env + install
 make build                         # cargo build --workspace --release

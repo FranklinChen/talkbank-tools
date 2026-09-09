@@ -11,8 +11,8 @@ authors:
     family-names: Liu
   - given-names: Franklin
     family-names: Chen
-repository-code: 'https://github.com/TalkBank/talkbank-tools'
-url: 'https://github.com/TalkBank/talkbank-tools'
+repository-code: 'https://github.com/FranklinChen/talkbank-tools'
+url: 'https://github.com/FranklinChen/talkbank-tools'
 abstract: >-
   Unified repository for the TalkBank CHAT toolchain, including the chatter CLI,
   public TalkBank Rust crates, the talkbank-lsp language server, and the

@@ -10,7 +10,7 @@ requests, discussions, or commit messages.
 
 Preferred reporting channels:
 
-1. GitHub private vulnerability reporting for `TalkBank/talkbank-tools`
+1. GitHub private vulnerability reporting for `FranklinChen/talkbank-tools`
 2. Email [franklinchen@franklinchen.com](mailto:franklinchen@franklinchen.com)
 
 Please include:

@@ -7,7 +7,7 @@
 This document is the implementation spec for the live typed worker boundary
 currently named `worker_v2`.
 
-**See also:** [INTERFACE_MAP.md](https://github.com/TalkBank/talkbank-tools/blob/main/INTERFACE_MAP.md) section "1. Worker Protocol Dispatch"
+**See also:** [INTERFACE_MAP.md](https://github.com/FranklinChen/talkbank-tools/blob/main/INTERFACE_MAP.md) section "1. Worker Protocol Dispatch"
 for the unified reference to all protocol-related files, Python implementations, and
 shared schema definitions.
 

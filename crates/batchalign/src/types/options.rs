@@ -597,6 +597,15 @@ pub struct SpeakerIdentifyOptions {
     /// Speaker tiers whose utterances are scored; empty means every tier.
     #[serde(default)]
     pub tiers: Vec<String>,
+
+    /// Seed and count of the permutation test behind the track contrasts.
+    ///
+    /// A job row written before the track verdict existed carries none, and
+    /// re-running such a row is what `documented_plan` is for: it is the
+    /// plan the CLI flags name in their help text, so a re-run and a fresh
+    /// run under default flags produce the same file.
+    #[serde(default = "crate::chat_ops::speaker_identity::documented_permutation_plan")]
+    pub permutation: crate::chat_ops::speaker_identity::PermutationPlan,
 }
 
 /// Options for the `compare` command.

@@ -14,7 +14,7 @@ echo   Batchalign3 Installer for Windows
 echo ============================================
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex"
 
 echo.
 echo ============================================

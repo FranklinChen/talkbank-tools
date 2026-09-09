@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import configparser
+import hashlib
 import json
 import re
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
@@ -19,7 +21,15 @@ _COMMIT_REVISION = re.compile(r"[0-9a-f]{40}")
 _HUB_REPOSITORY_ID = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*"
 )
-_PYANNOTE_PIPELINE: object | None = None
+_PYANNOTE_PIPELINE: _LoadedPipeline | None = None
+
+
+@dataclass(frozen=True)
+class _LoadedPipeline:
+    """Keep verified private model files alive for lazy backend reads."""
+
+    pipeline: object
+    files: tempfile.TemporaryDirectory[str]
 
 
 @dataclass(frozen=True)
@@ -29,6 +39,7 @@ class PinnedHuggingFaceArtifact:
     repo_id: str
     revision: str
     filename: str
+    sha256: str
 
     @classmethod
     def parse(cls, value: object, *, field: str) -> PinnedHuggingFaceArtifact:
@@ -36,6 +47,7 @@ class PinnedHuggingFaceArtifact:
             "repo_id",
             "revision",
             "filename",
+            "sha256",
         }:
             raise ValueError(
                 f"local Pyannote {field} must name exactly one pinned artifact"
@@ -43,6 +55,9 @@ class PinnedHuggingFaceArtifact:
         repo_id = value["repo_id"]
         revision = value["revision"]
         filename = value["filename"]
+        sha256 = value["sha256"]
+        if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+            raise ValueError(f"local Pyannote {field} must name a SHA-256 digest")
         if (
             not isinstance(repo_id, str)
             or _HUB_REPOSITORY_ID.fullmatch(repo_id) is None
@@ -62,7 +77,7 @@ class PinnedHuggingFaceArtifact:
             raise ValueError(
                 f"local Pyannote {field} filename must stay within its repository"
             )
-        return cls(repo_id=repo_id, revision=revision, filename=filename)
+        return cls(repo_id=repo_id, revision=revision, filename=filename, sha256=sha256)
 
 
 @dataclass(frozen=True)
@@ -196,13 +211,50 @@ def _reclassified_access_error(error: Exception) -> Exception:
     return access_error if access_error is not None else error
 
 
+@dataclass(frozen=True)
+class _VerifiedArtifact:
+    """Private snapshot admitted by the packaged artifact's complete digest."""
+
+    path: Path
+
+    @classmethod
+    def admit(
+        cls, artifact: PinnedHuggingFaceArtifact, directory: Path, *, token: str | None
+    ) -> _VerifiedArtifact:
+        source = Path(_download_pinned_artifact(artifact, token=token))
+        # Pyannote's embedding factory dispatches on the repository name in
+        # a local path (for example, "wespeaker" selects its ONNX backend).
+        # Keep that validated component as well as preventing graph-node
+        # filename collisions inside our private snapshot.
+        target = directory / artifact.repo_id / artifact.filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        # The enclosing private directory owns cleanup on every refusal.
+        with source.open("rb") as incoming, target.open("xb") as outgoing:
+            while block := incoming.read(1024 * 1024):
+                digest.update(block)
+                outgoing.write(block)
+        if digest.hexdigest() != artifact.sha256:
+            raise ValueError(
+                f"model artifact integrity mismatch: {artifact.repo_id}/{artifact.filename}"
+            )
+        return cls(target)
+
+
 def _pinned_pipeline_config(
-    graph: LocalPyannoteModelGraph, *, token: str | None
+    graph: LocalPyannoteModelGraph, *, token: str | None, directory: Path
 ) -> dict[str, Any]:
     """Materialize a config whose transitive model references cannot move."""
 
-    pipeline_config_path = _download_pinned_artifact(graph.pipeline, token=token)
-    embedding_path = _download_pinned_artifact(graph.embedding, token=token)
+    pipeline_config_path = _VerifiedArtifact.admit(
+        graph.pipeline, directory, token=token
+    ).path
+    embedding_path = _VerifiedArtifact.admit(
+        graph.embedding, directory, token=token
+    ).path
+    segmentation_path = _VerifiedArtifact.admit(
+        graph.segmentation, directory, token=token
+    ).path
     loaded = OmegaConf.to_container(
         OmegaConf.load(Path(pipeline_config_path)), resolve=True
     )
@@ -216,10 +268,9 @@ def _pinned_pipeline_config(
         raise ValueError("pinned local Pyannote config has no parameter mapping")
 
     params["segmentation"] = {
-        "checkpoint": graph.segmentation.repo_id,
-        "revision": graph.segmentation.revision,
+        "checkpoint": str(segmentation_path),
     }
-    params["embedding"] = embedding_path
+    params["embedding"] = str(embedding_path)
     return loaded
 
 
@@ -233,10 +284,18 @@ def _get_pyannote_pipeline() -> object:
         token = resolve_huggingface_hub_token()
         for artifact in (graph.pipeline, graph.segmentation, graph.embedding):
             _emit_model_download_if_missing(artifact)
-        pipeline = _load_pipeline(
-            _pinned_pipeline_config(graph, token=token), token=token
-        )
-        if pipeline is None:
-            raise RuntimeError("pinned local Pyannote model graph could not be loaded")
-        _PYANNOTE_PIPELINE = pipeline
-    return _PYANNOTE_PIPELINE
+        files = tempfile.TemporaryDirectory(prefix="batchalign-model-")
+        try:
+            pipeline = _load_pipeline(
+                _pinned_pipeline_config(graph, token=token, directory=Path(files.name)),
+                token=token,
+            )
+            if pipeline is None:
+                raise RuntimeError(
+                    "pinned local Pyannote model graph could not be loaded"
+                )
+        except BaseException:
+            files.cleanup()
+            raise
+        _PYANNOTE_PIPELINE = _LoadedPipeline(pipeline, files)
+    return _PYANNOTE_PIPELINE.pipeline

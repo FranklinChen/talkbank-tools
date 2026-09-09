@@ -36,7 +36,7 @@ to Python workers, manages job lifecycle, and returns results.
 ### 1. Install batchalign3 on the server
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 ```
 
 ### 2. Configure batchalign3

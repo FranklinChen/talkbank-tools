@@ -4,7 +4,7 @@
 # environment using a uv-managed Python (default 3.13).
 #
 #   curl --proto '=https' --tlsv1.2 -LsSf \
-#     https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+#     https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 #
 # Re-running upgrades an existing installation. Override the managed Python with
 # BATCHALIGN3_PYTHON (for example BATCHALIGN3_PYTHON=3.13).
@@ -14,7 +14,7 @@
 # ML dependencies.
 set -euo pipefail
 
-REPO="TalkBank/talkbank-tools"
+REPO="FranklinChen/talkbank-tools"
 PYTHON_VERSION="${BATCHALIGN3_PYTHON:-3.13}"
 
 die() { printf 'install-batchalign3: %s\n' "$1" >&2; exit 1; }

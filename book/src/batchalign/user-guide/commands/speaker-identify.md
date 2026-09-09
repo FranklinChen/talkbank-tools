@@ -1,7 +1,7 @@
 # speaker-identify
 
 **Status:** Current
-**Last updated:** 2026-09-04 23:35 EDT
+**Last updated:** 2026-09-09 13:24 EDT
 
 Score each timed utterance of a CHAT transcript against one or more voices you
 enroll from the recording itself, and write the scores and verdicts beside the
@@ -77,6 +77,8 @@ alone before anyone else joins.
 | `--enroll SPAN` | **required** | `<start_ms>-<end_ms>:<label>`. Repeat once per known voice |
 | `--threshold F` | **required** | Similarity at or above which a voice counts as a match |
 | `--tiers CODES` | all tiers | Speaker tiers to score, comma-separated or repeated |
+| `--permutations N` | `1000` | Shuffled labellings drawn for each track contrast's p-value; a thousand resolve p to 0.001 |
+| `--permutation-seed S` | `0` | Seed of that shuffle, so a run reproduces byte for byte. Both are recorded in the file |
 | `--lang CODE` | `eng` | 3-letter ISO code, for worker-pool selection only; embedding is language-independent |
 
 ### Why `--threshold` has no default
@@ -117,7 +119,7 @@ For `session.cha`, `session_speaker_identity.json`:
 ```json
 {
   "provenance": {
-    "schema_version": 1,
+    "schema_version": 2,
     "interpretation": "Scores are acoustic AGREEMENT with an enrolled span ...",
     "transcript": "session.cha",
     "media": "/corpus/media/session.mp3",
@@ -131,6 +133,7 @@ For `session.cha`, `session_speaker_identity.json`:
     "enrollments": [
       { "label": "INV", "start_ms": 1500, "end_ms": 9000 }
     ],
+    "permutation": { "seed": 0, "count": 1000 },
     "produced_by": "batchalign3 <build>"
   },
   "utterances": [
@@ -143,12 +146,32 @@ For `session.cha`, `session_speaker_identity.json`:
       "scores": [{ "label": "INV", "score": 0.81 }],
       "verdict": { "verdict": "matches", "label": "INV", "score": 0.81 }
     }
+  ],
+  "tracks": [
+    { "kind": "voiced", "track": "PAR0", "lines_embedded": 212, "lines_refused": 3,
+      "centroid": ["..."], "scores": [{ "label": "INV", "score": 0.71 }] }
+  ],
+  "track_contrasts": [
+    { "kind": "one_track", "label": "INV", "track": "PAR0" }
   ]
 }
 ```
 
 Every utterance carries its similarity to **every** enrolled voice, not only
 the winner, so you can try a different threshold without re-running the model.
+
+### Tracks as voices
+
+Beside the per-line verdicts, every speaker code among the scored tiers is
+scored as **one voice**: the centroid of its lines' vectors, compared to each
+enrolled voice. The mean of a track's line scores is not the similarity of
+the track's voice, and the centroid is robust to the short lines that drag a
+mean down. For each enrolled voice, `track_contrasts` then says how far the
+best track stands out from the runner-up, with a permutation p-value in
+place of a margin somebody chose: line-to-track membership is shuffled with
+track sizes kept, and the p-value is how often a shuffle reaches the observed
+margin. The seed and count are yours to set and are written into the file.
+Field by field: the [evidence reference](../../reference/speaker-identity-evidence.md).
 
 ### The three verdicts
 

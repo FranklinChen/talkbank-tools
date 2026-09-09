@@ -2,13 +2,13 @@
 # GitHub release on Windows. Bootstraps uv if absent and installs into an
 # isolated uv tool environment using a uv-managed Python (default 3.13).
 #
-#   irm https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
+#   irm https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
 #
 # Re-running upgrades an existing installation. Override the managed Python with
 # the BATCHALIGN3_PYTHON environment variable (for example 3.13). There is no
 # PyPI package; distribution is via GitHub releases.
 $ErrorActionPreference = "Stop"
-$Repo = "TalkBank/talkbank-tools"
+$Repo = "FranklinChen/talkbank-tools"
 $PythonVersion = if ($env:BATCHALIGN3_PYTHON) { $env:BATCHALIGN3_PYTHON } else { "3.13" }
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {

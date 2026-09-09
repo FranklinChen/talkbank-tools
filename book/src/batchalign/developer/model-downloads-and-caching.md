@@ -1,7 +1,7 @@
 # Model Downloads and Caching (Developer Reference)
 
 **Status:** Current
-**Last updated:** 2026-09-02 20:59 EDT
+**Last updated:** 2026-09-10 01:56 EDT
 
 This page documents how batchalign3 downloads, caches, and verifies ML
 models, the contributor-facing complement to the
@@ -223,8 +223,13 @@ no Hugging Face account can embed and cannot diarize.
 
 Local Pyannote has an additional cross-language identity rule. The JSON
 manifest at `batchalign/inference/local_pyannote_model.json` is the single
-owner of the exact pipeline, segmentation, and embedding Hub commits. Python
-validates it and passes pinned revisions to every download/model loader; Rust
+owner of the exact pipeline, segmentation, and embedding Hub commits and
+artifact SHA-256 digests. Python downloads the pinned revisions, copies each
+artifact into a private directory while hashing its bytes, and refuses any
+digest mismatch before loading the pipeline. Segmentation and embedding loaders
+receive these verified local paths; the worker retains the snapshots for lazy
+backend reads. This admits the packaged trusted model bytes, not arbitrary
+checkpoint files, and does not make general pickle loading safe. Rust
 hashes the identical packaged bytes into `SpeakerEvidenceModelRevision`.
 Changing any graph node therefore invalidates raw speaker evidence without a
 second hand-maintained version constant or a drift-detection test.

@@ -145,6 +145,7 @@ impl AudioFileTask for SpeakerIdentityTask {
             &utterances,
             prepared,
             &ThresholdPolicy::new(self.options.threshold),
+            self.options.permutation,
             &inference,
         )
         .await

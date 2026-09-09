@@ -328,6 +328,10 @@ pub fn build_typed_options(
                 enrollments: a.enrollment_set()?,
                 threshold: a.threshold,
                 tiers: a.tiers.clone(),
+                permutation: crate::chat_ops::speaker_identity::PermutationPlan {
+                    seed: a.permutation_seed,
+                    count: a.permutations,
+                },
             }))
         }
         Commands::Diarize(a) => Some(CommandOptions::Diarize(DiarizeOptions {

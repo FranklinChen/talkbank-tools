@@ -16,7 +16,7 @@ echo "============================================"
 echo ""
 
 curl --proto '=https' --tlsv1.2 -LsSf \
-    https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+    https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 
 echo ""
 echo "============================================"

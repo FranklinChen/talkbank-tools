@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "batchalign3"
-version = "0.8.0"
+version = "0.8.1"
 description = "Transcription, alignment, and language-sample analysis for TalkBank CHAT transcripts"
 readme = "batchalign/README.md"
 license = "BSD-3-Clause"
@@ -99,10 +99,10 @@ docs = ["mkdocs-material", "mkdocs-click"]
 batchalign3 = "batchalign._cli:main"
 
 [project.urls]
-Homepage = "https://github.com/TalkBank/talkbank-tools/tree/main/batchalign"
-Repository = "https://github.com/TalkBank/talkbank-tools"
-Documentation = "https://github.com/TalkBank/talkbank-tools/tree/main/batchalign-book"
-Issues = "https://github.com/TalkBank/talkbank-tools/issues"
+Homepage = "https://github.com/FranklinChen/talkbank-tools/tree/main/batchalign"
+Repository = "https://github.com/FranklinChen/talkbank-tools"
+Documentation = "https://github.com/FranklinChen/talkbank-tools/tree/main/batchalign-book"
+Issues = "https://github.com/FranklinChen/talkbank-tools/issues"
 
 [tool.maturin]
 manifest-path = "crates/batchalign-pyo3/Cargo.toml"

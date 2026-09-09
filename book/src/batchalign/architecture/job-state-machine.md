@@ -330,3 +330,11 @@ This matters because a server bounce mid-job (deploy, OS restart, crash)
 would otherwise be indistinguishable from a user cancel in the local DB, and
 the user's dashboard would show the job as "cancelled" even though no user
 pressed cancel.
+
+The runtime supervisor waits for aborted job tasks to retire before returning
+its shutdown summary. File tasks use abort-on-drop ownership: dropping their
+parent's supervision cannot detach inference that keeps writing file failures
+after shutdown starts. GPU transport admission reports `PoolShuttingDown`
+during teardown, rather than misclassifying it as a protocol violation.
+Regression tests cover both task retirement after a shutdown timeout and
+file-task cancellation when supervision is dropped.

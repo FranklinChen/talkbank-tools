@@ -189,11 +189,11 @@ impl SharedGpuWorker {
             available_permits = self.dispatch_semaphore.available_permits(),
             "execute_v2: about to acquire dispatch_semaphore",
         );
-        let _permit = self.dispatch_semaphore.acquire().await.map_err(|_| {
-            WorkerError::Protocol(
-                "GPU worker dispatch semaphore closed (worker shutting down)".into(),
-            )
-        })?;
+        let _permit = self
+            .dispatch_semaphore
+            .acquire()
+            .await
+            .map_err(|_| WorkerError::PoolShuttingDown)?;
         tracing::debug!("execute_v2: dispatch_semaphore acquired");
 
         // Re-check shutdown after acquiring the permit, the worker may have
@@ -201,7 +201,7 @@ impl SharedGpuWorker {
         // raced shutdown could write to a closing stdin and observe a
         // confusing `ProcessExited` instead of the explicit shutdown reason.
         if self.shutdown_started.load(Ordering::Acquire) {
-            return Err(WorkerError::Protocol("GPU worker is shutting down".into()));
+            return Err(WorkerError::PoolShuttingDown);
         }
 
         let request_id = request.request_id.to_string();
@@ -281,9 +281,7 @@ impl SharedGpuWorker {
     ) -> Result<crate::worker::WorkerHealthResponse, WorkerError> {
         let _control_guard = self.control_gate.lock().await;
         if self.shutdown_started.load(Ordering::Acquire) {
-            return Err(WorkerError::HealthCheckFailed(
-                "GPU worker is shutting down".into(),
-            ));
+            return Err(WorkerError::PoolShuttingDown);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -385,9 +383,7 @@ impl SharedGpuWorker {
         }
 
         if self.shutdown_started.load(Ordering::Acquire) {
-            return Err(WorkerError::Protocol(
-                "GPU worker is shutting down, cannot ensure_task".into(),
-            ));
+            return Err(WorkerError::PoolShuttingDown);
         }
 
         let _control_guard = self.control_gate.lock().await;
@@ -538,7 +534,7 @@ impl SharedGpuWorker {
     /// permanent proof of liveness: the process may die between requests.
     pub(in crate::worker::pool) fn check_available(&self) -> Result<(), WorkerError> {
         if self.shutdown_started.load(Ordering::Acquire) {
-            return Err(WorkerError::Protocol("GPU worker is shutting down".into()));
+            return Err(WorkerError::PoolShuttingDown);
         }
         if self.reader_task.is_finished() {
             return Err(WorkerError::ProcessExited {

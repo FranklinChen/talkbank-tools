@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -37,11 +39,13 @@ def test_pinned_artifact_refuses_moving_or_escaping_inputs(value: object) -> Non
     """A parsed artifact is proof of an immutable in-repository object."""
 
     with pytest.raises(ValueError):
-        PinnedHuggingFaceArtifact.parse(value, field="test")
+        assert isinstance(value, dict)
+        PinnedHuggingFaceArtifact.parse({**value, "sha256": "b" * 64}, field="test")
 
 
+@pytest.mark.parametrize("tampered", [None, "pipeline", "embedding", "segmentation"])
 def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, tampered: str | None
 ) -> None:
     """The runtime must consume the same immutable graph named by the cache."""
 
@@ -57,6 +61,26 @@ def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
     )
     embedding_path = tmp_path / "speaker-embedding.onnx"
     embedding_path.write_bytes(b"fixture")
+    segmentation_path = tmp_path / "pytorch_model.bin"
+    segmentation_path.write_bytes(b"segmentation fixture")
+    graph = replace(
+        graph,
+        pipeline=replace(
+            graph.pipeline, sha256=hashlib.sha256(config_path.read_bytes()).hexdigest()
+        ),
+        embedding=replace(
+            graph.embedding,
+            sha256=hashlib.sha256(embedding_path.read_bytes()).hexdigest(),
+        ),
+        segmentation=replace(
+            graph.segmentation,
+            sha256=hashlib.sha256(segmentation_path.read_bytes()).hexdigest(),
+        ),
+    )
+    monkeypatch.setattr(
+        "batchalign.inference.pyannote_local.load_local_pyannote_model_graph",
+        lambda: graph,
+    )
     downloads: list[tuple[str, str, str, str | None]] = []
 
     def fake_download(
@@ -67,6 +91,8 @@ def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
             return str(config_path)
         if repo_id == graph.embedding.repo_id:
             return str(embedding_path)
+        if repo_id == graph.segmentation.repo_id:
+            return str(segmentation_path)
         raise AssertionError(f"unexpected eager download: {repo_id}")
 
     loaded: list[dict[str, object]] = []
@@ -91,6 +117,17 @@ def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
     )
     monkeypatch.setattr("batchalign.inference.pyannote_local._PYANNOTE_PIPELINE", None)
 
+    if tampered is not None:
+        sources = {
+            "pipeline": config_path,
+            "embedding": embedding_path,
+            "segmentation": segmentation_path,
+        }
+        sources[tampered].write_bytes(b"changed before admission")
+        with pytest.raises(ValueError, match="integrity mismatch"):
+            _get_pyannote_pipeline()
+        assert loaded == []
+        return
     first = _get_pyannote_pipeline()
     second = _get_pyannote_pipeline()
 
@@ -108,17 +145,38 @@ def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
             graph.embedding.revision,
             "stub-token",
         ),
+        (
+            graph.segmentation.repo_id,
+            graph.segmentation.filename,
+            graph.segmentation.revision,
+            "stub-token",
+        ),
     ]
     assert load_tokens == ["stub-token"]
     pipeline = loaded[0]["pipeline"]
     assert isinstance(pipeline, dict)
     params = pipeline["params"]
     assert isinstance(params, dict)
-    assert params["segmentation"] == {
-        "checkpoint": graph.segmentation.repo_id,
-        "revision": graph.segmentation.revision,
-    }
-    assert params["embedding"] == str(embedding_path)
+    segmentation = params["segmentation"]
+    assert isinstance(segmentation, dict)
+    snapshot = Path(segmentation["checkpoint"])
+    assert snapshot != segmentation_path
+    segmentation_path.write_bytes(b"changed after admission")
+    assert snapshot.read_bytes() == b"segmentation fixture"
+    assert Path(params["embedding"]).read_bytes() == b"fixture"
+    # Exercise the actual upstream dispatch seam: an anonymous local ONNX
+    # path falls through to the pickle loader despite passing our mocks.
+    from pyannote.audio.pipelines import speaker_verification
+
+    selected = object()
+    monkeypatch.setattr(
+        speaker_verification,
+        "ONNXWeSpeakerPretrainedSpeakerEmbedding",
+        lambda *args, **kwargs: selected,
+    )
+    assert (
+        speaker_verification.PretrainedSpeakerEmbedding(params["embedding"]) is selected
+    )
 
 
 def test_resolve_huggingface_hub_token_prefers_the_batchalign_ini(
@@ -218,7 +276,10 @@ def test_download_pinned_artifact_reclassifies_a_gated_repo_error() -> None:
         raise gated
 
     artifact = PinnedHuggingFaceArtifact(
-        repo_id="talkbank/dia-fork", revision="a" * 40, filename="config.yaml"
+        repo_id="talkbank/dia-fork",
+        revision="a" * 40,
+        filename="config.yaml",
+        sha256="b" * 64,
     )
 
     with pytest.raises(ModelAccessDeniedError) as excinfo:

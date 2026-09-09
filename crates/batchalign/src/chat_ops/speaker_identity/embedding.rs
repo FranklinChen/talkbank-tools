@@ -144,6 +144,67 @@ impl SpeakerEmbedding {
         self.components.len()
     }
 
+    /// The components scaled to unit length, so that a sum of several of
+    /// them weights every span equally whatever its magnitude.
+    ///
+    /// Refused for a vector with no direction, which is the one input a
+    /// centroid cannot honestly include.
+    pub fn unit_components(&self) -> Result<Vec<f64>, IncomparableEmbeddings> {
+        let norm = self.magnitude();
+        if norm == 0.0 {
+            return Err(IncomparableEmbeddings::NoDirection);
+        }
+        Ok(self.components.iter().map(|value| value / norm).collect())
+    }
+
+    /// The voice of a set of spans as ONE vector: the unit-normalized mean of
+    /// their unit vectors, renormalized.
+    ///
+    /// # Why unit vectors first
+    ///
+    /// A plain mean weights each span by its magnitude, which the embedding
+    /// model does not promise means anything. Normalizing first makes the
+    /// centroid a direction agreed on by every span equally, which is the
+    /// quantity a cosine against it then measures.
+    ///
+    /// # Every route to a refusal
+    ///
+    /// No spans at all; two spans of different widths (two models answered);
+    /// a span with no direction; or unit vectors that cancel to nothing,
+    /// which is the one case where "the voice of these spans" has no answer.
+    pub fn centroid<'a>(
+        spans: impl IntoIterator<Item = &'a SpeakerEmbedding>,
+    ) -> Result<Self, NoCentroid> {
+        let mut sum: Option<Vec<f64>> = None;
+        for span in spans {
+            let unit = span
+                .unit_components()
+                .map_err(|_| NoCentroid::SpanWithoutDirection)?;
+            match &mut sum {
+                None => sum = Some(unit),
+                Some(total) => {
+                    if total.len() != unit.len() {
+                        return Err(NoCentroid::DifferentWidths {
+                            first: total.len(),
+                            offending: unit.len(),
+                        });
+                    }
+                    for (slot, value) in total.iter_mut().zip(unit) {
+                        *slot += value;
+                    }
+                }
+            }
+        }
+        let total = sum.ok_or(NoCentroid::NoSpans)?;
+        let norm = total.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if norm == 0.0 {
+            return Err(NoCentroid::SpansCancel);
+        }
+        Ok(Self {
+            components: total.into_iter().map(|value| value / norm).collect(),
+        })
+    }
+
     /// The cosine similarity between this embedding and `other`.
     ///
     /// The ONLY producer of a [`SimilarityScore`] in production, which is what
@@ -192,6 +253,28 @@ impl SpeakerEmbedding {
             .sum::<f64>()
             .sqrt()
     }
+}
+
+/// Why a set of spans has no centroid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NoCentroid {
+    /// Nothing to average.
+    #[error("a centroid needs at least one span")]
+    NoSpans,
+    /// Two spans came from different models.
+    #[error("a centroid cannot mix a {first}-component span with a {offending}-component one")]
+    DifferentWidths {
+        /// Width of the first span seen.
+        first: usize,
+        /// Width of the span that disagreed.
+        offending: usize,
+    },
+    /// A span has zero magnitude and so no direction to contribute.
+    #[error("a span with zero magnitude has no direction to contribute to a centroid")]
+    SpanWithoutDirection,
+    /// The unit vectors summed to zero.
+    #[error("the spans' directions cancel exactly, so they share no voice")]
+    SpansCancel,
 }
 
 /// Why two embeddings have no similarity.
@@ -303,5 +386,37 @@ mod tests {
             embedding(vec![1.0, 0.0]).similarity_to(&embedding(vec![1.0, 0.0, 0.0])),
             Err(IncomparableEmbeddings::DifferentWidths { .. })
         ));
+    }
+
+    /// Two spans pointing the same way have that direction as their voice;
+    /// magnitude does not weight the answer.
+    #[test]
+    fn a_centroid_is_the_shared_direction_regardless_of_magnitude() {
+        let spans = [embedding(vec![3.0, 0.0]), embedding(vec![0.5, 0.0])];
+        let centroid = SpeakerEmbedding::centroid(&spans).expect("test: a legal centroid");
+        assert_eq!(centroid.components, vec![1.0, 0.0]);
+    }
+
+    /// Opposite directions cancel and have no voice; nothing to average is
+    /// refused; a width mismatch names both widths.
+    #[test]
+    fn a_centroid_refuses_cancelling_empty_and_mixed_width_spans() {
+        let opposite = [embedding(vec![1.0, 0.0]), embedding(vec![-1.0, 0.0])];
+        assert_eq!(
+            SpeakerEmbedding::centroid(&opposite),
+            Err(NoCentroid::SpansCancel)
+        );
+        assert_eq!(
+            SpeakerEmbedding::centroid(std::iter::empty()),
+            Err(NoCentroid::NoSpans)
+        );
+        let mixed = [embedding(vec![1.0, 0.0]), embedding(vec![1.0, 0.0, 0.0])];
+        assert_eq!(
+            SpeakerEmbedding::centroid(&mixed),
+            Err(NoCentroid::DifferentWidths {
+                first: 2,
+                offending: 3
+            })
+        );
     }
 }

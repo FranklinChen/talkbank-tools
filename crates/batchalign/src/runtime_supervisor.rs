@@ -196,6 +196,7 @@ async fn run_supervisor(mut receiver: UnboundedReceiver<SupervisorCommand>) {
                 tracing::debug!("runtime supervisor: shutdown requested");
                 if let Some(handle) = queue_task.take() {
                     handle.abort();
+                    let _ = handle.await;
                 }
 
                 let timed_out = tokio::time::timeout(timeout, async {
@@ -204,6 +205,12 @@ async fn run_supervisor(mut receiver: UnboundedReceiver<SupervisorCommand>) {
                 .await
                 .is_err();
                 let remaining_jobs = job_tasks.len();
+                // Aborting schedules cancellation; it does not prove task
+                // destructors have run. Retire every task before replying so
+                // callers may safely tear down the worker pool and registry.
+                if timed_out {
+                    job_tasks.shutdown().await;
+                }
                 let _ = reply.send(ShutdownSummary {
                     timed_out,
                     remaining_jobs,
@@ -246,6 +253,39 @@ mod tests {
         assert!(!summary.timed_out);
         assert_eq!(summary.remaining_jobs, 0);
         assert_eq!(completed.load(Ordering::SeqCst), 1);
+    }
+
+    /// Shutdown reports timeout when a tracked job exceeds the deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_for_timed_out_task_destruction() {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                // Model a task retiring an owned external resource. Aborting
+                // it only schedules destruction on another executor thread.
+                std::thread::sleep(Duration::from_millis(50));
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let supervisor = RuntimeSupervisor::new();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = Dropped(dropped.clone());
+        let (started, ready) = oneshot::channel();
+        supervisor.spawn_detached(async move {
+            let _guard = guard;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.expect("job started");
+        let summary = supervisor
+            .shutdown(Duration::from_millis(1))
+            .await
+            .expect("shutdown");
+        assert!(summary.timed_out);
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "shutdown must retire tasks before callers tear down their dependencies"
+        );
     }
 
     /// Shutdown reports timeout when a tracked job exceeds the deadline.

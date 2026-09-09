@@ -27,6 +27,9 @@ use super::enrollment::{EnrolledLabel, EnrollmentSet};
 use super::evidence::{EmbeddingRunFacts, RunFacts, SpeakerIdentityEvidence, UtteranceIdentity};
 use super::frames::{FrameSpan, OutsidePreparedAudio, PreparedPcm};
 use super::policy::{LabelledScore, SpeakerVerdict, ThresholdPolicy, UnscoredReason};
+use super::tracks::{
+    EmptyTrackCode, EnrolledVoice, PermutationPlan, TrackAnalysisFailure, TrackCode, TrackLines,
+};
 
 /// One timed, or untimed, utterance of a named tier, as read from the model.
 ///
@@ -206,12 +209,20 @@ pub enum SpeakerIdentityFailure {
     /// The inference capability itself failed.
     #[error(transparent)]
     Inference(#[from] EmbeddingInferenceFailure),
-}
-
-/// One enrolled label paired with the vector measured from its window.
-struct EnrolledVoice {
-    label: EnrolledLabel,
-    vector: SpeakerEmbedding,
+    /// A scored utterance carries an empty speaker code, which no main tier
+    /// can have; the transcript reader has handed over something it did not
+    /// parse.
+    #[error("the utterance on line {line} has an empty speaker code: {source}")]
+    EmptySpeakerCode {
+        /// One-based line of the main tier.
+        line: usize,
+        /// Why.
+        #[source]
+        source: EmptyTrackCode,
+    },
+    /// The tracks could not be scored as voices.
+    #[error(transparent)]
+    Tracks(#[from] TrackAnalysisFailure),
 }
 
 /// Span id for one enrollment. Prefixed so it can never collide with an
@@ -237,6 +248,7 @@ pub async fn identify_speakers(
     utterances: &[TranscriptUtterance],
     prepared: PreparedPcm,
     policy: &ThresholdPolicy,
+    permutation: PermutationPlan,
     inference: &dyn SpeakerEmbeddingInference,
 ) -> Result<SpeakerIdentityEvidence, SpeakerIdentityFailure> {
     let mut spans = Vec::new();
@@ -332,29 +344,45 @@ pub async fn identify_speakers(
     }
 
     let mut identified = Vec::with_capacity(utterances.len());
+    // Every line lands on its track as it is judged, embedded or refused, so
+    // the track analysis below sees exactly the population the line verdicts
+    // saw and neither can drift from the other.
+    let mut track_lines = TrackLines::default();
     for utterance in utterances {
         let start_ms = utterance.timing.start().map(FileMs::get);
         let end_ms = utterance.timing.end().map(FileMs::get);
+        let track = TrackCode::from_speaker(&utterance.speaker).map_err(|source| {
+            SpeakerIdentityFailure::EmptySpeakerCode {
+                line: utterance.line,
+                source,
+            }
+        })?;
 
         let verdict_and_scores = match refusals.get(&utterance.utterance_index) {
-            Some(reason) => (
-                SpeakerVerdict::Unscored {
-                    reason: reason.clone(),
-                },
-                Vec::new(),
-            ),
+            Some(reason) => {
+                track_lines.refused(track);
+                (
+                    SpeakerVerdict::Unscored {
+                        reason: reason.clone(),
+                    },
+                    Vec::new(),
+                )
+            }
             None => {
                 let span_id = utterance_span_id(utterance.utterance_index);
                 match response.outcomes.get(&span_id) {
-                    Some(SpanOutcome::TooShort { frames }) => (
-                        SpeakerVerdict::Unscored {
-                            reason: UnscoredReason::TooShortForEmbedding {
-                                frames: *frames,
-                                minimum_frames: response.minimum_frames.get(),
+                    Some(SpanOutcome::TooShort { frames }) => {
+                        track_lines.refused(track);
+                        (
+                            SpeakerVerdict::Unscored {
+                                reason: UnscoredReason::TooShortForEmbedding {
+                                    frames: *frames,
+                                    minimum_frames: response.minimum_frames.get(),
+                                },
                             },
-                        },
-                        Vec::new(),
-                    ),
+                            Vec::new(),
+                        )
+                    }
                     Some(SpanOutcome::Embedded(vector)) => {
                         let mut scored = Vec::with_capacity(enrolled.len());
                         for voice in &enrolled {
@@ -371,6 +399,16 @@ pub async fn identify_speakers(
                                 // tinguishable from a measured one.
                                 Err(_) => continue,
                             }
+                        }
+                        // A line joins its track's voice only once it has
+                        // compared with at least one enrolled voice: a
+                        // directionless vector is one unscored LINE, as it
+                        // always was, and not a reason to refuse the whole
+                        // session's tracks.
+                        if scored.is_empty() {
+                            track_lines.refused(track);
+                        } else {
+                            track_lines.embedded(track, vector.clone());
                         }
                         let verdict = policy.verdict(&scored);
                         (verdict, scored)
@@ -394,6 +432,8 @@ pub async fn identify_speakers(
         });
     }
 
+    let tracks = track_lines.analyse(&enrolled, permutation)?;
+
     Ok(SpeakerIdentityEvidence::new(
         facts,
         EmbeddingRunFacts {
@@ -402,7 +442,9 @@ pub async fn identify_speakers(
         },
         enrollments,
         policy,
+        permutation,
         identified,
+        tracks,
     ))
 }
 
@@ -412,6 +454,7 @@ mod tests {
     use super::super::enrollment::EnrollmentSpec;
     use super::super::model::pinned_embedding_revision;
     use super::super::policy::MatchThreshold;
+    use super::super::tracks::{TrackContrast, TrackIdentity, documented_permutation_plan};
     use super::*;
 
     /// A model that answers with vectors the test chose, so every decision
@@ -522,6 +565,7 @@ mod tests {
             &[timed(0, 10_000, 12_000), timed(1, 12_000, 14_000)],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -543,6 +587,146 @@ mod tests {
         assert_eq!(evidence.utterances[1].scores.len(), 1);
     }
 
+    /// The same run scores the TRACKS: every speaker code becomes one voice,
+    /// a refused line is counted on its track rather than imputed, and the
+    /// enrolled voice's contrast names the track that is it.
+    #[tokio::test]
+    async fn tracks_reach_the_evidence_as_voices_with_a_contrast() {
+        let mut by_span = BTreeMap::from([("enroll:INV".to_owned(), vector(vec![1.0, 0.0]))]);
+        let mut utterances = Vec::new();
+        for index in 0..8 {
+            let (speaker, direction) = if index % 2 == 0 {
+                ("PAR0", vec![1.0, 0.1 * f64::from(index)])
+            } else {
+                ("PAR1", vec![0.1 * f64::from(index), 1.0])
+            };
+            by_span.insert(format!("utt:{index}"), vector(direction));
+            let start = 10_000 + 2_000 * u64::try_from(index).expect("test: a small index");
+            utterances.push(TranscriptUtterance {
+                speaker: speaker.to_owned(),
+                ..timed(
+                    usize::try_from(index).expect("test: a small index"),
+                    start,
+                    start + 1_500,
+                )
+            });
+        }
+        // One PAR1 line with no bullet: refused, and counted on PAR1.
+        utterances.push(TranscriptUtterance {
+            utterance_index: 8,
+            line: 18,
+            speaker: "PAR1".to_owned(),
+            timing: UtteranceTiming::Untimed,
+        });
+        let model = ChosenVectors {
+            by_span,
+            minimum_frames: 1680,
+        };
+        let evidence = match identify_speakers(
+            facts(),
+            &enrollments(&["0-5000:INV"]),
+            &utterances,
+            prepared(),
+            &policy(0.5),
+            documented_permutation_plan(),
+            &model,
+        )
+        .await
+        {
+            Ok(evidence) => evidence,
+            Err(error) => panic!("the run succeeds: {error}"),
+        };
+
+        assert_eq!(evidence.provenance.schema_version, 2);
+        assert_eq!(
+            evidence.provenance.permutation,
+            documented_permutation_plan()
+        );
+        match &evidence.tracks[..] {
+            [
+                TrackIdentity::Voiced {
+                    track: first,
+                    lines_embedded: first_embedded,
+                    lines_refused: 0,
+                    ..
+                },
+                TrackIdentity::Voiced {
+                    track: second,
+                    lines_embedded: second_embedded,
+                    lines_refused: 1,
+                    ..
+                },
+            ] => {
+                assert_eq!(first.as_str(), "PAR0");
+                assert_eq!(second.as_str(), "PAR1");
+                assert_eq!(first_embedded.get(), 4);
+                assert_eq!(second_embedded.get(), 4);
+            }
+            other => panic!("expected two voiced tracks, got {other:?}"),
+        }
+        match &evidence.track_contrasts[..] {
+            [
+                TrackContrast::Tested {
+                    best,
+                    runner_up,
+                    p_value,
+                    ..
+                },
+            ] => {
+                assert_eq!(best.as_str(), "PAR0");
+                assert_eq!(runner_up.as_str(), "PAR1");
+                assert!(p_value.get() < 0.05, "p was {}", p_value.get());
+            }
+            other => panic!("expected one tested contrast, got {other:?}"),
+        }
+    }
+
+    /// A line whose vector has no direction is one unscored line, as it was
+    /// before tracks existed: it is counted as refused on its track and the
+    /// run still ships its evidence.
+    #[tokio::test]
+    async fn a_directionless_line_is_refused_on_its_track_and_the_run_succeeds() {
+        let model = ChosenVectors {
+            by_span: BTreeMap::from([
+                ("enroll:INV".to_owned(), vector(vec![1.0, 0.0])),
+                ("utt:0".to_owned(), vector(vec![1.0, 0.0])),
+                ("utt:1".to_owned(), vector(vec![0.0, 0.0])),
+            ]),
+            minimum_frames: 1680,
+        };
+        let evidence = match identify_speakers(
+            facts(),
+            &enrollments(&["0-5000:INV"]),
+            &[timed(0, 10_000, 12_000), timed(1, 12_000, 14_000)],
+            prepared(),
+            &policy(0.5),
+            documented_permutation_plan(),
+            &model,
+        )
+        .await
+        {
+            Ok(evidence) => evidence,
+            Err(error) => panic!("the run succeeds: {error}"),
+        };
+        assert!(matches!(
+            evidence.utterances[1].verdict,
+            SpeakerVerdict::Unscored { .. }
+        ));
+        match &evidence.tracks[..] {
+            [
+                TrackIdentity::Voiced {
+                    lines_embedded,
+                    lines_refused,
+                    ..
+                },
+            ] => {
+                assert_eq!(lines_embedded.get(), 1);
+                assert_eq!(*lines_refused, 1);
+            }
+            other => panic!("expected one voiced track, got {other:?}"),
+        }
+    }
+
     /// Evidence combines the pinned model revision with measurements reported
     /// by the worker that actually loaded it.
     #[tokio::test]
@@ -560,6 +744,7 @@ mod tests {
             &[timed(0, 10_000, 12_000)],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -592,6 +777,7 @@ mod tests {
             &[timed(0, 1_000, 2_000)],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -628,6 +814,7 @@ mod tests {
             }],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -657,6 +844,7 @@ mod tests {
             &[timed(0, 90_000, 92_000)],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -697,6 +885,7 @@ mod tests {
             &[timed(0, 10_000, 10_020)],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -738,6 +927,7 @@ mod tests {
             &[timed(0, 10_000, 12_000)],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -763,6 +953,7 @@ mod tests {
             &[],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -788,6 +979,7 @@ mod tests {
             &[timed(0, 10_000, 12_000)],
             prepared(),
             &policy(0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await
@@ -817,6 +1009,7 @@ mod tests {
             &[timed(0, 10_000, 12_000)],
             prepared(),
             &policy(-0.5),
+            documented_permutation_plan(),
             &model,
         )
         .await

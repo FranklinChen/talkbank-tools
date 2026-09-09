@@ -3,8 +3,8 @@
 **Status:** Current
 **Last updated:** 2026-06-30 13:55 EDT
 
-[![CI](https://github.com/TalkBank/talkbank-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/TalkBank/talkbank-tools/actions/workflows/ci.yml)
-[![Batchalign Python](https://github.com/TalkBank/talkbank-tools/actions/workflows/batchalign-python.yml/badge.svg)](https://github.com/TalkBank/talkbank-tools/actions/workflows/batchalign-python.yml)
+[![CI](https://github.com/FranklinChen/talkbank-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/FranklinChen/talkbank-tools/actions/workflows/ci.yml)
+[![Batchalign Python](https://github.com/FranklinChen/talkbank-tools/actions/workflows/batchalign-python.yml/badge.svg)](https://github.com/FranklinChen/talkbank-tools/actions/workflows/batchalign-python.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
 This repository is the home of **Batchalign3**: the [TalkBank](https://talkbank.org/)
@@ -24,12 +24,12 @@ CHAT-format toolchain.
 
 ```bash
 # macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-irm https://github.com/TalkBank/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
+irm https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.ps1 | iex
 ```
 
 The installer bootstraps [`uv`](https://docs.astral.sh/uv/) if it is not already

@@ -175,7 +175,7 @@ impl PreparedArtifactStoreV2 {
 
             let produced =
                 Transcode::window(&source, window, PcmEncoding::F32LeRaw).produce(&output_path)?;
-            let byte_len = produced.byte_len;
+            let byte_len = produced.byte_len();
 
             // ffmpeg exits with code 0 and writes an empty (or truncated)
             // output rather than failing, and an empty tensor crashes the
@@ -205,8 +205,8 @@ impl PreparedArtifactStoreV2 {
                 encoding: PreparedAudioEncodingV2::PcmF32le,
                 // Derived from what was produced, not restated. These were
                 // two literals mirroring constants in another module.
-                channels: ChannelCountV2(produced.channels),
-                sample_rate_hz: SampleRateHzV2(produced.sample_rate_hz),
+                channels: ChannelCountV2(produced.channels()),
+                sample_rate_hz: SampleRateHzV2(produced.sample_rate_hz()),
                 frame_count: FrameCountV2(frame_count.get()),
                 byte_offset: ByteOffsetV2(0),
                 byte_len: ByteLengthV2(byte_len),
@@ -237,7 +237,7 @@ impl PreparedArtifactStoreV2 {
 
             let produced =
                 Transcode::whole(&source, PcmEncoding::F32LeRaw).produce(&output_path)?;
-            let byte_len = produced.byte_len;
+            let byte_len = produced.byte_len();
             let sample_bytes = std::mem::size_of::<f32>() as u64;
             let frame_count = byte_len / sample_bytes;
 
@@ -247,8 +247,8 @@ impl PreparedArtifactStoreV2 {
                 encoding: PreparedAudioEncodingV2::PcmF32le,
                 // Derived from what was produced, not restated. These were
                 // two literals mirroring constants in another module.
-                channels: ChannelCountV2(produced.channels),
-                sample_rate_hz: SampleRateHzV2(produced.sample_rate_hz),
+                channels: ChannelCountV2(produced.channels()),
+                sample_rate_hz: SampleRateHzV2(produced.sample_rate_hz()),
                 frame_count: FrameCountV2(frame_count),
                 byte_offset: ByteOffsetV2(0),
                 byte_len: ByteLengthV2(byte_len),
@@ -284,7 +284,7 @@ impl PreparedArtifactStoreV2 {
             let output_path = root.join(AUDIO_DIR_NAME).join(format!("{id}.pcm"));
             let produced =
                 Transcode::whole(source.path(), PcmEncoding::F32LeRaw).produce(&output_path)?;
-            let byte_len = produced.byte_len;
+            let byte_len = produced.byte_len();
             let sample_bytes = std::mem::size_of::<f32>() as u64;
             let frame_count = byte_len / sample_bytes;
 
@@ -292,8 +292,8 @@ impl PreparedArtifactStoreV2 {
                 id,
                 path: WorkerArtifactPathV2(output_path.to_string_lossy().into_owned()),
                 encoding: PreparedAudioEncodingV2::PcmF32le,
-                channels: ChannelCountV2(produced.channels),
-                sample_rate_hz: SampleRateHzV2(produced.sample_rate_hz),
+                channels: ChannelCountV2(produced.channels()),
+                sample_rate_hz: SampleRateHzV2(produced.sample_rate_hz()),
                 frame_count: FrameCountV2(frame_count),
                 byte_offset: ByteOffsetV2(0),
                 byte_len: ByteLengthV2(byte_len),

@@ -1,15 +1,16 @@
 //! Content-fingerprinted WAV conversion cache.
 //!
 //! Converts non-WAV media (e.g. mp4) to WAV via ffmpeg and caches the result
-//! in `~/.batchalign3/media_cache/` keyed by a fast content fingerprint. This
+//! in `~/.batchalign3/media_cache/` keyed by a complete source-content digest. This
 //! avoids writing converted files next to originals (which may be on read-only
 //! NFS/SMB mounts) and deduplicates across paths that point to the same content.
 //!
 //!
 //! # Design
 //!
-//! - **Fingerprint**: `BLAKE3(file_size ++ first_64KB ++ last_64KB)[:24]`
-//!   reads at most ~128 KB regardless of file size.
+//! - **Identity**: full streamed BLAKE3 of source bytes in a versioned PCM
+//!   recipe namespace. Legacy sampled-fingerprint entries remain on disk but
+//!   are not silently admitted as complete-content matches.
 //! - **Locking**: per-fingerprint `.lock` file via `fs2` exclusive lock prevents
 //!   concurrent ffmpeg invocations for the same source file (important for
 //!   parallel FA groups).
@@ -21,14 +22,13 @@
 //! read need conversion. Currently: `.mp4`, `.m4a`, `.webm`, `.wma`.
 //! WAV, MP3, FLAC, OGG are handled natively by `soundfile`.
 
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use thiserror::Error;
 use tracing::{debug, info};
 
-use crate::media::transcode::{PcmEncoding, ProducedMedia, Transcode, TranscodeError};
+use crate::media::transcode::{PcmEncoding, Transcode, TranscodeError};
 use crate::media::window::MediaWindow;
 
 // ---------------------------------------------------------------------------
@@ -37,9 +37,6 @@ use crate::media::window::MediaWindow;
 
 /// Extensions that `soundfile` (libsndfile) cannot read and must be converted.
 const FORCED_CONVERSION: &[&str] = &["mp4", "m4a", "webm", "wma"];
-
-/// Chunk size for fingerprinting (64 KB).
-const FINGERPRINT_CHUNK: usize = 65536;
 
 /// Default cache directory name under the app data dir.
 const CACHE_SUBDIR: &str = "media_cache";
@@ -81,16 +78,12 @@ enum CacheSlot {
 ///
 /// # Why this is a type and not two lines of code
 ///
-/// The route from here to a cached path is [`Self::commit`], which renames
-/// while the lock is still held and releases it afterwards, by dropping. It
-/// takes the [`ProducedMedia`] as evidence, so a slot cannot be published by a
-/// caller that produced nothing.
-///
-/// Precisely how strong that is, since over-claiming here would be the same
-/// mistake this type fixes: the evidence requirement is enforced everywhere,
-/// and the fields are private, so nothing OUTSIDE this module can unlock early
-/// or rename for itself. Code inside this module still can. The guarantee is
-/// "no other module can get the ordering wrong", not "nobody can".
+/// Consuming this slot through `produce` yields a `ProducedCacheSlot` only
+/// after strict conversion into this slot's own temporary path. Only that
+/// resulting state can commit, while still holding the original lock. No
+/// caller can supply an unrelated conversion token to publish this slot.
+/// Private fields enforce the boundary outside this module; filesystem
+/// mutation by unrelated processes remains outside this guarantee.
 ///
 /// It used to be exactly that, and the comment above it said the opposite: "the
 /// lock must be held across the conversion", four lines before
@@ -128,22 +121,31 @@ impl LockedCacheSlot {
         }))
     }
 
-    /// Where to write. Deliberately the only way to learn the temp path.
-    fn tmp_path(&self) -> &Path {
-        &self.tmp_path
+    /// Convert into this exact slot, retaining its lock across the transition.
+    fn produce(self, transcode: Transcode) -> Result<ProducedCacheSlot, TranscodeError> {
+        transcode.produce(&self.tmp_path)?;
+        Ok(ProducedCacheSlot { slot: self })
     }
+}
 
-    /// Publish atomically, still holding the lock.
-    ///
-    /// Consumes the [`ProducedMedia`] as evidence: a slot cannot be committed
-    /// by a caller that never produced anything, which is the other half of the
-    /// ordering this type exists to hold.
-    fn commit(self, _produced: ProducedMedia) -> Result<PathBuf, std::io::Error> {
-        std::fs::rename(&self.tmp_path, &self.cached_path)?;
+/// A locked slot whose own temporary destination passed strict conversion.
+struct ProducedCacheSlot {
+    slot: LockedCacheSlot,
+}
+
+impl ProducedCacheSlot {
+    /// Publish atomically before releasing the lock.
+    fn commit(self) -> Result<PathBuf, std::io::Error> {
+        let LockedCacheSlot {
+            lock_file,
+            tmp_path,
+            cached_path,
+        } = self.slot;
+        std::fs::rename(&tmp_path, &cached_path)?;
         // Explicit, and AFTER the rename: this order is the entire point of the
         // type, so it is stated rather than left to end-of-scope drop order.
-        drop(self.lock_file);
-        Ok(self.cached_path)
+        drop(lock_file);
+        Ok(cached_path)
     }
 }
 
@@ -207,9 +209,8 @@ pub async fn ensure_wav(
 
         // The status check, the partial-file cleanup and the stderr reading all
         // live in `produce`; this call site keeps only what is its own.
-        let produced =
-            Transcode::whole(&source_path, PcmEncoding::S16LeWav).produce(slot.tmp_path())?;
-        Ok(slot.commit(produced)?)
+        let produced = slot.produce(Transcode::whole(&source_path, PcmEncoding::S16LeWav))?;
+        Ok(produced.commit()?)
     })
     .await
     .map_err(std::io::Error::other)?
@@ -234,15 +235,13 @@ pub async fn extract_audio_segment(
         std::fs::create_dir_all(&cache_dir)?;
 
         // Key includes source identity + time window
-        let base_fp = media_fingerprint(&source).unwrap_or_else(|_| {
-            // Fallback: hash the path + mtime + size
-            let meta = std::fs::metadata(&source).ok();
-            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            format!("{:024x}", size)
-        });
-        let segment_key = blake3::hash(format!("{base_fp}|{start_ms}|{end_ms}").as_bytes())
-            .to_hex()[..24]
-            .to_string();
+        // Failure to identify the source is a refusal, never a cache key
+        // synthesized from its length (or zero when metadata also failed).
+        let base_fp = media_fingerprint(&source)?;
+        let segment_key = format!(
+            "segment-pcm16-mono16k-strict-v3-{}",
+            blake3::hash(format!("{base_fp}|{start_ms}|{end_ms}").as_bytes()).to_hex()
+        );
         let cached_wav = cache_dir.join(format!("{segment_key}.wav"));
 
         // Fast path: already extracted
@@ -274,9 +273,8 @@ pub async fn extract_audio_segment(
             cached_wav.display()
         );
 
-        let produced =
-            Transcode::window(&source, window, PcmEncoding::S16LeWav).produce(slot.tmp_path())?;
-        Ok(slot.commit(produced)?)
+        let produced = slot.produce(Transcode::window(&source, window, PcmEncoding::S16LeWav))?;
+        Ok(produced.commit()?)
     })
     .await
     .map_err(std::io::Error::other)?
@@ -341,31 +339,19 @@ pub fn needs_conversion(path: &Path) -> bool {
     FORCED_CONVERSION.contains(&ext.as_str())
 }
 
-/// Fast content fingerprint: `BLAKE3(file_size ++ first_64KB ++ last_64KB)[:24]`.
+/// Complete source identity, namespaced by the whole-file conversion recipe.
 ///
-/// Reads at most ~128 KB regardless of file size. The size prefix
-/// distinguishes files whose head and tail happen to be identical but
-/// differ in the middle.
+/// A sampled fingerprint cannot attest content: equal-sized files may differ
+/// exclusively between their first and last blocks. Streaming bounds memory,
+/// while hashing every byte makes such changes select distinct cache entries.
 fn media_fingerprint(path: &Path) -> Result<String, std::io::Error> {
-    let mut file = std::fs::File::open(path)?;
-    let size = file.metadata()?.len();
-
+    let file = std::fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(&size.to_be_bytes());
-
-    let mut buf = vec![0u8; FINGERPRINT_CHUNK];
-    let n = file.read(&mut buf)?;
-    hasher.update(&buf[..n]);
-
-    if size > FINGERPRINT_CHUNK as u64 {
-        file.seek(SeekFrom::End(-(FINGERPRINT_CHUNK as i64)))?;
-        let n = file.read(&mut buf)?;
-        hasher.update(&buf[..n]);
-    }
-
-    let hash = hasher.finalize();
-    // 24 hex chars from 12 bytes
-    Ok(hash.to_hex()[..24].to_string())
+    hasher.update_reader(file)?;
+    Ok(format!(
+        "whole-pcm16-mono16k-strict-v3-{}",
+        hasher.finalize().to_hex()
+    ))
 }
 
 fn default_cache_dir() -> PathBuf {
@@ -442,7 +428,13 @@ mod tests {
         let fp1 = media_fingerprint(&path).unwrap();
         let fp2 = media_fingerprint(&path).unwrap();
         assert_eq!(fp1, fp2, "fingerprint should be deterministic");
-        assert_eq!(fp1.len(), 24, "fingerprint should be 24 hex chars");
+        assert_eq!(
+            fp1,
+            format!(
+                "whole-pcm16-mono16k-strict-v3-{}",
+                blake3::hash(b"fake mp4 content for fingerprinting").to_hex()
+            )
+        );
     }
 
     #[test]
@@ -459,15 +451,33 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_detects_same_size_middle_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.mp4");
+        let mut bytes = vec![0u8; 3 * 65536];
+        std::fs::write(&path, &bytes).unwrap();
+        let before = media_fingerprint(&path).unwrap();
+        bytes[65536 + 1] = 1;
+        std::fs::write(&path, &bytes).unwrap();
+        assert_ne!(before, media_fingerprint(&path).unwrap());
+    }
+
+    #[test]
     fn fingerprint_large_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("large.mp4");
-        // Create a file larger than FINGERPRINT_CHUNK
-        let data = vec![0xABu8; FINGERPRINT_CHUNK * 3];
+        // Exercise streaming beyond the former sampled blocks.
+        let data = vec![0xABu8; 65536 * 3];
         std::fs::write(&path, &data).unwrap();
 
         let fp = media_fingerprint(&path).unwrap();
-        assert_eq!(fp.len(), 24);
+        assert_eq!(
+            fp,
+            format!(
+                "whole-pcm16-mono16k-strict-v3-{}",
+                blake3::hash(&data).to_hex()
+            )
+        );
     }
 
     #[test]
@@ -490,6 +500,16 @@ mod tests {
                 .join("batchalign3")
                 .join(CACHE_SUBDIR)
         );
+    }
+
+    #[tokio::test]
+    async fn segment_refuses_unreadable_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.wav");
+        let window =
+            MediaWindow::new(crate::time::FileMs::new(0), crate::time::FileMs::new(100)).unwrap();
+        assert!(matches!(extract_audio_segment(&missing, window).await,
+            Err(EnsureWavError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound));
     }
 
     #[tokio::test]

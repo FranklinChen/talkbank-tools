@@ -27,6 +27,31 @@ use crate::store::JobStore;
 
 use super::test_sink::{RecordedProgress, RecordingSink};
 
+#[tokio::test]
+async fn dropping_file_supervision_retires_the_child_task() {
+    struct Retired(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for Retired {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (retired, done) = tokio::sync::oneshot::channel();
+    let task = spawn_supervised_file_task(DisplayPath::from("a.cha"), "test", async move {
+        let _guard = Retired(Some(retired));
+        let _ = started.send(());
+        std::future::pending::<FileTaskOutcome>().await
+    });
+    ready.await.expect("child started");
+    drop(task);
+    tokio::time::timeout(Duration::from_secs(1), done)
+        .await
+        .expect("losing the parent must not detach a running file task")
+        .expect("child retired");
+}
+
 fn test_config() -> crate::config::ServerConfig {
     crate::config::ServerConfig {
         max_concurrent_jobs: Some(2),

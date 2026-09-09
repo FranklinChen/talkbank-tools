@@ -23,7 +23,7 @@ DIST_DIR="$REPO_ROOT/dist"
 BUILD_WHEEL=true
 
 TAG="v0.0.0-installer-test"
-REPO="TalkBank/talkbank-tools"
+REPO="FranklinChen/talkbank-tools"
 
 for arg in "$@"; do
     case "$arg" in

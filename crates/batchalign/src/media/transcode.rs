@@ -5,7 +5,7 @@
 //! Four call sites used to spell out the same ffmpeg invocation by hand:
 //!
 //! ```text
-//! -y [-ss START -to END] -i SOURCE [-f f32le] -acodec pcm_{s16le,f32le} \
+//! -y -nostdin -v error -xerror [-ss START -to END] -i SOURCE [-f f32le] -acodec pcm_{s16le,f32le} \
 //!    -ar 16000 -ac 1 DESTINATION
 //! ```
 //!
@@ -114,21 +114,38 @@ pub struct Transcode {
 /// `produce` returns `Result`, which already carries it, and the marker was
 /// forcing `let _produced = produced?;` at the two sites that need only the
 /// error.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ProducedMedia {
     /// How many bytes it holds.
-    pub byte_len: u64,
+    byte_len: u64,
     /// The sample rate the audio was produced at.
     ///
     /// Reported rather than left for the caller to restate. `artifacts_v2`
     /// declared `SampleRateHzV2(16_000)` into the descriptor Python consumes,
     /// six lines after asking for audio at whatever this constant says, so
     /// changing the constant left the descriptor asserting the old value.
-    pub sample_rate_hz: u32,
+    sample_rate_hz: u32,
     /// How many channels it has, for the same reason. `u16` because that is
     /// the width the worker protocol's own channel count uses; a fact that
     /// travels should not change type on the way.
-    pub channels: u16,
+    channels: u16,
+}
+
+impl ProducedMedia {
+    /// Byte length observed after strict conversion.
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    /// Sample rate requested by the checked conversion.
+    pub const fn sample_rate_hz(&self) -> u32 {
+        self.sample_rate_hz
+    }
+
+    /// Channel count requested by the checked conversion.
+    pub const fn channels(&self) -> u16 {
+        self.channels
+    }
 }
 
 /// Why a transcode did not produce its file.
@@ -218,7 +235,10 @@ impl Transcode {
                     },
                 })?;
 
-        if !output.status.success() {
+        // ffmpeg may otherwise return zero after dropping damaged packets.
+        // `-v error` makes any stderr diagnostic incompatible with admission;
+        // `-xerror` also stops decoding at the first error.
+        if !output.status.success() || !output.stderr.is_empty() {
             // The one statement of this cleanup. Four call sites each had their
             // own, and a fifth would have had to remember.
             let _ = std::fs::remove_file(destination);
@@ -240,7 +260,10 @@ impl Transcode {
 
     /// The full argv, which exists in exactly this one place.
     fn args(&self, destination: &Path) -> Vec<OsString> {
-        let mut args = vec![OsString::from("-y")];
+        let mut args: Vec<OsString> = ["-y", "-nostdin", "-v", "error", "-xerror"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
         if let Some(window) = self.window {
             args.extend(window.as_seek_args());
         }
@@ -268,6 +291,48 @@ mod tests {
     use super::*;
     use crate::time::FileMs;
 
+    /// A truncated PCM sample is a real decoder error that ffmpeg ordinarily
+    /// tolerates with exit zero and almost all of the audio still emitted.
+    #[test]
+    fn decoder_errors_refuse_partial_audio_and_remove_output() {
+        assert!(MediaTool::Ffmpeg.banner().is_some(), "test requires ffmpeg");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("truncated.wav");
+        let destination = dir.path().join("output.wav");
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&20_036u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&32_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&20_000u32.to_le_bytes());
+        wav.resize(44 + 19_999, 0); // final sample is missing one byte
+        std::fs::write(&source, wav).unwrap();
+
+        let permissive = MediaTool::Ffmpeg
+            .command()
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&source)
+            .args(["-f", "s16le", "-"])
+            .output()
+            .unwrap();
+        assert!(permissive.status.success());
+        assert!(!permissive.stdout.is_empty());
+        assert!(!permissive.stderr.is_empty());
+
+        let error = Transcode::whole(&source, PcmEncoding::S16LeWav)
+            .produce(&destination)
+            .expect_err("a successful process exit cannot admit decoder errors");
+        assert!(matches!(error, TranscodeError::Failed { .. }));
+        assert!(!destination.exists(), "partial output must be removed");
+    }
+
     fn ms(value: u64) -> FileMs {
         FileMs::new(value)
     }
@@ -289,13 +354,17 @@ mod tests {
     /// has: it is what reaches `execvp`, and no type can describe what ffmpeg
     /// will accept.
     #[test]
-    fn a_whole_file_wav_transcode_spells_the_argv_callers_used_to_write() {
+    fn a_whole_file_wav_transcode_requires_strict_decoding() {
         let args = Transcode::whole("/in.mp4", PcmEncoding::S16LeWav).args(Path::new("/out.wav"));
         let rendered: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
         assert_eq!(
             rendered,
             [
                 "-y",
+                "-nostdin",
+                "-v",
+                "error",
+                "-xerror",
                 "-i",
                 "/in.mp4",
                 "-acodec",
@@ -321,6 +390,10 @@ mod tests {
             rendered,
             [
                 "-y",
+                "-nostdin",
+                "-v",
+                "error",
+                "-xerror",
                 "-ss",
                 "1.500",
                 "-to",

@@ -881,10 +881,64 @@ pub struct SpeakerIdentifyArgs {
     #[arg(long, required = true, value_parser = parse_threshold)]
     pub threshold: crate::chat_ops::speaker_identity::MatchThreshold,
 
+    /// How many shuffled line-to-track labellings the track contrast draws.
+    ///
+    /// The evidence's `track_contrasts` carry a permutation p-value: how
+    /// often a margin as large as the observed one appears when line
+    /// membership is shuffled with track sizes preserved. A thousand draws
+    /// resolve p to 0.001. Recorded in the file with the seed.
+    #[arg(long, default_value_t = documented_permutations(), value_parser = parse_permutations)]
+    pub permutations: crate::chat_ops::speaker_identity::PermutationCount,
+
+    /// Seed of the shuffle behind `--permutations`, so a run reproduces
+    /// byte for byte. Recorded in the file.
+    #[arg(long, default_value_t = documented_permutation_seed())]
+    pub permutation_seed: u64,
+
     /// Language (3-letter ISO code). Worker-pool selection only; speaker
     /// embedding itself is language-independent.
     #[arg(long, default_value = "eng")]
     pub lang: String,
+}
+
+/// The documented count, read from its one owner so the help text cannot
+/// disagree with the persisted-job fallback.
+fn documented_permutations() -> crate::chat_ops::speaker_identity::PermutationCount {
+    crate::chat_ops::speaker_identity::documented_permutation_plan().count
+}
+
+/// The documented seed, same owner.
+fn documented_permutation_seed() -> u64 {
+    crate::chat_ops::speaker_identity::documented_permutation_plan().seed
+}
+
+/// A `--permutations` value that is not a positive count.
+#[derive(Debug, thiserror::Error)]
+pub enum PermutationsArgumentError {
+    /// Not an integer.
+    #[error("{value:?} is not a permutation count: {source}")]
+    Parse {
+        /// The rejected text.
+        value: String,
+        /// Why.
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    /// Zero.
+    #[error(transparent)]
+    Zero(#[from] crate::chat_ops::speaker_identity::ZeroPermutations),
+}
+
+fn parse_permutations(
+    value: &str,
+) -> Result<crate::chat_ops::speaker_identity::PermutationCount, PermutationsArgumentError> {
+    let parsed: u32 = value
+        .parse()
+        .map_err(|source| PermutationsArgumentError::Parse {
+            value: value.to_owned(),
+            source,
+        })?;
+    Ok(crate::chat_ops::speaker_identity::PermutationCount::try_from(parsed)?)
 }
 
 impl SpeakerIdentifyArgs {

@@ -45,12 +45,18 @@
 //!                                              |
 //!                          SpeakerEmbedding::similarity_to
 //!                                (the ONLY producer of a score)
-//!                                              |
-//!                              ThresholdPolicy::verdict
-//!                                (the ONLY producer of a verdict)
-//!                                              v
-//!                                       SpeakerVerdict
+//!                                     |                 |
+//!                     ThresholdPolicy::verdict     TrackLines::analyse
+//!                  (the ONLY producer of a       (the ONLY producer of a
+//!                   per-line verdict)             track voice and contrast)
+//!                                     v                 v
+//!                              SpeakerVerdict    TrackIdentity, TrackContrast
 //! ```
+//!
+//! The per-line verdict and the track verdict are two readings of the same
+//! vectors. The line reading answers "who said THIS"; the track reading
+//! answers "which speaker code IS this enrolled voice", and carries a
+//! permutation p-value instead of a margin somebody chose. See `tracks`.
 //!
 //! # Why the enrollment spans and the utterances share one decode
 //!
@@ -67,10 +73,11 @@ pub mod frames;
 pub mod model;
 pub mod policy;
 pub mod run;
+pub mod tracks;
 pub mod transcript;
 
 pub use embedding::{
-    EmbeddingDimension, IncomparableEmbeddings, MinimumEmbeddingFrames, NotAnEmbedding,
+    EmbeddingDimension, IncomparableEmbeddings, MinimumEmbeddingFrames, NoCentroid, NotAnEmbedding,
     SpeakerEmbedding, ZeroEmbeddingDimension, ZeroMinimumEmbeddingFrames,
 };
 pub use enrollment::{
@@ -91,5 +98,10 @@ pub use run::{
     EmbeddingInferenceFailure, EmbeddingRequest, EmbeddingResponse, RequestedSpan, SpanOutcome,
     SpeakerEmbeddingInference, SpeakerIdentityFailure, TranscriptUtterance, UtteranceTiming,
     identify_speakers,
+};
+pub use tracks::{
+    CentroidMargin, EmptyTrackCode, PValue, PermutationCount, PermutationPlan, TrackAnalysis,
+    TrackAnalysisFailure, TrackCode, TrackContrast, TrackIdentity, TrackLines, ZeroPermutations,
+    documented_permutation_plan,
 };
 pub use transcript::{TierSelection, read_utterances};
