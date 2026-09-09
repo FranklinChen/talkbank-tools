@@ -9,10 +9,11 @@ use crate::chat_ops::morphosyntax_ops::{
 use crate::chat_ops::nlp::UdResponse;
 use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::morphosyntax::{MorphotagDisposition, infer_batch};
+use crate::pipeline::post_validate::PostValidated;
 use crate::{api::LanguageCode3, error::ServerError, pipeline::PipelineServices};
 use batchalign_transform::morphosyntax::MatchedMorphosyntaxResponses;
 use batchalign_transform::parse::parse_lenient;
-use batchalign_transform::validate::{ValidityLevel, validate_output, validate_to_level};
+use batchalign_transform::validate::{ValidityLevel, validate_to_level};
 use tracing::warn;
 
 /// Immutable inputs shared across transitions; job-level language is excluded.
@@ -76,7 +77,16 @@ pub(super) struct Inferred {
     work: InferenceWork,
 }
 pub(super) struct Applied;
-pub(super) struct PostChecked;
+
+/// The terminal phase: the document is finished AND its bytes have passed the
+/// post-validation gate.
+///
+/// It carries the proof rather than re-deriving it, so the bytes that were
+/// validated are exactly the bytes `serialize` hands back; there is no second
+/// serialization for a caller to get wrong.
+pub(super) struct PostChecked {
+    output: PostValidated,
+}
 
 /// Captured evidence, rather than a policy flag paired with a missing value.
 enum HintPlan {
@@ -287,23 +297,19 @@ impl Analysis<Applied> {
         self.chat
     }
 
-    /// Existing policy is non-fatal post-validation; this state claims a check,
-    /// not validity, so diagnostics do not masquerade as an admission proof.
-    pub(super) fn postcheck(self) -> Analysis<PostChecked> {
-        if let Err(errors) = validate_output(&self.chat, "morphotag") {
-            let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
-            warn!(errors = ?messages, "morphotag post-validation warnings (non-fatal)");
-        }
-        Analysis {
-            chat: self.chat,
-            language: self.language,
-            state: PostChecked,
-        }
-    }
-}
-
-impl Analysis<PostChecked> {
-    pub(super) fn serialize(mut self, options: &RunOptions<'_>) -> String {
+    /// Finish the document and gate it, fail-closed.
+    ///
+    /// The finishing edits (decision-tier strip, provenance, empty-placeholder
+    /// removal) moved here from `serialize` so that the thing validated is the
+    /// thing written. Gating before them would have proved a draft.
+    ///
+    /// `MainTierValid` is the level `admit` demanded of the input, so this is
+    /// the no-degradation half of the rule; `validate_output` inside the gate
+    /// adds the `%mor`-item-count check that is specific to morphotag.
+    pub(super) fn postcheck(
+        mut self,
+        options: &RunOptions<'_>,
+    ) -> Result<Analysis<PostChecked>, ServerError> {
         batchalign_transform::decisions::strip_decision_tiers(&mut self.chat);
         let provenance = crate::provenance::morphotag_provenance(
             self.language.api.as_ref(),
@@ -313,6 +319,28 @@ impl Analysis<PostChecked> {
         );
         crate::provenance::inject_provenance(&mut self.chat, &provenance);
         remove_empty_morphosyntax_placeholders(&mut self.chat);
-        batchalign_transform::serialize::to_chat_string(&self.chat)
+
+        let output = PostValidated::gate(
+            &self.chat,
+            ValidityLevel::MainTierValid,
+            crate::api::ReleasedCommand::Morphotag,
+        )
+        .map_err(|failure| ServerError::Validation(failure.to_string()))?;
+        Ok(Analysis {
+            chat: self.chat,
+            language: self.language,
+            state: PostChecked { output },
+        })
+    }
+}
+
+impl Analysis<PostChecked> {
+    /// Hand back the gate-proven output.
+    ///
+    /// Nothing is serialized here: `postcheck` already produced the bytes it
+    /// validated, and re-serializing would reopen the gap between what was
+    /// checked and what is written.
+    pub(super) fn serialize(self) -> PostValidated {
+        self.state.output
     }
 }

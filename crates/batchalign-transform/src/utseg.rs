@@ -39,7 +39,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use talkbank_model::Span;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::{WordItem, counts_for_tier, walk_words};
 use talkbank_model::alignment::{
     WorTimingBinding, WorTimingCorrespondence, WorTimingSequence, assess_wor_timing_sequence,
     bind_wor_timing, corroborate_wor_timing,
@@ -233,7 +235,11 @@ pub fn collect_utseg_payloads(chat_file: &ChatFile) -> UtsegPayloadCollection {
         };
 
         let mut words = Vec::new();
-        extract::collect_utterance_content(&utt.main.content.content, TierDomain::Mor, &mut words);
+        extract::collect_utterance_content(
+            &utt.main.content.content,
+            PositionalDomain::Mor,
+            &mut words,
+        );
 
         let speaker = SpeakerCode::new(utt.main.speaker.as_str());
         match words.len() {
@@ -363,7 +369,11 @@ pub fn build_word_to_content_map(content: &[UtteranceContent]) -> Vec<usize> {
 
     for (content_idx, item) in content.iter().enumerate() {
         let mut words = Vec::new();
-        extract::collect_utterance_content(std::slice::from_ref(item), TierDomain::Mor, &mut words);
+        extract::collect_utterance_content(
+            std::slice::from_ref(item),
+            PositionalDomain::Mor,
+            &mut words,
+        );
         for _ in &words {
             word_to_content.push(content_idx);
         }
@@ -729,27 +739,41 @@ fn as_retrace(item: &UtteranceContent) -> Option<&Retrace> {
 /// Compute the child-group assignment for each main-tier word that is
 /// `%wor`-eligible.
 ///
-/// "Eligible" matches `TierDomain::Wor`: untranscribed words (`xxx`/`yyy`/
-/// `www`), phonological fragments (`&+`), and nonwords (`&~`) are excluded;
-/// fillers (`&-`) are included. The returned Vec has one entry per eligible
-/// word, in main-tier order; entries are child-group indices.
+/// "Eligible" is chatter's `%wor` slot rule (`WorSlotMembershipPolicy::
+/// FilteredLexicalV1`): untranscribed words (`xxx`/`yyy`/`www`),
+/// phonological fragments (`&+`), and nonwords (`&~`) are excluded; fillers
+/// (`&-`) are included. The returned Vec has one entry per eligible word, in
+/// main-tier order; entries are child-group indices.
 ///
-/// Implementation: walk content_items one at a time, count `%wor`-eligible
-/// words inside each via `extract::collect_utterance_content` with
-/// `TierDomain::Wor`. Each such word inherits its enclosing content item's
-/// group.
+/// Implementation: walk each content item on its own with the `%wor` walker
+/// and admit exactly what `WorMainTierProjection::from_main` admits (a word,
+/// or a replaced word's original, that `counts_for_tier` accepts for `%wor`).
+/// The projection itself is only constructible from a whole `MainTier`, so
+/// a per-item count has to restate its admission rule; the rule is named
+/// here so the two cannot drift silently.
 fn wor_eligible_word_groups(
     content_items: &[UtteranceContent],
     content_item_group: &[Option<usize>],
 ) -> Vec<usize> {
     let mut groups = Vec::new();
     for (content_idx, item) in content_items.iter().enumerate() {
-        let mut buf = Vec::new();
-        extract::collect_utterance_content(std::slice::from_ref(item), TierDomain::Wor, &mut buf);
         let group = content_item_group[content_idx].unwrap_or(0);
-        for _ in &buf {
-            groups.push(group);
-        }
+        walk_words(
+            std::slice::from_ref(item),
+            Some(TierDomain::Wor),
+            &mut |word| {
+                let admitted = match word {
+                    WordItem::Word(word) => counts_for_tier(word, TierDomain::Wor),
+                    WordItem::ReplacedWord(replaced) => {
+                        counts_for_tier(&replaced.word, TierDomain::Wor)
+                    }
+                    WordItem::Separator(_) => false,
+                };
+                if admitted {
+                    groups.push(group);
+                }
+            },
+        );
     }
     groups
 }

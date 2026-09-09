@@ -43,6 +43,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from batchalign.inference.languages.cantonese._cantonese_fa import CantoneseFaHost
+    from batchalign.inference.qwen_forced_alignment import (
+        IndexedWordTimingRow,
+        QwenFaHost,
+    )
     from batchalign.inference.types import (
         Wave2VecFAHandle,
         Wave2VecFAResult,
@@ -82,6 +86,14 @@ class ForcedAlignmentExecutionHostV2:
         ]
         | None
     ) = None
+    # Same call shape as `wave2vec_runner`: the Qwen3 host is handed the word
+    # list and rebuilds its own transcript, so nothing about the request beyond
+    # the words reaches it. Its rows differ from wave2vec's in one way that
+    # matters: `interval_ms` may be `None`, because the Qwen3 aligner can time
+    # some of a group's words and not others, and says which.
+    qwen3_runner: (
+        Callable[[np.ndarray, list[str]], list[IndexedWordTimingRow]] | None
+    ) = None
 
 
 def build_default_fa_execution_host_v2(
@@ -89,11 +101,12 @@ def build_default_fa_execution_host_v2(
     whisper_model: WhisperFAHandle | None,
     wave2vec_model: Wave2VecFAHandle | None,
     canto_host: CantoneseFaHost | None,
+    qwen_host: QwenFaHost | None,
 ) -> ForcedAlignmentExecutionHostV2:
     """Build the live V2 FA host from already loaded model handles.
 
-    `canto_host` is passed in rather than read from module globals so the seam
-    stays explicit and a test can supply a fake.
+    `canto_host` and `qwen_host` are passed in rather than read from module
+    globals so the seam stays explicit and a test can supply a fake.
     """
 
     import torch
@@ -138,10 +151,29 @@ def build_default_fa_execution_host_v2(
 
         canto_runner = _run_canto
 
+    qwen3_runner = None
+    if qwen_host is not None:
+
+        def _run_qwen3(
+            audio: np.ndarray, words: list[str]
+        ) -> list[IndexedWordTimingRow]:
+            # The host owns the whole verb (segment, align, fold onto our
+            # words), so nothing is reassembled here. Times come back
+            # WINDOW-relative on purpose: Rust adds the group offset.
+            #
+            # `to_indexed_timings` is the one lossy step, and it is called
+            # here and nowhere else: the fold knows WHY a word is untimed and
+            # the worker protocol's row has no slot for it, so the reason
+            # stops at this line rather than at an unmarked boundary.
+            return qwen_host.align_words(audio, words).to_indexed_timings()
+
+        qwen3_runner = _run_qwen3
+
     return ForcedAlignmentExecutionHostV2(
         whisper_runner=whisper_runner,
         wave2vec_runner=wave2vec_runner,
         canto_runner=canto_runner,
+        qwen3_runner=qwen3_runner,
     )
 
 
@@ -185,5 +217,6 @@ def execute_forced_alignment_request_v2(
                 host.whisper_runner,
                 host.wave2vec_runner,
                 _wrap_canto_runner(host.canto_runner),
+                host.qwen3_runner,
             )
         )

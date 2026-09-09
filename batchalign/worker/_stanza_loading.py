@@ -22,6 +22,11 @@ from batchalign.inference._italian_mwt import (
     ItalianMwtPolicy,
 )
 from batchalign.inference.types import StanzaNLP
+from batchalign.worker._pipeline_cache import (
+    StanzaPipelineCache,
+    mwt_probe_key,
+    retokenize_key,
+)
 from batchalign.worker._stanza_capabilities import (
     _ISO3_OVERRIDES,
     StanzaCapabilityTable,
@@ -30,6 +35,37 @@ from batchalign.worker._stanza_capabilities import (
 from batchalign.worker._types import _state
 
 L = logging.getLogger("batchalign.worker")
+
+# Every Stanza alpha-2 code a Chinese ISO-639-3 code resolves to, DERIVED from
+# the shared override table rather than spelled out.
+#
+# The retokenize loader's guard was the literal `"zh"` while `_ISO3_OVERRIDES`
+# maps `cmn`, `zho` and `yue` all to `"zh-hans"`, so it rejected every code its
+# only caller passes and the neural-tokenizer pipeline could not be loaded at
+# all: a `--retokenize` Mandarin job logged "non-Chinese lang zho, skipping" and
+# silently fell back to the pretokenized pipeline. A literal beside a mapping it
+# has to agree with is the drift this module's own `iso3_to_alpha2` docstring
+# warns about, one function further down.
+_STANZA_CHINESE_ALPHA2: frozenset[str] = frozenset(
+    _ISO3_OVERRIDES[iso3] for iso3 in ("cmn", "zho", "yue")
+)
+
+# One process-wide creation of the pipeline cache, ordered by a lock because
+# two serving threads can reach a first load at the same time. The previous
+# read-modify-write of `_state.stanza_pipelines` could lose one thread's
+# pipeline entirely; `None` still means "no Stanza bootstrap has run".
+_CACHE_CREATION_LOCK = threading.Lock()
+
+
+def pipeline_cache() -> StanzaPipelineCache:
+    """Return this worker's Stanza pipeline cache, creating it once."""
+    with _CACHE_CREATION_LOCK:
+        cache = _state.stanza_pipelines
+        if cache is None:
+            cache = StanzaPipelineCache()
+            _state.stanza_pipelines = cache
+        return cache
+
 
 # Stanza's key for pos-independent lemmatizer entries (`_POS_INDEPENDENT` in
 # `stanza/models/lemma/trainer.py`). Mirrored rather than imported because it is
@@ -154,11 +190,42 @@ def iso3_to_alpha2(iso3: LanguageCode) -> LanguageCode2:
 
 
 def load_stanza_models(lang: LanguageCode) -> None:
-    """Load Stanza morphosyntax models for one language.
+    """Load Stanza morphosyntax models for one language, once per language.
 
-    The resulting pipeline, tokenizer context, and lock are installed into the
+    Owns the cache's per-language construction slot and nothing else, so the
+    serialization is visible in four lines instead of buried at the bottom of
+    a hundred-line build. See :func:`_build_stanza_models` for the build, and
+    the docstring below for why the slot exists.
+    """
+    with pipeline_cache().load_slot(lang) as already_resident:
+        if already_resident is not None:
+            return
+        _build_stanza_models(lang)
+
+
+def _build_stanza_models(lang: LanguageCode) -> None:
+    """Build and install one language's Stanza pipeline.
+
+    Called only by :func:`load_stanza_models`, and only with that language's
+    construction slot held.
+
+    The resulting pipeline and tokenizer context are installed into the
     shared worker state so request handlers can do pure inference routing
-    without rebuilding Stanza pipelines on every call.
+    without rebuilding Stanza pipelines on every call. The inference lock is
+    NOT created here: it is one per process, created with the state, so a
+    reload can never hand a running handler a different lock.
+
+    Residency is BOUNDED: the pipeline goes into ``StanzaPipelineCache``, which
+    evicts the least recently used pipeline once it is full, so calling this
+    for a third language returns the second-oldest one's memory rather than
+    keeping every language a long-lived worker has ever seen.
+
+    Construction is SERIALIZED PER LANGUAGE by the cache's ``load_slot``, and
+    a language already resident when the slot opens is a no-op. Two request
+    threads that missed on the same language used to call this concurrently
+    and both build a multi-hundred-megabyte Stanza pipeline, the second install
+    replacing the first: double the peak memory and double the wall clock for
+    one usable result. The second thread now waits and finds the first's.
     """
     import stanza
     from stanza import DownloadMethod
@@ -214,7 +281,6 @@ def load_stanza_models(lang: LanguageCode) -> None:
         processors += ",mwt"
 
     ctx = TokenizerContext()
-    lock = threading.Lock()
 
     # Italian needs a policy for single-word multi-word tokens; every other
     # language keeps Stanza's own behavior. Built here rather than inside the
@@ -277,14 +343,9 @@ def load_stanza_models(lang: LanguageCode) -> None:
             ),
         )
 
-    # Preserve any pipelines already loaded for other languages in this worker.
-    existing_pipelines = _state.stanza_pipelines or {}
-    existing_contexts = _state.stanza_contexts or {}
-    existing_pipelines[lang] = nlp
-    existing_contexts[lang] = ctx
-    _state.stanza_pipelines = existing_pipelines
-    _state.stanza_contexts = existing_contexts
-    _state.stanza_nlp_lock = lock
+    # Install into the bounded cache, which may evict another language's
+    # pipeline to stay under its ceiling. The context travels with it.
+    pipeline_cache().install(lang, nlp, context=ctx)
 
     try:
         _state.stanza_version = stanza.__version__
@@ -301,19 +362,42 @@ def load_stanza_retokenize_model(lang: LanguageCode) -> None:
 
     The pipeline is stored under key ``"{lang}:retok"`` in worker state so it
     coexists with the standard pretokenized pipeline.
+
+    Owns that key's construction slot and nothing else, exactly as
+    :func:`load_stanza_models` owns the plain language key's; the build is
+    :func:`_build_stanza_retokenize_model`. The slot was missing here until
+    2026-09-07, so the load-stampede fix covered one of the three key kinds a
+    worker loads: two request threads that missed on ``{lang}:retok`` both
+    built the neural tokenizer (a separate ~200 MB model), and the second
+    install replaced the first.
     """
-    import stanza
-    from stanza import DownloadMethod
-
-    from batchalign.inference._tokenizer_realign import TokenizerContext
-
     alpha2 = iso3_to_alpha2(lang)
-    if alpha2 != "zh":
+    if alpha2 not in _STANZA_CHINESE_ALPHA2:
         L.warning(
             "load_stanza_retokenize_model called for non-Chinese lang %s, skipping",
             lang,
         )
         return
+
+    retok_key = retokenize_key(lang)
+    with pipeline_cache().load_slot(retok_key) as already_resident:
+        if already_resident is not None:
+            return
+        _build_stanza_retokenize_model(lang, alpha2, retok_key)
+
+
+def _build_stanza_retokenize_model(
+    lang: LanguageCode, alpha2: str, retok_key: str
+) -> None:
+    """Build and install the Mandarin retokenize pipeline.
+
+    Called only by :func:`load_stanza_retokenize_model`, and only with
+    ``retok_key``'s construction slot held.
+    """
+    import stanza
+    from stanza import DownloadMethod
+
+    from batchalign.inference._tokenizer_realign import TokenizerContext
 
     processors = "tokenize,pos,lemma,depparse"
     ctx = TokenizerContext()
@@ -331,13 +415,7 @@ def load_stanza_retokenize_model(lang: LanguageCode) -> None:
         tokenize_pretokenized=False,
     )
 
-    retok_key = f"{lang}:retok"
-    existing_pipelines = _state.stanza_pipelines or {}
-    existing_contexts = _state.stanza_contexts or {}
-    existing_pipelines[retok_key] = nlp
-    existing_contexts[retok_key] = ctx
-    _state.stanza_pipelines = existing_pipelines
-    _state.stanza_contexts = existing_contexts
+    pipeline_cache().install(retok_key, nlp, context=ctx)
 
     L.info("Loaded Stanza retokenize pipeline for %s (key=%s)", lang, retok_key)
 
@@ -477,8 +555,8 @@ class ItalianMwtPolicyProvider:
         if self._lexicon_resolved:
             return self._lexicon
         self._lexicon_resolved = True
-        pipelines = _state.stanza_pipelines or {}
-        nlp = pipelines.get(self._lang)
+        pipelines = _state.stanza_pipelines
+        nlp = None if pipelines is None else pipelines.get(self._lang)
         if nlp is None:
             L.warning(
                 "Italian MWT policy: no loaded pipeline for %s, leaving Stanza's "
@@ -603,34 +681,41 @@ def load_stanza_mwt_probe_model(
     marks anything as a multi-word candidate and the MWT processor expands
     nothing. A pretokenized probe would answer "never splits" for every word,
     which reads as a clean result and is a measurement that never ran.
+
+    Construction is SERIALIZED on ``{lang}:mwtprobe`` by the cache's
+    ``load_slot``. Until 2026-09-07 this was a check-then-act on
+    ``cache.get(probe_key)``: two threads could both miss, both build a
+    tokenizer plus MWT model, and both install, with the loser's pipeline
+    already handed out to its caller.
     """
     import stanza
     from stanza import DownloadMethod
 
-    probe_key = f"{lang}:mwtprobe"
-    existing_pipelines = _state.stanza_pipelines or {}
-    cached = existing_pipelines.get(probe_key)
-    if cached is not None:
-        return cached
+    probe_key = mwt_probe_key(lang)
+    cache = pipeline_cache()
+    with cache.load_slot(probe_key) as already_resident:
+        if already_resident is not None:
+            return already_resident.nlp
 
-    alpha2 = iso3_to_alpha2(lang)
-    nlp = stanza.Pipeline(
-        lang=alpha2,
-        processors="tokenize,mwt",
-        download_method=DownloadMethod.REUSE_RESOURCES,
-        tokenize_no_ssplit=True,
-        tokenize_postprocessor=postprocessor,
-    )
-    existing_pipelines[probe_key] = nlp
-    _state.stanza_pipelines = existing_pipelines
-    L.info("Loaded Stanza MWT probe pipeline for %s (key=%s)", lang, probe_key)
-    # `stanza.Pipeline` is untyped (no stubs ship with it, and
-    # `ignore_missing_imports` makes it `Any`), so this is the boundary where an
-    # `Any` becomes a typed value. Narrowed explicitly rather than returned
-    # bare: a bare return would silently re-infect every caller with `Any`,
-    # which is exactly how the untyped probe seam went unnoticed.
-    probe: StanzaNLP = nlp
-    return probe
+        alpha2 = iso3_to_alpha2(lang)
+        nlp = stanza.Pipeline(
+            lang=alpha2,
+            processors="tokenize,mwt",
+            download_method=DownloadMethod.REUSE_RESOURCES,
+            tokenize_no_ssplit=True,
+            tokenize_postprocessor=postprocessor,
+        )
+        # No tokenizer context: the probe has no realignment layer, and an empty
+        # one here would read as "a context exists" to anything that looked.
+        cache.install(probe_key, nlp, context=None)
+        L.info("Loaded Stanza MWT probe pipeline for %s (key=%s)", lang, probe_key)
+        # `stanza.Pipeline` is untyped (no stubs ship with it, and
+        # `ignore_missing_imports` makes it `Any`), so this is the boundary where
+        # an `Any` becomes a typed value. Narrowed explicitly rather than
+        # returned bare: a bare return would silently re-infect every caller with
+        # `Any`, which is exactly how the untyped probe seam went unnoticed.
+        probe: StanzaNLP = nlp
+        return probe
 
 
 def load_utseg_builder(lang: LanguageCode) -> None:

@@ -71,6 +71,11 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         // orchestrator must not retry them as if transient.
         ServerError::WhisperEngine(_) => FailureCategory::System,
         ServerError::Validation(_) => FailureCategory::Validation,
+        // The producing workflow already classified this one; its verdict is
+        // carried, never re-derived. Re-deriving is what turned a per-item
+        // PROVIDER failure into `Validation` (and so killed its retry) when
+        // `run_text_pipeline` rendered its typed error into a string.
+        ServerError::ClassifiedFailure { category, .. } => *category,
         ServerError::MemoryPressure(_) => FailureCategory::MemoryPressure,
         ServerError::RequiredEvidenceUnavailable(_) => FailureCategory::EvidenceUnavailable,
         ServerError::Io(_) => FailureCategory::System,

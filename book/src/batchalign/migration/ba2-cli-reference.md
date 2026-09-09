@@ -1,7 +1,7 @@
 # Batchalign2 CLI Reference (Baseline)
 
 **Status:** Reference
-**Last updated:** 2026-05-23 09:20 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 This document captures the CLI surface of Batchalign2 across **two baselines**:
 
@@ -74,9 +74,9 @@ Create transcripts from audio files via ASR.
 
 | Flag | Type | Default | Help | BA3 Status |
 |------|------|---------|------|------------|
-| `--whisper_oai` / `--rev` | exclusive pair | `--rev` | ASR engine (OAI variant) | Hidden compat alias → `--asr-engine` |
+| `--whisper_oai` / `--rev` | exclusive pair | `--rev` | ASR engine (OAI variant) | Hidden compat alias → `--asr-engine`; the engine is not implemented, so the job is refused |
 | `--whisper` / `--rev` | exclusive pair | `--rev` | ASR engine (HF variant) | Hidden compat alias → `--asr-engine` |
-| `--whisperx` / `--rev` | exclusive pair | `--rev` | ASR engine (WhisperX variant) | Hidden compat alias → `--asr-engine` |
+| `--whisperx` / `--rev` | exclusive pair | `--rev` | ASR engine (WhisperX variant) | Hidden compat alias → `--asr-engine`; the engine is not implemented, so the job is refused |
 | `--diarize` / `--nodiarize` | bool | `False` | Speaker diarization | Hidden compat alias → `--diarization` |
 | `--wor` / `--nowor` | bool | `False` | Write %wor tier | Wired |
 | `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
@@ -186,7 +186,7 @@ ASR word error rate benchmarking against gold transcripts.
 | Flag | Type | Default | Help | BA3 Status |
 |------|------|---------|------|------------|
 | `--whisper` / `--rev` | exclusive pair | `--rev` | ASR engine (HF variant) | Hidden compat alias → `--asr-engine` |
-| `--whisper_oai` / `--rev` | exclusive pair | `--rev` | ASR engine (OAI variant) | Hidden compat alias → `--asr-engine` |
+| `--whisper_oai` / `--rev` | exclusive pair | `--rev` | ASR engine (OAI variant) | Hidden compat alias → `--asr-engine`; the engine is not implemented, so the job is refused |
 | `--lang` | str | `"eng"` | Language code | Wired |
 | `-n` / `--num_speakers` | int | `2` | Expected speaker count | **Not as spelled.** BA3 takes `--num-speakers` (kebab). It never accepted BA2's `--num_speakers` underscore, and it stopped accepting `-n` on 2026-08-19. |
 | `--wor` / `--nowor` | bool | `False` | Write %wor tier | Wired |

@@ -143,7 +143,7 @@ fn build_tui_cancel_provenance(
 
 use super::helpers::{
     classify_files, filter_files_for_command, inject_lexicon, maybe_open_dashboard,
-    poll_and_write_incrementally,
+    order_files_for_command, poll_and_write_incrementally,
 };
 use super::paths::prepare_paths_submission;
 use super::{server_supports_command, warn_stale_server};
@@ -224,6 +224,7 @@ pub(super) async fn dispatch_single_server(
         let (files, outputs) =
             crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
         let (files, outputs) = filter_files_for_command(command, files, outputs);
+        let (files, outputs) = order_files_for_command(command, files, outputs)?;
 
         if let Some(od) = out_dir {
             let mut passthrough = crate::cli::discover::PassthroughReport::default();

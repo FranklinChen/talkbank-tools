@@ -94,6 +94,7 @@ fn main() {
 
 mod audit_docs;
 mod audit_prose_references;
+mod ci_artifact_flow;
 mod ci_hygiene;
 mod core_purity;
 mod dead_variant_audit;

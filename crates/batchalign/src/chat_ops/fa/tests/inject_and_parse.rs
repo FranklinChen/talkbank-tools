@@ -5,8 +5,12 @@
 use super::*;
 
 use crate::chat_ops::fa::Placement;
+use crate::chat_ops::fa::alignment::token_map::{UntimedReason, WordTimingOutcome};
+use crate::chat_ops::fa::alignment::{IndexedWordTimings, apply_indexed_timings};
 use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Ms, Recording};
-use crate::chat_ops::fa::origin::EngineId;
+use crate::chat_ops::fa::origin::{CharEdits, EngineId};
+use crate::chat_ops::fa::timing::SpanFault;
+use crate::chat_ops::nlp::FaIndexedTiming;
 use talkbank_model::UtteranceIdx;
 use talkbank_model::model::{Line, UtteranceContent, WriteChat};
 use talkbank_parser::TreeSitterParser;
@@ -468,6 +472,188 @@ fn fa_finalization_runs_optional_repair_before_monotonicity() {
     );
 }
 
+/// Every word the indexed path leaves untimed SAYS WHY, per word.
+///
+/// The fact was modelled twice and only one copy could be read: the token path
+/// answered with a typed [`UntimedReason`] per word, while this path answered
+/// with a `None` in a vector and a counter beside it, so "the host declined
+/// this word", "the engine's span had no width" and "the engine answered about
+/// audio it was not given" were one and the same `None` to every caller. Only
+/// the aggregate counters told them apart, and only in a log line.
+#[test]
+fn test_apply_indexed_timings_says_why_each_word_has_no_timing() {
+    let words = make_fa_words(&["alpha", "beta", "gamma", "delta"]);
+    let indexed = vec![
+        // Timed and usable.
+        Some(FaIndexedTiming {
+            start_ms: 100,
+            end_ms: 400,
+            confidence: None,
+        }),
+        // The host declined to time this word.
+        None,
+        // A span with no width: the engine answered and its answer is unusable.
+        Some(FaIndexedTiming {
+            start_ms: 500,
+            end_ms: 500,
+            confidence: None,
+        }),
+        // Past the end of the 60 s window the engine was handed, which is the
+        // shape that wrote phantom speech into six sessions.
+        Some(FaIndexedTiming {
+            start_ms: 61_000,
+            end_ms: 62_000,
+            confidence: None,
+        }),
+    ];
+    let (outcomes, _discarded) = apply_indexed_timings(
+        IndexedWordTimings::pair(&words, &indexed).expect("one timing slot per word"),
+        &window_at(0).1,
+        &fa_test_engine(),
+    );
+
+    assert!(
+        matches!(outcomes[0], WordTimingOutcome::Timed { .. }),
+        "a usable timing must survive: {:?}",
+        outcomes[0]
+    );
+    assert!(
+        matches!(
+            outcomes[1],
+            WordTimingOutcome::Untimed {
+                reason: UntimedReason::NoTimingFromHost
+            }
+        ),
+        "the host declined this word: {:?}",
+        outcomes[1]
+    );
+    assert!(
+        matches!(
+            outcomes[2],
+            WordTimingOutcome::Untimed {
+                reason: UntimedReason::SpanRefused(SpanFault::NoExtent { .. })
+            }
+        ),
+        "a zero-width span is refused by width, not by absence: {:?}",
+        outcomes[2]
+    );
+    assert!(
+        matches!(
+            outcomes[3],
+            WordTimingOutcome::Untimed {
+                reason: UntimedReason::ReportedOutsideWindow(_)
+            }
+        ),
+        "a report past the end of the window says so: {:?}",
+        outcomes[3]
+    );
+}
+
+/// The warn line's per-word counters are DERIVED from those reasons.
+///
+/// The counters used to be hand-maintained fields incremented beside the
+/// `None` they described, so nothing tied the number to the word. Deriving
+/// them means a reason cannot be reported in one place and counted in another;
+/// this pins the arithmetic on a group carrying one of each class.
+#[test]
+fn test_indexed_untimed_counters_are_derived_from_the_reasons() {
+    let words = make_fa_words(&["alpha", "beta", "gamma", "delta"]);
+    let indexed = vec![
+        Some(FaIndexedTiming {
+            start_ms: 100,
+            end_ms: 400,
+            confidence: None,
+        }),
+        None,
+        Some(FaIndexedTiming {
+            start_ms: 500,
+            end_ms: 500,
+            confidence: None,
+        }),
+        Some(FaIndexedTiming {
+            start_ms: 61_000,
+            end_ms: 62_000,
+            confidence: None,
+        }),
+    ];
+    let (outcomes, discarded) = apply_indexed_timings(
+        IndexedWordTimings::pair(&words, &indexed).expect("one timing slot per word"),
+        &window_at(0).1,
+        &fa_test_engine(),
+    );
+    assert_eq!(
+        discarded.tally(&outcomes).notable(),
+        3,
+        "one declined word, one zero-width span and one out-of-window report"
+    );
+}
+
+/// A word the HOST returned no timing for is REPORTED, not silently skipped.
+///
+/// Downstream a word the host never timed is byte-identical to one whose
+/// timing was REJECTED for landing outside the window, and only the second
+/// warned. A Qwen3 group answering with three of ten words untimed emitted no
+/// diagnostic at all, so nothing distinguished "the engine declined these
+/// three" from "the engine timed everything".
+///
+/// It asserts the REASON now rather than a counter. The counter was a second
+/// representation of this fact and was deleted with the field it lived on; the
+/// warn line's `untimed_by_host` is counted from these reasons.
+#[test]
+fn test_apply_indexed_timings_reports_words_the_host_left_untimed() {
+    let words = make_fa_words(&["alpha", "beta", "gamma"]);
+    let indexed = vec![
+        Some(FaIndexedTiming {
+            start_ms: 100,
+            end_ms: 400,
+            confidence: None,
+        }),
+        None,
+        None,
+    ];
+    let (outcomes, discarded) = apply_indexed_timings(
+        IndexedWordTimings::pair(&words, &indexed).expect("one timing slot per word"),
+        &window_at(0).1,
+        &fa_test_engine(),
+    );
+    assert!(matches!(outcomes[0], WordTimingOutcome::Timed { .. }));
+    let declined = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                WordTimingOutcome::Untimed {
+                    reason: UntimedReason::NoTimingFromHost
+                }
+            )
+        })
+        .count();
+    assert_eq!(declined, 2);
+    assert_eq!(
+        discarded.tally(&outcomes).notable(),
+        2,
+        "an untimed word is on its own enough to make the group worth reporting"
+    );
+}
+
+/// Nothing to report when every word came back timed and usable.
+#[test]
+fn test_apply_indexed_timings_reports_nothing_when_every_word_is_timed() {
+    let words = make_fa_words(&["alpha"]);
+    let indexed = vec![Some(FaIndexedTiming {
+        start_ms: 100,
+        end_ms: 400,
+        confidence: None,
+    })];
+    let (outcomes, discarded) = apply_indexed_timings(
+        IndexedWordTimings::pair(&words, &indexed).expect("one timing slot per word"),
+        &window_at(0).1,
+        &fa_test_engine(),
+    );
+    assert!(matches!(outcomes[0], WordTimingOutcome::Timed { .. }));
+    assert_eq!(discarded.tally(&outcomes).notable(), 0);
+}
+
 #[test]
 fn test_parse_fa_response_token_level() {
     let json = r#"{"tokens": [
@@ -548,6 +734,17 @@ fn test_parse_fa_response_token_level_punctuation_token_is_ignored() {
     );
 }
 
+/// An engine label the transcript does not contain must cost NOTHING but
+/// itself.
+///
+/// The policy this test asserts CHANGED on 2026-09-07, and the docstring is
+/// changed with it rather than left describing a loss. It used to end
+/// `assert_eq!(timings[1], None)`: the deterministic stitch failed on "world"
+/// (the extra label "there" is not a prefix of it), and a failed stitch ended
+/// the group, so a word whose own onset the engine had reported perfectly well
+/// came back untimed. That was the abort, and it is gone: the residue of a
+/// broken stitch is now remapped by character alignment, which puts "world"
+/// back on the label that spells it.
 #[test]
 fn test_parse_fa_response_token_level_mismatch_does_not_skip_tokens() {
     let json = r#"{"tokens": [
@@ -571,7 +768,30 @@ fn test_parse_fa_response_token_level_mismatch_does_not_skip_tokens() {
             Origin::DerivedFromNextOnset
         )
     );
-    assert_eq!(timings[1], None);
+    // "world" is placed on its own label, and "there" is left owned by nobody.
+    // Every character of the word and of that label matched, so NEITHER end is
+    // wrapped: an exactly reconciled fold is the same fact the in-order stitch
+    // proves, and claiming an attribution over it would report a guess that was
+    // never made.
+    //
+    // Both ends carried `AttributedByCharAlignment { edits: ZERO }` until the
+    // route was folded into the edit counts on 2026-09-07. That wrapper said
+    // only WHICH CODE placed the word, and the reviewer's tally read it as our
+    // own answer. Where a fold really is inexact, both ends are still wrapped,
+    // which is what `both_boundaries_of_a_remapped_word_are_attributed` pins.
+    assert_eq!(
+        timings[1],
+        WordTiming::new(
+            600,
+            1_100,
+            Origin::EngineMeasured {
+                engine: fa_test_engine()
+            },
+            Origin::FallbackDuration {
+                assumed: Ms(LAST_WORD_FALLBACK_MS)
+            }
+        )
+    );
 }
 
 #[test]

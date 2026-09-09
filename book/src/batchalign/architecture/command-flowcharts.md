@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:15 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -345,7 +345,7 @@ commands chained automatically.
 - **Rev.AI with explicit `--diarize`:** BA3 runs a dedicated speaker stage on
   top of Rev output and treats its segments as authoritative before utterance
   segmentation.
-- **Whisper-based engines** (`whisper`, `whisperx`, `whisper-oai`): these
+- **Whisper-based engines** (`whisper`, `whisper_hub`, `whisper_rs`): these
   engines do not return speaker labels. Passing `--diarize` (or
   `--diarization enabled`) runs a dedicated speaker model as an additional
   stage.
@@ -375,8 +375,7 @@ flowchart TD
     engine_check{--asr-engine?}
     engine_check -->|whisper| whisper[Whisper local ASR]
     engine_check -->|rev| rev_cache["Rev.AI evidence resolution\ncontent-addressed lookup + per-key lease"]
-    engine_check -->|whisperx| whisperx[WhisperX ASR]
-    engine_check -->|whisper_oai| whisper_oai[OpenAI Whisper ASR]
+    engine_check -->|"whisperx, whisper_oai"| refused["Refused: engine not implemented"]
 
     rev_cache --> rev_hit{valid evidence hit?}
     rev_hit -->|Yes| rev_replay[Replay provider-shaped transcript]
@@ -386,8 +385,6 @@ flowchart TD
     rev_commit --> asr_tokens
 
     whisper --> asr_tokens
-    whisperx --> asr_tokens
-    whisper_oai --> asr_tokens
 
     asr_tokens["Raw ASR tokens\nword + start_s + end_s + optional speaker + confidence"]
     asr_tokens --> convert["convert_asr_response()\nALWAYS groups tokens by speaker label\nNo use_speaker_labels parameter"]

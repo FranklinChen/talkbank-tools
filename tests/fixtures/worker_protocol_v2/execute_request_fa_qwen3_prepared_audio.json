@@ -1,0 +1,46 @@
+{
+  "request_id": "req-fa-0005",
+  "task": "forced_alignment",
+  "payload": {
+    "kind": "forced_alignment",
+    "backend": "qwen3",
+    "payload_ref_id": "inline-ref-0005",
+    "audio_ref_id": "audio-ref-0005",
+    "text_mode": "space_joined"
+  },
+  "attachments": [
+    {
+      "kind": "inline_json",
+      "id": "inline-ref-0005",
+      "value": {
+        "words": [
+          "咁搞笑",
+          "嘅"
+        ],
+        "word_ids": [
+          "u0w0",
+          "u0w1"
+        ],
+        "word_utterance_indices": [
+          0,
+          0
+        ],
+        "word_utterance_word_indices": [
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "prepared_audio",
+      "id": "audio-ref-0005",
+      "path": "/tmp/batchalign3/worker-v2/audio-ref-0005.pcm",
+      "encoding": "pcm_f32le",
+      "channels": 1,
+      "sample_rate_hz": 16000,
+      "frame_count": 32000,
+      "byte_offset": 0,
+      "byte_len": 128000
+    }
+  ]
+}

@@ -6,8 +6,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::chat_ops::TierDomain;
-use batchalign_transform::extract::extract_words;
 use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
 use walkdir::WalkDir;
 
@@ -118,9 +116,13 @@ fn extract_utterances_from_files(
     for path in files {
         let text = std::fs::read_to_string(path)?;
         let (chat_file, _warnings) = parse_lenient(&parser, &text);
-        let extracted = extract_words(&chat_file, TierDomain::Wor);
-        for utt in &extracted {
-            let words: Vec<&str> = utt.words.iter().map(|w| w.text.as_str()).collect();
+        // Words on the `%wor` scale are the main tier's projection (chatter
+        // 0.23.0: the extractor no longer offers a `%wor` domain; the
+        // projection owns that selection). The generated tier carries one
+        // word per slot, in main-tier order.
+        for utterance in chat_file.utterances() {
+            let generated = utterance.main.wor_projection().generate_tier();
+            let words: Vec<&str> = generated.words().map(|word| word.cleaned_text()).collect();
             if words.len() >= min_word_count {
                 utterances.push(words.join(" "));
             }

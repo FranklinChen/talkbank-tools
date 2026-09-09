@@ -119,16 +119,46 @@ pub(crate) struct FaDispatchPlan {
 
 impl FaDispatchPlan {
     /// Build the FA option plan from the persisted job snapshot.
-    pub(crate) fn from_job(job: &RunnerJobSnapshot, config: &ServerConfig) -> Option<Self> {
+    ///
+    /// Returns the typed refusal rather than `None` for the reason
+    /// [`DispatchPlanRefusal`] gives: an `Option` here reached a `warn!` and a
+    /// bare `return` in `runner::routing`, so an align job whose persisted
+    /// options could not be read vanished with no file failed and nothing for
+    /// the operator to act on.
+    pub(crate) fn from_job(
+        job: &RunnerJobSnapshot,
+        config: &ServerConfig,
+    ) -> Result<Self, DispatchPlanRefusal> {
         let overrides = resolve_cache_overrides(job);
         let fa_cache_policy = overrides.policy_for(CacheTaskName::ForcedAlignment);
         let utr_cache_policy = overrides.policy_for(CacheTaskName::UtrAsr);
-        extract_fa_dispatch_params(&job.dispatch.options, fa_cache_policy).map(|options| Self {
+        let options = extract_fa_dispatch_params(&job.dispatch.options, fa_cache_policy)
+            .ok_or(DispatchPlanRefusal::Options)?;
+        Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             options,
             utr_cache_policy,
         })
     }
+}
+
+/// Why a dispatch plan could not be built.
+///
+/// `from_job` used to return `Option<Self>`, and the engine-selection refusal
+/// reached it through `.ok()?`. A job naming an engine this build cannot run
+/// therefore became `None`, indistinguishable from unreadable options, and
+/// `runner::routing` answered `None` with a `warn!` and a bare `return`: the
+/// job was dropped with no file failed, no error recorded and nothing for the
+/// operator to see but one log line. The refusal now travels.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DispatchPlanRefusal {
+    /// The persisted options could not be read into a plan at all.
+    #[error("command plan could not be built from job options")]
+    Options,
+    /// The job names an engine that is accepted as a name but not implemented
+    /// in this build.
+    #[error("{0}")]
+    Engine(#[from] crate::types::engines::EngineNotImplemented),
 }
 
 /// Typed plan for transcribe dispatch.
@@ -150,7 +180,10 @@ pub(crate) struct TranscribeDispatchPlan {
 
 impl TranscribeDispatchPlan {
     /// Build the transcribe plan from the persisted job snapshot.
-    pub(crate) fn from_job(job: &RunnerJobSnapshot, config: &ServerConfig) -> Option<Self> {
+    pub(crate) fn from_job(
+        job: &RunnerJobSnapshot,
+        config: &ServerConfig,
+    ) -> Result<Self, DispatchPlanRefusal> {
         let overrides = resolve_cache_overrides(job);
         let cache_policies = TranscribeCachePolicies {
             rev_asr: overrides.policy_for(CacheTaskName::RevAsrEvidence),
@@ -166,15 +199,21 @@ impl TranscribeDispatchPlan {
             allow_stanza_fallback_utseg,
             batch_size: _,
             engine_extras,
-        } = extract_transcribe_dispatch_params(&job.dispatch.options, cache_policies)?;
+        } = extract_transcribe_dispatch_params(&job.dispatch.options, cache_policies)
+            .ok_or(DispatchPlanRefusal::Options)?;
         let with_utseg = runtime_flag(job, "utseg", true);
         let with_morphosyntax = runtime_flag(job, "morphosyntax", false);
         let speaker_backend = diarize.then(|| resolve_speaker_backend(speaker_engine));
 
-        Some(Self {
+        Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
-                backend: AsrBackend::from_engine_name(asr_engine.as_wire_name()),
+                // A refusal here means a persisted job names an engine this
+                // build cannot run. Submission validation refuses those up
+                // front, so reaching this arm means the job predates the
+                // check. The refusal is PROPAGATED: `.ok()?` used to turn it
+                // into `None`, which routing dropped silently.
+                backend: AsrBackend::try_from_engine(&asr_engine)?,
                 diarize,
                 speaker_backend,
                 lang: job.dispatch.lang.clone(),
@@ -207,7 +246,10 @@ pub(crate) struct BenchmarkDispatchPlan {
 
 impl BenchmarkDispatchPlan {
     /// Build the benchmark plan from the persisted job snapshot.
-    pub(crate) fn from_job(job: &RunnerJobSnapshot, config: &ServerConfig) -> Option<Self> {
+    pub(crate) fn from_job(
+        job: &RunnerJobSnapshot,
+        config: &ServerConfig,
+    ) -> Result<Self, DispatchPlanRefusal> {
         let cache_policy = resolve_cache_overrides(job).policy_for(CacheTaskName::RevAsrEvidence);
         let BenchmarkDispatchParams {
             asr_engine,
@@ -215,12 +257,18 @@ impl BenchmarkDispatchPlan {
             merge_abbrev,
             cache_policy,
             engine_extras,
-        } = extract_benchmark_dispatch_params(&job.dispatch.options, cache_policy)?;
+        } = extract_benchmark_dispatch_params(&job.dispatch.options, cache_policy)
+            .ok_or(DispatchPlanRefusal::Options)?;
 
-        Some(Self {
+        Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
-                backend: AsrBackend::from_engine_name(asr_engine.as_wire_name()),
+                // A refusal here means a persisted job names an engine this
+                // build cannot run. Submission validation refuses those up
+                // front, so reaching this arm means the job predates the
+                // check. The refusal is PROPAGATED: `.ok()?` used to turn it
+                // into `None`, which routing dropped silently.
+                backend: AsrBackend::try_from_engine(&asr_engine)?,
                 diarize: false,
                 speaker_backend: None,
                 lang: job.dispatch.lang.clone(),
@@ -269,29 +317,38 @@ pub(crate) enum MediaAnalysisDispatchPlan {
 
 impl MediaAnalysisDispatchPlan {
     /// Build the media-analysis plan from the persisted job snapshot.
-    pub(crate) fn from_job(job: &RunnerJobSnapshot, config: &ServerConfig) -> Option<Self> {
+    ///
+    /// Returns the typed refusal for the same reason `FaDispatchPlan` does:
+    /// the `Option` this used to return reached a `warn!` and a bare `return`,
+    /// so a media-analysis job with a corrupt options row was dropped in
+    /// silence.
+    pub(crate) fn from_job(
+        job: &RunnerJobSnapshot,
+        config: &ServerConfig,
+    ) -> Result<Self, DispatchPlanRefusal> {
         match job.dispatch.command {
             ReleasedCommand::Opensmile => {
                 let OpensmileDispatchParams { feature_set } =
-                    extract_opensmile_dispatch_params(&job.dispatch.options)?;
-                Some(Self::Opensmile {
+                    extract_opensmile_dispatch_params(&job.dispatch.options)
+                        .ok_or(DispatchPlanRefusal::Options)?;
+                Ok(Self::Opensmile {
                     kernel_plan: kernel_plan_for_job(job, config),
                     feature_set,
                 })
             }
-            ReleasedCommand::Avqi => Some(Self::Avqi {
+            ReleasedCommand::Avqi => Ok(Self::Avqi {
                 kernel_plan: kernel_plan_for_job(job, config),
             }),
             ReleasedCommand::Diarize => {
                 // A diarize job snapshot must carry diarize options; any
                 // other variant means the persisted options row is corrupt.
-                // Returning `None` fails plan construction visibly (same
-                // contract as the opensmile params extractor above) instead
-                // of silently proceeding with default settings.
+                // Refusing fails plan construction visibly (same contract as
+                // the opensmile params extractor above) instead of silently
+                // proceeding with default settings.
                 let crate::options::CommandOptions::Diarize(options) = &job.dispatch.options else {
-                    return None;
+                    return Err(DispatchPlanRefusal::Options);
                 };
-                Some(Self::Diarize {
+                Ok(Self::Diarize {
                     kernel_plan: kernel_plan_for_job(job, config),
                     backend: resolve_selected_speaker_backend(options.speaker_engine),
                     expected_speakers: options.expected_speakers,
@@ -299,7 +356,7 @@ impl MediaAnalysisDispatchPlan {
                         .policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
                 })
             }
-            _ => None,
+            _ => Err(DispatchPlanRefusal::Options),
         }
     }
 }
@@ -554,6 +611,98 @@ mod tests {
             TranscribeCachePolicies::uniform(crate::params::CachePolicy::UseCache)
         );
         assert!(!plan.should_merge_abbrev);
+    }
+
+    /// RED FIRST (review item 7): a job naming an engine this build cannot
+    /// run must PROPAGATE the refusal. `.ok()?` used to turn it into `None`,
+    /// which routing answered with a `warn!` and a bare return: the job was
+    /// dropped with no file failed and no error recorded.
+    #[test]
+    fn transcribe_plan_propagates_an_unimplemented_engine_refusal() {
+        let snapshot = make_snapshot(
+            ReleasedCommand::Transcribe,
+            CommandOptions::Transcribe(TranscribeCommand {
+                common: CommonOptions::default(),
+                asr_engine: AsrEngineName::WhisperX,
+                diarize: false,
+                wor: false.into(),
+                merge_abbrev: false.into(),
+                batch_size: 8,
+                utseg_fallback: false.into(),
+            }),
+            BTreeMap::new(),
+        );
+
+        let refusal = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
+            .err()
+            .expect("an unimplemented engine must refuse the plan, not drop it");
+        assert!(
+            matches!(refusal, DispatchPlanRefusal::Engine(_)),
+            "the refusal must say it was the ENGINE, not unreadable options: {refusal:?}"
+        );
+        assert!(
+            refusal.to_string().contains("whisperx"),
+            "the refusal must name the engine, got: {refusal}"
+        );
+    }
+
+    /// RED FIRST (review item 3): an align job whose persisted options are not
+    /// align options used to become `None`, which routing answered with a
+    /// `warn!` and a bare `return`: no file failed and the job simply stopped.
+    #[test]
+    fn fa_plan_refuses_options_it_cannot_read_instead_of_dropping_the_job() {
+        let snapshot = make_snapshot(
+            ReleasedCommand::Align,
+            CommandOptions::Transcribe(TranscribeCommand {
+                common: CommonOptions::default(),
+                asr_engine: AsrEngineName::RevAi,
+                diarize: false,
+                wor: false.into(),
+                merge_abbrev: false.into(),
+                batch_size: 8,
+                utseg_fallback: false.into(),
+            }),
+            BTreeMap::new(),
+        );
+
+        // `let ... else` rather than `expect_err`, which would demand `Debug`
+        // on the plan itself just to report a case that cannot happen here.
+        let Err(refusal) = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()) else {
+            panic!("unreadable align options must refuse the plan, not drop it");
+        };
+        assert!(
+            matches!(refusal, DispatchPlanRefusal::Options),
+            "unreadable options must say so: {refusal:?}"
+        );
+    }
+
+    /// RED FIRST (review item 3): the same silent drop existed on the
+    /// media-analysis arm, where a diarize job with a corrupt options row
+    /// returned `None`.
+    #[test]
+    fn media_analysis_plan_refuses_options_it_cannot_read() {
+        let snapshot = make_snapshot(
+            ReleasedCommand::Diarize,
+            CommandOptions::Transcribe(TranscribeCommand {
+                common: CommonOptions::default(),
+                asr_engine: AsrEngineName::RevAi,
+                diarize: false,
+                wor: false.into(),
+                merge_abbrev: false.into(),
+                batch_size: 8,
+                utseg_fallback: false.into(),
+            }),
+            BTreeMap::new(),
+        );
+
+        let Err(refusal) = MediaAnalysisDispatchPlan::from_job(&snapshot, &ServerConfig::default())
+        else {
+            panic!("a corrupt diarize options row must refuse the plan, not drop it");
+        };
+        assert!(
+            matches!(refusal, DispatchPlanRefusal::Options),
+            "unreadable options must say so: {refusal:?}"
+        );
     }
 
     #[test]

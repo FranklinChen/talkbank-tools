@@ -1,4 +1,12 @@
-//! Post-processing: fix end times, bound by utterance, update bullets.
+//! Post-processing a single utterance's word timings: supply the ends an
+//! engine did not report, rebalance collapsed words against their
+//! neighbours, optionally bound the words to an authoritative utterance
+//! bullet, and settle what survives into the AST.
+//!
+//! It does NOT update the utterance bullet. That is
+//! `chat_ops::fa::update_utterance_bullet_with_boundary_policy`, called
+//! by `chat_ops::fa::orchestrate` after this module has run; the doc comments
+//! here claimed it as a fourth step until 2026-09-07.
 
 use talkbank_model::alignment::helpers::{WordItem, WordItemMut, walk_words, walk_words_mut};
 use talkbank_model::model::{
@@ -347,15 +355,26 @@ const MAX_HEALED_WORD_PROPORTION_DENOMINATOR: u64 = 5;
 const MIN_HEALED_FINAL_WORD_DURATION_MS: u64 = 100;
 const MAX_HEALED_FINAL_WORD_OVERRUN_MS: u64 = 500;
 
-/// Post-process timings: set word end times, bound by utterance, update bullets.
+/// Post-process one utterance's word timings, in this order.
 ///
-/// 1. Under `WordGapHealing::Heal`: set each word's end time to the next
-///    word's start time only when the internal gap is plausibly small
-/// 2. Bound all word times within utterance bullet range
-/// 3. Drop invalid timings (start >= end)
-/// 4. Update utterance bullet from word timings
+/// 1. Under `WordEndPolicy`'s healing and derived-end settings: give the LAST
+///    timed word an end (the utterance bullet if there is one, otherwise an
+///    assumed duration), extend each earlier word to its successor's onset
+///    where the internal gap is plausibly small, and rebalance a lexical word
+///    that collapsed to near-zero duration against its neighbour.
+/// 2. Bound the words to the utterance bullet, but ONLY when that bullet is
+///    `BulletSource::Authoritative`, the utterance already has a `%wor` tier,
+///    and the boundary policy is `Preserve`. The long comment at that block
+///    says why each condition is load-bearing; "bound all word times within
+///    utterance bullet range" was the previous wording here and is true of
+///    none of the other cases.
+/// 3. Settle each timing, dropping any with no positive extent.
+/// 4. Write the survivors back to the AST and tally how they were produced.
 ///
-/// Returns the words that lost their timing, by cause.
+/// It does NOT touch the utterance's own bullet; see the module doc.
+///
+/// Returns the words that lost their timing, by cause, and the provenance
+/// tally of the ones that survived.
 pub fn postprocess_utterance_timings(
     utterance: &mut Utterance,
     policy: WordEndPolicy,
@@ -715,8 +734,14 @@ pub fn postprocess_utterance_timings_with_boundary_policy(
 /// It takes no `original`: [`MovedBoundary`] carries the position of whichever
 /// boundary actually moved, which is exactly what the two hand-captured copies
 /// got wrong.
-fn repaired_for_order(moved: MovedBoundary) -> Origin {
-    Origin::RepairedForOrder {
+///
+/// Named `repaired_for_order` until 2026-09-07, after the origin variant it
+/// builds, which was itself named for an ordering repair in
+/// `chat_ops::fa::repair` that produces no origin at all. What actually
+/// happens here is a rebalance against a neighbour; the name now says that on
+/// both sides.
+fn rebalanced_with_neighbour(moved: MovedBoundary) -> Origin {
+    Origin::RebalancedWithNeighbour {
         was: Box::new(moved.was),
         original: moved.original,
     }
@@ -766,8 +791,8 @@ fn rebalance_near_zero_lexical_words_from_following_spans(
         let taken_next = word_timings[i + 1].take();
         match (taken_current, taken_next) {
             (Some(current), Some(next)) => {
-                word_timings[i] = Some(current.remeasured(current_span, repaired_for_order));
-                word_timings[i + 1] = Some(next.remeasured(next_span, repaired_for_order));
+                word_timings[i] = Some(current.remeasured(current_span, rebalanced_with_neighbour));
+                word_timings[i + 1] = Some(next.remeasured(next_span, rebalanced_with_neighbour));
             }
             // The guards above proved both slots occupied. Written out rather
             // than unwrapped, and it puts back what it took, so a change to
@@ -818,8 +843,9 @@ fn rebalance_near_zero_lexical_words_from_preceding_spans(
         let taken_current = word_timings[i].take();
         match (taken_previous, taken_current) {
             (Some(previous), Some(current)) => {
-                word_timings[i - 1] = Some(previous.remeasured(previous_span, repaired_for_order));
-                word_timings[i] = Some(current.remeasured(current_span, repaired_for_order));
+                word_timings[i - 1] =
+                    Some(previous.remeasured(previous_span, rebalanced_with_neighbour));
+                word_timings[i] = Some(current.remeasured(current_span, rebalanced_with_neighbour));
             }
             // As above: put back what was taken rather than unwrap.
             (previous, current) => {
@@ -966,7 +992,7 @@ mod moved_boundary_tests {
         // displaced, and the untouched end was stamped with a clamp that never
         // happened.
         let moved_start = word(1_000, 2_000).remeasured(TimeSpan::new(1_200, 2_000), |m| {
-            Origin::RepairedForOrder {
+            Origin::RebalancedWithNeighbour {
                 was: Box::new(m.was),
                 original: m.original,
             }
@@ -977,7 +1003,7 @@ mod moved_boundary_tests {
         assert!(!moved_start.start_origin.is_observation());
         assert_eq!(
             moved_start.start_origin,
-            Origin::RepairedForOrder {
+            Origin::RebalancedWithNeighbour {
                 was: Box::new(measured("wav2vec_fa")),
                 original: FileMs::new(1_000),
             }
@@ -988,16 +1014,18 @@ mod moved_boundary_tests {
     }
 
     #[test]
-    fn postprocessing_preserves_the_model_score_while_marking_repairs() {
+    fn postprocessing_preserves_the_model_score_while_marking_rebalances() {
         let score = ModelAlignmentScore::try_from_f64(0.73).unwrap();
         let aligned = WordTiming::new(100, 300, measured("wav2vec_fa"), measured("wav2vec_fa"))
             .unwrap()
             .with_model_score(score);
 
         let settled = PendingTiming::from_aligned(aligned)
-            .remeasured(TimeSpan::new(120, 300), |moved| Origin::RepairedForOrder {
-                was: Box::new(moved.was),
-                original: moved.original,
+            .remeasured(TimeSpan::new(120, 300), |moved| {
+                Origin::RebalancedWithNeighbour {
+                    was: Box::new(moved.was),
+                    original: moved.original,
+                }
             })
             .settle()
             .unwrap();
@@ -1039,7 +1067,7 @@ mod moved_boundary_tests {
         assert_eq!(current.start_origin, measured("wav2vec_fa"));
         assert_eq!(
             current.end_origin,
-            Origin::RepairedForOrder {
+            Origin::RebalancedWithNeighbour {
                 was: Box::new(measured("wav2vec_fa")),
                 original: FileMs::new(2_000),
             }
@@ -1051,7 +1079,7 @@ mod moved_boundary_tests {
         assert_eq!(next.end_origin, measured("wav2vec_fa"));
         assert_eq!(
             next.start_origin,
-            Origin::RepairedForOrder {
+            Origin::RebalancedWithNeighbour {
                 was: Box::new(measured("wav2vec_fa")),
                 original: FileMs::new(2_000),
             }

@@ -271,7 +271,6 @@ pub(crate) struct CatalogEntry {
     pub command: ReleasedCommand,
     pub family: CommandFamily,          // implies 8 runtime policies, via const fns
     pub planner: PlannerKind,
-    pub execution_mode: ExecutionMode,
     pub capability_kind: CommandCapabilityKind,
     pub io_profile: CommandIoProfile,
     pub runner_dispatch_kind: RunnerDispatchKind,
@@ -286,6 +285,11 @@ Every field is declared per command. Three of them (`capability_kind`,
 name with a catch-all default until 2026-07-29; two view types
 (`CommandDefinition`, `CommandWorkflowDescriptor`) and a delegating
 `commands/catalog.rs` were deleted in the same change.
+
+The execution mode is NOT among them. It was an `execution_mode` field written
+out beside the recipe that already carries it, with a catalog test asserting
+the two stayed equal; the field and the test went on 2026-09-07 and the mode is
+read from `entry.recipe.mode`.
 
 Derived helpers in `catalog.rs`:
 

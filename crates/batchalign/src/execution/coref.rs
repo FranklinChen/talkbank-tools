@@ -78,7 +78,8 @@ mod tests {
             _options: MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
             unreachable!()
         }
 
@@ -114,7 +115,13 @@ mod tests {
                 .iter()
                 .map(|file| {
                     let content = file.chat_text.replace("@End", "%xcoref:\t(1)\n@End");
-                    TextBatchFileResult::ok(file.filename.clone(), content)
+                    TextBatchFileResult::ok(
+                        file.filename.clone(),
+                        crate::pipeline::post_validate::PostValidated::for_test(
+                            content,
+                            crate::api::ReleasedCommand::Coref,
+                        ),
+                    )
                 })
                 .collect()
         }

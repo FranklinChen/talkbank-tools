@@ -22,45 +22,62 @@ use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 use crate::types::results::{FaOutput, FaResult};
-use crate::types::traces::{FaEvidenceSourceTrace, FaGroupTrace, TimingTrace, ViolationTrace};
+use crate::types::traces::{FaEvidenceSourceTrace, FaGroupTrace, TimingTrace};
 use batchalign_transform::diff::UtteranceDelta;
 use batchalign_transform::diff::preserve::{TierKind, copy_dependent_tiers};
 use batchalign_transform::parse::{is_dummy, is_no_align, parse_lenient};
-use batchalign_transform::validate::{ValidityLevel, validate_output, validate_to_level};
+// `ValidityLevel` and `validate_to_level` are no longer named here: the level
+// FA admits at, and the level it gates output at, both live on `FaAdmission`.
 use tracing::{info, warn};
 
 use super::transport::{
     FaInferencePlan, FaWorkerTransport, UncheckedFaWorkerBatch, plan_fa_inference,
 };
 use super::{
-    CACHE_TASK, RAW_EVIDENCE_CACHE_TASK, assemble_group_evidence, collect_evidence_sources,
-    collect_final_timings, process_fa,
+    AdmittedFaResult, CACHE_TASK, FaAdmission, RAW_EVIDENCE_CACHE_TASK, assemble_group_evidence,
+    collect_evidence_sources, collect_final_timings,
 };
 use crate::chat_ops::fa::Grouping;
 
 /// Process a CHAT file through forced alignment incrementally.
 ///
-/// Compares `before_text` (previous file with timings) against `after_text`
-/// (user-edited version) and only re-aligns FA groups that contain changed
+/// Compares `before_text` (previous file with timings) against `after`
+/// (the user-edited version) and only re-aligns FA groups that contain changed
 /// utterances. Unchanged groups preserve their existing timings.
 ///
 /// Falls back to full processing if no "before" is available.
+///
+/// # It takes the MODEL, not a serialization of one
+///
+/// The caller holds the "after" document as a parsed [`FaInputDocument`]. It
+/// used to serialize that model, hand over the string, and this function
+/// parsed it back TWICE: once for the diff (throwing the parse errors away
+/// into a `_`) and once more for a mutable target, with a third parse inside
+/// the `process_fa` fallback. Four parses and a serialization per incremental
+/// file, all to recover a document the caller already had.
+///
+/// Two consequences beyond the cost, and both make this path agree with the
+/// full-file one rather than diverge from it. The document's own parse errors
+/// now reach [`FaAdmission::admit`] instead of a re-parse's (a round trip
+/// through the serializer used to launder them away), and a `@Options: dummy`
+/// or `NoAlign` document passes through as the bytes it was READ as rather
+/// than as a re-serialization of its model, which is what align promises and
+/// what `run_fa_from_ast` already did.
 pub(crate) async fn process_fa_incremental(
     before_text: &str,
-    after_text: &str,
+    after: super::FaInputDocument<'_>,
     audio: &AudioContext<'_>,
     worker_lang: &crate::api::LanguageCode3,
     services: PipelineServices<'_>,
     fa_params: &FaParams,
     progress: Option<&ProgressSender>,
-) -> Result<FaResult, ServerError> {
+) -> Result<AdmittedFaResult, ServerError> {
     use batchalign_transform::diff::{DiffSummary, diff_chat};
 
     let parser = crate::chat_parser();
     let (before_file, _) = parse_lenient(&parser, before_text);
-    let (after_file, _) = parse_lenient(&parser, after_text);
 
-    let deltas = diff_chat(&before_file, &after_file);
+    let deltas = diff_chat(&before_file, &after.chat_file);
     let summary = DiffSummary::from_deltas(&deltas);
 
     info!(
@@ -75,37 +92,37 @@ pub(crate) async fn process_fa_incremental(
     // preserve from the previous file, the incremental path has nothing to
     // reuse and should fall back to the regular full-file align path.
     if summary.unchanged == 0 && summary.speaker_changed == 0 && summary.timing_only == 0 {
-        return process_fa(
-            after_text,
-            audio,
-            worker_lang,
-            services,
-            fa_params,
-            progress,
-        )
-        .await;
+        // The AST entry point, not `process_fa`: the document is already
+        // parsed, and `process_fa` exists only to parse a string into one.
+        return super::run_fa_from_ast(after, audio, worker_lang, services, fa_params, progress)
+            .await;
     }
 
-    // Group the "after" file's utterances
-    let (mut chat_file, parse_errors) = parse_lenient(&parser, after_text);
+    // The "after" document's own model is the mutation target. It used to be a
+    // third parse of its own serialization.
+    let super::FaInputDocument {
+        mut chat_file,
+        parse_errors,
+        text: after_text,
+    } = after;
 
     if is_dummy(&chat_file) || is_no_align(&chat_file) {
-        return Ok(FaResult::pass_through(
+        // `after_text` is the bytes the document was READ as, so the
+        // pass-through is literally unchanged. It used to be a
+        // re-serialization of the model, because that is all the caller had
+        // handed over.
+        return Ok(FaAdmission::pass_through(
             chat_file,
+            after_text,
             fa_params.gap_healing,
             fa_params.engine.as_wire_name(),
             services.engine_version.as_ref(),
         ));
     }
 
-    if let Err(errors) = validate_to_level(&chat_file, &parse_errors, ValidityLevel::MainTierValid)
-    {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return Err(ServerError::Validation(format!(
-            "align pre-validation failed: {}",
-            msgs.join("; ")
-        )));
-    }
+    // Same owner as the full path: the level is stated on `FaAdmission`, and
+    // the proof it returns is what every `Ok` return below is gated against.
+    let admission = FaAdmission::admit(&chat_file, &parse_errors)?;
 
     let reusable_after_indices =
         reuse_stable_wor_timing_from_before(&before_file, &mut chat_file, &deltas);
@@ -152,13 +169,15 @@ pub(crate) async fn process_fa_incremental(
                 finalized,
             ),
         );
-        return Ok(FaResult::without_groups(
-            chat_file,
-            fa_params.gap_healing,
-            fa_params.engine.as_wire_name(),
-            services.engine_version.as_ref(),
-        )?
-        .with_written_decisions(written));
+        return admission.finish(
+            FaResult::without_groups(
+                chat_file,
+                fa_params.gap_healing,
+                fa_params.engine.as_wire_name(),
+                services.engine_version.as_ref(),
+            )?
+            .with_written_decisions(written),
+        );
     }
 
     // Determine which groups still need re-alignment after stable `%wor`
@@ -469,21 +488,9 @@ pub(crate) async fn process_fa_incremental(
     let decision_traces = decision_records.into_iter().map(Into::into).collect();
     let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
 
+    // Post-validation runs in `FaAdmission::finish`, below, at the level this
+    // file was ADMITTED at, together with every other `Ok` return.
     let output = FaOutput::processed(chat_file)?;
-    let violations = if let Err(errors) = validate_output(output.as_chat_file(), "align") {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        warn!(errors = ?msgs, "align post-validation warnings (non-fatal)");
-        errors
-            .iter()
-            .map(|e| ViolationTrace {
-                code: format!("L{}", e.level as u8),
-                message: e.message.clone(),
-                utterance_index: None,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     let group_traces: Vec<FaGroupTrace> = groups
         .iter()
@@ -506,7 +513,7 @@ pub(crate) async fn process_fa_incremental(
         pre_injection_timings,
     )?;
 
-    Ok(FaResult {
+    admission.finish(FaResult {
         output,
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
@@ -514,7 +521,6 @@ pub(crate) async fn process_fa_incremental(
         decisions: decision_traces,
         timing_decisions,
         gap_healing: fa_params.gap_healing,
-        violations,
         fallback_events,
     })
 }

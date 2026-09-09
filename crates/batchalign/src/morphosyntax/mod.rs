@@ -47,9 +47,9 @@ use crate::error::ServerError;
 use crate::params::MorphosyntaxParams;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::morphosyntax::run_morphosyntax_pipeline;
+use crate::pipeline::post_validate::PostValidated;
 use batchalign_transform::parse::{is_ca, is_dummy, parse_lenient};
-use batchalign_transform::serialize::to_chat_string;
-use batchalign_transform::validate::{ValidityLevel, validate_output, validate_to_level};
+use batchalign_transform::validate::{ValidityLevel, validate_to_level};
 use tracing::{info, warn};
 
 pub(crate) use batch::dispatch_secondary_l2;
@@ -99,7 +99,7 @@ pub(crate) async fn process_morphosyntax(
     chat_text: &str,
     services: PipelineServices<'_>,
     params: &MorphosyntaxParams<'_>,
-) -> Result<String, ServerError> {
+) -> Result<PostValidated, ServerError> {
     run_morphosyntax_impl(chat_text, services, params).await
 }
 
@@ -107,7 +107,7 @@ pub(crate) async fn run_morphosyntax_impl(
     chat_text: &str,
     services: PipelineServices<'_>,
     params: &MorphosyntaxParams<'_>,
-) -> Result<String, ServerError> {
+) -> Result<PostValidated, ServerError> {
     run_morphosyntax_pipeline(chat_text, services, params).await
 }
 
@@ -137,7 +137,7 @@ pub(crate) async fn process_morphosyntax_incremental(
     after_text: &str,
     services: PipelineServices<'_>,
     params: &MorphosyntaxParams<'_>,
-) -> Result<String, ServerError> {
+) -> Result<PostValidated, ServerError> {
     use batchalign_transform::diff::preserve::TierKind;
     use batchalign_transform::diff::{
         DiffSummary, UtteranceDelta, copy_dependent_tiers, diff_chat,
@@ -156,6 +156,12 @@ pub(crate) async fn process_morphosyntax_incremental(
     let parser = crate::chat_parser();
     let (before_file, _) = parse_lenient(&parser, before_text);
     let (mut after_file, parse_errors) = parse_lenient(&parser, after_text);
+    // This strip is the ANALYZE path's: it is the counterpart of the one
+    // `pipeline::morphosyntax::states::Analysis::<Applied>::postcheck` runs on
+    // the non-incremental path, and everything below (pre-validation, the
+    // diff, the tier copies) sees the stripped document. It stays HERE, ahead
+    // of the two declining exits, so that ordering is unchanged; the declining
+    // exits no longer depend on it, because their constructor strips too.
     batchalign_transform::decisions::strip_decision_tiers(&mut after_file);
 
     if !parse_errors.is_empty() {
@@ -165,15 +171,34 @@ pub(crate) async fn process_morphosyntax_incremental(
         );
     }
 
+    // Neither of these analyses the document; both DO leave it with the
+    // decision tiers an earlier run wrote removed, so the input's own bytes
+    // are not the answer and `PostValidated::pass_through` (which carries them
+    // verbatim) would be the wrong route.
+    // `declined_stripping_decision_tiers` names exactly what was applied and
+    // why it is not gated, and it PERFORMS the strip rather than trusting this
+    // call site to have run it first.
+    //
+    // Both predicates read only `ChatFile::options` (`is_dummy` looks for the
+    // `dummy` option flag; `disposition_for` delegates to `is_ca`, which looks
+    // for the `CA` flag), and `strip_decision_tiers` touches only utterances'
+    // dependent tiers. So the strip above cannot change either verdict, and
+    // the redundant strip inside the constructor cannot either.
     if is_dummy(&after_file) {
-        return Ok(to_chat_string(&after_file));
+        return Ok(PostValidated::declined_stripping_decision_tiers(
+            after_file,
+            crate::api::ReleasedCommand::Morphotag,
+        ));
     }
 
     if matches!(
         params.policy.ca_policy.disposition_for(&after_file),
         MorphotagDisposition::PassThroughCa
     ) {
-        return Ok(to_chat_string(&after_file));
+        return Ok(PostValidated::declined_stripping_decision_tiers(
+            after_file,
+            crate::api::ReleasedCommand::Morphotag,
+        ));
     }
 
     // Pre-validation
@@ -248,12 +273,10 @@ pub(crate) async fn process_morphosyntax_incremental(
         .collect();
 
     if needs_processing.is_empty() {
-        // Nothing to reprocess, all utterances preserved from "before"
-        if let Err(errors) = validate_output(&after_file, "morphotag") {
-            let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-            warn!(errors = ?msgs, "morphotag post-validation warnings (non-fatal)");
-        }
-        return Ok(to_chat_string(&after_file));
+        // Nothing to reprocess: every utterance was preserved from "before".
+        // The tiers were still COPIED in, so this is real output and is
+        // gated, not passed through.
+        return gate_incremental_output(after_file);
     }
 
     // Build a set of utterance ordinals that need processing
@@ -279,11 +302,7 @@ pub(crate) async fn process_morphosyntax_incremental(
         .collect();
 
     if filtered_payloads.is_empty() {
-        if let Err(errors) = validate_output(&after_file, "morphotag") {
-            let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-            warn!(errors = ?msgs, "morphotag post-validation warnings (non-fatal)");
-        }
-        return Ok(to_chat_string(&after_file));
+        return gate_incremental_output(after_file);
     }
 
     info!(
@@ -390,12 +409,25 @@ pub(crate) async fn process_morphosyntax_incremental(
         }
     }
 
-    if let Err(errors) = validate_output(&after_file, "morphotag") {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        warn!(errors = ?msgs, "morphotag post-validation warnings (non-fatal)");
-    }
+    gate_incremental_output(after_file)
+}
 
-    Ok(to_chat_string(&after_file))
+/// Run the post-validation gate for the incremental morphotag path.
+///
+/// One owner for the three exits of `process_morphosyntax_incremental`, so a
+/// fourth exit cannot quietly skip the gate. `MainTierValid` is the level this
+/// path's own pre-validation admitted the input at.
+fn gate_incremental_output(
+    after_file: crate::chat_ops::ChatFile,
+) -> Result<PostValidated, ServerError> {
+    // BY VALUE: all three exits drop `after_file` immediately, and the
+    // borrowing gate would clone the whole document straight back.
+    PostValidated::gate_owned(
+        after_file,
+        ValidityLevel::MainTierValid,
+        crate::api::ReleasedCommand::Morphotag,
+    )
+    .map_err(|failure| ServerError::Validation(failure.to_string()))
 }
 
 #[cfg(test)]

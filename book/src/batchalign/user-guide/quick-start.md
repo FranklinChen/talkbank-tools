@@ -1,7 +1,7 @@
 # Quick Start
 
 **Status:** Current
-**Last updated:** 2026-05-11 11:42 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 This chapter covers the most common `batchalign3` workflows from the terminal.
 The examples assume the `batchalign3` binary is installed and that local
@@ -46,13 +46,6 @@ batchalign3 [GLOBAL OPTIONS] COMMAND [COMMAND OPTIONS] [PATHS...]
 
 ```bash
 batchalign3 transcribe ~/recordings/ -o ~/transcripts/ --lang eng
-```
-
-To use OpenAI Whisper instead of the default Rev.AI engine:
-
-```bash
-batchalign3 transcribe ~/recordings/ -o ~/transcripts/ \
-  --asr-engine whisper-oai --lang eng
 ```
 
 To use a local Whisper model:

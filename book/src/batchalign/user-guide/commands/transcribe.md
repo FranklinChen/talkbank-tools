@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-09-02 06:51 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -150,8 +150,7 @@ flowchart TD
     engine_check -->|whisper| whisper[Whisper local ASR]
     engine_check -->|whisper_hub| whisper_hub["HF Whisper fine-tune\n(per-language model_id)"]
     engine_check -->|rev| rev_key["Hash provider media + Rev request semantics"]
-    engine_check -->|whisperx| whisperx[WhisperX ASR]
-    engine_check -->|whisper_oai| whisper_oai[OpenAI Whisper ASR]
+    engine_check -->|"whisperx, whisper_oai"| refused["Refused: engine not implemented"]
 
     rev_key --> rev_cache{"Validated raw Rev-evidence cache"}
     rev_cache -->|hit| rev_convert["Convert retained raw Rev transcript"]
@@ -162,8 +161,6 @@ flowchart TD
 
     whisper --> asr_tokens
     whisper_hub --> asr_tokens
-    whisperx --> asr_tokens
-    whisper_oai --> asr_tokens
 
     asr_tokens["Raw ASR tokens\nword + start_s + end_s + optional speaker + confidence"]
     asr_tokens --> convert["convert_asr_response()\nGroups tokens by speaker label"]
@@ -314,8 +311,8 @@ generated from the engine set itself, as is the one `--help` prints.
 | `rev` | Rev.AI cloud ASR. The default. |
 | `whisper` | Local Whisper. |
 | `whisper_hub` | HuggingFace Whisper fine-tune by model id. See [`whisper-hub-asr.md`](../../reference/whisper-hub-asr.md). |
-| `whisperx` | WhisperX. |
-| `whisper_oai` | OpenAI Whisper API. `whisper-oai` is accepted as a historical spelling. |
+| `whisperx` | **Not implemented.** Accepted as a name and refused at submission; nothing here runs WhisperX. |
+| `whisper_oai` | **Not implemented.** Accepted as a name (`whisper-oai` is the historical spelling) and refused at submission; nothing here calls the OpenAI Whisper API. |
 | `whisper_rs` | Rust-native whisper.cpp, run in process. |
 | `tencent` | Tencent Cloud ASR. |
 | `aliyun` | Aliyun ASR. |
@@ -340,7 +337,7 @@ without passing `--diarization enabled`. Passing `--diarization enabled`
 explicitly makes dedicated diarization authoritative and ignores Rev's speaker
 projection. The default dedicated engine is pyannoteAI Precision-2.
 
-**Whisper-based engines** (`--asr-engine whisper`, `whisperx`, `whisper-oai`):
+**Whisper-based engines** (`--asr-engine whisper`, `whisper_hub`, `whisper_rs`):
 these engines produce no speaker labels. Without `--diarization enabled`, all
 utterances are attributed to a single default speaker. Pass
 `--diarization enabled` to run a dedicated speaker stage that assigns speaker

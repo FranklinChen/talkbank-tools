@@ -10,6 +10,7 @@ use crate::worker::pool::WorkerPool;
 
 pub(crate) mod morphosyntax;
 pub(crate) mod plan;
+pub(crate) mod post_validate;
 pub(crate) mod text_infer;
 pub(crate) mod transcribe;
 

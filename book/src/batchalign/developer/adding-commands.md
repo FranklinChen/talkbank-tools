@@ -101,8 +101,10 @@ pub(super) const YOUR_COMMAND_RECIPE: Recipe = Recipe {
 };
 ```
 
-`mode` must equal the `execution_mode` you declare in step 3; a catalog test
-enforces the pair.
+`mode` is the command's execution mode, declared here and nowhere else. The
+catalog entry in step 3 used to repeat it as an `execution_mode` field with a
+test asserting the two agreed; both are gone, and readers ask
+`entry.recipe.mode`.
 
 ## Step 3: Declare the catalog entry
 
@@ -114,7 +116,6 @@ CatalogEntry {
     command: ReleasedCommand::YourCommand,
     family: CommandFamily::BatchedText,
     planner: PlannerKind::TextInputs,
-    execution_mode: ExecutionMode::BatchedStage,
     capability_kind: CommandCapabilityKind::DirectInfer,
     io_profile: CommandIoProfile::PathsModeText,
     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,

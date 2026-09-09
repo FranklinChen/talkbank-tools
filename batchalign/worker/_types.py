@@ -36,14 +36,14 @@ from batchalign.inference._domain_types import (
 )
 
 if TYPE_CHECKING:
-    from batchalign.inference._tokenizer_realign import TokenizerContext
+    from batchalign.inference.qwen_forced_alignment import QwenFaHost
     from batchalign.inference.types import (
-        StanzaNLP,
         Wave2VecFAHandle,
         WhisperASRHandle,
         WhisperFAHandle,
     )
     from batchalign.models.utterance.infer import BertUtteranceModel
+    from batchalign.worker._pipeline_cache import StanzaPipelineCache
 
 JSONPrimitive = str | int | float | bool | None
 
@@ -137,6 +137,7 @@ class FaEngine(str, Enum):
     WHISPER = "whisper"
     WAVE2VEC = "wave2vec"
     WAV2VEC_CANTO = "wav2vec_canto"
+    QWEN3 = "qwen3_fa"
 
 
 class StanzaLanguageProcessors(BaseModel):
@@ -225,10 +226,21 @@ class _WorkerState:
         self.ready: bool = False
         self.bootstrap: WorkerBootstrapRuntime | None = None
 
-        # Stanza models for morphosyntax
-        self.stanza_pipelines: dict[LanguageCode, StanzaNLP] | None = None
-        self.stanza_contexts: dict[LanguageCode, TokenizerContext] | None = None
-        self.stanza_nlp_lock: threading.Lock | None = None
+        # Stanza models for morphosyntax. A BOUNDED cache rather than a dict:
+        # pipelines are hundreds of megabytes each and this process is
+        # long-lived, so residency needs a ceiling. `None` still means "no
+        # Stanza bootstrap ran in this worker", which is a different fact from
+        # "the cache is empty" and is what the infer host refuses on.
+        # The tokenizer contexts live INSIDE the cache, beside the pipelines
+        # they belong to; they used to be a second dict keyed alike, which
+        # nothing kept in step.
+        self.stanza_pipelines: StanzaPipelineCache | None = None
+        # ONE lock for the life of the process, created here and never
+        # replaced: a handler captures it before inference, and a mid-batch
+        # reload (the bounded cache can evict a language and bring it back)
+        # must not hand a second handler a different lock, or two threads enter
+        # Stanza at once.
+        self.stanza_nlp_lock: threading.Lock = threading.Lock()
         self.stanza_version: str = ""
 
         # Utseg config builder (callable from StanzaUtteranceEngine)
@@ -247,6 +259,10 @@ class _WorkerState:
         # FA models (typed handles from load_whisper_fa / load_wave2vec_fa)
         self.whisper_fa_model: WhisperFAHandle | None = None
         self.wave2vec_fa_model: Wave2VecFAHandle | None = None
+        # The Qwen3 aligner arrives as a whole host rather than a bare handle,
+        # because the language it was loaded for is part of what it is: the
+        # label is fixed at load time and never travels on the FA wire.
+        self.qwen_fa_host: QwenFaHost | None = None
         self.fa_model_name: str = ""
 
         # ASR model

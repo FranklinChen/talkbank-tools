@@ -25,9 +25,26 @@ pub(crate) struct RecordedProgress {
     pub(crate) total: Option<i64>,
 }
 
+/// One durable attempt the sink was asked to open.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecordedAttempt {
+    pub(crate) filename: String,
+    pub(crate) work_unit_kind: WorkUnitKind,
+}
+
+/// One terminal file error the sink was asked to record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecordedError {
+    pub(crate) filename: String,
+    pub(crate) error: String,
+    pub(crate) category: FailureCategory,
+}
+
 #[derive(Default)]
 pub(crate) struct RecordingSink {
     progress: Mutex<Vec<RecordedProgress>>,
+    attempts: Mutex<Vec<RecordedAttempt>>,
+    errors: Mutex<Vec<RecordedError>>,
 }
 
 #[async_trait]
@@ -52,20 +69,35 @@ impl RunnerEventSink for RecordingSink {
     async fn mark_file_error(
         &self,
         _job_id: &JobId,
-        _filename: &str,
-        _error: &str,
-        _category: FailureCategory,
+        filename: &str,
+        error: &str,
+        category: FailureCategory,
         _finished_at: UnixTimestamp,
     ) {
+        self.errors
+            .lock()
+            .expect("errors lock")
+            .push(RecordedError {
+                filename: filename.to_string(),
+                error: error.to_string(),
+                category,
+            });
     }
 
     async fn start_file_attempt(
         &self,
         _job_id: &JobId,
-        _filename: &str,
-        _work_unit_kind: WorkUnitKind,
+        filename: &str,
+        work_unit_kind: WorkUnitKind,
         _started_at: UnixTimestamp,
     ) {
+        self.attempts
+            .lock()
+            .expect("attempts lock")
+            .push(RecordedAttempt {
+                filename: filename.to_string(),
+                work_unit_kind,
+            });
     }
 
     async fn finish_file_attempt(
@@ -149,5 +181,19 @@ impl RecordingSink {
     /// Every file-progress write the sink received, in order.
     pub(crate) fn progress(&self) -> Vec<RecordedProgress> {
         self.progress.lock().expect("progress lock").clone()
+    }
+
+    /// Every durable attempt the sink was asked to open, in order.
+    ///
+    /// Recorded because "the file failed" and "the file failed with an attempt
+    /// behind it" are different facts, and a preflight rejection that records
+    /// only the second leaves no attempt history for an operator to read.
+    pub(crate) fn attempts(&self) -> Vec<RecordedAttempt> {
+        self.attempts.lock().expect("attempts lock").clone()
+    }
+
+    /// Every terminal file error the sink was asked to record, in order.
+    pub(crate) fn errors(&self) -> Vec<RecordedError> {
+        self.errors.lock().expect("errors lock").clone()
     }
 }

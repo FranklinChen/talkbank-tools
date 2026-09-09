@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use talkbank_model::alignment::helpers::PositionalDomain;
 
 use crate::common::regression_manifest::{
     DiscoveredFixture, FixtureAssertion, FixtureCommand, FixtureManifest,
@@ -312,7 +313,7 @@ fn run_one_assertion(
                 "max_first_main_tier_word_count: first utterance has no timing bullet".to_string(),
             );
         }
-        let extracted = extract_words(parsed, TierDomain::Mor);
+        let extracted = extract_words(parsed, PositionalDomain::Mor);
         let first_words = extracted.first().ok_or_else(|| {
             "max_first_main_tier_word_count: missing extracted words for first utterance"
                 .to_string()

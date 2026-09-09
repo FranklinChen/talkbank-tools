@@ -298,6 +298,24 @@ pub enum AsrBackendV2 {
     Revai,
 }
 
+impl AsrBackendV2 {
+    /// Every backend the ASR wire can name.
+    ///
+    /// THE owner of "which ASR backends exist", for the same reason
+    /// [`FaBackendV2::ALL`] is: the fixture-coverage test used to iterate four
+    /// string literals, so three of these seven had no request fixture and
+    /// nothing said so.
+    pub const ALL: [Self; 7] = [
+        Self::LocalWhisper,
+        Self::WhisperHub,
+        Self::HkTencent,
+        Self::HkAliyun,
+        Self::HkFunaudio,
+        Self::HkQwen,
+        Self::Revai,
+    ];
+}
+
 /// Forced-alignment backend selected by the Rust control plane.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -308,6 +326,25 @@ pub enum FaBackendV2 {
     Wave2vec,
     /// Cantonese Wave2Vec forced alignment.
     Wav2vecCanto,
+    /// Qwen3 forced alignment, the standalone form of the aligner the
+    /// Qwen3-ASR engine loads for its own word timestamps.
+    Qwen3,
+}
+
+impl FaBackendV2 {
+    /// Every backend the FA wire can name.
+    ///
+    /// THE owner of "which FA backends exist" for tests that must cover the
+    /// whole matrix. The fixture-coverage test in
+    /// `crates/batchalign/tests/worker_protocol_matrix.rs` iterates this
+    /// instead of a hand-written list of three literals, which is how a fourth
+    /// backend came to have no request fixture while the test stayed green.
+    pub const ALL: [Self; 4] = [
+        Self::Whisper,
+        Self::Wave2vec,
+        Self::Wav2vecCanto,
+        Self::Qwen3,
+    ];
 }
 
 /// Speaker diarization backend selected by Rust.
@@ -320,6 +357,15 @@ pub enum SpeakerBackendV2 {
     Pyannote,
     /// NeMo diarization backend.
     Nemo,
+}
+
+impl SpeakerBackendV2 {
+    /// Every backend the speaker wire can name.
+    ///
+    /// THE owner of "which speaker backends exist"; the fixture-coverage test
+    /// iterated two literals and so never noticed that the DEFAULT engine,
+    /// `pyannote_ai`, had no request fixture.
+    pub const ALL: [Self; 3] = [Self::PyannoteAi, Self::Pyannote, Self::Nemo];
 }
 
 /// Speaker-embedding backend selected by the Rust control plane.

@@ -1,22 +1,30 @@
 //! Post-FA bullet repair: fix timing violations without destroying accuracy.
 //!
-//! Replaces CLAN's FIXBULLETS with three principled strategies:
+//! Replaces CLAN's FIXBULLETS with three principled strategies, listed
+//! below in the order [`repair_bullets`] applies them.
 //!
-//! 1. **Same-speaker gap filling**: snap small gaps (500-1000ms) between
-//!    consecutive same-speaker utterances.
-//! 2. **Boundary averaging**: for small overlaps (≤ threshold), classified
-//!    from measured word hulls through the same `EndOverlapResolution` Pass
-//!    2 of monotonicity uses (2026-09-01 review, item 7). A cross-speaker
-//!    pair is left alone (ordinary conversational overlap) unless the
-//!    policy says every adjacent pair clamps; a same-speaker pair whose
-//!    hulls do not overlap splits the difference, but never past either
-//!    side's own measured hull, so it can only eat inherited coverage,
-//!    never a real word; a pair whose hulls DO overlap is a genuine
-//!    conflict and is clamped, bullet and words together, through the same
-//!    route Pass 2 uses.
-//! 3. **Selective timing removal via LIS**: for large violations, find the
-//!    longest increasing subsequence of start times and strip timing from
-//!    utterances outside the LIS.
+//! The strategies used to carry NUMBERS as well as names, and the two
+//! numberings disagreed: this list said 1/2/3 while every comment and
+//! constant in the body said 3/1/2 for the same three strategies. A number
+//! beside a name is a value proxying for a fact, with no owner and nothing
+//! keeping the two in step, so the numbers are gone and the names are the
+//! only handle. Nothing outside this file ever referred to them.
+//!
+//! - **Same-speaker gap filling**: snap small gaps (500-1000ms) between
+//!   consecutive same-speaker utterances.
+//! - **Boundary averaging**: for small overlaps (≤ threshold), classified
+//!   from measured word hulls through the same `EndOverlapResolution` Pass
+//!   2 of monotonicity uses (2026-09-01 review, item 7). A cross-speaker
+//!   pair is left alone (ordinary conversational overlap) unless the
+//!   policy says every adjacent pair clamps; a same-speaker pair whose
+//!   hulls do not overlap splits the difference, but never past either
+//!   side's own measured hull, so it can only eat inherited coverage,
+//!   never a real word; a pair whose hulls DO overlap is a genuine
+//!   conflict and is clamped, bullet and words together, through the same
+//!   route Pass 2 uses.
+//! - **Selective timing removal via LIS**: for large violations, find the
+//!   longest increasing subsequence of start times and strip timing from
+//!   utterances outside the LIS.
 //!
 //! Design principle: every bullet either points to the correct audio location
 //! or doesn't exist. No lying bullets.
@@ -32,7 +40,7 @@ use super::orchestrate::{
     file_order_successor_start_ms, furthest_word_timing_end, strip_utterance_timing,
 };
 
-/// Maximum overlap (ms) eligible for boundary averaging (Strategy 1).
+/// Maximum overlap (ms) eligible for boundary averaging.
 /// Beyond this, the overlap is either genuine or a real alignment failure.
 /// This IS chatter's own E704 tolerance (2026-09-01 review, item 15): not a
 /// second, independently hand-typed 500, but the same shared constant Pass
@@ -43,7 +51,7 @@ use super::orchestrate::{
 /// monotonicity's blunter but always-correct resolution, or for LIS removal).
 const BOUNDARY_AVERAGING_THRESHOLD_MS: u64 = E704_TOLERANCE_MS;
 
-/// Gap range (ms) eligible for same-speaker gap filling (Strategy 3).
+/// Gap range (ms) eligible for same-speaker gap filling.
 const GAP_FILL_MAX_MS: u64 = 1000;
 
 /// Whether the optional post-FA bullet-repair phase runs.
@@ -161,7 +169,7 @@ struct BulletEntry {
 ///
 /// Returns statistics describing what was changed.
 ///
-/// `end_overlap_policy` governs boundary averaging (Strategy 1) exactly as
+/// `end_overlap_policy` governs boundary averaging exactly as
 /// it governs Pass 2 of monotonicity enforcement: a cross-speaker pair is
 /// ordinary conversational overlap and is left alone under the default
 /// `PreserveCrossSpeaker`, averaged only under `ClampAllAdjacent`
@@ -182,7 +190,7 @@ pub fn repair_bullets(
         return RepairResult { stats, decisions };
     }
 
-    // Strategy 3: Same-speaker gap filling.
+    // Same-speaker gap filling.
     // Must run first because it only narrows gaps, never creates new violations.
     let gap_fills = find_gap_fills(&entries);
     stats.gaps_filled = gap_fills.len();
@@ -207,7 +215,7 @@ pub fn repair_bullets(
         });
     }
 
-    // Strategy 1 (boundary averaging) needs to see gap-filling's effect and
+    // Boundary averaging needs to see gap-filling's effect and
     // must itself run LIVE and INTERLEAVED (2026-09-01 review, item 11): it
     // operates on a scratch clone under `dry_run` (so the real file stays
     // untouched) or on `chat_file` directly otherwise, and either way gap
@@ -227,7 +235,7 @@ pub fn repair_bullets(
         }
     }
 
-    // Strategy 1: Boundary averaging for small overlaps, classified from
+    // Boundary averaging for small overlaps, classified from
     // measured word hulls exactly as Pass 2 of monotonicity classifies an
     // end overlap (2026-09-01 review, item 7): a cross-speaker pair is left
     // alone unless the policy says otherwise, a pair whose hulls do not
@@ -242,7 +250,7 @@ pub fn repair_bullets(
     stats.boundary_averaged = boundary_averaged;
     decisions.extend(boundary_decisions);
 
-    // Strategy 2: Selective timing removal via LIS. Re-collected from
+    // Selective timing removal via LIS. Re-collected from
     // `working`'s CURRENT state (post gap-fill, post boundary-averaging),
     // not the original snapshot: a boundary average can itself have moved a
     // start, and LIS must decide against what is actually there.
@@ -288,7 +296,7 @@ pub fn repair_bullets(
     RepairResult { stats, decisions }
 }
 
-/// Strategy 1's live, interleaved sweep (2026-09-01 review, item 11):
+/// Boundary averaging's live, interleaved sweep (2026-09-01 review, item 11):
 /// resolve one eligible small-overlap pair at a time, APPLY it to
 /// `chat_file` immediately, then move to the next pair, so a pair's
 /// classification always sees what an EARLIER pair in this same sweep
@@ -555,7 +563,7 @@ fn collect_bullet_entries(chat_file: &ChatFile) -> Vec<BulletEntry> {
     entries
 }
 
-/// Strategy 3: Find same-speaker gaps eligible for filling.
+/// Find same-speaker gaps eligible for filling.
 ///
 /// Returns `(line_idx, new_start_ms)` pairs, the later utterance's start
 /// should be snapped to the previous same-speaker utterance's end.
@@ -586,7 +594,7 @@ fn find_gap_fills(entries: &[BulletEntry]) -> Vec<(usize, u64)> {
     fills
 }
 
-/// Strategy 2: Find utterances to strip timing from using per-speaker LIS.
+/// Find utterances to strip timing from using per-speaker LIS.
 ///
 /// For each speaker, computes the Longest Increasing Subsequence of start
 /// times. Utterances NOT in their speaker's LIS have same-speaker

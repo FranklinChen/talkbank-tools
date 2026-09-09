@@ -14,6 +14,7 @@ use crate::chat_ops::fa::{FaGroup, FaInferItem, WordGapHealing, WordTiming};
 use crate::error::{MissingForcedAlignmentEvidence, MissingRequiredEvidence, ServerError};
 use crate::params::CachePolicy;
 use crate::pipeline::PipelineServices;
+use crate::types::engines::SelectableEngine;
 use crate::types::traces::FaFallbackEventTrace;
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::fa_result_v2::parse_forced_alignment_result_v2;
@@ -281,7 +282,8 @@ async fn infer_groups_v2(
         {
             Ok(response) => response,
             Err(ServerError::EmptyFaAudioSegment(ref segment)) => {
-                // The FA group's audio window is past the end of the file.
+                // Extraction produced no frames. That does not prove the
+                // window is past EOF; very short in-range windows can do this.
                 // Leave this group's words unaligned rather than failing the
                 // whole file: the transcript is still useful without timing.
                 warn!(
@@ -289,7 +291,7 @@ async fn infer_groups_v2(
                     start_ms = segment.window.start().get(),
                     end_ms = segment.window.end().get(),
                     path = %segment.path,
-                    "FA group has no audio (segment past end of file); leaving words unaligned"
+                    "FA group decoded no audio samples; leaving words unaligned"
                 );
                 parsed_results.push(unaligned_group_result(group_index, group));
                 continue;
@@ -328,7 +330,7 @@ async fn infer_groups_v2(
         match admission.admit(&response, FaEvidenceRoute::Direct) {
             Ok(parsed) => parsed_results.push(FaWorkerGroupResult::Evidence(Box::new(parsed))),
             Err(error) => {
-                let Some(reason) = whisper_fallback_reason(batch.engine, &error) else {
+                let Some(retry) = fa_group_retry(batch.engine, &error) else {
                     // Before propagating to the file level, check whether this is a
                     // data-driven RuntimeFailure. RuntimeFailure means the model failed
                     // on this group's specific input, other groups are unaffected, so
@@ -351,8 +353,11 @@ async fn infer_groups_v2(
                     group = group_index,
                     start_ms = group.audio_start_ms(),
                     end_ms = group.audio_end_ms(),
-                    reason,
-                    "Wave2Vec FA hit recoverable target constraint; retrying group with Whisper FA"
+                    reason = retry.reason,
+                    failed_engine = batch.engine.selection_name(),
+                    retry_engine = retry.target.selection_name(),
+                    "FA engine hit a recoverable target constraint; retrying group on its \
+                     fallback engine"
                 );
                 let fallback_namespace = NEXT_FA_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed);
                 let fallback_response = dispatch_group_request(
@@ -361,20 +366,25 @@ async fn infer_groups_v2(
                     &batch,
                     fallback_namespace,
                     group_index,
-                    crate::types::engines::FaEngineName::Whisper,
+                    retry.target,
                 )
                 .await?;
-                match admission.admit(&fallback_response, FaEvidenceRoute::Fallback { reason }) {
+                match admission.admit(
+                    &fallback_response,
+                    FaEvidenceRoute::Fallback {
+                        reason: retry.reason,
+                    },
+                ) {
                     Ok(parsed) => parsed_results.push(FaWorkerGroupResult::Evidence(Box::new(
                         parsed.with_fallback_event(build_fallback_event(
                             group_index,
                             group,
                             batch.engine,
-                            crate::types::engines::FaEngineName::Whisper,
-                            reason,
+                            retry.target,
+                            retry.reason,
                         )),
                     ))),
-                    // The Whisper model is not loaded in this worker (capability
+                    // The fallback model is not loaded in this worker (capability
                     // gap, not a data error).  Leave the group's words unaligned
                     // rather than aborting the whole file, the surrounding
                     // utterances still have valid timing.
@@ -383,22 +393,24 @@ async fn infer_groups_v2(
                             group = group_index,
                             start_ms = group.audio_start_ms(),
                             end_ms = group.audio_end_ms(),
-                            "Whisper FA unavailable (worker has no Whisper model loaded); \
-                             leaving group words unaligned"
+                            retry_engine = retry.target.selection_name(),
+                            "fallback FA engine unavailable (worker has no such model \
+                             loaded); leaving group words unaligned"
                         );
                         parsed_results.push(unaligned_group_result(group_index, group));
                     }
-                    // The Whisper fallback itself hit a data-driven RuntimeFailure
-                    // (e.g. the group is still too long for Whisper's CTC context
-                    // after the Wave2Vec → Whisper retry).  Same treatment: leave
-                    // the group unaligned rather than aborting the file.
+                    // The fallback itself hit a data-driven RuntimeFailure
+                    // (e.g. the group is still too long for the fallback's own
+                    // context after the retry).  Same treatment: leave the group
+                    // unaligned rather than aborting the file.
                     Err(ref error) if is_fa_runtime_failure(error) => {
                         warn!(
                             group = group_index,
                             start_ms = group.audio_start_ms(),
                             end_ms = group.audio_end_ms(),
                             error = %error,
-                            "Whisper FA fallback also failed with model RuntimeFailure; \
+                            retry_engine = retry.target.selection_name(),
+                            "fallback FA engine also failed with model RuntimeFailure; \
                              leaving group words unaligned"
                         );
                         parsed_results.push(unaligned_group_result(group_index, group));
@@ -694,27 +706,53 @@ fn is_whisper_model_unavailable(error: &ServerError) -> bool {
     )
 }
 
-fn whisper_fallback_reason(
+/// A recoverable FA failure and where the group goes next.
+///
+/// One value rather than a bare reason, because the reason and the engine the
+/// retry runs on are one decision: the reason comes from the error, the target
+/// comes from the failing engine's own row, and a caller holding only the
+/// reason has to name the target itself. It did, as a literal `Whisper`, and
+/// the warn line beside it said "Wave2Vec FA" for every retry, so a Cantonese
+/// group reported the wrong engine to whoever read the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FaGroupRetry {
+    /// The engine the group is re-dispatched to.
+    ///
+    /// Read from [`FaFallbackPolicy::RetryGroupOn`], never named here. That
+    /// row's target is const-checked to be language-general, which is what
+    /// makes re-dispatching without a second language admission sound.
+    target: crate::types::engines::FaEngineName,
+    /// The exact constraint the engine reported, quoted into the warn line and
+    /// into the fallback event.
+    reason: &'static str,
+}
+
+/// Whether this failure is one the engine's row says to retry, and on what.
+fn fa_group_retry(
     engine: crate::types::engines::FaEngineName,
     error: &ServerError,
-) -> Option<&'static str> {
-    // Both wav2vec-family engines hit the CTC limits below; Whisper is the
-    // fallback target and cannot fall back to itself.
-    use crate::types::engines::FaEngineName;
-    if !matches!(engine, FaEngineName::Wave2Vec | FaEngineName::Wav2vecCanto) {
-        return None;
-    }
+) -> Option<FaGroupRetry> {
+    // The policy is a FIELD on the engine's row in `FA_ENGINES`, not a match
+    // over the roster here. The roster match, and the paragraph explaining why
+    // the Qwen3 aligner has nothing to fall back to, moved to that row: a new
+    // engine still cannot compile without stating a policy, and it now states
+    // it beside everything else it is.
+    use crate::types::engines::FaFallbackPolicy;
+    let target = match engine.fallback_policy() {
+        FaFallbackPolicy::RetryGroupOn(target) => target,
+        FaFallbackPolicy::NoFallback => return None,
+    };
 
-    match error {
+    let reason = match error {
         ServerError::Validation(message)
             if message.contains("targets length is too long for CTC") =>
         {
-            Some("targets length is too long for CTC")
+            "targets length is too long for CTC"
         }
         ServerError::Validation(message)
             if message.contains("targets Tensor shouldn't contain blank index") =>
         {
-            Some("targets Tensor shouldn't contain blank index")
+            "targets Tensor shouldn't contain blank index"
         }
         // Wave2Vec MMS_FA has 7 conv layers (kernels [10,3,3,3,3,2,2], strides
         // [5,2,2,2,2,2,2]).  A group shorter than ~400 samples (25ms @ 16 kHz)
@@ -725,10 +763,11 @@ fn whisper_fallback_reason(
         ServerError::Validation(message)
             if message.contains("Kernel size can't be greater than actual input size") =>
         {
-            Some("audio segment too short for Wave2Vec feature extractor")
+            "audio segment too short for Wave2Vec feature extractor"
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    Some(FaGroupRetry { target, reason })
 }
 
 /// Build one production-domain `FaInferItem` from the transport-neutral batch
@@ -992,11 +1031,14 @@ mod tests {
                 .into(),
         );
         assert_eq!(
-            whisper_fallback_reason(crate::types::engines::FaEngineName::Wave2Vec, &overflow),
-            Some("targets length is too long for CTC")
+            fa_group_retry(crate::types::engines::FaEngineName::Wave2Vec, &overflow),
+            Some(FaGroupRetry {
+                target: crate::types::engines::FaEngineName::Whisper,
+                reason: "targets length is too long for CTC",
+            })
         );
         assert_eq!(
-            whisper_fallback_reason(crate::types::engines::FaEngineName::Whisper, &overflow),
+            fa_group_retry(crate::types::engines::FaEngineName::Whisper, &overflow),
             None
         );
 
@@ -1007,11 +1049,14 @@ mod tests {
                 .into(),
         );
         assert_eq!(
-            whisper_fallback_reason(crate::types::engines::FaEngineName::Wave2Vec, &blank_index),
-            Some("targets Tensor shouldn't contain blank index")
+            fa_group_retry(crate::types::engines::FaEngineName::Wave2Vec, &blank_index),
+            Some(FaGroupRetry {
+                target: crate::types::engines::FaEngineName::Whisper,
+                reason: "targets Tensor shouldn't contain blank index",
+            })
         );
         assert_eq!(
-            whisper_fallback_reason(crate::types::engines::FaEngineName::Whisper, &blank_index),
+            fa_group_retry(crate::types::engines::FaEngineName::Whisper, &blank_index),
             None
         );
 
@@ -1026,14 +1071,17 @@ mod tests {
                 .into(),
         );
         assert_eq!(
-            whisper_fallback_reason(
+            fa_group_retry(
                 crate::types::engines::FaEngineName::Wave2Vec,
                 &kernel_too_large
             ),
-            Some("audio segment too short for Wave2Vec feature extractor")
+            Some(FaGroupRetry {
+                target: crate::types::engines::FaEngineName::Whisper,
+                reason: "audio segment too short for Wave2Vec feature extractor",
+            })
         );
         assert_eq!(
-            whisper_fallback_reason(
+            fa_group_retry(
                 crate::types::engines::FaEngineName::Whisper,
                 &kernel_too_large
             ),
@@ -1042,9 +1090,66 @@ mod tests {
 
         let other = ServerError::Validation("some other parse failure".into());
         assert_eq!(
-            whisper_fallback_reason(crate::types::engines::FaEngineName::Wave2Vec, &other),
+            fa_group_retry(crate::types::engines::FaEngineName::Wave2Vec, &other),
             None
         );
+    }
+
+    /// The retry each engine offers, written out per variant.
+    ///
+    /// An exhaustive `match` and not a read of `fallback_policy()`, which is
+    /// the field the function under test reads: an expectation derived from
+    /// that field stays green for ANY value it holds. A new engine fails to
+    /// compile here, next to the values it must state.
+    ///
+    /// The self-retry case this used to be the only guard against, a row
+    /// naming its own engine as its target, is refused by the `const` block
+    /// beside `FA_ENGINES` and can no longer be written at all. What is left
+    /// for this match is the pair no type pins: that the target and the reason
+    /// the transport hands back are the ones the row declares.
+    fn expected_retry(engine: crate::types::engines::FaEngineName) -> Option<FaGroupRetry> {
+        use crate::types::engines::FaEngineName;
+        const RECOVERABLE: &str = "targets length is too long for CTC";
+        match engine {
+            FaEngineName::Wave2Vec => Some(FaGroupRetry {
+                target: FaEngineName::Whisper,
+                reason: RECOVERABLE,
+            }),
+            FaEngineName::Wav2vecCanto => Some(FaGroupRetry {
+                target: FaEngineName::Whisper,
+                reason: RECOVERABLE,
+            }),
+            // It IS the fallback target and cannot retry itself.
+            FaEngineName::Whisper => None,
+            // Its aligner is not a CTC decoder, so no recoverable CTC
+            // constraint is reachable for it, and a whole-group retry would
+            // replace measured Qwen3 timings with another model's.
+            FaEngineName::Qwen3 => None,
+        }
+    }
+
+    /// Every engine offers exactly the retry written out above, on a failure
+    /// all of them could see.
+    ///
+    /// A ROUNDTRIP between the declaration table and the transport that reads
+    /// it, which no signature pins: the row says "retry on Whisper", and only
+    /// running the function shows that a Whisper request is what comes back.
+    #[test]
+    fn every_fa_engine_falls_back_exactly_as_its_row_declares() {
+        use crate::types::engines::{FaEngineName, SelectableEngine};
+
+        let recoverable = ServerError::Validation(
+            "worker protocol V2 forced-alignment request failed with RuntimeFailure: \
+             targets length is too long for CTC"
+                .into(),
+        );
+        for engine in FaEngineName::ALL.iter().copied() {
+            assert_eq!(
+                fa_group_retry(engine, &recoverable),
+                expected_retry(engine),
+                "{engine:?} did not offer the retry this test writes out for it"
+            );
+        }
     }
 
     /// a user's bug (2026-04-08): `batchalign3 align` silently drops files

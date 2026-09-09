@@ -1,7 +1,7 @@
 # Benchmarks
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Batchalign provides a `benchmark` command to evaluate ASR accuracy against
 gold transcripts. It transcribes each audio file, compares the result
@@ -136,7 +136,7 @@ batchalign3 benchmark ~/ba_data/input -o ~/ba_data/output --lang eng
 
 | Option | Meaning |
 | --- | --- |
-| `--asr-engine {rev,whisper,whisper-oai}` | ASR engine (default: rev) |
+| `--asr-engine NAME` | ASR engine (default: rev). `--help` prints the list, which is generated from the engine set. |
 | `--asr-engine-custom NAME` | Deprecated alias for `--asr-engine`, still honoured, hidden from help |
 | `--lang CODE` | 3-letter ISO language code (default: `eng`) |
 | `--num-speakers N` | Number of speakers (default: `2`) |

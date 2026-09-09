@@ -1,7 +1,7 @@
 # CHAT Validation Failures
 
 **Status:** Current
-**Last updated:** 2026-09-03 05:50 EDT
+**Last updated:** 2026-09-07 19:45 EDT
 
 This document catalogs how CHAT validation failures arise, how they are handled
 in BA3 vs BA2, and what the correct behavior should be. It is the reference for
@@ -40,7 +40,7 @@ flowchart LR
     PRE -->|"fail"| HARD_ERR["Hard Error<br>File fails, no output"]
     PIPELINE --> POST["Post-Validation Gate"]
     POST -->|"pass"| OUTPUT["Write Output"]
-    POST -->|"fail"| WARN_OUTPUT["Write Output + warn!"]
+    POST -->|"fail"| POST_ERR["Hard Error<br>File fails, no output"]
 ```
 
 ### Pre-Validation (hard error)
@@ -54,14 +54,25 @@ flowchart LR
 - **Rationale:** running NLP (Stanza, etc.) on structurally broken CHAT would
   produce garbage and waste GPU time
 
-### Post-Validation (warn-only)
+### Post-Validation (hard error)
 
-- **Where:** `pipeline/text_infer.rs:131-134`
-- **What it checks:** `validate_output(file, command)`: roundtrip structural
-  integrity
-- **On failure:** logs `warn!` but **writes the output anyway**
-- **Rationale:** output is more useful than no output; the user can inspect the
-  file even if it has issues
+- **Where:** `pipeline/post_validate.rs`. Every route from a finished model to
+  bytes a command may write goes through `PostValidated`, and possession of one
+  is the proof; the writer seams take the proof rather than a `String`.
+- **What it checks:** whichever judgement the command's INPUT entitles it to.
+  A command that admitted its input at a `ValidityLevel` is held to
+  `validate_to_level` at that level plus `validate_output(file, command)`. A
+  command that admitted its input at no level (compare, benchmark) is held to
+  PRESERVATION instead: its output is compared against a census of the document
+  it descends from and refused only for what it destroyed, so the input's own
+  faults travel through and are not charged to the command.
+- **On failure:** the file **fails with no output**.
+- **This section said "warn-only ... writes the output anyway" until
+  2026-09-07**, with the rationale that output is more useful than no output.
+  That was the behaviour and it was the defect: a `warn!` is where lost
+  information goes to look like it was handled, so a file whose `%mor` had
+  drifted or whose terminator a transform had eaten landed on disk and reported
+  success.
 
 ## The Problem: Pre-Validation in the Transcribe Pipeline
 

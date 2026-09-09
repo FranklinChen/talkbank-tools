@@ -93,6 +93,14 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         reason: "one live child process: its config, handle, pid, runtime identity, the two pipes, the activity clock, the loaded-task set, and the request-flight state the checkout's Drop decides from; the tenth field is that state, added so a cancelled attempt's worker is discarded rather than requeued",
     },
     WideStructAllowance {
+        path: "crates/batchalign/src/types/engines.rs",
+        struct_name: "FaEngineSpec",
+        max_fields: 11,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "one row of the forced-alignment engine declaration table, and its width is the design rather than sprawl: adding an engine used to be an edit in nineteen places, so every fact an engine decides now lives in one required field (variant, wire name, selection name, aliases, the name the Python worker resolves, timing resolution, longest dispatch window, resident memory, language support, fallback policy, worker backend) and the struct having no Default is what makes a new field break every row until its author states it; the cap is still doing its job, since a twelfth field is a fact nobody has reviewed",
+    },
+    WideStructAllowance {
         path: "crates/batchalign-transform/src/morphosyntax/ud_types.rs",
         struct_name: "UdWord",
         max_fields: 10,

@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:14 EDT
+**Last updated:** 2026-09-07 19:54 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -44,7 +44,20 @@ re-run align, and re-add the option if still needed.
 
 Implementation: `run_fa_from_ast` checks `is_no_align(&chat_file)` immediately
 after parsing (before media resolution, pre-validation, and all FA logic) and
-returns `FaResult::without_groups(...)`.
+returns `FaAdmission::pass_through(...)`, which is one of exactly two routes to
+a returned FA result. The proof it carries is `PostValidated::pass_through`:
+not gated, because gating would re-judge the INPUT against a bar the input never
+had to meet, and carrying the input's OWN BYTES rather than a re-serialization
+of the parsed model, so "unchanged" is literally true. It used to be built by
+the sibling constructor that serializes the model, which made a parse-and-
+serialize round trip of a file align had promised not to touch.
+
+"Zero modifications" includes the `[ba3 align ...]` provenance comment. Until
+this became a transition on the typed proof
+(`PostValidated::with_provenance_injected`), the dispatch seam stamped that
+comment onto NoAlign and dummy documents too, so the sentence above was false by
+one line. A pass-through is now returned untouched by both the provenance stamp
+and the abbreviation merge.
 
 ---
 
@@ -311,15 +324,24 @@ See [Incremental Processing](../../architecture/incremental-processing.md).
 `group_utterances()` enforces two independent split constraints. A group is
 flushed when either is exceeded by adding the next utterance:
 
-- **Time window**: configured via `AlignOptions.max_group_ms` (default 20 000 ms)
-- **Character-token limit**: `WHISPER_FA_MAX_LABEL_TOKENS = 448` (constant in
-  `grouping.rs`). Whisper's CTC FA counts every character of every word as one
-  label token. Exceeding 448 raises a hard Python `ValueError`. Dense languages
-  (Spanish, any long-word corpus) can hit this inside a normal time window.
+- **Time window**: not an option at all. It comes from the run's FA engine
+  (`FaParams::max_group_ms()` reads `FaEngineName::max_group_ms()`, which is the
+  `max_group` field of that engine's row in `FA_ENGINES`), so it differs between
+  engines and no caller can set it independently of the engine it belongs to
+- **Label-byte cap**: `MAX_GROUP_LABEL_BYTES = 448` (constant in
+  `grouping.rs`, counted through the `LabelBytes` newtype). Whisper's CTC FA
+  refuses more than 448 label TOKENS and raises a hard Python `ValueError`. The
+  budget is counted in UTF-8 BYTES because every token covers at least one
+  byte, so a byte count bounds the token count from above; a character count
+  does not, and would loosen the cap on non-Latin script. The cap applies to
+  every engine's groups, since grouping is not told which engine will align
+  them. Dense languages (Spanish, any long-word corpus) can hit it inside a
+  normal time window.
 
-The flush guard is skipped only when the current group is empty, if one
-utterance alone exceeds 448 chars it is sent as its own group (fail gracefully
-rather than drop silently).
+The cap is consulted only where two utterances are MERGED, so it bounds merges
+rather than every group: the flush guard is skipped when the current group is
+empty, and one utterance whose own labels exceed 448 bytes is sent as its own
+group, unsplit (fail gracefully rather than drop silently).
 
 See [Forced Alignment: FA grouping strategy](../../reference/forced-alignment.md#fa-grouping-strategy)
 for the full rationale, flowchart, and edge cases.
@@ -463,11 +485,23 @@ declaration. Only that state can reach the serialization boundary in
 timing work occurred. A typed `MediaTimingError` fails contradictory timed
 output before any successful result can be written.
 
-The reconciled CHAT file is then validated at Level 2 (output gate equivalent to
+The reconciled CHAT file is then gated at the level its INPUT was admitted at,
+`MainTierValid` (L2), by `FaAdmission::finish` (output gate equivalent to
 [Command Contracts: align post-validation](../../architecture/command-contracts.md#align-post-validation)).
-Validation errors are **warnings only**: cross-speaker overlap is normal in
-conversation data and non-fatal. If critical errors appear (e.g., invalid tier
-codes), they are logged but do not fail the job.
+
+The gate is **fail-closed**, and this paragraph used to say the opposite
+("validation errors are warnings only ... logged but do not fail the job").
+That was true of the `warn!`-and-write shape `PostValidated` replaced: a file
+whose `%mor` had drifted or whose terminator a transform had eaten still landed
+on disk and still reported success. A file whose aligned output now fails the
+gate fails THAT file with `FailureCategory::Validation`, and nothing is written.
+The level comes off the admission rather than being restated at the gate, so
+output cannot be judged at a lower bar than its input was admitted at.
+
+The proof the gate returns is what the writer carries. It reaches
+`FileOutput::Chat` as a `PostValidated`, not a `String`, so the bytes written
+are the bytes the gate serialized; the writer no longer parses the text and
+manufactures a second, weaker proof of its own.
 
 Implementation: `crates/batchalign/src/types/results.rs`,
 `crates/batchalign/src/fa/mod.rs`, and

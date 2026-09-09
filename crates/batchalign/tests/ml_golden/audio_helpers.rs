@@ -9,6 +9,7 @@ use batchalign::options::{
 use batchalign::worker::InferTask;
 use batchalign_transform::extract::extract_words;
 use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
+use talkbank_model::alignment::helpers::PositionalDomain;
 
 pub(crate) fn parse_output(chat: &str, label: &str) -> batchalign::chat_ops::ChatFile {
     let parser = TreeSitterParser::new().unwrap();
@@ -19,7 +20,7 @@ pub(crate) fn parse_output(chat: &str, label: &str) -> batchalign::chat_ops::Cha
 
 pub(crate) fn assert_all_utterances_timed(chat: &str, label: &str) {
     let file = parse_output(chat, label);
-    let extracted = extract_words(&file, TierDomain::Mor);
+    let extracted = extract_words(&file, PositionalDomain::Mor);
     for (ext_utt, utt) in extracted.iter().zip(file.utterances()) {
         if ext_utt.words.is_empty() {
             continue;
@@ -62,7 +63,7 @@ pub(crate) fn assert_first_utterance_max_words(chat: &str, label: &str, max_word
         .utterances()
         .next()
         .unwrap_or_else(|| panic!("{label}: expected at least one utterance"));
-    let words = extract_words(&file, TierDomain::Mor);
+    let words = extract_words(&file, PositionalDomain::Mor);
     let first_words = words
         .first()
         .unwrap_or_else(|| panic!("{label}: missing extracted words for first utterance"));

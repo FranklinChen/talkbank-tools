@@ -1,7 +1,7 @@
 # Language Code Resolution
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 This page documents how batchalign3 maps language codes to models, Stanza
 pipelines, and processing behavior.
@@ -115,9 +115,9 @@ pass an explicit `model_id` via `--engine-overrides`. See
 the recommendation to add new entries.
 
 Other ASR engines ignore language for model selection:
-- `--asr-engine whisper-oai`: always `whisper-turbo`
-- `--asr-engine whisperx`: always `whisper-large-v2`
 - Rev.AI: cloud API, handles language internally
+- `--asr-engine whisper_rs`: the model comes from
+  `BATCHALIGN_WHISPER_RS_MODEL`, else ggml-large-v3
 
 ## Model Resolution (UTR)
 

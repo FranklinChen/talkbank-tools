@@ -17,6 +17,7 @@ from batchalign.worker._stanza_loading import (
     UnsupportedLanguageError,
     iso3_to_alpha2,
     load_stanza_models,
+    load_stanza_retokenize_model,
     should_request_mwt,
 )
 
@@ -207,3 +208,180 @@ def test_load_stanza_models_rejects_partial_processor_language_before_pipeline(
 
     assert "pan" in str(exc_info.value)
     assert "morphosyntax" in str(exc_info.value).lower()
+
+
+def test_the_stanza_inference_lock_survives_a_reload(monkeypatch) -> None:
+    """One lock for the life of the process.
+
+    A handler captures the lock before inference; the bounded pipeline cache
+    can evict a language mid-batch and reload it. Before 2026-09-07 every
+    load minted a NEW lock, so a handler that started before the reload and
+    one that started after held different locks and could enter Stanza at
+    once. The identity is what this pins; the load itself is faked.
+    """
+    table = StanzaCapabilityTable(
+        languages={
+            "eng": StanzaLanguageCapability(
+                alpha2="en",
+                has_tokenize=True,
+                has_pos=True,
+                has_lemma=True,
+                has_depparse=True,
+                has_mwt=False,
+            )
+        },
+        iso3_to_alpha2={"eng": "en"},
+    )
+    monkeypatch.setattr(_stanza_loading, "get_cached_capability_table", lambda: table)
+    fake_stanza = types.ModuleType("stanza")
+    fake_stanza.DownloadMethod = types.SimpleNamespace(REUSE_RESOURCES=object())
+    fake_stanza.Pipeline = lambda *args, **kwargs: types.SimpleNamespace()
+    fake_stanza.__version__ = "0.0-test"
+    monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
+
+    before = _stanza_loading._state.stanza_nlp_lock
+    load_stanza_models("eng")
+    load_stanza_models("eng")
+    assert _stanza_loading._state.stanza_nlp_lock is before
+
+
+def test_the_retokenize_guard_admits_every_chinese_code_its_caller_passes() -> None:
+    """RED FIRST: the guard compared against a literal the mapping had moved on from.
+
+    ``_ISO3_OVERRIDES`` maps ``cmn``, ``zho`` and ``yue`` to ``zh-hans``, and
+    the loader's guard was ``alpha2 != "zh"``. Its only caller passes ``zho``
+    or ``cmn``, so every real call logged "non-Chinese lang, skipping" and the
+    neural-tokenizer pipeline was never loaded: a ``--retokenize`` Mandarin job
+    fell back to the pretokenized pipeline without saying so. The guard is
+    derived from the override table now, so the two cannot disagree again.
+    """
+    for iso3 in ("cmn", "zho", "yue"):
+        assert iso3_to_alpha2(iso3) in _stanza_loading._STANZA_CHINESE_ALPHA2, (
+            f"{iso3} is what the caller passes and must reach the loader"
+        )
+    assert iso3_to_alpha2("eng") not in _stanza_loading._STANZA_CHINESE_ALPHA2
+
+
+def test_two_threads_loading_one_retokenize_key_build_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RED FIRST (2026-09-07 review, item 5): the retokenize load stampedes.
+
+    The load-stampede fix covered one of the three key kinds a worker loads.
+    ``load_stanza_retokenize_model`` installed straight into the cache with no
+    construction slot, so two request threads that both missed on
+    ``{lang}:retok`` each built the neural tokenizer, a separate ~200 MB model,
+    and the second install replaced the first: double the peak memory and
+    double the wall clock for one usable result.
+
+    This reaches the real loader with a fake ``stanza`` module, so what it pins
+    is the SEAM (which thread gets to build) and not the model.
+    """
+    import threading
+
+    from batchalign.worker._pipeline_cache import (
+        StanzaPipelineCache,
+        retokenize_key,
+    )
+
+    cache = StanzaPipelineCache()
+    monkeypatch.setattr(_stanza_loading, "pipeline_cache", lambda: cache)
+    monkeypatch.setattr(
+        _stanza_loading,
+        "_emit_stanza_lang_download_event_if_missing",
+        lambda *args, **kwargs: None,
+    )
+
+    builds: list[str] = []
+    first_is_inside = threading.Event()
+    let_first_finish = threading.Event()
+
+    def _pipeline(*args: object, **kwargs: object) -> object:
+        builds.append("built")
+        if len(builds) == 1:
+            first_is_inside.set()
+            # Hold the build open so a second thread must block on the slot.
+            let_first_finish.wait(timeout=5)
+        return types.SimpleNamespace()
+
+    fake_stanza = types.ModuleType("stanza")
+    fake_stanza.DownloadMethod = types.SimpleNamespace(REUSE_RESOURCES=object())
+    fake_stanza.Pipeline = _pipeline
+    monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
+
+    first = threading.Thread(target=load_stanza_retokenize_model, args=("zho",))
+    second = threading.Thread(target=load_stanza_retokenize_model, args=("zho",))
+    first.start()
+    assert first_is_inside.wait(timeout=5)
+    second.start()
+    # The second thread is blocked on the slot, so nothing new is built yet.
+    assert builds == ["built"]
+    let_first_finish.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert builds == ["built"], (
+        "the second thread must find the first thread's pipeline, not build one"
+    )
+    assert cache.loaded(retokenize_key("zho")) is not None
+    assert len(cache) == 1
+
+
+def test_two_threads_loading_one_mwt_probe_build_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RED FIRST (2026-09-07 review, item 5): the probe check-then-acts.
+
+    ``load_stanza_mwt_probe_model`` read ``cache.get(probe_key)`` and built on
+    a miss, which is a check followed by an act with nothing between them
+    holding a lock. Two threads could both miss, both build, and both install;
+    the loser's pipeline had already been handed back to its own caller, so the
+    memory stayed reachable as well as duplicated.
+    """
+    import threading
+
+    from batchalign.worker._pipeline_cache import StanzaPipelineCache, mwt_probe_key
+    from batchalign.worker._stanza_loading import load_stanza_mwt_probe_model
+
+    cache = StanzaPipelineCache()
+    monkeypatch.setattr(_stanza_loading, "pipeline_cache", lambda: cache)
+
+    builds: list[str] = []
+    first_is_inside = threading.Event()
+    let_first_finish = threading.Event()
+
+    def _pipeline(*args: object, **kwargs: object) -> object:
+        builds.append("built")
+        if len(builds) == 1:
+            first_is_inside.set()
+            let_first_finish.wait(timeout=5)
+        return types.SimpleNamespace()
+
+    fake_stanza = types.ModuleType("stanza")
+    fake_stanza.DownloadMethod = types.SimpleNamespace(REUSE_RESOURCES=object())
+    fake_stanza.Pipeline = _pipeline
+    monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
+
+    probes: list[object] = []
+
+    def _load() -> None:
+        probes.append(load_stanza_mwt_probe_model("ita"))
+
+    first = threading.Thread(target=_load)
+    second = threading.Thread(target=_load)
+    first.start()
+    assert first_is_inside.wait(timeout=5)
+    second.start()
+    assert builds == ["built"]
+    let_first_finish.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert builds == ["built"], (
+        "the second thread must find the first thread's probe, not build one"
+    )
+    # Both callers hold the SAME probe, which is what makes the single build
+    # observable at the seam rather than only in the cache.
+    assert len(probes) == 2
+    assert probes[0] is probes[1]
+    assert cache.loaded(mwt_probe_key("ita")) is not None

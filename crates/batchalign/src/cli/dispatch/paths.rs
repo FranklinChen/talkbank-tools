@@ -11,7 +11,7 @@ use crate::cli::discover::{
 };
 use crate::cli::error::CliError;
 
-use super::helpers::{filter_files_for_command, inject_lexicon};
+use super::helpers::{filter_files_for_command, inject_lexicon, order_files_for_command};
 use crate::cli::args::InputKind;
 
 pub(super) struct PreparedPathsSubmission {
@@ -37,6 +37,7 @@ pub(super) fn prepare_paths_submission(
     let (files, outputs) =
         crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
     let (files, outputs) = filter_files_for_command(command, files, outputs);
+    let (files, outputs) = order_files_for_command(command, files, outputs)?;
 
     let mut passthrough = PassthroughReport::default();
     if let Some(od) = out_dir {

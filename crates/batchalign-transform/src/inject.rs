@@ -16,6 +16,7 @@
 //! re-running. See `morphosyntax/outcome.rs` for the full outcome model.
 
 use talkbank_model::WriteChat;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::alignment::helpers::{MorAlignableWordCount, MorItemCount};
 use talkbank_model::model::{DependentTier, GrammaticalRelation, Mor, MorTier, Utterance};
 
@@ -154,7 +155,7 @@ pub fn inject_morphosyntax(
         let mut extracted = Vec::new();
         collect_utterance_content(
             &utterance.main.content.content,
-            talkbank_model::alignment::helpers::TierDomain::Mor,
+            PositionalDomain::Mor,
             &mut extracted,
         );
         // Mismatch class:

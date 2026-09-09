@@ -1,3 +1,3 @@
-0.7.0
-September 6, 2026
-Adopted Chatter 0.22.0; preserve configured two-pass UTR tuning and route Tencent ASR correctly. Provider-bound UTR keys no longer replay unidentifiable legacy entries; canonical media paths share identity across symlinks and alternate spellings.
+0.8.0
+September 9, 2026
+Adopted Chatter 0.23.0; words on the %wor scale come from the main-tier projection and timing only from a corroborated %wor pairing. One declaration table per forced-alignment engine; a fail-closed output gate; qwen3_fa as a selectable engine.

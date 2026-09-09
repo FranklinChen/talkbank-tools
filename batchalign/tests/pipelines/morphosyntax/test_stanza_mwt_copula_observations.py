@@ -40,6 +40,7 @@ from batchalign.inference._tokenizer_realign import (
     TokenizerContext,
     make_tokenizer_postprocessor,
 )
+from batchalign.worker._pipeline_cache import static_pipelines
 
 # Stanza pipeline fixtures are provided by conftest.py in this directory.
 
@@ -510,8 +511,7 @@ class TestBatchInferPreservePayloadToRust:
 
         response = batch_infer_morphosyntax(
             req,
-            nlp_pipelines={"eng": nlp},
-            contexts={"eng": ctx},
+            pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
             nlp_lock=threading.Lock(),
             free_threaded=False,
         )

@@ -5,19 +5,22 @@ use std::sync::Arc;
 
 use crate::api::{DisplayPath, DurationMs, EngineVersion, LanguageCode3, NumWorkers};
 use crate::cache::UtteranceCache;
+use crate::fa::AdmittedFaResult;
 use crate::options::{CommandOptions, EngineBackend as _};
 use crate::params::{AudioContext, CachePolicy, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
-use crate::types::results::FaResult;
 use crate::worker::pool::WorkerPool;
 use async_trait::async_trait;
 use tracing::{info, warn};
 
 use crate::store::{RunnerJobSnapshot, unix_now};
-use crate::types::request::validate_utr_language_support;
+use crate::types::request::{
+    AdmittedFaParams, DeclaredLanguages, HeaderLanguageError, validate_fa_language_support,
+    validate_utr_language_support,
+};
 
 use super::super::util::{
     FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, compute_audio_identity,
@@ -175,14 +178,30 @@ struct AlignAudioTask<'a> {
     file_index: usize,
     filename: String,
     services: PipelineServices<'a>,
-    fa_params: FaParams,
+    /// The run's FA parameters and the languages they were admitted against.
+    ///
+    /// One proof rather than a `FaParams` beside a `LanguageCode3`: the pair
+    /// used to be two fields nothing tied together, and the language was read
+    /// off the header BEFORE the engine was checked against it, so the task
+    /// could be assembled from an engine and a language that had never been
+    /// compared. The only way to obtain this value is to pass the check.
+    admitted: AdmittedFaParams,
     utr_cache_policy: CachePolicy,
     before_path: Option<PathBuf>,
-    file_lang: LanguageCode3,
     audio_path: PathBuf,
     audio_identity: crate::chat_ops::fa::AudioIdentity,
     total_audio_ms: Option<u64>,
     chat_file: crate::chat_ops::ChatFile,
+    /// The bytes this file was read as, kept beside the model they were parsed
+    /// into.
+    ///
+    /// Align promises a `@Options: dummy` or `NoAlign` document back
+    /// byte-identical, and only the ORIGINAL bytes can keep that promise: a
+    /// re-serialization of the model is a parse-and-serialize round trip, and
+    /// the pass-through route judges nothing, so any difference it makes
+    /// reaches disk unexamined. Carried rather than re-read because the file on
+    /// disk is the file this run is about to overwrite.
+    chat_text: String,
     parse_errors: Vec<crate::chat_ops::ParseError>,
     had_unrecovered_untimed: bool,
     utr_fallback_attempted: bool,
@@ -214,7 +233,7 @@ struct AlignOutputPolicy {
 
 #[async_trait]
 impl AudioFileTask for AlignAudioTask<'_> {
-    type AttemptOutput = FaResult;
+    type AttemptOutput = AdmittedFaResult;
 
     async fn run_attempt(
         &mut self,
@@ -235,26 +254,33 @@ impl AudioFileTask for AlignAudioTask<'_> {
             total_audio_ms: self.total_audio_ms.map(DurationMs),
         };
 
+        // Both branches hand over the SAME document. The incremental one used
+        // to serialize `chat_file` into a string that it then parsed back
+        // twice, so this task paid a serialization and two parses to give the
+        // callee a model it was already holding.
+        let document = crate::fa::FaInputDocument::new(
+            self.chat_file.clone(),
+            self.parse_errors.clone(),
+            &self.chat_text,
+        );
         if let Some(ref bt) = before_text {
-            let current_text = batchalign_transform::serialize::to_chat_string(&self.chat_file);
             crate::fa::process_fa_incremental(
                 bt,
-                &current_text,
+                document,
                 &audio,
-                &self.file_lang,
+                self.admitted.primary_language(),
                 self.services,
-                &self.fa_params,
+                self.admitted.params(),
                 Some(&progress_tx),
             )
             .await
         } else {
             crate::fa::run_fa_from_ast(
-                self.chat_file.clone(),
-                self.parse_errors.clone(),
+                document,
                 &audio,
-                &self.file_lang,
+                self.admitted.primary_language(),
                 self.services,
-                &self.fa_params,
+                self.admitted.params(),
                 Some(&progress_tx),
             )
             .await
@@ -266,9 +292,12 @@ impl AudioFileTask for AlignAudioTask<'_> {
         fa_result: Self::AttemptOutput,
     ) -> Result<FileOutput, crate::error::ServerError> {
         let retention = FaEvidenceRetention::requested(self.dumper.is_enabled(), self.debug_traces);
-        let output_text = if retention.requires_timeline() {
-            let (output, timeline) = fa_result.into_output_and_timeline();
-            let output_text = output.to_chat_string();
+        // The document leaves as the PROOF `FaAdmission` produced, never as a
+        // fresh serialization of the model beside it: that second
+        // serialization is what made the L2-gated bytes and the written bytes
+        // two different things.
+        let document = if retention.requires_timeline() {
+            let (document, timeline) = fa_result.into_document_and_timeline();
             self.dumper
                 .dump_fa_evidence(&self.filename, &timeline)
                 .map_err(|error| {
@@ -290,12 +319,21 @@ impl AudioFileTask for AlignAudioTask<'_> {
                     .upsert_file(&self.job_id, self.file_index, file_traces)
                     .await;
             }
-            output_text
+            document
         } else {
-            fa_result.output.to_chat_string()
+            fa_result.into_document()
         };
 
-        self.dumper.dump_fa_output(&self.filename, &output_text);
+        // Asked BEFORE the bytes are, because asking is what materializes
+        // them: `PostValidated::as_str` serializes the judged model the first
+        // time anyone reads it, and a switched-off dumper would otherwise pay
+        // for a whole-document serialization it then discards. `dump_fa_output`
+        // already no-ops on the same condition, so this changes what is
+        // computed and not what is written.
+        if self.dumper.is_enabled() {
+            self.dumper
+                .dump_fa_output(&self.filename, document.as_str());
+        }
         let provenance = crate::provenance::align_provenance(
             &self.output.provenance_lang,
             self.services.engine_version.as_ref(),
@@ -303,9 +341,16 @@ impl AudioFileTask for AlignAudioTask<'_> {
             false,
             self.output.incremental_enabled,
         );
+        // A named transition on the proof, re-gated at align's own admitted
+        // level. It used to be `inject_provenance_into_text` on a bare string
+        // after the proof had been thrown away, and it stamped a `@Comment`
+        // even onto the `NoAlign` documents the book promises are returned
+        // with zero modifications; a pass-through is now returned untouched.
+        let document = document
+            .with_provenance_injected(&provenance)
+            .map_err(|failure| crate::error::ServerError::Validation(failure.to_string()))?;
         Ok(FileOutput::Chat {
-            text: crate::provenance::inject_provenance_into_text(&output_text, &provenance)
-                .map_err(crate::error::ServerError::OutputParse)?,
+            document,
             merge_abbreviations: self.output.merge_abbreviations,
         })
     }
@@ -330,12 +375,12 @@ impl AudioFileTask for AlignAudioTask<'_> {
                 &mut self.chat_file,
                 UtrPassContext {
                     audio_path: self.audio_path.as_path(),
-                    lang: &self.file_lang,
+                    lang: self.admitted.primary_language(),
                     services: self.services,
                     audio_identity: &self.audio_identity,
                     cache_policy: self.utr_cache_policy,
                     total_audio_ms: self.total_audio_ms.map(DurationMs),
-                    max_group_ms: Some(self.fa_params.max_group_ms()),
+                    max_group_ms: Some(self.admitted.params().max_group_ms()),
                     filename: &self.filename,
                     engine: utr_engine,
                     strategy: &self.utr_strategy,
@@ -604,47 +649,71 @@ async fn process_one_fa_file(
     let (mut chat_file, parse_errors) =
         batchalign_transform::parse::parse_lenient(&fa_parser, &chat_text);
 
-    // Read the primary language from @Languages, falling back to the
-    // job-level lang only if the file has no `@Languages:` header. If
-    // the file's header is absent AND the job has no resolved lang
-    // (`--lang auto`), surface a typed error rather than silently
-    // tagging this file as English.
-    let file_lang: LanguageCode3 = match chat_file.languages.first() {
-        Some(lc) => match LanguageCode3::try_new(lc.as_str()) {
-            Ok(code) => code,
-            Err(_) => match lang_fallback {
-                Some(fallback) => fallback.clone(),
-                None => {
-                    let msg = format!(
-                        "align: file '{}' declares `@Languages: {}` which is not a parseable \
-                         ISO 639-3 code, and the job was submitted with `--lang auto` so \
-                         there is no fallback. Fix the file's @Languages or pass \
-                         `--lang <iso3>`.",
-                        filename, lc
-                    );
-                    lifecycle
-                        .fail(&msg, FailureCategory::Validation, unix_now())
-                        .await;
-                    return FileTaskOutcome::TerminalStateRecorded;
-                }
-            },
-        },
-        None => match lang_fallback {
-            Some(fallback) => fallback.clone(),
-            None => {
-                let msg = format!(
-                    "align: file '{}' has no `@Languages:` header and the job was \
-                     submitted with `--lang auto`. Add the header or pass \
-                     `--lang <iso3>` so we can stamp `@Languages:` honestly.",
-                    filename
-                );
-                lifecycle
-                    .fail(&msg, FailureCategory::Validation, unix_now())
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
-            }
-        },
+    // Resolve the WHOLE `@Languages:` header against the job's `--lang` in one
+    // step. The resolution lives on `DeclaredLanguages` rather than here
+    // because doing it here is what made header ORDER decide admission: the
+    // primary was resolved locally (falling back to `--lang` for an
+    // unreadable first entry) and the secondaries were then taken as
+    // `skip(1)`, so the unreadable entry disappeared from the declaration
+    // that admission was checked against.
+    //
+    // The whole header, not `first()`: a secondary language reaches words
+    // through `[- deu]` precodes and `word@s:deu` markers, and those words
+    // travel to the aligner in the same groups as the primary language's.
+    let declared_languages = match DeclaredLanguages::from_header(
+        chat_file.languages.iter().map(|code| code.as_str()),
+        lang_fallback,
+    ) {
+        Ok(declared) => declared,
+        Err(HeaderLanguageError::UnreadablePrimary { raw }) => {
+            let msg = format!(
+                "align: file '{}' declares `@Languages: {}` which is not a parseable \
+                 ISO 639-3 code, and the job was submitted with `--lang auto` so \
+                 there is no fallback. Fix the file's @Languages or pass \
+                 `--lang <iso3>`.",
+                filename, raw
+            );
+            lifecycle
+                .fail(&msg, FailureCategory::Validation, unix_now())
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+        Err(HeaderLanguageError::NoHeader) => {
+            let msg = format!(
+                "align: file '{}' has no `@Languages:` header and the job was \
+                 submitted with `--lang auto`. Add the header or pass \
+                 `--lang <iso3>` so we can stamp `@Languages:` honestly.",
+                filename
+            );
+            lifecycle
+                .fail(&msg, FailureCategory::Validation, unix_now())
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
     };
+    // The selected aligner has to be able to handle every language THIS file
+    // declares, and this is the first moment both facts are known: the engine
+    // came from the job's options, the languages from `@Languages:` just
+    // above. Refusing here costs the operator a message; the alternative,
+    // silently aligning with a language-general engine instead, costs them a
+    // `%wor` tier produced by a model they did not choose and cannot tell
+    // apart afterwards.
+    //
+    // Both values are MOVED into the check, and what comes back is the proof.
+    // The engine that runs and the language this file is processed under are
+    // read off it below, so neither can be the pre-check value: the language
+    // used to be cloned off the header on the line ABOVE this call, which made
+    // "was it validated" a question about statement order.
+    let admitted = match validate_fa_language_support(declared_languages, fa_params) {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            lifecycle
+                .fail(&error.to_string(), FailureCategory::Validation, unix_now())
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+    let file_lang: LanguageCode3 = admitted.primary_language().clone();
 
     // UTR pre-pass: if untimed utterances exist and a UTR engine is configured,
     // run ASR to recover utterance-level timing before FA grouping.
@@ -671,7 +740,7 @@ async fn process_one_fa_file(
                         audio_identity: &audio_identity,
                         cache_policy: utr_cache_policy,
                         total_audio_ms: total_audio_ms.map(DurationMs),
-                        max_group_ms: Some(fa_params.max_group_ms()),
+                        max_group_ms: Some(admitted.params().max_group_ms()),
                         filename,
                         engine: utr_engine,
                         strategy: &context.utr_strategy,
@@ -714,14 +783,14 @@ async fn process_one_fa_file(
         file_index,
         filename: filename.to_string(),
         services,
-        fa_params,
+        admitted,
         utr_cache_policy,
         before_path: before_path.map(Path::to_path_buf),
-        file_lang,
         audio_path,
         audio_identity,
         total_audio_ms,
         chat_file,
+        chat_text,
         parse_errors,
         had_unrecovered_untimed,
         utr_fallback_attempted: false,

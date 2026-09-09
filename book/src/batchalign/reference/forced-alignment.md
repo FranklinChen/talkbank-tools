@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:59 EDT
+**Last updated:** 2026-09-07 19:52 EDT
 
 ## Overview
 
@@ -446,33 +446,33 @@ offset before injection into the AST.
 
 #### FA grouping strategy
 
-Groups are formed by `group_utterances()` (at
-`crates/batchalign/src/chat_ops/fa/grouping.rs:42`). Each group maps
+Groups are formed by `group_utterances()` in
+`crates/batchalign/src/chat_ops/fa/grouping.rs`. Each group maps
 to one FA worker call.
 Grouping is driven by two independent constraints, a group is flushed and a new
 one started when either is exceeded:
 
-| Constraint | Default | Rationale |
-|------------|---------|-----------|
-| **Time window** (`max_group_ms`) | 20 000 ms | Caps audio segment length sent to the FA worker. Larger windows give the model more context but increase latency and memory. |
-| **Character-token limit** (`WHISPER_FA_MAX_LABEL_TOKENS = 448`) | 448 chars | Whisper's CTC forced-alignment backend (`ctc_loss` / `ctc_best_path`) counts each character of each word as one label token. The maximum allowed sequence length is exactly 448. Exceeding it produces a hard `ValueError: Labels' sequence length N cannot exceed the maximum allowed length of 448 tokens`. |
+| Constraint | Limit | Rationale |
+|------------|-------|-----------|
+| **Time window** (`max_group_ms`) | Per engine: the `max_group` field of the selected engine's row in `FA_ENGINES` | Caps audio segment length sent to the FA worker. Larger windows give the model more context but increase latency and memory, and the engines do not agree on the trade-off: the wav2vec family's CTC target length grows with the window, so it takes a narrower one than Whisper. `group_utterances()` is never told which engine will align its groups; the caller reads the window off the run's engine (`FaParams::max_group_ms()`, which is `FaEngineName::max_group_ms()`, which is that row). The numbers are deliberately not restated here: read the rows in `crates/batchalign/src/types/engines.rs`. |
+| **Label-byte cap** (`MAX_GROUP_LABEL_BYTES = 448`) | 448 UTF-8 bytes | Whisper's CTC forced-alignment backend (`ctc_loss` / `ctc_best_path`) has a maximum label sequence length of exactly 448 TOKENS; exceeding it produces a hard `ValueError: Labels' sequence length N cannot exceed the maximum allowed length of 448 tokens`. The cap is applied to EVERY engine's groups, not only Whisper's, because grouping is never told which engine will align them; the tightest engine's limit is therefore used for all. The unit is a UTF-8 BYTE, and that is a deliberately conservative proxy for the token limit: every token occupies at least one byte, so a byte count bounds the token count from above. A character count does not, and outside ASCII it is smaller, so counting characters would loosen the cap against the very limit it stands in for. |
 
-The char-token limit exists because the time window alone is insufficient. Dense
+The label-byte limit exists because the time window alone is insufficient. Dense
 speech (fast talkers, long-word languages like Spanish) can accumulate hundreds
-of words, and thus thousands of characters, inside a normal 20-second window.
+of words, and thus thousands of label bytes, well inside a single time window.
 The first time this was observed in production was on the `biling-data` corpus
-(`DiazCollazos/09.cha`, Spanish), where group 0 carried 2043 chars in 10.97
-seconds, and `DiazCollazos/01.cha` group 14 carried 2523 chars in 14.56 seconds.
-Both crashed Whisper FA.
+(`DiazCollazos/09.cha`, Spanish), where group 0 carried 2043 label bytes in
+10.97 seconds, and `DiazCollazos/01.cha` group 14 carried 2523 in 14.56
+seconds. Both crashed Whisper FA.
 
 ```mermaid
 flowchart TD
     utt(["Next utterance\n(with timing bullet or estimate)"])
-    extract["collect_fa_words()\nExtract words → count chars\n(utt_chars)"]
+    extract["collect_fa_words()\nExtract words → count UTF-8 bytes\n(utt_bytes)"]
     over_time{"(current duration +\nnew duration) > max_group_ms\nor time went backwards?"}
-    over_chars{"current_chars +\nutt_chars > 448?"}
-    flush["Flush current group\nReset: current_chars = 0\nExtend audio window into gap"]
-    add["Add utterance words to group\ncurrent_chars += utt_chars"]
+    over_chars{"current_bytes +\nutt_bytes > 448?"}
+    flush["Flush current group\nReset: current_bytes = 0\nExtend audio window into gap"]
+    add["Add utterance words to group\ncurrent_bytes += utt_bytes"]
     more{"More\nutterances?"}
     final["Flush final group\n(extend into trailing audio)"]
 
@@ -487,27 +487,36 @@ flowchart TD
     more -->|"no"| final
 ```
 
-**Edge case, single utterance exceeds 448 chars:** If one utterance alone
-exceeds the limit, the flush guard is skipped (`!current_words.is_empty()` is
-false) and the utterance is included in its own group regardless. The worker
-will fail for that group, but the error is scoped to that group alone. The
-alternative, silently dropping the utterance, would corrupt injection by
-skewing the word-cursor alignment for every subsequent group.
+**Known limit, the cap bounds a MERGE and not every group:** it is consulted
+only where two utterances are joined, so a SINGLE utterance whose own labels
+exceed 448 bytes is never split. The flush guard is skipped
+(`!current_words.is_empty()` is false) and the utterance is sent as its own
+group regardless. The worker may fail for that group, but the error is scoped
+to that group alone; the alternative, silently dropping the utterance, would
+corrupt injection by skewing the word-cursor alignment for every subsequent
+group, and splitting one utterance would mean splitting its audio window at a
+position grouping cannot justify. So "no group exceeds the cap" is not what
+this code guarantees.
 
-**Character count vs. actual tokens:** The 448-char limit is a conservative
-proxy. Whisper's CTC vocabulary has some multi-byte characters and some
-characters that map to the CTC blank token (contributing a wildcard instead of
-themselves). In practice, the character count is a safe upper bound: the actual
-label sequence is never longer than the sum of word character lengths.
+**Byte count vs. actual tokens:** The 448-byte limit is a conservative proxy
+for a limit stated in tokens, and conservative in the safe direction. Every
+token of these tokenizers covers at least one UTF-8 byte, so staying under the
+byte cap guarantees staying under the token limit, for every script. The cost
+is over-splitting non-Latin text, roughly threefold for Devanagari, CJK and
+most Indic scripts and twofold for Cyrillic and Greek: more, smaller groups
+still align correctly, where an oversized group is a hard engine failure.
+Tightening this means asking the engine for its real tokenizer, not swapping
+the proxy for a looser one.
 
 **Implementation note, why the word count is computed before the split
-decision:** The split must know the new utterance's char count before deciding
+decision:** The split must know the new utterance's byte count before deciding
 whether to flush, so `collect_fa_words()` is called at the top of the loop
 (before the flush check) and the words are held in `extracted` until after the
 flush decision. This avoids calling `collect_fa_words()` twice.
 
 Source: `crates/batchalign/src/chat_ops/fa/grouping.rs`,
-constant `WHISPER_FA_MAX_LABEL_TOKENS` (line 15).
+constant `MAX_GROUP_LABEL_BYTES` and the `LabelBytes` newtype that is the only
+way to produce a count comparable against it.
 
 ### Failure points, recovery, and what the user sees
 
@@ -584,11 +593,11 @@ flowchart TD
     required_fail["RequireCache failure\n(no dispatch authority)"]
     build["build_forced_alignment_request_v2()\n(worker/request_builder_v2.rs)"]
     empty{"EmptyAudioSegment?\n(0 PCM frames after ffmpeg)"}
-    skip_empty["WARN: group past end of file\nLeave words unaligned\n→ continue to next group"]
+    skip_empty["WARN: group decoded no audio samples\nLeave words unaligned\n→ continue to next group"]
     dispatch["dispatch_execute_v2()\n→ Python worker"]
     parse{"parse_group_response()\nparse_forced_alignment_result_v2()"}
     ok["Group timings resolved"]
-    err_kind{"Error kind?\n(is_fa_runtime_failure,\nwhisper_fallback_reason,\nis_whisper_model_unavailable)"}
+    err_kind{"Error kind?\n(is_fa_runtime_failure,\nfa_group_retry,\nis_whisper_model_unavailable)"}
     ctc["Wave2Vec CTC fallback\n(see diagram below)"]
     model_unavail["ModelUnavailable: \ncapability gap\nLeave words unaligned\n+ WARN in server log"]
     runtime_fail["RuntimeFailure: \ndata-driven model error\nLeave words unaligned\n+ WARN in server log"]
@@ -622,7 +631,7 @@ FA.  No other error triggers this retry.
 ```mermaid
 flowchart TD
     w2v["Wave2Vec worker response\n(parse_group_response fails)"]
-    reason{"whisper_fallback_reason()\n(fa/transport.rs)"}
+    reason{"fa_group_retry()\n(fa/transport.rs)"}
 
     w2v --> reason
 
@@ -656,8 +665,9 @@ flowchart TD
 The `WARN` log line for a successful fallback:
 
 ```text
-WARN fa_transport: Wave2Vec FA hit recoverable target constraint; retrying group with Whisper FA
+WARN fa_transport: FA engine hit a recoverable target constraint; retrying group on its fallback engine
      group=24 start_ms=379515 end_ms=381395 reason="targets length is too long for CTC"
+     failed_engine="wav2vec" retry_engine="whisper"
 ```
 
 A successful fallback appends a `FaFallbackEventTrace` to the job's trace
@@ -723,7 +733,7 @@ a `ProtocolErrorCodeV2::RuntimeFailure` response. It does not appear in
 
 **Ordering in `infer_groups_v2()`:**
 
-1. `whisper_fallback_reason()` is checked first, Wave2Vec CTC patterns still
+1. `fa_group_retry()` is checked first, Wave2Vec CTC patterns still
    trigger the Whisper retry (which may produce timings). `is_fa_runtime_failure`
    is only reached when the fallback logic has already decided no retry is
    possible.
@@ -747,10 +757,10 @@ WARN fa_transport: Whisper FA fallback also failed with model RuntimeFailure;
 | Condition | Scope | Outcome | Log |
 |-----------|-------|---------|-----|
 | FA cache hit | Group | Reuse cached timings silently |, |
-| Audio segment past EOF | Group | Leave words unaligned; continue | `WARN: group past end of file` |
-| Wave2Vec CTC target overflow (3 patterns) | Group | Retry with Whisper; record fallback trace | `WARN: retrying group with Whisper FA` |
+| Audio extraction produces no frames | Group | Leave words unaligned; continue | `WARN: group decoded no audio samples` |
+| Wave2Vec CTC target overflow (3 patterns) | Group | Retry on the row's fallback engine; record fallback trace | `WARN: retrying group on its fallback engine` |
 | Whisper retry succeeds | Group | Group timings resolved |, |
-| Whisper retry: `ModelUnavailable` (worker has no Whisper model) | Group | Leave words unaligned; continue | `WARN: Whisper FA unavailable … leaving group words unaligned` |
+| Fallback retry: `ModelUnavailable` (worker has no such model) | Group | Leave words unaligned; continue | `WARN: fallback FA engine unavailable … leaving group words unaligned` |
 | Worker `RuntimeFailure` (any model exception: token overflow, shape error, OOM, etc.) | Group | Leave words unaligned; continue, `is_fa_runtime_failure()` demotes to group-level | `WARN: FA group failed with model RuntimeFailure` |
 | Whisper fallback also hits `RuntimeFailure` | Group | Leave words unaligned; continue | `WARN: Whisper FA fallback also failed with model RuntimeFailure` |
 | Other worker error (retryable) | File | Retry with backoff; fallback UTR if untimed | `WARN: FA error (raw)` |
@@ -1120,13 +1130,148 @@ utterance, proportional interpolation provides a fallback.
 
 ## Engine Selection
 
-| Engine | Model | Response format | Default? |
-|--------|-------|-----------------|----------|
-| `whisper_fa` | Whisper large-v2 cross-attention DTW | `TokenLevel` (token text + onset seconds) | Yes |
-| `wav2vec_fa` | MMS_FA CTC forced alignment | `WordLevel` (word text + start/end ms) | No |
+| Engine | Model | Response format | Languages | Default? |
+|--------|-------|-----------------|-----------|----------|
+| `wav2vec` | MMS_FA CTC forced alignment | `WordLevel` (word text + start/end ms) | any | Yes |
+| `whisper` | Whisper large-v2 cross-attention DTW | `TokenLevel` (token text + onset seconds) | any | No |
+| `cantonese` | MMS_FA CTC forced alignment over jyutping | `WordLevel` | any (romanizes only for `yue`) | No |
+| `qwen3_fa` | `Qwen/Qwen3-ForcedAligner-0.6B-hf` | `WordLevel` | `yue`, `zho`, `cmn`, `eng` | No |
 
-Both return chunk-relative timestamps. The Rust orchestration (`parse_fa_response`)
-handles offset addition for both formats.
+Select one with `--fa-engine <name>`. The names above are the canonical ones,
+the spellings `--help` advertises. Each engine also answers to its historical
+spellings (`wav2vec_fa`, `wave2vec`, `whisper_fa`, `cantonese_fa`,
+`wav2vec_canto`, `wav2vec_fa_canto`); `qwen3_fa` additionally answers to
+`qwen3-fa` and `qwen3`, which is a convenience for that one engine and not a
+house style.
+
+Every fact in that table is declared in one place, `FA_ENGINES` in
+`crates/batchalign/src/types/engines.rs`, one row per engine. The set of
+accepted spellings is derived from those rows rather than written out
+separately, so it cannot fall behind them.
+
+Two different mechanisms keep that declaration honest, and it is worth being
+precise about which does what:
+
+- **A new FIELD is a compile error in every row.** `FaEngineSpec` requires every
+  field and has no `Default`, so nothing can be left blank.
+- **A new VARIANT is a compile error in the pairing list.** The `spec()` lookup
+  and `FA_ENGINES` are both generated by the `fa_engine_table!` macro from one
+  line per engine, and the match it generates is exhaustive over the engine
+  enum. A variant missing from that list does not compile, and a variant in it
+  is necessarily in the table.
+- **Three further properties are checked while the crate compiles**, in a
+  `const` block beside the table: no engine has two rows, no spelling is
+  accepted by two rows (the resolver is first match, so a duplicate would
+  silently belong to whichever row is listed earlier), and every fallback target
+  is language-general.
+
+All of them return chunk-relative timestamps. The Rust orchestration
+(`parse_fa_response`) handles offset addition for every format.
+
+### `qwen3_fa`: the Qwen3 aligner on its own
+
+`qwen3_fa` is the SAME model the Qwen3-ASR engine already loads to produce its
+own word timestamps (`Qwen/Qwen3-ForcedAligner-0.6B-hf`, the forced-alignment
+companion of the Qwen3-ASR family). Selecting it here runs that aligner against
+a transcript you already have, instead of one the ASR just produced. Both paths
+call one shared module,
+`batchalign/inference/qwen_forced_alignment.py`, so there is no second copy of
+the aligner call to drift.
+
+It reports a word's start AND its end, so its durations are measured rather
+than derived from the next word's onset (`FaTimingResolution::WordIntervals`).
+
+**Languages, and it is EVERY declared language, not just the primary.** Only
+the four ISO-639-3 codes above, because those are the codes
+`QWEN_LANG_LABELS` maps to a label the model accepts. A file declaring any
+other language is refused at admission, by name, with the engines that would
+work listed in the message; it is never silently realigned with a different
+engine.
+
+Admission reads the WHOLE `@Languages:` header. The first code is the
+transcript's primary language, but the rest are not decoration: an utterance
+switches to one with a `[- deu]` precode and a single word with `word@s:deu`,
+and those words travel to the aligner in the same groups as the primary
+language's, under the same single language label. So `@Languages: eng, deu`
+is refused for `qwen3_fa` exactly as `@Languages: deu, eng` is. Until
+2026-09-07 admission read `languages.first()` only, which admitted the first
+spelling and refused the second over identical content, and aligned every
+German utterance under the English label. A declared entry that is not a
+parseable ISO 639-3 code is also refused for this engine, because we cannot
+show it is supported; the language-general engines ignore the header entirely
+and are unaffected by either rule. That holds for the FIRST entry too: when it
+will not parse, `--lang` supplies the primary but the entry itself stays in
+the declaration and still has to be supportable, so `@Languages: not-a-code,
+eng` and `@Languages: eng, not-a-code` are refused alike. Resolving the header
+against `--lang` is `DeclaredLanguages::from_header`, its only constructor, so
+the align dispatch cannot resolve a primary that disagrees with the header it
+validated.
+The upstream checkpoint advertises a wider set (French, German, Italian,
+Japanese, Korean, Portuguese, Russian, Spanish), and Japanese and Korean
+additionally need optional tokenizer packages, so widening our map is a
+measurement rather than a typo fix. The two lists that have to agree are
+`QWEN_LANG_LABELS` (Python) and the `language_support` field of the engine's
+row in `FA_ENGINES`, `crates/batchalign/src/types/engines.rs`.
+
+**A word the engine declines to time is REPORTED.** A `qwen3_fa` group can
+come back with some words timed and others not: a CHAT word whose characters
+the aligner's tokenizer keeps none of owns no unit and so has no span. Those
+words are counted as `untimed_by_host` on the FA warn line, beside the counts
+of timings we rejected. They reach the output the same way a rejected timing
+does, with no bullet, so without their own field an operator could not tell
+"the engine declined three words" from "the engine timed everything".
+
+**Tokenization, and the fold.** The aligner segments the transcript itself and
+does not negotiate: CJK characters individually, space-delimited words
+otherwise, and every character its rule does not keep (it keeps letters,
+digits, apostrophes and CJK) silently dropped WITHOUT ending the current
+token. So the CHAT word `你好` is two aligner units, and `black+bird` is one
+unit spelled `blackbird`, because `cleaned_text()` keeps `+` and non-filler
+`_` and the aligner keeps neither.
+
+Its units and our CHAT words are therefore two different spaces, and the
+engine aligns on ITS units and then FOLDS them back onto ours
+(`WordSegmentation.fold` in `batchalign/inference/qwen_forced_alignment.py`).
+A word's timing is its first constituent unit's start and its last one's end.
+The fold is exact rather than heuristic: each word is segmented with the
+aligner's own tokenizer, and the concatenation is checked against the whole
+transcript's segmentation, so a language whose tokenizer is not
+word-decomposable (Japanese and Korean run a morphological analyser over the
+whole string) is refused loudly instead of mis-attributing spans.
+
+Measured on `05b_clip.wav` (`scripts/prove_qwen3_fa.py`, 2026-09-07): the same
+audio and words written as 26 single characters gives 26 units and 26 timings;
+written as 11 multi-character words it gives the same 26 units folded onto 11
+timings, with `咁搞笑` spanning 560-880 ms, exactly its three characters'
+560-640, 640-720 and 720-880.
+
+Until that fold existed the engine required the aligner's segmentation to EQUAL
+our word list, which is true only of a character-tokenized transcript. It
+refused most real CJK, and it refused ordinary English containing `+` or `_`.
+
+**A word the fold cannot reach is UNTIMED, never padded.** A CHAT word the
+aligner's tokenizer keeps no character of owns no unit, so it comes back with
+no timing and a named reason (`UntimedReason.NO_ALIGNABLE_CHARACTERS`) rather
+than borrowing a neighbour's span. The rest of the group is timed normally.
+The reason is typed on the Python `QwenWordFold`; the worker wire carries only
+"no timing" for that word (`indexed_timings[i] = None`, which is the same slot
+every other unaligned-word path uses), because
+`IndexedWordTimingResultV2` is shared by all four FA backends and the only
+consumer downstream of it leaves an untimed word without a bullet whatever the
+reason was. What crosses is an honest UNKNOWN, never a fabricated span.
+
+**No CTC fallback, and that is a decision.** Two halves. The three CTC failures
+that send a wave2vec group to Whisper (target length, blank index, window
+shorter than the feature extractor) are unreachable for this model. And its own
+characteristic failure, a word it can time no part of, is no longer a
+group-level failure at all: the fold times the rest and reports that one word
+untimed. Retrying the whole group on Whisper would replace measured Qwen3
+timings with Whisper ones for every word that DID align, and the wire records
+timings per word without recording which engine produced each, so the
+substitution would be invisible afterwards. One untimed word is the smaller and
+the honest loss. The `FaFallbackPolicy::NoFallback` row in
+`crates/batchalign/src/types/engines.rs` states this, and `fa_group_retry` in
+`crates/batchalign/src/fa/transport.rs` reads it.
 
 ## Offset Handling
 
@@ -1290,52 +1435,33 @@ This is especially useful for confirming:
 
 ## Known Pitfalls
 
-### Audio timestamps past end of file
+### Empty audio windows
 
-**Symptom if the empty-segment check is absent:** One or more files fail alignment with:
+An FA window can decode to zero PCM frames even when ffmpeg exits successfully.
+A window outside the recording is one possible cause; a very short window
+inside the recording can also produce no frames. Empty output alone does not
+establish which cause applies.
 
-```text
-FA processing failed: validation error: failed to parse worker protocol V2 FA
-response for group N (Xms..Yms): worker protocol V2 forced-alignment request
-failed with RuntimeFailure: RuntimeError: Calculated padded input size per
-channel: (0). Kernel size: (10). Kernel size can't be greater than actual
-input size
-```
-
-**Root cause:** The FA grouping algorithm assigns timestamps to groups using
-utterance bullets already present in the CHAT file.  When the last few
-utterances carry timestamps that extend past the actual end of the audio (a
-common occurrence in PWA/aphasia corpora where utterance-end times are
-hand-estimated or interpolated beyond the recording), the corresponding FA
-group contains no real audio samples.
-
-`ffmpeg` exits with code 0 in this case but writes an empty PCM file.  Without
-an explicit check, the 0-frame PCM is passed to Wave2Vec, which crashes with the
-PyTorch convolution error above because its kernel is larger than the input
-tensor.
-
-`extract_prepared_audio_segment_f32le` checks `frame_count == 0` after ffmpeg
-and returns `PreparedArtifactErrorV2::EmptyAudioSegment` instead of a 0-frame
-descriptor.  The transport layer (`infer_groups_v2`) catches this before
-dispatching to the worker, skips the group with all-`None` timings, and logs:
+`extract_prepared_audio_segment_f32le` checks `frame_count == 0` and returns
+`PreparedArtifactErrorV2::EmptyAudioSegment`. The transport maps that owned
+window/path evidence to `ServerError::EmptyFaAudioSegment`, leaves the group's
+words unaligned, and continues with the next group. No empty descriptor is
+sent to the model, where a convolution could fail on a zero-length tensor.
 
 ```text
-WARN fa_transport: FA group has no audio (segment past end of file); leaving words unaligned
+WARN fa_transport: FA group decoded no audio samples; leaving words unaligned
      group=N start_ms=X end_ms=Y path=<audio file>
 ```
 
-The affected words in the CHAT output have no bullets but the file is otherwise
-complete.  This is the correct conservative outcome: the words exist in the
-transcript but their timing is unknown.
-
-**Affected corpora:** Typically aphasia/PWA corpora where post-session
-annotation extends utterance times beyond the recorded audio.  The Croatian
-PWA corpus (APROCSA) triggered this in production (job `6795bfbe-467`,
-`1-ZH-76-1.cha`, group 62, 908154-909196 ms).
+Inspect the reported window, actual recording duration and source timing before
+changing the transcript. Do not infer a truncated recording from this warning
+or shorten the recording as a workaround. Correct timing only when the source
+evidence supports it; the conservative output keeps words whose timing is
+unknown.
 
 **Implementation:** `crates/batchalign/src/worker/artifacts_v2.rs`
-(`EmptyAudioSegment` variant), `request_builder_v2.rs` (build-error mapping),
-`fa/transport.rs` (skip logic in `infer_groups_v2`).
+(`EmptyAudioSegment`), `request_builder_v2.rs` (build-error mapping), and
+`fa/transport.rs` (group skip in `infer_groups_v2`).
 
 ### Whisper pipeline chunking
 
@@ -1359,26 +1485,24 @@ working correctly. This path is more fragile.
 
 ## Warning reference
 
-All `WARN` lines emitted to the server log during `align`.  None of these are
-fatal by themselves; a `WARN` on a group or a post-processing pass does not
-prevent output from being written.  Only file-level errors prevent output.
+Selected current warnings emitted during `align` are listed below. A recovered
+warning does not itself abort the file, but a later error can still prevent
+completion. Read the final job status and structured decisions as well as logs.
 
-| Log source | Message pattern | When it fires | Action needed? |
-|------------|----------------|--------------|---------------|
-| `fa_pipeline` | `untimed utterances present but no UTR engine configured` | `--no-utr` and file has untimed utterances | No, proportional interpolation runs instead |
-| `crates/batchalign/src/chat_ops/fa/utr.rs` | `no timing bullet and no estimate, skipping from FA grouping` | Utterance has no bullet and no timed neighbors for interpolation | Inspect file; utterance will be left unaligned |
-| `crates/batchalign/src/chat_ops/fa/transport.rs` | `FA group has no audio (segment past end of file)` | Group's time window exceeds audio duration | Check audio file length and CHAT bullets |
-| `crates/batchalign/src/chat_ops/fa/transport.rs` | `Wave2Vec FA hit recoverable target constraint; retrying group with Whisper FA` | Wave2Vec CTC overflow on one group | Informational; Whisper retry follows automatically |
-| `crates/batchalign/src/chat_ops/fa/transport.rs` | `Whisper FA unavailable … leaving group words unaligned` | Wave2Vec overflow AND worker has no Whisper model | Informational; affected utterances lose word timing but file completes |
-| `crates/batchalign/src/chat_ops/fa/transport.rs` | `FA error (raw) … category=validation` | Group failed worker inference for a non-CTC reason | Check server log for root cause; file may fail |
-| `crates/batchalign/src/chat_ops/fa/mod.rs` | `FA cache batch lookup failed` | SQLite cache read error (non-fatal; misses treated as cache misses) | Check disk space and cache file permissions |
-| `crates/batchalign/src/chat_ops/fa/mod.rs` | `Failed to deserialize cached FA timings` | Cache entry written by a different schema version | Wipe FA cache: `rm ~/Library/Caches/batchalign3/cache.db*` |
-| `fa/mod.rs` | `Failed to cache FA result` | SQLite cache write error (non-fatal; inference result still used) | Check disk space |
-| `fa/mod.rs` | `Post-validation warnings` | CHAT structural issues after injection | Review structured decision evidence and output |
-| `fa/orchestrate.rs` | `monotonicity: strategy="end_clamped_coverage_only"\|"end_clamped_boundary_from_words"\|"end_clamped_interleaved_words"` | Same-speaker BY STREAM, i.e. skipping intervening other-speaker lines (default), or additionally every physically adjacent pair (`clamp-all-adjacent`); end overlap resolved from measured word timings, the last variant's reason carries how many words were cut | Review only `end_clamped_interleaved_words` (`needs_review=true`); the other two are automatic and informational |
-| `fa/orchestrate.rs` | `monotonicity: strategy="start_stripped"` | Utterance start precedes previous accepted start, full timing stripped | Review utterance; structured decision has `needs_review=true` |
-| `fa_pipeline` | `FA failed with untimed utterances; attempting fallback UTR` | FA error on file that still has untimed utterances | Informational; fallback UTR retry follows |
-| `fa_pipeline` | `Fallback UTR recovered timing` | Fallback UTR succeeded before retry | Informational; timing injected, FA retry queued |
+| Log source | Message pattern | Meaning and response |
+|------------|----------------|----------------------|
+| `fa/transport.rs` | `FA group decoded no audio samples` | Extraction returned zero frames. Inspect the window, duration and source timing; the group remains unaligned. |
+| `fa/transport.rs` | `Worker process exited during FA group` | This request lost its worker. The exit alone does not prove OOM or bad input; review process evidence and the unaligned group. |
+| `fa/transport.rs` | `FA engine hit a recoverable target constraint; retrying group on its fallback engine` | A recognized target constraint triggers the retry. `failed_engine` and `retry_engine` name both ends; the target comes from the failing engine's row, never from a literal in the log call. |
+| `fa/transport.rs` | `fallback FA engine unavailable … leaving group words unaligned` | The retry worker lacks the loaded model named by `retry_engine`; review the group's missing timing. |
+| `fa/transport.rs` | `FA group failed with model RuntimeFailure` / `fallback FA engine also failed with model RuntimeFailure` | The model returned a runtime failure and the group remains unaligned. Inspect the attached error; this category alone does not establish the cause. |
+| `fa/mod.rs`, `fa/incremental.rs` | `FA cache batch lookup failed` | A cache read failed. Inspect the attached error before changing storage; inference may continue through cache misses. |
+| `runner/dispatch/fa_pipeline.rs` | `FA failed with untimed utterances; attempting fallback UTR` | The pipeline attempts fallback UTR before retrying FA. |
+| `runner/dispatch/fa_pipeline.rs` | `Fallback UTR recovered timing` | Fallback UTR produced timing for the FA retry; this is not final alignment success. |
+
+Timing-clamp and timing-removal decisions are structured review evidence.
+Inspect their `needs_review` flags and affected words rather than relying on a
+historical log-message spelling.
 
 ## Comparison with BA2
 
@@ -1450,8 +1574,8 @@ English occupies, while Whisper FA yields 0 ms for every word unless the
 onset-to-interval step runs.
 
 The CTC fallback described above still catches genuine Wave2Vec refusals, which
-are rare: a group is capped at 448 label characters, and MMS_FA offers one
-20 ms frame per target, so reaching the ceiling takes more than 50 characters
+are rare: a merged group is capped at 448 label bytes, and MMS_FA offers one
+20 ms frame per target, so reaching the ceiling takes more than 50 label bytes
 per second against the 12 to 15 that speech produces.
 
 ## Design Rationale
@@ -1587,20 +1711,20 @@ unchanged utterances).
 
 ## Known limitations
 
-- **FA cannot recover utterances under ~200 ms of audio.** The Whisper
-  and Wave2Vec FA models need a minimum number of frames to produce
-  reliable timing. Utterances narrower than ~200 ms (single short
-  backchannels, brief interjections) are left untimed by FA. The
-  proportional-FA-estimation fallback may still place an estimated
-  bullet on them when `total_audio_ms` is available; otherwise they
-  remain untimed.
-- **Audio timestamps past end of file leave words unaligned.** When an
-  FA group's utterance timestamps extend past the actual end of the
-  audio file (common in PWA corpora where end-times are
-  hand-estimated), the prepared-audio extractor returns
-  `EmptyAudioSegment` and the group is skipped with all-`None`
-  timings. The rest of the file aligns normally. Workaround: trim the
-  audio or correct end-times before re-running.
+- **FA cannot recover utterances under about 200 ms of audio.** The Whisper
+  and Wave2Vec FA models need a minimum number of frames to produce reliable
+  timing, so an utterance narrower than that (a single short backchannel, a
+  brief interjection) is left untimed. The proportional-FA-estimation fallback
+  may still place an estimated bullet on it when `total_audio_ms` is
+  available; otherwise it stays untimed. (Restored 2026-09-07: this limit was
+  deleted as collateral of a warning-table cull and then existed nowhere in
+  the book, which left a user whose brief interjections come back untimed with
+  no documented cause.)
+- **Empty audio windows leave words unaligned.** A very short window or one
+  outside the recording can produce no PCM frames. The prepared-audio extractor
+  returns `EmptyAudioSegment`, and the group is skipped with all-`None` timings.
+  Review the window and original recording before changing timing. Keep the
+  words untimed when no source-supported correction is available.
 - **Same-speaker overlap windows can lose timing.** If two utterances
   from the same speaker overlap (E704), `strip_e704_same_speaker_overlaps()`
   drops the earlier one's timing rather than emit a contradiction.

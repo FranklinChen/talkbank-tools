@@ -1,7 +1,7 @@
 # Language-Specific Processing Overview
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 This page is the single entry point for understanding how batchalign3 handles
 non-English languages. It maps every stage of the processing pipeline to the
@@ -54,8 +54,6 @@ only `mal → thennal/whisper-medium-ml`).
 | Engine | Model |
 |--------|-------|
 | `--asr-engine whisper` (default) | `openai/whisper-large-v3` for all languages |
-| `--asr-engine whisper-oai` | always `whisper-turbo` |
-| `--asr-engine whisperx` | always `whisper-large-v2` |
 | `--asr-engine whisper_hub` | per-language HuggingFace fine-tune via `_RESOLVER` or explicit `--engine-overrides model_id` |
 | `--utr-engine whisper` | `openai/whisper-large-v2` for every language |
 

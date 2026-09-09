@@ -1,7 +1,7 @@
 # Hebrew Morphosyntax
 
 **Status:** Current
-**Last updated:** 2026-05-20 07:56 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Hebrew-specific handling in batchalign3's morphosyntax pipeline.
 
@@ -18,7 +18,6 @@ Hebrew uses a fine-tuned Whisper model for the HuggingFace engine:
 | Engine | Model |
 |--------|-------|
 | `--asr-engine whisper` | `ivrit-ai/whisper-large-v3` (fine-tuned for Hebrew) |
-| `--asr-engine whisper-oai` | `openai/whisper-turbo` (generic) |
 | Rev.AI | Cloud API (supports Hebrew) |
 
 The `ivrit-ai/whisper-large-v3` model is trained on Hebrew conversational

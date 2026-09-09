@@ -1,4 +1,4 @@
-use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::dependent_tier::{Mor, MorTier};
 use talkbank_model::model::{ChatFile, DependentTier, Line, Utterance};
 use talkbank_model::{UtteranceIdx, WriteChat};
@@ -212,8 +212,8 @@ pub fn project_gold_structurally(
     bundle: &ComparisonBundle,
 ) -> ChatFile {
     let mut projected = gold_file.clone();
-    let main_utts = extract::extract_words(main_file, TierDomain::Mor);
-    let gold_utts = extract::extract_words(gold_file, TierDomain::Mor);
+    let main_utts = extract::extract_words(main_file, PositionalDomain::Mor);
+    let gold_utts = extract::extract_words(gold_file, PositionalDomain::Mor);
     let main_compared_word_counts = compared_word_counts(&main_utts);
     let gold_compared_word_counts = compared_word_counts(&gold_utts);
     let main_alignable_word_counts = alignable_word_counts(&main_utts);

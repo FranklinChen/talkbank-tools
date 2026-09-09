@@ -12,6 +12,11 @@ from batchalign.inference.morphosyntax import (
     validate_ud_words,
 )
 from batchalign.providers import BatchInferRequest
+from batchalign.worker._pipeline_cache import (
+    LoadedPipeline,
+    StaticPipelines,
+    static_pipelines,
+)
 
 
 class _RecordingLock:
@@ -191,8 +196,9 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
                 {"bad": "shape"},
             ],
         ),
-        {"eng": eng_nlp, "fra": fra_nlp},
-        {"eng": eng_ctx, "fra": fra_ctx},
+        static_pipelines(
+            {"eng": eng_nlp, "fra": fra_nlp}, {"eng": eng_ctx, "fra": fra_ctx}
+        ),
         lock,
         free_threaded=False,
     )
@@ -224,7 +230,15 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
 def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure(
     monkeypatch,
 ) -> None:
-    """If a lang-specific context is absent, the request-lang context should be used and reset."""
+    """If a lang-specific context is absent, the request-lang context should be used and reset.
+
+    POLICY CHANGE, recorded here because this test used to assert the loss:
+    its final assertion was ``result == {"sentences": []}``, i.e. that a
+    pipeline which RAISED still returned a well-formed empty analysis. That is
+    the silent-empty-tier defect, written down as an expectation. The reset of
+    the borrowed context is what this test is actually for, and it still holds;
+    the outcome for the item is now an error.
+    """
 
     monotonic = iter([1.0, 2.0])
     monkeypatch.setattr(
@@ -239,6 +253,11 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
         [],
         error=RuntimeError("stanza exploded"),
     )
+    # The request-language pipeline is resident and carries the context that
+    # `fra` borrows. A context with no pipeline behind it is no longer a state
+    # the fixture can express, and it was never one the real cache could
+    # reach: `LoadedPipeline` holds the two together.
+    eng_nlp = _RecordingNlp(fallback_ctx, [])
 
     response = batch_infer_morphosyntax(
         BatchInferRequest(
@@ -253,8 +272,7 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
                 }
             ],
         ),
-        {"fra": fra_nlp},
-        {"eng": fallback_ctx},
+        static_pipelines({"fra": fra_nlp, "eng": eng_nlp}, {"eng": fallback_ctx}),
         lock,
         free_threaded=True,
     )
@@ -262,14 +280,202 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
     assert lock.enter_count == 0
     assert fra_nlp.calls == [("salut toi .", [["salut", "toi", "."]])]
     assert fallback_ctx.original_words == []
-    assert response.results[0].result == {"sentences": []}
+    assert response.results[0].result is None
+    assert (
+        response.results[0].error
+        == "Stanza pipeline raised for language fra: stanza exploded"
+    )
     assert response.results[0].elapsed_s == 1.0
 
 
-def test_batch_infer_morphosyntax_leaves_defaults_for_missing_pipelines_and_mismatches(
+def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
     monkeypatch,
 ) -> None:
-    """Missing pipelines and sentence-count drift should preserve empty fallback results."""
+    """A language group whose pipeline RAISES must return an error per item.
+
+    The fact that Stanza failed has to travel in the response, because the
+    Rust consumer branches on it: `morphosyntax/worker.rs` turns a per-item
+    `error` into a failed file, and its own comment says why, "so the
+    affected file fails rather than silently producing empty %mor tiers".
+    An empty result carries no such fact, so the file used to be WRITTEN with
+    empty `%mor` and `%gra` and nothing anywhere said the analysis never ran.
+
+    Items in a language whose pipeline SUCCEEDED are unaffected: the failure
+    is scoped to its own group.
+    """
+
+    monotonic = iter([1.0, 2.0])
+    monkeypatch.setattr(
+        "batchalign.inference.morphosyntax.time.monotonic",
+        lambda: next(monotonic),
+    )
+
+    eng_ctx = SimpleNamespace(original_words=[])
+    fra_ctx = SimpleNamespace(original_words=[])
+    # The fake returns the terminator too, as Stanza does; it is stripped on
+    # the way out, which is why the expectation below is the CHAT words alone.
+    eng_nlp = _RecordingNlp(eng_ctx, [_raw_sentence(["hello", "world", "."])])
+    fra_nlp = _RecordingNlp(fra_ctx, [], error=RuntimeError("stanza exploded"))
+
+    response = batch_infer_morphosyntax(
+        BatchInferRequest(
+            task="morphosyntax",
+            lang="eng",
+            items=[
+                {
+                    "words": ["salut", "toi"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "lang": "fra",
+                },
+                {
+                    "words": ["hello", "world"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "lang": "eng",
+                },
+                {
+                    "words": ["bonjour"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "lang": "fra",
+                },
+            ],
+        ),
+        static_pipelines(
+            {"eng": eng_nlp, "fra": fra_nlp}, {"eng": eng_ctx, "fra": fra_ctx}
+        ),
+        _RecordingLock(),
+        free_threaded=True,
+    )
+
+    for index in (0, 2):
+        failed = response.results[index]
+        assert failed.error is not None, f"item {index} carries no error"
+        assert "fra" in failed.error
+        assert "stanza exploded" in failed.error
+        # Never an empty analysis: an empty `%mor` is indistinguishable from a
+        # real one for an utterance Stanza legitimately had nothing to say
+        # about, which is exactly how this defect stayed invisible.
+        assert failed.result is None
+
+    survivor = response.results[1]
+    assert survivor.error is None
+    assert survivor.result == {"raw_sentences": [_raw_sentence(["hello", "world"])]}
+
+
+def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
+    monkeypatch,
+) -> None:
+    """A missing pipeline asks the loader once, and a good reload is no failure.
+
+    This is what makes a BOUNDED pipeline cache safe. The cache holds two
+    pipelines, so a batch spanning three languages will find one evicted
+    between the host loading it and this function reaching its group. Without
+    this seam that group would be reported as unanalysable and the whole file
+    would fail, which is a worse outcome than the memory ceiling buys.
+    """
+
+    monotonic = iter([40.0, 41.0])
+    monkeypatch.setattr(
+        "batchalign.inference.morphosyntax.time.monotonic",
+        lambda: next(monotonic),
+    )
+
+    fra_ctx = SimpleNamespace(original_words=[])
+    fra_nlp = _RecordingNlp(fra_ctx, [_raw_sentence(["salut", "."])])
+    # Empty: stands for a cache that has evicted `fra` since the host loaded it.
+    entries: dict[str, LoadedPipeline] = {}
+    pipelines = StaticPipelines(entries=entries)
+    loaded: list[str] = []
+
+    def _load(lang: str) -> None:
+        loaded.append(lang)
+        # The loader installs the pipeline AND its context together, which is
+        # the only way an entry ever comes into existence.
+        entries[lang] = LoadedPipeline(nlp=fra_nlp, context=fra_ctx)
+
+    response = batch_infer_morphosyntax(
+        BatchInferRequest(
+            task="morphosyntax",
+            lang="fra",
+            items=[
+                {
+                    "words": ["salut"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "lang": "fra",
+                }
+            ],
+        ),
+        pipelines,
+        _RecordingLock(),
+        free_threaded=True,
+        load_pipeline=_load,
+    )
+
+    assert loaded == ["fra"], "the loader must be asked exactly once"
+    assert response.results[0].error is None
+    assert response.results[0].result == {"raw_sentences": [_raw_sentence(["salut"])]}
+
+
+def test_batch_infer_morphosyntax_reports_why_a_reload_failed(monkeypatch) -> None:
+    """A loader that raises hands its reason to the failure, not only to the log.
+
+    The bare absence of a pipeline and "Stanza has no model for this language"
+    are different operator leads, and the second one is only knowable here.
+    """
+
+    monotonic = iter([50.0, 51.0])
+    monkeypatch.setattr(
+        "batchalign.inference.morphosyntax.time.monotonic",
+        lambda: next(monotonic),
+    )
+
+    def _load(lang: str) -> None:
+        raise RuntimeError(f"no Stanza model for {lang}")
+
+    response = batch_infer_morphosyntax(
+        BatchInferRequest(
+            task="morphosyntax",
+            lang="zzz",
+            items=[
+                {
+                    "words": ["kuku"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "lang": "zzz",
+                }
+            ],
+        ),
+        static_pipelines({}, {}),
+        _RecordingLock(),
+        free_threaded=True,
+        load_pipeline=_load,
+    )
+
+    assert response.results[0].result is None
+    assert response.results[0].error == (
+        "no Stanza pipeline loaded for language zzz: loading it failed: "
+        "no Stanza model for zzz"
+    )
+
+
+def test_batch_infer_morphosyntax_reports_missing_pipelines_and_mismatches(
+    monkeypatch,
+) -> None:
+    """A missing pipeline and sentence-count drift both fail their group.
+
+    POLICY CHANGE, and this test used to be named "leaves_defaults..." and to
+    assert exactly the defect: three items whose analysis never happened came
+    back as well-formed empty results, so the Rust side injected empty %mor
+    and %gra and wrote the file. Both situations mean nothing is KNOWN about
+    the utterances, which is not the same as knowing they have no morphology.
+
+    They stay two distinct error kinds because the operator action differs:
+    a missing pipeline is an installation or routing problem, a count mismatch
+    is a tokenization drift to investigate.
+    """
 
     monotonic = iter([20.0, 21.0])
     monkeypatch.setattr(
@@ -309,8 +515,7 @@ def test_batch_infer_morphosyntax_leaves_defaults_for_missing_pipelines_and_mism
                 },
             ],
         ),
-        {"eng": mismatch_nlp},
-        {"eng": eng_ctx},
+        static_pipelines({"eng": mismatch_nlp}, {"eng": eng_ctx}),
         lock,
         free_threaded=False,
     )
@@ -321,9 +526,19 @@ def test_batch_infer_morphosyntax_leaves_defaults_for_missing_pipelines_and_mism
             [["hello", "world", "."], ["goodbye", "moon", "."]],
         )
     ]
-    assert response.results[0].result == {"sentences": []}
-    assert response.results[1].result == {"sentences": []}
-    assert response.results[2].result == {"sentences": []}
+    assert response.results[0].result is None
+    assert (
+        response.results[0].error
+        == "no Stanza pipeline loaded for language spa: this worker has no "
+        "loaded pipeline for the language"
+    )
+    for index in (1, 2):
+        assert response.results[index].result is None
+        assert (
+            response.results[index].error
+            == "Stanza sentence count mismatch for language eng: expected 2 "
+            "sentences, got 1"
+        )
 
 
 def test_batch_infer_morphosyntax_returns_early_when_no_nonempty_items(
@@ -346,8 +561,7 @@ def test_batch_infer_morphosyntax_returns_early_when_no_nonempty_items(
                 {"bad": "shape"},
             ],
         ),
-        {},
-        {},
+        static_pipelines({}, {}),
         _RecordingLock(),
         free_threaded=False,
     )
@@ -419,8 +633,7 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
                 }
             ],
         ),
-        {"ita": nlp},
-        {"ita": ctx},
+        static_pipelines({"ita": nlp}, {"ita": ctx}),
         lock,
         free_threaded=False,
     )
@@ -447,8 +660,7 @@ def _run_eng(
     nlp = _RecordingNlp(ctx, sentences)
     response = batch_infer_morphosyntax(
         BatchInferRequest(task="morphosyntax", lang="eng", items=items),
-        {"eng": nlp},
-        {"eng": ctx},
+        static_pipelines({"eng": nlp}, {"eng": ctx}),
         _RecordingLock(),
         free_threaded=False,
     )

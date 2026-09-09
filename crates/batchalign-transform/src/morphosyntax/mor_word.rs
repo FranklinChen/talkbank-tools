@@ -16,7 +16,7 @@ pub fn map_ud_word_to_mor(ud: &UdWord, ctx: &MappingContext) -> Result<Mor, Mapp
     }
 
     let feats = parse_feats(ud.feats.as_deref());
-    let (mut cleaned_lemma, _is_unknown) = clean_lemma(&ud.lemma, &ud.text);
+    let mut cleaned_lemma = clean_lemma(&ud.lemma, &ud.text);
     let mut effective_pos = upos_to_name(&ud.upos).to_string();
     if lang2(&ctx.lang) == "ja"
         && let Some(ovr) = japanese_verbform(&effective_pos, &cleaned_lemma, &ud.text)
@@ -78,9 +78,35 @@ pub(super) fn parse_feats(feats: Option<&str>) -> HashMap<String, String> {
 }
 
 /// Clean a UD lemma for use as a CHAT `%mor` stem.
-pub fn clean_lemma(lemma: &str, text: &str) -> (String, bool) {
+///
+/// # The zero-prefix branch that used to live here, and why it is gone
+///
+/// This function used to special-case a lemma starting with `0`: it replaced
+/// the lemma with `text[1..]`, dropping the first character of the WORD, and
+/// set an `is_unknown` flag no caller read. The deletion is right; the reason
+/// first given for it ("a CHAT word cannot begin with a digit") is not, and it
+/// is corrected here so the next reader does not inherit it.
+///
+/// The real reasons, in order:
+///
+/// - A leading `0` in CHAT is the OMISSION marker, not a digit in a word:
+///   `0the` is "the word *the*, omitted by the speaker", modelled as
+///   `WordCategory::Omission` (`talkbank-model`,
+///   `model/content/action.rs`, which distinguishes it from the bare `0`
+///   non-verbal action token).
+/// - An omission never reaches a `%mor` payload. It carries no surface form to
+///   tag, and the alignment rules say so directly: "Omissions never align"
+///   (`talkbank-model`, `alignment/helpers/rules.rs`). So a `%mor` item whose
+///   lemma begins with `0` is not a thing this code can be handed.
+/// - Measured rather than assumed: no `%mor` item in the whole data tree
+///   carries a zero-prefixed POS. The branch was dead in production and
+///   destructive if it ever fired.
+///
+/// A lemma that does begin with `0` is therefore cleaned like any other, with
+/// no character dropped. [`tests::clean_lemma_keeps_a_leading_zero_intact`]
+/// pins that, so the deletion is a stated behaviour rather than a silent one.
+pub fn clean_lemma(lemma: &str, text: &str) -> String {
     let mut target = lemma.to_string();
-    let mut unknown = false;
 
     if target.trim() == "\u{300D}" || target.trim() == "\u{300C}" {
         target = text.to_string();
@@ -92,13 +118,6 @@ pub fn clean_lemma(lemma: &str, text: &str) -> (String, bool) {
         target = text.to_string();
     }
     target = target.replace(['\u{300D}', '\u{300C}'], "");
-
-    if target.starts_with('0') && target.len() > 1 {
-        if text.len() > 1 {
-            target = text[1..].to_string();
-        }
-        unknown = true;
-    }
 
     if target.contains("<SOS>") {
         target = text.to_string();
@@ -147,7 +166,7 @@ pub fn clean_lemma(lemma: &str, text: &str) -> (String, bool) {
         target = "x".to_string();
     }
 
-    (target, unknown)
+    target
 }
 
 fn upos_to_name(upos: &UdPunctable<UniversalPos>) -> &'static str {
@@ -217,11 +236,22 @@ mod tests {
         assert_eq!(feats.get("Person"), Some(&"3".to_string()));
     }
 
+    /// The zero-prefix branch was DELETED (see `clean_lemma`'s own docs): a
+    /// leading `0` is CHAT's omission marker, omissions never reach a `%mor`
+    /// payload, and no `%mor` item in the data tree carries a zero-prefixed
+    /// POS. This pins what the deletion means for a lemma that does arrive
+    /// with one: it is cleaned like any other lemma, and no character of
+    /// either the lemma or the text is dropped. The old branch returned
+    /// `text[1..]`, so it would answer "ero" here.
+    #[test]
+    fn clean_lemma_keeps_a_leading_zero_intact() {
+        assert_eq!(clean_lemma("0zero", "zero"), "0zero");
+    }
+
     #[test]
     fn clean_lemma_falls_back_from_empty_to_text() {
-        let (lemma, unknown) = clean_lemma("'", "Claus'");
+        let lemma = clean_lemma("'", "Claus'");
         assert_eq!(lemma, "Claus'");
-        assert!(!unknown);
     }
 
     #[test]

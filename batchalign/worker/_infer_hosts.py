@@ -9,9 +9,6 @@ prepared handlers instead of re-deriving engine policy on every call.
 
 from __future__ import annotations
 
-import logging
-import threading
-
 from batchalign.worker._types import (
     BatchInferHandler,
     BatchInferRequest,
@@ -19,8 +16,6 @@ from batchalign.worker._types import (
     InferResponse,
     _state,
 )
-
-L = logging.getLogger("batchalign.worker")
 
 
 def unsupported_batch_infer(message: str) -> BatchInferHandler:
@@ -37,48 +32,36 @@ def unsupported_batch_infer(message: str) -> BatchInferHandler:
 
 def build_morphosyntax_batch_infer_handler() -> BatchInferHandler:
     """Build the morphosyntax batch handler from loaded Stanza runtime state."""
-    from pydantic import ValidationError
-
-    from batchalign.inference.morphosyntax import (
-        MorphosyntaxBatchItem,
-        batch_infer_morphosyntax,
-    )
+    from batchalign.inference.morphosyntax import batch_infer_morphosyntax
     from batchalign.runtime import FREE_THREADED
     from batchalign.worker._stanza_loading import load_stanza_models
 
     def _handler(req: BatchInferRequest) -> BatchInferResponse:
-        """Run morphosyntax batch inference, loading extra languages on demand."""
-        if _state.stanza_pipelines is None:
+        """Run morphosyntax batch inference, loading each language on demand."""
+        cache = _state.stanza_pipelines
+        if cache is None:
             return unsupported_batch_infer("No Stanza models loaded")(req)
 
-        lang_set = {req.lang}
-        for raw_item in req.items:
-            try:
-                parsed = MorphosyntaxBatchItem.model_validate(raw_item)
-            except ValidationError:
-                continue
-            if parsed.lang:
-                lang_set.add(parsed.lang)
-
-        for lang in sorted(lang_set):
-            if lang not in _state.stanza_pipelines:
-                try:
-                    load_stanza_models(lang)
-                except Exception as exc:
-                    L.warning("Failed to load Stanza for %s: %s", lang, exc)
-
-        nlp_lock = _state.stanza_nlp_lock
-        if nlp_lock is None:
-            nlp_lock = threading.Lock()
-
+        # There is deliberately no preload loop here. This used to walk every
+        # language mentioned anywhere in the request and load them all before
+        # inference started, which THRASHES against a bounded cache: with a
+        # capacity of two and a three-language request, the third load evicted
+        # the first, and the first language group then had to reload it
+        # immediately. Loading three pipelines to keep two, twice over.
+        # `batch_infer_morphosyntax` loads per language GROUP, at the point of
+        # use, through `load_pipeline` below, so nothing is loaded before it is
+        # needed and nothing is evicted before it is used.
         return batch_infer_morphosyntax(
             req=req,
-            nlp_pipelines=_state.stanza_pipelines,
-            contexts=_state.stanza_contexts or {},
-            nlp_lock=nlp_lock,
+            pipelines=cache,
+            nlp_lock=_state.stanza_nlp_lock,
             free_threaded=FREE_THREADED,
             mwt_lexicon=req.mwt,
             progress_callback=_state.active_progress_callback,
+            # The cache is bounded, so a batch spanning more languages than it
+            # holds will find one evicted mid-batch. This is how it comes back
+            # instead of the group being reported as unanalysable.
+            load_pipeline=load_stanza_models,
         )
 
     return _handler

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use talkbank_model::WriteChat;
-use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::{ChatFile, DependentTier, Line};
 
 use crate::dp_align::{self, AlignResult, MatchMode};
@@ -264,8 +264,8 @@ pub fn compare(
     gold_coverage: GoldCoverage,
 ) -> ComparisonBundle {
     // 1. Extract words from both files
-    let main_utts = extract::extract_words(main_file, TierDomain::Mor);
-    let gold_utts = extract::extract_words(gold_file, TierDomain::Mor);
+    let main_utts = extract::extract_words(main_file, PositionalDomain::Mor);
+    let gold_utts = extract::extract_words(gold_file, PositionalDomain::Mor);
 
     // 2. Flatten words, filtering punctuation and fillers
     let (main_words, main_info) = flatten_words(main_file, &main_utts);

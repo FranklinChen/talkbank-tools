@@ -26,11 +26,12 @@ use batchalign_transform::coref::{
 };
 use batchalign_transform::parse::{is_dummy, parse_lenient};
 use batchalign_transform::serialize::to_chat_string;
-use batchalign_transform::validate::{ValidityLevel, validate_output, validate_to_level};
+use batchalign_transform::validate::{ValidityLevel, validate_to_level};
 use tracing::{info, warn};
 
 use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
+use crate::pipeline::post_validate::PostValidated;
 use crate::text_batch::{
     TextBatchFileInput, TextBatchFileResult, TextBatchFileResults, TextBatchOperation,
     TextBatchWorkflow, TextBatchWorkflowRequest, TextPerFileWorkflowRequest,
@@ -206,13 +207,7 @@ async fn run_coref_impl(
     // 6. Apply annotations
     apply_coref_results(&mut chat_file, &results);
 
-    // 7. Post-validation check (warn only, always serialize output for debugging).
-    if let Err(errors) = validate_output(&chat_file, "coref") {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        warn!(errors = ?msgs, "coref post-validation warnings (non-fatal)");
-    }
-
-    // 8. Inject provenance + serialize. Coref is English-only, so the
+    // 7. Inject provenance, then gate. Coref is English-only, so the
     // provenance lang is hardcoded `eng` regardless of any value the
     // gateway/dispatch handed in. The `lang: &LanguageCode3` parameter on
     // this function is retained for shared-trait symmetry with the other
@@ -221,7 +216,16 @@ async fn run_coref_impl(
     let _ = lang; // intentionally ignored
     let provenance = crate::provenance::coref_provenance(LanguageCode3::eng().as_ref(), "stanza");
     crate::provenance::inject_provenance(&mut chat_file, &provenance);
-    Ok(to_chat_string(&chat_file))
+
+    // 8. The gate runs last, over the model that becomes the returned bytes.
+    // A refusal fails the command; no partial or invalid output is produced.
+    PostValidated::gate_owned(
+        chat_file,
+        ValidityLevel::StructurallyComplete,
+        crate::api::ReleasedCommand::Coref,
+    )
+    .map(PostValidated::into_text)
+    .map_err(|failure| ServerError::Validation(failure.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -359,11 +363,17 @@ async fn run_coref_batch_impl(
                 warn!(error = %e, "Batch coref execute_v2 failed for all files");
                 for (file_idx, file) in files.iter().enumerate() {
                     if let Some(ref err) = validation_errors[file_idx] {
-                        results.push(TextBatchFileResult::err(file.filename.clone(), err.clone()));
-                    } else if eligible_files.iter().any(|(idx, _)| *idx == file_idx) {
                         results.push(TextBatchFileResult::err(
                             file.filename.clone(),
-                            format!("coref batch infer failed: {e}"),
+                            crate::text_batch::TextWorkflowFileError::validation(err.clone()),
+                        ));
+                    } else if eligible_files.iter().any(|(idx, _)| *idx == file_idx) {
+                        // The control plane's classifier owns the verdict; a
+                        // bare string here reported every batch break, memory
+                        // pressure included, as a terminal provider failure.
+                        results.push(TextBatchFileResult::err(
+                            file.filename.clone(),
+                            crate::text_batch::TextWorkflowFileError::from_server_error(&e),
                         ));
                     } else {
                         // Non-eligible files (dummy / non-English) had
@@ -371,7 +381,10 @@ async fn run_coref_batch_impl(
                         // failure does not affect them.
                         results.push(TextBatchFileResult::ok(
                             file.filename.clone(),
-                            to_chat_string(&parsed_files[file_idx]),
+                            PostValidated::pass_through(
+                                file.chat_text.as_ref(),
+                                crate::api::ReleasedCommand::Coref,
+                            ),
                         ));
                     }
                 }
@@ -414,7 +427,10 @@ async fn run_coref_batch_impl(
         let filename = file.filename.as_ref();
         // Skip files that failed pre-validation
         if let Some(ref err) = validation_errors[file_idx] {
-            results.push(TextBatchFileResult::err(file.filename.clone(), err.clone()));
+            results.push(TextBatchFileResult::err(
+                file.filename.clone(),
+                crate::text_batch::TextWorkflowFileError::validation(err.clone()),
+            ));
             continue;
         }
 
@@ -434,16 +450,20 @@ async fn run_coref_batch_impl(
             continue;
         }
 
-        // Post-validation check (warn only, always serialize output for debugging).
-        if let Err(errors) = validate_output(&parsed_files[file_idx], "coref") {
-            let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-            warn!(filename = %filename, errors = ?msgs, "coref post-validation warnings (non-fatal)");
+        // Fail-closed post-validation, per file: a file whose output fails
+        // the gate is reported as a validation failure and never written.
+        // The rest of the cross-file batch is unaffected.
+        match PostValidated::gate(
+            &parsed_files[file_idx],
+            ValidityLevel::StructurallyComplete,
+            crate::api::ReleasedCommand::Coref,
+        ) {
+            Ok(output) => results.push(TextBatchFileResult::ok(file.filename.clone(), output)),
+            Err(failure) => {
+                warn!(filename = %filename, error = %failure, "coref output refused");
+                results.push(TextBatchFileResult::err(file.filename.clone(), failure));
+            }
         }
-
-        results.push(TextBatchFileResult::ok(
-            file.filename.clone(),
-            to_chat_string(&parsed_files[file_idx]),
-        ));
     }
 
     results

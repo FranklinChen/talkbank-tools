@@ -86,6 +86,37 @@ pub(crate) async fn write_text_results(
             .unwrap_or(0);
         match file_result.result {
             Ok(output_chat) => {
+                // The abbreviation merge is a step INSIDE the gate, so the
+                // bytes written below are bytes a gate judged. It used to run
+                // on `output_chat.as_str()` in the artifact loop and the
+                // writer wrote ITS result, which put a transform after the
+                // proof: the proof described a document that never reached
+                // disk. Done once here rather than per artifact, because the
+                // answer cannot differ between a file's artifacts.
+                let finished = if should_merge_abbrev {
+                    match output_chat.with_abbreviations_merged() {
+                        Ok(finished) => finished,
+                        // POLICY, stated here because the refusal hands back
+                        // `refused.unmerged`, an admissible output this seam
+                        // deliberately declines to write: a merge that breaks
+                        // its own gate is a defect in the transform, and
+                        // shipping past it would leave nobody looking at it.
+                        // The failure names the merge, so the operator is not
+                        // told their command's output was invalid.
+                        Err(refused) => {
+                            lifecycle
+                                .fail(
+                                    &refused.to_string(),
+                                    FailureCategory::Validation,
+                                    unix_now(),
+                                )
+                                .await;
+                            continue;
+                        }
+                    }
+                } else {
+                    output_chat
+                };
                 set_file_progress(
                     sink.as_ref(),
                     &job.identity.job_id,
@@ -114,14 +145,6 @@ pub(crate) async fn write_text_results(
                     if artifact.role != MaterializedArtifactRole::Primary {
                         continue;
                     }
-                    let output_text = if should_merge_abbrev {
-                        batchalign_transform::merge_abbreviations_in_chat_text(
-                            &crate::chat_parser(),
-                            output_chat.as_ref(),
-                        )
-                    } else {
-                        output_chat.as_ref().to_string()
-                    };
                     let target = crate::recipe_runner::runtime::ChatOutputTarget::new(
                         &job.filesystem,
                         file_index,
@@ -129,8 +152,7 @@ pub(crate) async fn write_text_results(
                     );
                     if let Err(error) = crate::recipe_runner::runtime::write_chat_output_artifact_with_provenance_gate(
                         &target,
-                        &output_text,
-                        job.dispatch.command,
+                        &finished,
                     )
                     .await
                     {
@@ -149,12 +171,11 @@ pub(crate) async fn write_text_results(
                 }
             }
             Err(error) => {
+                // The error states its own category. It used to be hardcoded
+                // `ProviderTerminal`, which reported a file refused on
+                // validity grounds as if a provider had given up on it.
                 lifecycle
-                    .fail(
-                        &error.to_string(),
-                        FailureCategory::ProviderTerminal,
-                        unix_now(),
-                    )
+                    .fail(&error.to_string(), error.category(), unix_now())
                     .await;
             }
         }

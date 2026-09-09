@@ -133,10 +133,14 @@ pub enum ForcedAlignmentRequestBuildErrorV2 {
         end_ms: FileMs,
     },
 
-    /// The requested audio segment produced zero samples, the segment is
-    /// entirely past the end of the source file.  Callers should skip the
-    /// affected FA group rather than propagating a hard failure.
-    #[error("empty audio segment for {0}: segment is past the end of the audio file")]
+    /// The requested audio segment produced zero whole samples. Callers should
+    /// skip the affected FA group rather than propagating a hard failure.
+    ///
+    /// The message reports the reason the measurement recorded rather than
+    /// asserting the segment was past the end of the file, which is a cause
+    /// nothing here can establish. See the sibling variant on
+    /// `PreparedArtifactErrorV2` for the full account.
+    #[error("empty audio segment for {0}")]
     EmptyAudioSegment(EmptySegment),
 
     /// Rust-owned prepared-artifact creation failed.
@@ -201,14 +205,11 @@ pub async fn build_forced_alignment_request_v2(
 
 /// Map an FA engine onto the V2 backend vocabulary.
 ///
-/// Exhaustive over the engine roster, so an unrouted engine fails to compile
-/// rather than collapsing onto another model's backend.
+/// A field read off the engine's row in `FA_ENGINES`, which is where an
+/// unrouted engine now fails to compile: the roster match this used to be was
+/// one of fifteen places a new engine had to be named.
 pub(crate) fn fa_backend_for_engine(engine: FaEngineName) -> FaBackendV2 {
-    match engine {
-        FaEngineName::Whisper => FaBackendV2::Whisper,
-        FaEngineName::Wave2Vec => FaBackendV2::Wave2vec,
-        FaEngineName::Wav2vecCanto => FaBackendV2::Wav2vecCanto,
-    }
+    engine.worker_backend()
 }
 
 /// The text shaping one V2 FA backend needs, for what the user asked for.
@@ -227,7 +228,16 @@ pub(crate) fn text_mode_for(backend: FaBackendV2, gap_healing: WordGapHealing) -
         // Only the onset-only decoder benefits: the wave2vec models align
         // against their own label set and never see this text.
         (FaBackendV2::Whisper, WordGapHealing::PreserveMeasured) => FaTextModeV2::CharSpaced,
-        (FaBackendV2::Whisper | FaBackendV2::Wave2vec, _) => FaTextModeV2::SpaceJoined,
+        // Qwen3 is handed the word LIST, like wave2vec, and rebuilds its own
+        // transcript from it, so this mode never reaches its model. It is
+        // space-joined rather than char-joined because that is what the
+        // aligner's own tokenizer inverts: it emits CJK characters
+        // individually and space-delimited words otherwise, so a space-joined
+        // transcript round-trips for both scripts and a char-joined one does
+        // not.
+        (FaBackendV2::Whisper | FaBackendV2::Wave2vec | FaBackendV2::Qwen3, _) => {
+            FaTextModeV2::SpaceJoined
+        }
         (FaBackendV2::Wav2vecCanto, _) => FaTextModeV2::CharJoined,
     }
 }

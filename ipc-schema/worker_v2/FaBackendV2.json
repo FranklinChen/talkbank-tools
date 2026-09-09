@@ -17,6 +17,11 @@
       "description": "Cantonese Wave2Vec forced alignment.",
       "type": "string",
       "const": "wav2vec_canto"
+    },
+    {
+      "description": "Qwen3 forced alignment, the standalone form of the aligner the\nQwen3-ASR engine loads for its own word timestamps.",
+      "type": "string",
+      "const": "qwen3"
     }
   ]
 }

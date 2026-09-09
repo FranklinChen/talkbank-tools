@@ -82,9 +82,12 @@ pub(crate) async fn dispatch_translate_job(
                     error = %err,
                     "Translate skipping file: per-file language resolution failed",
                 );
+                // A file whose language cannot be resolved is refused on
+                // validity grounds, not by a provider: a bare string here made
+                // it `Batch`, hence `ProviderTerminal`.
                 all_results.push(crate::text_batch::TextBatchFileResult::err(
                     file_input.filename.clone(),
-                    err.to_string(),
+                    crate::text_batch::TextWorkflowFileError::validation(err.to_string()),
                 ));
             }
         }
@@ -152,7 +155,8 @@ mod tests {
             _options: MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
             unreachable!()
         }
 
@@ -179,7 +183,13 @@ mod tests {
                 .iter()
                 .map(|file| {
                     let translated = file.chat_text.replace("@End", "%xtra:\ttranslated\n@End");
-                    TextBatchFileResult::ok(file.filename.clone(), translated)
+                    TextBatchFileResult::ok(
+                        file.filename.clone(),
+                        crate::pipeline::post_validate::PostValidated::for_test(
+                            translated,
+                            crate::api::ReleasedCommand::Translate,
+                        ),
+                    )
                 })
                 .collect()
         }

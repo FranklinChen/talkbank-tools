@@ -146,7 +146,7 @@ async fn run_translate_impl(
         lang,
         PipelineServices::new(pool, cache, engine_version),
         TextPipelineHooks {
-            command: "translate",
+            command: crate::api::ReleasedCommand::Translate,
             validity: ValidityLevel::StructurallyComplete,
             collect: collect_translate_payloads,
             integrate: integrate_translations,
@@ -156,6 +156,10 @@ async fn run_translate_impl(
         |_, _| Ok(()),
     )
     .await
+    // The proof stops here: the single-file entry point is the library/CLI
+    // surface and returns text. The gate itself still ran inside
+    // `run_text_pipeline`, so a refusal is already a `ServerError`.
+    .map(crate::pipeline::post_validate::PostValidated::into_text)
 }
 
 async fn run_translate_batch_impl(
@@ -169,7 +173,7 @@ async fn run_translate_batch_impl(
         lang,
         pool,
         TextBatchHooks {
-            command: "translate",
+            command: crate::api::ReleasedCommand::Translate,
             validity: ValidityLevel::StructurallyComplete,
             collect: collect_translate_payloads,
             apply: apply_translate_file,

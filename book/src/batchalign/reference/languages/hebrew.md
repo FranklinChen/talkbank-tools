@@ -1,7 +1,7 @@
 # Hebrew Language Support
 
 **Status:** Current
-**Last updated:** 2026-05-20 20:16 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Hebrew (`heb`) ships with RTL punctuation handling, capability-driven
 MWT for preposition+article contractions, and Hebrew-specific UD
@@ -22,7 +22,6 @@ features (HebBinyan, HebExistential).
 | Engine | Model | Notes |
 |--------|-------|-------|
 | `--asr-engine whisper` | `openai/whisper-large-v3` | Default; same model for every language |
-| `--asr-engine whisper-oai` | `openai/whisper-turbo` | Generic, lower accuracy |
 | `--asr-engine whisper_hub` | (empty entry today) | Opt-in HuggingFace fine-tune loader; requires explicit `--engine-overrides` `model_id`. No Hebrew fine-tune is seeded in `batchalign/models/resolve.py::_RESOLVER["whisper_hub"]` yet. |
 | Rev.AI | Cloud API | Supports Hebrew |
 

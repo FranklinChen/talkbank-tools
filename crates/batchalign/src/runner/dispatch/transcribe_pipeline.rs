@@ -225,8 +225,17 @@ impl AudioFileTask for TranscribeAudioTask<'_> {
         &mut self,
         output: Self::AttemptOutput,
     ) -> Result<FileOutput, crate::error::ServerError> {
+        // Transcribe BUILDS its document from audio, so there is no admitted
+        // input level to carry forward and this is where its proof is born.
+        // See `gate_built_chat_output` for why the bar is L1 here and why
+        // align does not come through it.
+        let document = crate::runner::dispatch::audio_output::gate_built_chat_output(
+            &output,
+            crate::api::ReleasedCommand::Transcribe,
+        )
+        .map_err(|failure| crate::error::ServerError::Validation(failure.to_string()))?;
         Ok(FileOutput::Chat {
-            text: output,
+            document,
             merge_abbreviations: self.merge_abbreviations,
         })
     }

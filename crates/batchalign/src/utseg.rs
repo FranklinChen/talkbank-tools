@@ -426,7 +426,7 @@ where
         lang,
         services,
         TextPipelineHooks {
-            command: "utseg",
+            command: crate::api::ReleasedCommand::Utseg,
             validity: ValidityLevel::StructurallyComplete,
             collect: collect_utseg_batch_items,
             integrate: integrate_admitted_assignments,
@@ -450,6 +450,10 @@ where
         observe,
     )
     .await
+    // The proof stops here: the single-file entry point is the library/CLI
+    // surface and returns text. The gate itself still ran inside
+    // `run_text_pipeline`, so a refusal is already a `ServerError`.
+    .map(crate::pipeline::post_validate::PostValidated::into_text)
 }
 
 async fn run_utseg_batch_impl(
@@ -464,7 +468,7 @@ async fn run_utseg_batch_impl(
         lang,
         pool,
         TextBatchHooks {
-            command: "utseg",
+            command: crate::api::ReleasedCommand::Utseg,
             validity: ValidityLevel::StructurallyComplete,
             collect: collect_utseg_batch_items,
             apply: apply_utseg_file,

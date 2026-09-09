@@ -28,7 +28,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use talkbank_model::Span;
-use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::{
     ChatFile, DependentTier, Line, NonEmptyString, UserDefinedDependentTier,
 };
@@ -316,7 +316,11 @@ pub fn collect_coref_payloads(chat_file: &ChatFile) -> CorefPayloadCollection {
         };
 
         let mut words = Vec::new();
-        extract::collect_utterance_content(&utt.main.content.content, TierDomain::Mor, &mut words);
+        extract::collect_utterance_content(
+            &utt.main.content.content,
+            PositionalDomain::Mor,
+            &mut words,
+        );
 
         if words.is_empty() {
             not_applicable.push(CorefOutcome {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::EngineVersion;
 use crate::chat_ops::CacheKey;
-use crate::types::engines::FaEngineName;
+use crate::types::engines::{FaEngineName, FaTimingResolution};
 use crate::types::worker_v2::{ExecuteOutcomeRef, ExecuteResponseV2, TaskResultV2};
 
 const FA_RAW_EVIDENCE_SCHEMA_VERSION: u8 = 2;
@@ -183,7 +183,14 @@ impl FaRawEvidence {
                 });
             }
             ExecuteOutcomeRef::Success(TaskResultV2::IndexedWordTimingResult(result)) => {
-                if requested_engine == FaEngineName::Whisper {
+                // An indexed payload carries a start AND an end per word, so
+                // only an engine whose row says it reports word INTERVALS can
+                // have produced it. Read from the table rather than compared
+                // against a literal `Whisper`: the literal was right only for
+                // as long as Whisper stayed the single token-onset engine, and
+                // it is the failing engine's own row that the fallback policy
+                // next door now reasons about.
+                if requested_engine.timing_resolution() == FaTimingResolution::TokenOnsets {
                     return Err(FaRawEvidenceError::IndexedEngineMismatch(requested_engine));
                 }
                 if result.indexed_timings.len() != expected_words.get() {
@@ -194,6 +201,19 @@ impl FaRawEvidence {
                 }
                 requested_engine
             }
+            // The one literal left, and it is a WIRE fact rather than a
+            // policy: `WhisperTokenTimingResult` is Whisper's own protocol
+            // shape, named for it, and it is the ONLY token-onset payload the
+            // worker protocol defines. Whichever engine was requested, a
+            // response of this shape came from Whisper.
+            //
+            // This is what makes a fallback recognisable at all, since an
+            // effective engine differing from the requested one is the whole
+            // proof, and it is why the `const` block beside `FA_ENGINES`
+            // refuses a fallback target that reports word intervals: such a
+            // retry would return the indexed shape above, be credited to the
+            // engine that was requested, and have its timings thrown away by
+            // the `Fallback` arm below as an ineffective fallback.
             ExecuteOutcomeRef::Success(TaskResultV2::WhisperTokenTimingResult(_)) => {
                 FaEngineName::Whisper
             }
@@ -564,6 +584,60 @@ mod tests {
         .expect_err("a fallback response needs an explicit fallback route");
 
         assert!(matches!(error, FaRawEvidenceError::UnexpectedDirectEngine));
+    }
+
+    /// An interval payload is refused for every engine the table says reports
+    /// token onsets, and admitted for every engine it says reports intervals.
+    ///
+    /// A ROUNDTRIP between `FA_ENGINES` and the admission that reads it, which
+    /// no signature pins: the row states a resolution, and only running the
+    /// admission shows that a payload of the other shape is refused rather
+    /// than credited to the engine that cannot have produced it.
+    ///
+    /// Written as a loop over the roster rather than as
+    /// `FaEngineName::Whisper`, because naming one engine here would be the
+    /// very defect it exists to catch: this refusal WAS a literal `Whisper`
+    /// comparison, which was correct only for as long as Whisper stayed the
+    /// single token-onset engine.
+    #[test]
+    fn an_interval_payload_is_refused_for_every_token_onset_engine() {
+        use crate::types::engines::{FaTimingResolution, SelectableEngine};
+
+        let engine_version = engine_version();
+        let response = ExecuteResponseV2::success(
+            WorkerRequestIdV2::from("fa-raw-interval-shape"),
+            TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
+                indexed_timings: vec![None],
+            }),
+            DurationSeconds(0.01),
+        );
+
+        for engine in FaEngineName::ALL.iter().copied() {
+            let admitted = FaRawEvidence::admit_requested(
+                &response,
+                engine,
+                &engine_version,
+                ExpectedFaWords::new(1),
+                &cache_key("interval-shape"),
+                FaEvidenceRoute::Direct,
+            );
+            match engine.timing_resolution() {
+                FaTimingResolution::TokenOnsets => assert!(
+                    matches!(
+                        admitted,
+                        Err(FaRawEvidenceError::IndexedEngineMismatch(refused))
+                            if refused == engine
+                    ),
+                    "{engine:?} reports token onsets, so an indexed interval payload \
+                     cannot be its own work and must not be admitted as it",
+                ),
+                FaTimingResolution::WordIntervals => {
+                    let evidence =
+                        admitted.expect("an interval engine's own payload shape must be admitted");
+                    assert_eq!(evidence.effective_engine(), engine);
+                }
+            }
+        }
     }
 
     #[test]

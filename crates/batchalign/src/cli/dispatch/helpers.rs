@@ -438,6 +438,79 @@ pub(super) fn filter_files_for_command(
     (kept_files, kept_outputs)
 }
 
+/// Which files sit together in a morphotag job's submission order.
+///
+/// A named group rather than an `Option<String>` key: the "unreadable" case is
+/// a group of its own and sorts LAST, so a file that does not parse at
+/// discovery keeps its neighbours and reports its real error at admission.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LanguageGroup {
+    /// The file's `@Languages` codes, sorted, as chatter parsed them.
+    Declared(Vec<String>),
+    /// The file could not be read or parsed here; admission will say why.
+    Unreadable,
+}
+
+impl LanguageGroup {
+    fn of(parser: &batchalign_transform::parse::TreeSitterParser, path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return LanguageGroup::Unreadable;
+        };
+        let (file, _warnings) = batchalign_transform::parse::parse_lenient(parser, &text);
+        let mut codes: Vec<String> = file
+            .languages
+            .iter()
+            .map(|code| code.as_str().to_owned())
+            .collect();
+        codes.sort();
+        LanguageGroup::Declared(codes)
+    }
+}
+
+/// Order a job's files for the command that will run them.
+///
+/// Only `morphotag` reorders: the worker keeps a bounded LRU of loaded Stanza
+/// pipelines (two), so a mixed-language corpus in discovery's largest-first
+/// order evicts and reloads a model on nearly every file. Files sharing a
+/// declared `@Languages` set are made adjacent, and the largest-first order
+/// survives inside each group because the sort is stable. Every other command
+/// keeps discovery's order unchanged.
+///
+/// The language set is read through chatter's typed parser, never a text scan
+/// of the header. One parse per file at submission is the cost; the worker
+/// parses each file again, which is cheaper than the model reloads this saves.
+pub(super) fn order_files_for_command(
+    command: ReleasedCommand,
+    files: Vec<PathBuf>,
+    outputs: Vec<PathBuf>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), CliError> {
+    match command {
+        ReleasedCommand::Morphotag => {}
+        ReleasedCommand::Align
+        | ReleasedCommand::Transcribe
+        | ReleasedCommand::TranscribeS
+        | ReleasedCommand::Translate
+        | ReleasedCommand::Coref
+        | ReleasedCommand::Utseg
+        | ReleasedCommand::Benchmark
+        | ReleasedCommand::Opensmile
+        | ReleasedCommand::Compare
+        | ReleasedCommand::Avqi
+        | ReleasedCommand::Diarize
+        | ReleasedCommand::SpeakerIdentify => return Ok((files, outputs)),
+    }
+    let parser = batchalign_transform::parse::TreeSitterParser::new()
+        .map_err(|e| CliError::InvalidArgument(format!("parser init: {e}")))?;
+    let mut keyed: Vec<(LanguageGroup, PathBuf, PathBuf)> = files
+        .into_iter()
+        .zip(outputs)
+        .map(|(file, output)| (LanguageGroup::of(&parser, &file), file, output))
+        .collect();
+    // Stable: within one language group the largest-first discovery order holds.
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(keyed.into_iter().map(|(_, f, o)| (f, o)).unzip())
+}
+
 /// Classify files into CHAT payloads and media filenames.
 pub(super) fn classify_files(
     files: &[PathBuf],
@@ -654,6 +727,42 @@ pub(super) fn print_job_debug_artifacts(artifacts: &JobDebugArtifacts) {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    /// Morphotag submission order groups files by their declared language
+    /// set and keeps the largest-first order inside each group; every other
+    /// command leaves discovery's order alone.
+    #[test]
+    fn morphotag_files_are_grouped_by_declared_languages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let write = |name: &str, lang: &str, body_lines: usize| {
+            let mut text = format!(
+                "@UTF8\n@Begin\n@Languages:\t{lang}\n@Participants:\tCHI Target_Child\n@ID:\t{lang}|corpus|CHI|||||Target_Child|||\n"
+            );
+            for _ in 0..body_lines {
+                text.push_str("*CHI:\thello there .\n");
+            }
+            text.push_str("@End\n");
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).expect("fixture");
+            path
+        };
+        // Discovery order is largest first: a (eng, 30 lines), b (fra, 20), c (eng, 10).
+        let a = write("a.cha", "eng", 30);
+        let b = write("b.cha", "fra", 20);
+        let c = write("c.cha", "eng", 10);
+        let files = vec![a.clone(), b.clone(), c.clone()];
+        let outputs = files.clone();
+
+        let (ordered, _) =
+            order_files_for_command(ReleasedCommand::Morphotag, files.clone(), outputs.clone())
+                .expect("ordered");
+        assert_eq!(ordered, vec![a.clone(), c.clone(), b.clone()]);
+
+        let (unchanged, _) =
+            order_files_for_command(ReleasedCommand::Align, files.clone(), outputs)
+                .expect("ordered");
+        assert_eq!(unchanged, files);
+    }
 
     use super::*;
     use crate::api::{FileStatusEntry, JobId, LanguageCode3, LanguageSpec, ReleasedCommand};

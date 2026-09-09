@@ -12,7 +12,6 @@ use super::command_spec::{
     CommandIoProfile, PlannerKind, RunnerDispatchKind,
 };
 use super::materialize::{FileNamingPolicy, OutputPolicy, SidecarPolicy, StemRewrite};
-use super::recipe::ExecutionMode;
 use super::recipes::{
     ALIGN_RECIPE, AVQI_RECIPE, BENCHMARK_RECIPE, COMPARE_RECIPE, COREF_RECIPE, DIARIZE_RECIPE,
     MORPHOTAG_RECIPE, OPENSMILE_RECIPE, SPEAKER_IDENTIFY_RECIPE, TRANSCRIBE_RECIPE,
@@ -38,7 +37,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Morphotag,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
-        execution_mode: ExecutionMode::BatchedStage,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
@@ -58,7 +56,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Utseg,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
-        execution_mode: ExecutionMode::BatchedStage,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
@@ -78,7 +75,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Translate,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
-        execution_mode: ExecutionMode::BatchedStage,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
@@ -98,7 +94,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Coref,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
-        execution_mode: ExecutionMode::BatchedStage,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
@@ -118,7 +113,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Align,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
-        execution_mode: ExecutionMode::SequentialPerUnit,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::ForcedAlignment,
@@ -138,7 +132,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Transcribe,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
-        execution_mode: ExecutionMode::SequentialPerUnit,
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
@@ -158,7 +151,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::TranscribeS,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
-        execution_mode: ExecutionMode::SequentialPerUnit,
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
@@ -178,7 +170,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Compare,
         family: CommandFamily::ReferenceProjection,
         planner: PlannerKind::ComparePairs,
-        execution_mode: ExecutionMode::ReferenceProjection,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
@@ -198,7 +189,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Benchmark,
         family: CommandFamily::Composite,
         planner: PlannerKind::BenchmarkPairs,
-        execution_mode: ExecutionMode::Composite,
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::BenchmarkAudioInfer,
@@ -218,7 +208,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Opensmile,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
-        execution_mode: ExecutionMode::SequentialPerUnit,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
@@ -242,7 +231,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Avqi,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
-        execution_mode: ExecutionMode::SequentialPerUnit,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
@@ -266,7 +254,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Diarize,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
-        execution_mode: ExecutionMode::SequentialPerUnit,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
@@ -296,7 +283,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         // and would never see the transcript.
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
-        execution_mode: ExecutionMode::SequentialPerUnit,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::SpeakerIdentity,
@@ -335,7 +321,7 @@ mod tests {
     use crate::api::DisplayPath;
     use crate::command_model::command_spec;
     use crate::recipe_runner::materialize::plan_materialized_files;
-    use crate::recipe_runner::recipe::{RecipeStageId, RecipeStagePresence};
+    use crate::recipe_runner::recipe::{ExecutionMode, RecipeStageId, RecipeStagePresence};
 
     /// Every released command must have a catalog entry.
     ///
@@ -362,41 +348,29 @@ mod tests {
         );
     }
 
-    /// Every shipped recipe must DECLARE its stages in an order that respects
-    /// its own `depends_on` edges.
+    /// Every shipped recipe declares its stages in an order that respects its
+    /// own `depends_on` edges, and declares no stage twice.
     ///
-    /// The runtime walks `Recipe::stages` in declaration order, so a stage that
-    /// depends on a later stage would run before its prerequisite. `validate`
-    /// does not catch this: it collects every stage id in a first pass, then
-    /// checks dependencies against that complete set, so a forward reference
-    /// looks exactly like a backward one. Until this test existed, `depends_on`
-    /// was decorative: it declared a graph nothing checked the order against.
+    /// There is no test for that here any more, and that is the point:
+    /// `Recipe::new` is the only constructor and it runs the check in a
+    /// `const` context, so a catalog recipe with a forward dependency, a
+    /// missing prerequisite, a self-dependency or a duplicate stage does not
+    /// COMPILE. The test this replaced walked the catalog re-deriving the
+    /// order rule, which is a runtime guard for something the compiler now
+    /// refuses; `Recipe::check`'s own tests in `recipe.rs` pin the rule.
+    ///
+    /// What survives is the part no constructor can know: that no command is
+    /// declared twice.
+    ///
+    /// It also asserted that each entry's declared `execution_mode` agreed
+    /// with its recipe's. That assertion is gone with the field it guarded:
+    /// `CatalogEntry::execution_mode` reads the recipe, so the two cannot
+    /// disagree and there is nothing left to check.
     #[test]
-    fn declared_stage_order_is_topological() {
-        for spec in recipe_command_catalog() {
-            let mut already_run: Vec<RecipeStageId> = Vec::new();
-            for stage in spec.recipe.stages {
-                for dependency in stage.depends_on {
-                    assert!(
-                        already_run.contains(dependency),
-                        "{}: stage {} depends on {}, which is declared after it",
-                        spec.command,
-                        stage.id,
-                        dependency
-                    );
-                }
-                already_run.push(stage.id);
-            }
-        }
-    }
-
-    #[test]
-    fn catalog_entries_are_unique_and_validate() {
+    fn catalog_entries_are_unique() {
         let mut seen = HashSet::new();
         for spec in recipe_command_catalog() {
             assert!(seen.insert(spec.command));
-            spec.recipe.validate(spec.command).expect("valid recipe");
-            assert_eq!(spec.execution_mode, spec.recipe.mode);
         }
     }
 
@@ -404,7 +378,7 @@ mod tests {
     fn compare_spec_keeps_reference_projection_and_sidecar_output() {
         let spec = command_spec(ReleasedCommand::Compare);
         assert_eq!(spec.family, CommandFamily::ReferenceProjection);
-        assert_eq!(spec.execution_mode, ExecutionMode::ReferenceProjection);
+        assert_eq!(spec.recipe.mode, ExecutionMode::ReferenceProjection);
         let outputs = plan_materialized_files(&"sample.cha".into(), spec.output_policy);
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].display_path, DisplayPath::from("sample.cha"));

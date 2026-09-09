@@ -251,6 +251,7 @@ pub fn retokenize_utterance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use talkbank_model::alignment::helpers::PositionalDomain;
 
     /// Extract `words` as a real utterance, through the real parser.
     ///
@@ -290,10 +291,7 @@ mod tests {
                 Err(e) => panic!("fixture {words:?} must parse as a CHAT utterance: {e:?}"),
             }
         });
-        let mut utterances = crate::extract::extract_words(
-            &chat_file,
-            talkbank_model::alignment::helpers::TierDomain::Mor,
-        );
+        let mut utterances = crate::extract::extract_words(&chat_file, PositionalDomain::Mor);
         assert_eq!(
             utterances.len(),
             1,

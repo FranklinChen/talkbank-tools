@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:14 EDT
+**Last updated:** 2026-09-07 16:10 EDT
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -86,9 +86,11 @@ flowchart TD
     engine_select{--fa-engine?}
     engine_select -->|whisper| whisper_fa[Whisper engine\nonset times only\nmax_group_ms from the engine = 20000]
     engine_select -->|wav2vec / cantonese| wav2vec_fa[Wave2Vec engines\nword start+end\nmax_group_ms from the engine = 15000]
+    engine_select -->|qwen3_fa| qwen3_fa[Qwen3 aligner\nword start+end\nyue/zho/cmn/eng only\nmax_group_ms from the engine = 15000]
 
     whisper_fa --> pause_check
     wav2vec_fa --> pause_check
+    qwen3_fa --> pause_check
 
     pause_check{--pauses?}
     pause_check -->|Yes| preserve[WordGapHealing::PreserveMeasured\nkeep each word's own end]
@@ -374,7 +376,7 @@ is more conservative about turning real pauses/fillers into dominant words.
 | `--utr-ca-markers {enabled,disabled}` | `enabled` | Use CA overlap markers (⌈⌉⌊⌋) to set alignment windows |
 | `--utr-density-threshold N` | `0.30` | Max overlap fraction before skipping pass-1 exclusion (0.0-1.0) |
 | `--utr-tight-buffer MS` | `500` | Pass-2 tight window buffer in milliseconds |
-| `--fa-engine {wav2vec,whisper,cantonese}` | `wav2vec` (reports word start and end; see §"Forced alignment reference") | Forced-alignment model. `cantonese` is the jyutping-preprocessing engine, formerly reachable only as `wav2vec_fa_canto` through the flag below. |
+| `--fa-engine {wav2vec,whisper,cantonese,qwen3_fa}` | `wav2vec` (reports word start and end; see §"Forced alignment reference") | Forced-alignment model. `cantonese` is the jyutping-preprocessing engine, formerly reachable only as `wav2vec_fa_canto` through the flag below. `qwen3_fa` (also spelled `qwen3-fa` or `qwen3`) is `Qwen/Qwen3-ForcedAligner-0.6B-hf`, the SAME aligner the Qwen3-ASR engine uses for its own word timestamps, run here against a transcript you already have; it reports word start and end, and it supports only `yue`, `zho`, `cmn` and `eng`, refusing any file that DECLARES another language in `@Languages:`, primary or secondary, by name at admission rather than falling back to another engine. |
 | `--fa-engine-custom NAME` |: | **Deprecated alias for `--fa-engine`**, still honoured, hidden from `--help`. |
 | `--wor` / `--nowor` | `--wor` | Include or suppress the `%wor` word-timing tier |
 | `--pauses` | off | Preserve each engine-reported word end instead of healing small plausible gaps. For Whisper, it also selects the historical character-spaced text mode. |

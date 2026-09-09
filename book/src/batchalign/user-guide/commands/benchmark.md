@@ -1,7 +1,7 @@
 # benchmark
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Transcribe audio via ASR and evaluate word error rate (WER) against gold
 `.cha` transcripts in the same directory. A composite command that runs
@@ -59,7 +59,7 @@ flowchart TD
 | --- | --- | --- |
 | `--lang CODE` | `eng` | 3-letter ISO language code |
 | `--num-speakers N` | `2` | Number of speakers. No short flag; `-n` was removed 2026-08-19. |
-| `--asr-engine {rev,whisper,whisper-oai}` | `rev` | ASR engine |
+| `--asr-engine NAME` | `rev` | ASR engine. `--help` prints the list, which is generated from the engine set. |
 | `--asr-engine-custom NAME` |: | **Deprecated alias for `--asr-engine`**, still honoured, hidden from `--help`. |
 | `--wor` / `--nowor` | `--nowor` | Include or suppress the `%wor` tier in the hypothesis output |
 | `--merge-abbrev` | off | Merge abbreviations in the output |

@@ -35,6 +35,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler ripgrep
 
       - name: Cache cargo artifacts
+        # Job-scoped, and that is deliberate. Sharing a key with the Python
+        # workflow's build-cli job looks attractive because both compile this
+        # workspace, and it is wrong: build-cli runs `cargo build -p
+        # batchalign`, which resolves no dev-dependencies and builds no test
+        # targets, while this job runs the whole gate including four test
+        # invocations. rust-cache saves on post-job and skips the second save
+        # of an identical key, so the shorter job would decide the contents and
+        # this one would recompile every dev-dependency on every run.
         uses: Swatinem/rust-cache@v2
 
       - name: Build dashboard assets
@@ -58,6 +66,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Cache cargo artifacts
+        # Job-scoped, like every other compiling job here. This one builds a
+        # single crate, so a cache it saved would be thinner still than the
+        # gate job's.
         uses: Swatinem/rust-cache@v2
 
       - name: Build imported standalone PyO3 crate

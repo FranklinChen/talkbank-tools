@@ -110,6 +110,7 @@ def build_default_execution_host_v2() -> WorkerExecutionHostV2:
             whisper_model=_state.whisper_fa_model,
             wave2vec_model=_state.wave2vec_fa_model,
             canto_host=_default_cantonese_fa_host(),
+            qwen_host=_state.qwen_fa_host,
         ),
         speaker=build_default_speaker_execution_host_v2(
             _state.bootstrap.device_policy if _state.bootstrap is not None else None

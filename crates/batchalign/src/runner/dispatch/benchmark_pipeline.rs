@@ -29,6 +29,7 @@ use super::super::util::{
 };
 use super::BenchmarkDispatchPlan;
 use super::asr_media::{prepare_asr_media_input, preserved_media_name_for_chat};
+use super::audio_output::MergeAbbreviations;
 
 /// Shared runtime dependencies for top-level benchmark dispatch.
 ///
@@ -290,17 +291,43 @@ async fn process_one_benchmark_file(
         })
         .await
         {
-            Ok(mut outputs) => {
+            Ok(outputs) => {
                 lifecycle.stage(FileStage::Writing).await;
                 let finished_at = unix_now();
 
-                if should_merge_abbrev {
-                    outputs.annotated_main_chat =
-                        batchalign_transform::merge_abbreviations_in_chat_text(
-                            &crate::chat_parser(),
-                            &outputs.annotated_main_chat,
-                        );
-                }
+                // The merge is the LAST transition on the proof, so the bytes
+                // written are bytes the gate judged. It ran on the finished
+                // TEXT here until 2026-09-07, which put a transform after the
+                // only thing that had looked at the document. A refusal is a
+                // typed per-file failure, not a `warn!`: the merged document
+                // is what would have reached disk.
+                let annotated_main_chat = match MergeAbbreviations::from_option(should_merge_abbrev)
+                {
+                    MergeAbbreviations::Merge => {
+                        match outputs.annotated_main_chat.with_abbreviations_merged() {
+                            Ok(proof) => proof,
+                            // POLICY: `refused.unmerged` is an admissible
+                            // benchmark output and this seam declines to write
+                            // it, for the reason `execution::text_io` gives.
+                            Err(refused) => {
+                                // TERMINAL, not `continue`: a gate refusal
+                                // is deterministic, so retrying would
+                                // re-run ASR to reach the same verdict.
+                                // This is the same shape the
+                                // non-retryable arm below uses.
+                                lifecycle
+                                    .fail(
+                                        &refused.to_string(),
+                                        FailureCategory::Validation,
+                                        finished_at,
+                                    )
+                                    .await;
+                                return FileTaskOutcome::TerminalStateRecorded;
+                            }
+                        }
+                    }
+                    MergeAbbreviations::Leave => outputs.annotated_main_chat,
+                };
 
                 let primary_output = primary_output_artifact(
                     crate::api::ReleasedCommand::Benchmark,
@@ -326,7 +353,7 @@ async fn process_one_benchmark_file(
                     &primary_output.display_path,
                 );
                 if let Err(err) =
-                    write_text_output_artifact(&target, &outputs.annotated_main_chat).await
+                    write_text_output_artifact(&target, annotated_main_chat.as_str()).await
                 {
                     warn!(error = %err, "Failed to write benchmark CHAT output");
                 }

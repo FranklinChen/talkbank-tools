@@ -264,7 +264,8 @@ async fn noalign_files_get_morphotagged_with_provenance() {
     let params = test_params(&lang, &mwt);
     let output = run_morphosyntax_pipeline(chat, services, &params)
         .await
-        .expect("NoAlign file should be processed (no longer skipped)");
+        .expect("NoAlign file should be processed (no longer skipped)")
+        .into_text();
 
     assert!(
         output.contains("[ba3 morphotag |"),
@@ -306,7 +307,8 @@ async fn ca_pass_through_strips_legacy_decision_tiers() {
     let params = test_params(&lang, &mwt);
     let output = run_morphosyntax_pipeline(chat, services, &params)
         .await
-        .expect("CA input should remain a successful pass-through");
+        .expect("CA input should remain a successful pass-through")
+        .into_text();
 
     assert!(!output.contains("%xalign:"), "output: {output}");
     assert!(!output.contains("%xrev:"), "output: {output}");

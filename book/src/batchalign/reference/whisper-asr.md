@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 ## Overview
 
@@ -18,10 +18,18 @@ Whisper models may be loaded simultaneously (FA + UTR).
 
 ## ASR Engines
 
-There are five ASR engines.  **Rev.AI is the production default** -- the four
-Whisper variants are local alternatives for when a commercial API is not wanted.
-One of those variants, `whisper_rs`, is Rust-native (whisper.cpp, in-process);
-the other three run in a Python worker.
+**Rev.AI is the production default** -- the Whisper variants are local
+alternatives for when a commercial API is not wanted.  Two of them run in a
+Python worker (`whisper`, `whisper_hub`) and one is Rust-native (`whisper_rs`,
+whisper.cpp, run in-process).
+
+Two further names, `whisperx` and `whisper_oai`, are **accepted by
+`--asr-engine` and not implemented**: nothing in this workspace runs WhisperX
+or the OpenAI Whisper API.  Submitting either is refused at job submission,
+with a message naming the engines that do work.  Until 2026-09-07 engine
+selection ended in a catch-all arm that mapped both onto stock local Whisper
+without saying so, so a job asking for one of them ran a different engine and
+recorded `whisper` in its provenance.
 
 ### Rev.AI (default)
 
@@ -36,20 +44,28 @@ batchalign3 transcribe input/ output/ --lang=eng
 - Requires an API key (`batchalign3 setup` or `~/.batchalign.ini`)
 - No local model loading, no GPU needed
 
-### OpenAI Whisper (`--asr-engine whisper-oai`)
+### Not implemented: `whisper_oai` and `whisperx`
 
 ```bash
+# Both of these are refused, and say so:
 batchalign3 transcribe input/ -o output/ --asr-engine whisper-oai --lang=eng
+batchalign3 transcribe input/ -o output/ --asr-engine whisperx --lang=eng
 ```
 
-- OAI Whisper engine in `inference/asr.py` (`_infer_whisper()` with OAI backend)
-- Uses OpenAI's official `whisper` Python library directly
-- **Hardcoded to "turbo" model** -- ignores language-specific model resolution
-- Converts Whisper segments/words output to Rev.AI-style JSON internally
-- Current Rust CLI default is `--asr-engine rev` when no ASR override is given
-  AND no per-language default applies (see "Per-language defaults" below).
-- The internal engine string remains `whisper_oai` where engine registries or
-  typed option payloads refer to engine names.
+- `whisper_oai` (historical spelling `whisper-oai`) names the OpenAI Whisper
+  API; `whisperx` names the WhisperX library.  **Neither has an
+  implementation** anywhere in this workspace: no worker engine, no Rust
+  backend, no dependency.
+- Both remain accepted NAMES so that stored jobs and the hidden BA2 aliases
+  (`--whisperx`, `--whisper-oai`) still parse and can be refused with an
+  accurate message, rather than failing as an unknown name.
+- Selection is a total match over the engine enum with no catch-all arm, so
+  adding a variant without an implementation fails to compile.  The refusal
+  lists the engines that do work, derived from that same match.
+- Use `whisper` (HuggingFace, below), `whisper_hub` (a per-language fine-tune)
+  or `whisper_rs` (Rust-native, in-process) instead.  The default remains
+  `--asr-engine rev` when no ASR override is given AND no per-language default
+  applies (see "Per-language defaults" below).
 
 ### HuggingFace Whisper (`--asr-engine whisper`)
 
@@ -65,19 +81,6 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
 - Chunk length 25s with 3s stride for long files
 - Device selection: CUDA > CPU (`MPS` is intentionally excluded; see
   `developer/apple-mps-workarounds.md`)
-
-### WhisperX (`--asr-engine whisperx`)
-
-```bash
-batchalign3 transcribe input/ -o output/ --asr-engine whisperx --lang=eng
-```
-
-- WhisperX engine in `inference/asr.py`
-- Uses the `whisperx` library (Whisper + phoneme-level forced alignment)
-- **Hardcoded to `large-v2`** -- ignores model resolution
-- Loads both a transcription model and an alignment model
-- Chunked processing with fallback: 60s -> 30s -> 15s
-- CUDA-only for `float16`; falls back to `float32` on CPU
 
 ### Native Whisper (`--asr-engine whisper_rs`)
 
@@ -142,10 +145,8 @@ Absent languages raise `WhisperHubModelNotFoundError` directing the
 user to pass an explicit `model_id` via `--engine-overrides`. See
 [Whisper Hub ASR](whisper-hub-asr.md).
 
-Other engines have hardcoded models:
-
-- OpenAI Whisper (`--asr-engine whisper-oai`): always `"turbo"` (via `whisper.load_model("turbo")`)
-- WhisperX (`--asr-engine whisperx`): always `"large-v2"` (via `whisperx.load_model("large-v2")`)
+`whisper_rs` resolves its model from `BATCHALIGN_WHISPER_RS_MODEL` when set,
+otherwise ggml-large-v3 fetched once via hf-hub.
 
 ## Auto-Detect Mode (`--lang auto`)
 
@@ -175,8 +176,6 @@ graph LR
 | Engine | `--lang auto` behavior |
 |--------|----------------------|
 | `whisper` (HuggingFace) | Uses `openai/whisper-large-v3` (multilingual); omits `language` from kwargs |
-| `whisper-oai` | Turbo model; omits `language` from kwargs |
-| `whisperx` | Uses `large-v2`; omits `language` from kwargs |
 | `rev` (Rev.AI) | Rev.AI has its own auto-detection via the API |
 
 **Limitations:**
@@ -293,8 +292,6 @@ use, not at CLI startup.
 | Context              | Model ID                           | Size    |
 |----------------------|------------------------------------|---------|
 | ASR (`--asr-engine whisper`, all languages) | `openai/whisper-large-v3` | large-v3 |
-| ASR (`--asr-engine whisper-oai`)            | `openai/whisper-turbo`    | turbo   |
-| ASR (`--asr-engine whisperx`)               | `openai/whisper-large-v2` | large-v2 |
 | ASR (`--asr-engine whisper_hub`, opt-in fine-tunes) | per `_RESOLVER["whisper_hub"]` or `--engine-overrides model_id` | varies |
 | FA                                          | `openai/whisper-large-v2` | large-v2 |
 | UTR (`--utr-engine whisper`, all languages) | `openai/whisper-large-v2` | large-v2 |

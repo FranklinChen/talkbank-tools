@@ -10,6 +10,10 @@ publish = false
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# The CI artifact-flow check reads the workflows as workflows rather than
+# searching their text, so a step it flags is a step, not a line that looks
+# like one.
+serde_yaml = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
 blake3 = { workspace = true }

@@ -53,7 +53,7 @@ def _host_with_canto() -> tuple[Any, list[list[str]]]:
 def test_no_canto_host_means_no_canto_runner() -> None:
     """Absence stays absent; the bridge reports ModelUnavailable, as before."""
     host = build_default_fa_execution_host_v2(
-        whisper_model=None, wave2vec_model=None, canto_host=None
+        whisper_model=None, wave2vec_model=None, canto_host=None, qwen_host=None
     )
     assert host.canto_runner is None
 
@@ -62,7 +62,10 @@ def test_a_canto_host_produces_a_runner() -> None:
     """The gap this test exists for: a loaded model must reach the bridge."""
     canto_host, _ = _host_with_canto()
     host = build_default_fa_execution_host_v2(
-        whisper_model=None, wave2vec_model=None, canto_host=canto_host
+        whisper_model=None,
+        wave2vec_model=None,
+        canto_host=canto_host,
+        qwen_host=None,
     )
     assert host.canto_runner is not None
 
@@ -76,7 +79,10 @@ def test_the_runner_romanizes_before_aligning() -> None:
     """
     canto_host, aligned = _host_with_canto()
     host = build_default_fa_execution_host_v2(
-        whisper_model=None, wave2vec_model=None, canto_host=canto_host
+        whisper_model=None,
+        wave2vec_model=None,
+        canto_host=canto_host,
+        qwen_host=None,
     )
     assert host.canto_runner is not None
 

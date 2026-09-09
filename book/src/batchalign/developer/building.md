@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-09-05 20:24 EDT
+**Last updated:** 2026-09-07 18:37 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -152,12 +152,86 @@ tracked in git. Instead:
   into `batchalign/_bin/` before running `make batchalign-python-prepare`
   if you need the installed-package experience. Most developers skip this and
   rely on the dev-checkout fallback (`target/debug/batchalign3`).
-- **CI:** A dedicated `build-cli` job compiles the CLI binary once (release
-  mode), uploads it as an artifact, and each Python-version wheel build
-  downloads it into `batchalign/_bin/` before maturin packages it.
+- **CI:** A dedicated `build-cli` job compiles a development-profile CLI
+  once and uploads it as an artifact. One development ABI3 wheel packages
+  that binary, and the Python-version matrix installs the same wheel.
+  Dashboard and server smoke jobs consume that CLI artifact; they need no
+  Rust compiler or target cache. Dashboard schema generation still runs
+  against the candidate binary through `BATCHALIGN_BIN`. Every consuming job
+  fetches it through the `.github/actions/cli-binary` composite action; see
+  below for why downloading it directly does not work.
 - **Release:** The release workflow builds platform-specific CLI binaries
   (macOS ARM + Intel, Linux x86 + ARM, Windows x86) and packages each into
   the corresponding wheel.
+
+### Fetching the CLI artifact in a new job
+
+Uploading an artifact zips its files and drops the POSIX mode, so a job that
+downloads `cli-binary` gets the compiler's output at mode 644 and cannot run
+it. The executable bit has to be restored by whoever downloads it, and the
+failure when it is not is a permission error deep inside whatever script tried
+to run the binary, several steps after the omission.
+
+So a job does not download the artifact. It calls the action that owns both
+halves:
+
+```yaml
+      - uses: ./.github/actions/cli-binary
+        with:
+          path: target/debug
+```
+
+Two paths are in use: `target/debug`, where the smoke scripts and the
+`BATCHALIGN_BIN` environment variable expect a locally built binary, and
+`batchalign/_bin`, where the wheel build expects a pre-staged one. The action
+needs `actions/checkout` to have run first, since it lives in the repository.
+
+This is checked rather than asked for. `cargo run -q -p xtask --
+lint-ci-hygiene`, which runs inside `make batchalign-ci-rust` and therefore on
+every push, refuses any job that fetches the binary itself or restores the
+executable bit by hand.
+
+Two things about how it decides, because both were holes in its first version.
+It works on the workflow that PUBLISHES the artifact, and only that one, since
+an artifact belongs to a single workflow run and no other file can reach it.
+That scoping is what lets it be strict: inside that workflow a download is
+refused whether it names the artifact, matches it with a `pattern:`, names
+nothing at all, or asks for something interpolated that nobody can resolve
+here, and the executable bit counts as restored by hand at any mode, not just
+`chmod +x`. Elsewhere those same shapes are ordinary and are left alone, which
+is why the release workflow's pattern-matched downloads do not trip it.
+
+The action's own definition is read as a definition rather than searched as
+text, so deleting its `chmod` step while leaving a sentence about one in the
+description does not satisfy it. Publishing is untouched: only downloads are
+judged, so the producing job stays legal without sitting on an allowlist. If
+the artifact is ever renamed or its producer removed, the check says that
+rather than quietly examining nothing.
+
+### CI cache ownership
+
+Only jobs that compile Rust restore target caches. Artifact-only smoke jobs
+restore their npm or Python dependencies instead.
+
+Each compiling job keeps its OWN cache key, and the temptation to share one is
+worth resisting for a specific reason. `build-cli` runs `cargo build -p
+batchalign`, which resolves no dev-dependencies and builds no test targets,
+while the Rust workflow's gate job runs four test invocations. The cache action
+saves on post-job and skips the second save of an identical key, so a shared
+key would let whichever job finishes first decide what the cache holds, and the
+shorter one would leave the longer one recompiling every dev-dependency on
+every run. Dependency audits cache
+Cargo downloads with `cache-targets: false`; restoring another job's compiled
+targets provides no audit coverage. Coverage keeps a separate instrumented
+target directory and cache, and release builds keep target-specific caches.
+
+Check cache restore messages and compilation time before blaming test count.
+GitHub evicts caches when repository storage is full, so redundant target
+archives can cause useful compiler caches to disappear. See
+[GitHub cache limits and eviction](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#usage-limits-and-eviction-policy)
+and [rust-cache inputs](https://github.com/Swatinem/rust-cache#cache-configuration).
+Cache hits and job duration on the next comparable run establish the effect;
+removing an unused cache does not by itself prove a speedup.
 
 ### Maturin include directive
 

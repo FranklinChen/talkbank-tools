@@ -1,6 +1,9 @@
 //! ASR response types, backend selection, and transcribe options.
 
 use crate::api::{DurationSeconds, LanguageCode3, LanguageSpec};
+// `SelectableEngine` is imported for its `ALL` associated constant, which is
+// what makes the "engines that do work" list derived rather than restated.
+use crate::types::engines::{AsrEngineName, SelectableEngine};
 use crate::types::worker_v2::{AsrBackendV2, SpeakerBackendV2};
 use batchalign_transform::asr_postprocess::AsrMonologue;
 use serde::{Deserialize, Serialize};
@@ -108,19 +111,6 @@ pub(crate) enum AsrWorkerMode {
 }
 
 impl AsrWorkerMode {
-    /// Select the concrete worker-side execution mode from the command option
-    /// string.
-    fn from_engine_name(engine_name: &str) -> Self {
-        match engine_name {
-            "whisper_hub" => Self::WhisperHubV2,
-            "tencent" => Self::HkTencentV2,
-            "aliyun" => Self::HkAliyunV2,
-            "funaudio" => Self::HkFunaudioV2,
-            "qwen" => Self::HkQwenV2,
-            _ => Self::LocalWhisperV2,
-        }
-    }
-
     /// Return the corresponding live V2 backend.
     pub(super) fn as_v2_backend(self) -> AsrBackendV2 {
         match self {
@@ -157,13 +147,54 @@ impl From<&crate::options::UtrEngine> for AsrBackend {
 }
 
 impl AsrBackend {
-    /// Select the runtime boundary from the configured ASR engine string.
-    pub(crate) fn from_engine_name(engine_name: &str) -> Self {
-        match engine_name {
-            "rev" => Self::RustRevAi,
-            "whisper_rs" => Self::RustWhisperRs,
-            other => Self::Worker(AsrWorkerMode::from_engine_name(other)),
+    /// Select the runtime boundary for one typed ASR engine, or refuse.
+    ///
+    /// THE owner of "which runtime actually runs this engine". It takes the
+    /// typed [`AsrEngineName`] rather than a string, and matches it
+    /// EXHAUSTIVELY: there is no catch-all arm, so a new engine variant is a
+    /// compile error here until somebody says what runs it.
+    ///
+    /// That absence is the whole point. The previous string form ended in
+    /// `_ => LocalWhisperV2`, which silently mapped the two accepted-but-
+    /// unimplemented names (`whisperx`, `whisper_oai`) onto stock local
+    /// Whisper. Nothing in this workspace implements WhisperX or the OpenAI
+    /// Whisper API, so those jobs ran an engine nobody asked for and recorded
+    /// "whisper" in provenance. They are now a typed refusal instead.
+    pub(crate) fn try_from_engine(
+        engine: &AsrEngineName,
+    ) -> Result<Self, crate::types::engines::EngineNotImplemented> {
+        match engine {
+            // Rust-owned runtimes: no Python worker involved.
+            AsrEngineName::RevAi => Ok(Self::RustRevAi),
+            AsrEngineName::WhisperRs => Ok(Self::RustWhisperRs),
+            // Python-worker runtimes, one arm per live worker mode.
+            AsrEngineName::Whisper => Ok(Self::Worker(AsrWorkerMode::LocalWhisperV2)),
+            AsrEngineName::WhisperHub => Ok(Self::Worker(AsrWorkerMode::WhisperHubV2)),
+            AsrEngineName::HkTencent => Ok(Self::Worker(AsrWorkerMode::HkTencentV2)),
+            AsrEngineName::HkAliyun => Ok(Self::Worker(AsrWorkerMode::HkAliyunV2)),
+            AsrEngineName::HkFunaudio => Ok(Self::Worker(AsrWorkerMode::HkFunaudioV2)),
+            AsrEngineName::HkQwen => Ok(Self::Worker(AsrWorkerMode::HkQwenV2)),
+            // Recognized names with nothing behind them.
+            AsrEngineName::WhisperX | AsrEngineName::WhisperOai => {
+                Err(crate::types::engines::EngineNotImplemented {
+                    engine: engine.clone(),
+                })
+            }
         }
+    }
+
+    /// The wire names of every ASR engine this build can actually run.
+    ///
+    /// DERIVED from [`Self::try_from_engine`], so an operator-facing message
+    /// listing the alternatives cannot recommend an engine that would itself
+    /// be refused. This is the same discipline `validate_utr_language_support`
+    /// applies to UTR engines: the remedy comes from the predicate that
+    /// produced the rejection, never from a second hand-written list.
+    pub(crate) fn implemented_engine_names() -> impl Iterator<Item = &'static str> {
+        AsrEngineName::ALL
+            .iter()
+            .filter(|engine| Self::try_from_engine(engine).is_ok())
+            .map(AsrEngineName::as_wire_name)
     }
 
     pub(crate) fn as_non_rev(self) -> Option<NonRevAsrBackend> {
@@ -239,14 +270,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_engine_name_maps_whisper_hub_to_worker_mode() {
-        assert_eq!(
-            AsrWorkerMode::from_engine_name("whisper_hub"),
-            AsrWorkerMode::WhisperHubV2,
-        );
-    }
-
-    #[test]
     fn whisper_hub_worker_mode_lowers_to_whisper_hub_backend() {
         assert_eq!(
             AsrWorkerMode::WhisperHubV2.as_v2_backend(),
@@ -259,7 +282,8 @@ mod tests {
         // ``whisper_hub`` is not Rust-owned; it must go to the Worker
         // path just like stock Whisper, HK engines, etc.
         assert_eq!(
-            AsrBackend::from_engine_name("whisper_hub"),
+            AsrBackend::try_from_engine(&AsrEngineName::WhisperHub)
+                .expect("whisper_hub is implemented"),
             AsrBackend::Worker(AsrWorkerMode::WhisperHubV2),
         );
     }
@@ -269,13 +293,56 @@ mod tests {
         // ``whisper_rs`` is Rust-owned (in-process whisper.cpp), so it must
         // route to the dedicated native backend, never the Python worker.
         assert_eq!(
-            AsrBackend::from_engine_name("whisper_rs"),
+            AsrBackend::try_from_engine(&AsrEngineName::WhisperRs)
+                .expect("whisper_rs is implemented"),
             AsrBackend::RustWhisperRs,
         );
     }
 
     #[test]
     fn asr_backend_from_rev_is_rust_revai_path() {
-        assert_eq!(AsrBackend::from_engine_name("rev"), AsrBackend::RustRevAi);
+        assert_eq!(
+            AsrBackend::try_from_engine(&AsrEngineName::RevAi).expect("rev is implemented"),
+            AsrBackend::RustRevAi,
+        );
+    }
+
+    /// The two engines this build accepts as NAMES and cannot run.
+    ///
+    /// Selection used to end in a catch-all that mapped both onto stock local
+    /// Whisper, so the wrong engine ran and provenance said "whisper". The
+    /// refusal must name the engine asked for; the caller derives the list of
+    /// working alternatives from the same function.
+    #[test]
+    fn unimplemented_asr_engines_are_refused_rather_than_defaulted() {
+        for engine in [AsrEngineName::WhisperX, AsrEngineName::WhisperOai] {
+            let refusal = AsrBackend::try_from_engine(&engine).expect_err(
+                "nothing in this tree implements WhisperX or the OpenAI Whisper API; \
+                 selecting one must refuse, never silently run stock local Whisper",
+            );
+            assert_eq!(refusal.engine, engine);
+            assert!(
+                refusal.to_string().contains(engine.as_wire_name()),
+                "the refusal must name the engine that was asked for",
+            );
+        }
+    }
+
+    /// The alternatives offered to an operator are exactly the engines that
+    /// resolve, so the list cannot recommend an unimplemented engine.
+    #[test]
+    fn implemented_engine_names_exclude_the_unimplemented_ones() {
+        let implemented: Vec<&str> = AsrBackend::implemented_engine_names().collect();
+        assert!(implemented.contains(&"rev"));
+        assert!(implemented.contains(&"whisper"));
+        assert!(implemented.contains(&"whisper_rs"));
+        assert!(!implemented.contains(&"whisperx"));
+        assert!(!implemented.contains(&"whisper_oai"));
+        assert_eq!(
+            implemented.len() + 2,
+            AsrEngineName::ALL.len(),
+            "exactly two accepted ASR engine names are unimplemented; if this count \
+             moved, either an engine was implemented or a new stub was added",
+        );
     }
 }

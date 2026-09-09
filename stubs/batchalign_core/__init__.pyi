@@ -63,6 +63,7 @@ def execute_forced_alignment_request_v2(
     whisper_runner: Callable[..., object] | None = None,
     wave2vec_runner: Callable[..., object] | None = None,
     canto_runner: Callable[..., object] | None = None,
+    qwen3_runner: Callable[..., object] | None = None,
 ) -> str: ...
 def execute_opensmile_request_v2(
     request: object,

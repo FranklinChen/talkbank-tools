@@ -336,6 +336,21 @@ impl RecordedInstant {
             origin,
         }
     }
+
+    /// Take the position and its provenance, consuming the instant.
+    ///
+    /// The counterpart of [`Self::at`] and [`Self::origin`] for a caller that
+    /// owns the instant and is building the value that replaces it. Reading
+    /// the origin through the borrowing accessor forces a clone of a boxed
+    /// chain; on the FA lowering path that was two clones per aligned word,
+    /// and on the exact-reconciliation route both of them were the identity.
+    ///
+    /// It hands out no containment claim a caller could reuse: a bare
+    /// [`FileMs`] proves nothing, which is why [`Recording::locate`] and
+    /// [`Recording::clamp`] remain the only ways to obtain one of these.
+    pub fn into_parts(self) -> (FileMs, Origin) {
+        (self.at, self.origin)
+    }
 }
 
 /// Why a stretch of audio is not a window over its recording.

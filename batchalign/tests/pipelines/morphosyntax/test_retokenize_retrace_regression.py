@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import pytest
 
+from batchalign.worker._pipeline_cache import static_pipelines
+
 
 @pytest.mark.golden
 def test_retokenize_retrace_utterance_returns_correct_count() -> None:
@@ -54,8 +56,7 @@ def test_retokenize_retrace_utterance_returns_correct_count() -> None:
 
     resp = batch_infer_morphosyntax(
         req=req,
-        nlp_pipelines={"yue": nlp},
-        contexts={"yue": TokenizerContext()},
+        pipelines=static_pipelines({"yue": nlp}, {"yue": TokenizerContext()}),
         nlp_lock=threading.Lock(),
         free_threaded=False,
     )

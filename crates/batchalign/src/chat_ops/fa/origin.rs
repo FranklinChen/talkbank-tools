@@ -5,7 +5,7 @@
 //! A CHAT bullet is a pair of integers. Nothing about `1266565_1286865`
 //! distinguishes a moment an engine measured against audio from one this
 //! program computed by dividing a gap by a word count, from one a repair pass
-//! moved to restore ordering, from one that was cut down to fit the recording.
+//! rebalanced against its neighbour, from one cut down to fit the recording.
 //! All four are written identically and all four read downstream as
 //! measurements.
 //!
@@ -109,11 +109,84 @@ impl fmt::Display for ClampBound {
     }
 }
 
+/// How much of a word and of its labels a character alignment could NOT
+/// reconcile.
+///
+/// # Why this lives with the origins and not with the aligner
+///
+/// It is part of an [`Origin`]: the counts are the EVIDENCE for an
+/// attribution, and "attributed by character alignment" without them is a
+/// claim a reader cannot weigh. A word whose characters all matched, one label
+/// boundary over, and a numeral that shares not one character with the labels
+/// it was handed both come out as `AttributedByCharAlignment`, and only these
+/// two numbers tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharEdits {
+    /// Characters of the transcript word that no label character matched.
+    pub transcript_only: usize,
+    /// Characters of this word's labels that no transcript character matched.
+    pub label_only: usize,
+}
+
+impl CharEdits {
+    /// Nothing went unreconciled.
+    ///
+    /// Deliberately a named constant rather than a `Default`: this is the TRUE
+    /// count for a word the alignment matched exactly, never a stand-in for a
+    /// count nobody took, so there is no `unwrap_or_default` shaped hole for a
+    /// missing tally to fall into.
+    pub const ZERO: Self = Self {
+        transcript_only: 0,
+        label_only: 0,
+    };
+
+    /// Whether the word and its labels reconciled character for character.
+    ///
+    /// This is the fact the in-order stitch proves, so it is also what
+    /// separates a word the alignment merely FOLDED from one it GUESSED at.
+    /// The alignment route is not that fact: a residue word whose characters
+    /// all matched is exactly as well evidenced as a stitched one, and the
+    /// count is what says so.
+    pub const fn is_exact(self) -> bool {
+        self.transcript_only == 0 && self.label_only == 0
+    }
+}
+
+impl fmt::Display for CharEdits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} transcript and {} label characters unmatched",
+            self.transcript_only, self.label_only
+        )
+    }
+}
+
 /// How a timing number was produced.
 ///
 /// Ordered roughly from strongest evidence to weakest. Each derived variant
 /// carries the inputs of its own computation, so a reader can reconstruct WHY
 /// the number is what it is rather than only that it was derived.
+///
+/// # A retired variant, and why it must not come back
+///
+/// `EstimatedFromWordCount { gap, words_before, words_total }` sat here until
+/// 2026-09-07 with NO production construction site: the declaration, the
+/// classification arms, the `Display` arm, the serialized mirror in
+/// `types::traces` and two tests were the whole of it. It described the
+/// word-count distribution in `chat_ops::fa::grouping`, and that pass does not
+/// produce a timing. It produces an audio WINDOW (a `Placement`), which is
+/// then sent to an aligner; the per-word numbers that come back are measured
+/// by the engine inside that window, so [`Origin::EngineMeasured`] is the
+/// honest answer and nothing is being laundered.
+///
+/// A variant nothing produces is worse than absent. It reads as a bucket the
+/// tally can fill, so `ProvenanceTally::assumed` and
+/// `ProvenanceTally::needs_review` looked as though they covered a case they
+/// could never see, and the doc comment on `assumed` said so in prose. Before
+/// re-adding it, find the code that computes a per-word TIMING from a word
+/// count; there is none today, and if one is written it should construct the
+/// origin where the number is born.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Origin {
     /// An alignment engine measured this position against the audio.
@@ -159,31 +232,29 @@ pub enum Origin {
         overshoot: Ms,
     },
 
-    /// Computed by distributing a gap between two anchors proportionally to
-    /// word count.
+    /// The boundary between this word and its neighbour was moved so that a
+    /// word which had collapsed to near-zero duration keeps a usable extent.
     ///
-    /// The placement used for utterances that carry no bullet. It is arithmetic
-    /// over a word count and says nothing about when anyone spoke; the fields
-    /// record the computation so a reader can see how thin the evidence is. A
-    /// run of 25 utterances sharing 290 milliseconds of audio is visibly not a
-    /// measurement, and without this variant that fact is invisible in output.
-    EstimatedFromWordCount {
-        /// The audio available to the whole run of untimed utterances.
-        gap: Ms,
-        /// Words placed before this one within the run.
-        words_before: usize,
-        /// Words in the entire run.
-        words_total: usize,
-    },
-
-    /// Moved so that timings run in order.
+    /// Produced by the two rebalance passes in
+    /// `chat_ops::fa::postprocess`, which take milliseconds from an
+    /// over-long neighbour and give them to a lexical word the engine
+    /// reported as almost instantaneous. BOTH words are re-timed, because one
+    /// boundary moved and it belongs to both of them; whichever boundary
+    /// actually changed is the one that wraps its previous origin.
     ///
-    /// A repair pass adjusting a neighbour is a decision by this program, not
-    /// an observation, however well justified.
-    RepairedForOrder {
-        /// Where the value came from before it was moved.
+    /// This was `RepairedForOrder` until 2026-09-07, named and documented as
+    /// "moved so that timings run in order" and attributed by its own docs to
+    /// a repair pass. `chat_ops::fa::repair` produces no origin at all: it
+    /// reaches word clamping through `clamp_words_past_bound`, which records
+    /// [`Origin::ClampedTo`] with [`ClampBound::UtteranceBullet`]. So the name
+    /// pointed at a module that never built one, and described an ordering
+    /// motive the only real producer does not have. Restoring order is a
+    /// CONSEQUENCE here (the moved boundary stays between the two words), not
+    /// the reason.
+    RebalancedWithNeighbour {
+        /// Where the value came from before the boundary moved.
         was: Box<Origin>,
-        /// The value before repair.
+        /// The value before the rebalance.
         original: FileMs,
     },
 
@@ -230,6 +301,29 @@ pub enum Origin {
         /// The duration that was assumed.
         assumed: Ms,
     },
+
+    /// This word was given its label by CHARACTER ALIGNMENT rather than by
+    /// matching it.
+    ///
+    /// The instant underneath is still the engine's own measurement of the
+    /// label it came from, which is why this WRAPS rather than replaces. What
+    /// changed is the ATTRIBUTION: an exact in-order stitch proves the label
+    /// spells the word, while an edit-distance alignment says only that it
+    /// fitted best, and for a numeral spelled out in words ("nineteen ninety
+    /// five" for `1995`) it does not even say that, since the neighbours were
+    /// placed and this word took what was left between them.
+    ///
+    /// Classified ASSUMED rather than Observed, because the number now answers
+    /// a question the engine did not: WHICH WORD this onset belongs to. Before
+    /// this variant existed, a remapped word and a stitched one reached a
+    /// reviewer byte-identical, so the guess was indistinguishable from the
+    /// proof. `edits` says how far the fit was from exact.
+    AttributedByCharAlignment {
+        /// How the underlying instant was obtained, before attribution.
+        was: Box<Origin>,
+        /// What the alignment could not reconcile.
+        edits: CharEdits,
+    },
 }
 
 /// What kind of number an [`Origin`] describes.
@@ -268,10 +362,10 @@ impl Origin {
             Self::DerivedFromNextOnset
             | Self::InheritedFromNeighbour { .. }
             | Self::MergedFromParts { .. } => OriginKind::Derived,
-            Self::FallbackDuration { .. } | Self::EstimatedFromWordCount { .. } => {
+            Self::FallbackDuration { .. } | Self::AttributedByCharAlignment { .. } => {
                 OriginKind::Assumed
             }
-            Self::ClampedTo { .. } | Self::RepairedForOrder { .. } => OriginKind::Adjusted,
+            Self::ClampedTo { .. } | Self::RebalancedWithNeighbour { .. } => OriginKind::Adjusted,
         }
     }
 
@@ -293,12 +387,13 @@ impl Origin {
     /// nothing kept in step. Now a new variant has exactly one match to answer.
     fn was(&self) -> Option<&Origin> {
         match self {
-            Self::ClampedTo { was, .. } | Self::RepairedForOrder { was, .. } => Some(was),
+            Self::ClampedTo { was, .. }
+            | Self::RebalancedWithNeighbour { was, .. }
+            | Self::AttributedByCharAlignment { was, .. } => Some(was),
             // Written out rather than left to a catch-all so a new variant that
             // wraps another cannot silently report that it wraps nothing.
             Self::EngineMeasured { .. }
             | Self::TranscriptBullet
-            | Self::EstimatedFromWordCount { .. }
             | Self::InheritedFromNeighbour { .. }
             | Self::MergedFromParts { .. }
             | Self::DerivedFromNextOnset
@@ -334,7 +429,7 @@ impl Origin {
     /// case was pooled with the ordinary ones in every count.
     ///
     /// Asks the whole chain, because a value clamped to the recording and then
-    /// repaired for order must still report it.
+    /// rebalanced against a neighbour must still report it.
     pub fn overran_recording(&self) -> bool {
         self.chain().any(|origin| {
             matches!(
@@ -345,6 +440,26 @@ impl Origin {
                 }
             )
         })
+    }
+
+    /// Whether OUR OWN character alignment decided which word this instant
+    /// belongs to, at any depth in its history.
+    ///
+    /// Different from asking whether [`Self::kind`] is `Assumed`, and that
+    /// difference is the whole reason this exists: a clamp or a rebalance
+    /// applied afterwards makes the OUTERMOST kind `Adjusted`, so a start the
+    /// DP attributed and postprocessing then nudged reported as a routine
+    /// adjustment and asked nobody to look at it.
+    ///
+    /// Walks the chain for the same reason [`Self::overran_recording`] does,
+    /// and is deliberately narrower than "was assumed anywhere underneath": a
+    /// [`Self::FallbackDuration`] capped at a real neighbouring onset has had
+    /// its invented magnitude REPLACED by a measurement, so that case is not
+    /// this one. An attribution is not undone by a later adjustment, because
+    /// which label belongs to which word is a question no clamp answers.
+    pub fn attributed_by_alignment(&self) -> bool {
+        self.chain()
+            .any(|origin| matches!(origin, Self::AttributedByCharAlignment { .. }))
     }
 }
 
@@ -362,21 +477,16 @@ impl fmt::Display for Origin {
                 f,
                 "clamped to {bound} from {original} ({overshoot} over), was {was}"
             ),
-            Self::EstimatedFromWordCount {
-                gap,
-                words_before,
-                words_total,
-            } => write!(
-                f,
-                "estimated: word {words_before} of {words_total} across {gap}"
-            ),
-            Self::RepairedForOrder { was, original } => {
-                write!(f, "reordered from {original}, was {was}")
+            Self::RebalancedWithNeighbour { was, original } => {
+                write!(f, "rebalanced with a neighbour from {original}, was {was}")
             }
             Self::MergedFromParts { parts } => write!(f, "merged from {parts} measured parts"),
             Self::InheritedFromNeighbour { from } => write!(f, "inherited from {from}"),
             Self::DerivedFromNextOnset => f.write_str("derived from the next word's onset"),
             Self::FallbackDuration { assumed } => write!(f, "assumed duration of {assumed}"),
+            Self::AttributedByCharAlignment { was, edits } => {
+                write!(f, "attributed by character alignment ({edits}), was {was}")
+            }
         }
     }
 }
@@ -399,14 +509,9 @@ mod tests {
 
     #[test]
     fn our_own_arithmetic_is_never_an_observation() {
-        // The 25-utterances-in-290ms case, which is the shape that made a
-        // corpus comparison report 37.2 percent agreement.
-        let estimated = Origin::EstimatedFromWordCount {
-            gap: Ms(290),
-            words_before: 40,
-            words_total: 180,
-        };
-        assert!(!estimated.is_observation());
+        // A fallback duration is the invented case that actually reaches a
+        // transcript: a constant standing in for a quantity nothing measured.
+        assert!(!Origin::FallbackDuration { assumed: Ms(500) }.is_observation());
         assert!(
             !Origin::InheritedFromNeighbour {
                 from: FileMs::new(1_000)
@@ -469,11 +574,6 @@ mod laundering_tests {
             Origin::FallbackDuration { assumed: Ms(500) },
             Origin::DerivedFromNextOnset,
             Origin::MergedFromParts { parts: 2 },
-            Origin::EstimatedFromWordCount {
-                gap: Ms(4_000),
-                words_before: 0,
-                words_total: 175,
-            },
             Origin::InheritedFromNeighbour {
                 from: FileMs::new(1_000),
             },
@@ -485,9 +585,20 @@ mod laundering_tests {
                 original: FileMs::new(1_288_185),
                 overshoot: Ms(28_217),
             },
-            Origin::RepairedForOrder {
+            Origin::RebalancedWithNeighbour {
                 was: Box::new(Origin::TranscriptBullet),
                 original: FileMs::new(400),
+            },
+            // The onset underneath WAS measured; which word it belongs to was
+            // our guess, so the pair must not read as an observation.
+            Origin::AttributedByCharAlignment {
+                was: Box::new(Origin::EngineMeasured {
+                    engine: EngineId::new("whisper-fa-large-v2"),
+                }),
+                edits: CharEdits {
+                    transcript_only: 4,
+                    label_only: 18,
+                },
             },
         ];
         for origin in invented {
@@ -576,9 +687,15 @@ pub struct ProvenanceTally {
     /// Inferred from a neighbouring measurement: the next word's onset, the
     /// utterance's own bullet, or several parts merged into one span.
     pub derived: usize,
-    /// Invented outright: a fallback duration, or a word-count distribution.
+    /// Our own answer where the engine gave none: a duration standing in for
+    /// one nothing measured ([`Origin::FallbackDuration`]), or an onset the
+    /// engine measured but attached to a word by our character alignment
+    /// rather than by matching ([`Origin::AttributedByCharAlignment`]). This
+    /// said "or a word-count distribution" until 2026-09-07, naming a variant
+    /// no code produced.
     pub assumed: usize,
-    /// Adjusted after the fact: clamped to a bound, or moved to restore order.
+    /// Adjusted after the fact: clamped to a bound, or rebalanced with a
+    /// neighbouring word.
     pub adjusted: usize,
     /// Of those, how many were cut down to the END OF THE RECORDING.
     ///
@@ -587,15 +704,35 @@ pub struct ProvenanceTally {
     /// something is wrong with the INPUT rather than with our arithmetic: the
     /// transcript claimed speech past the end of the audio.
     pub overran_recording: usize,
+    /// How many timings our own character alignment ATTRIBUTED to their word,
+    /// at any depth in their history.
+    ///
+    /// Cross-cutting rather than a fifth bucket, so it is NOT part of `total`:
+    /// an attribution nothing touched afterwards is counted here and in
+    /// `assumed`, while one a clamp or a rebalance later wrapped is counted
+    /// here and in `adjusted`.
+    ///
+    /// It exists because the four buckets classify on the OUTERMOST origin,
+    /// which is the right answer to "what is this number now" and the wrong
+    /// answer to "did we choose which word it belongs to". Until 2026-09-07
+    /// only the outermost was asked, so every DP-attributed start that
+    /// postprocessing later clamped or rebalanced left `assumed` at zero and
+    /// `needs_review` false, which is exactly the population a reviewer is
+    /// there to see.
+    pub attributed: usize,
 }
 
 impl ProvenanceTally {
     /// Count one timing, by the way it most recently came to be.
     ///
-    /// Classified on the OUTERMOST origin, because that is what the number now
-    /// is: a measurement that was later clamped is no longer a measurement.
-    /// Exhaustive on purpose, so a new `Origin` variant must be given a bucket
-    /// rather than silently joining one.
+    /// The four BUCKETS classify on the OUTERMOST origin, because that is what
+    /// the number now is: a measurement that was later clamped is no longer a
+    /// measurement. Exhaustive on purpose, so a new `Origin` variant must be
+    /// given a bucket rather than silently joining one.
+    ///
+    /// The two CROSS-CUTTING counts (`overran_recording`, `attributed`) are
+    /// taken from the whole chain instead, because each records a fact about
+    /// the number's history that a later wrapping does not undo.
     pub fn record(&mut self, origin: &Origin) {
         match origin.kind() {
             OriginKind::Observed => self.observed += 1,
@@ -608,6 +745,12 @@ impl ProvenanceTally {
         // report `Adjusted` for a reason that is not this one.
         if origin.overran_recording() {
             self.overran_recording += 1;
+        }
+        // Same reason, and the case that was missing: an attribution the DP
+        // made is still ours after a clamp or a rebalance wrapped it, and the
+        // outermost kind can no longer say so.
+        if origin.attributed_by_alignment() {
+            self.attributed += 1;
         }
     }
 
@@ -623,17 +766,25 @@ impl ProvenanceTally {
 
     /// Whether a human should look at this utterance's timings.
     ///
-    /// Two cases earn attention, and they are different complaints. An INVENTED
-    /// timing is anchored to nothing, where a derived one is anchored to a real
-    /// measurement next door. A timing cut back to the recording's end says the
+    /// Three cases earn attention, and they are different complaints. An
+    /// INVENTED timing is anchored to nothing, where a derived one is anchored
+    /// to a real measurement next door. An ATTRIBUTED one is anchored to a real
+    /// measurement that our own character alignment, not the engine, decided
+    /// belongs to this word. A timing cut back to the recording's end says the
     /// transcript described speech the audio does not contain, which is a
     /// problem with the delivery rather than with the alignment.
     ///
-    /// The second case used to be unaskable: every clamp was one variant, so a
+    /// The last case used to be unaskable: every clamp was one variant, so a
     /// word cut to the end of the file counted the same as one capped at the
     /// next word's onset, and only the routine case was common enough to notice.
+    ///
+    /// `attributed` rather than `assumed` carries the middle case, because
+    /// `assumed` is an outermost-origin bucket and postprocessing routinely
+    /// wraps an attributed start in a clamp or a rebalance. Reading the bucket
+    /// alone reported "nothing to see" for precisely the words the DP had
+    /// guessed at.
     pub fn needs_review(self) -> bool {
-        self.assumed > 0 || self.overran_recording > 0
+        self.assumed > 0 || self.attributed > 0 || self.overran_recording > 0
     }
 }
 
@@ -649,9 +800,15 @@ impl fmt::Display for ProvenanceTally {
         // Omitting it made an utterance flagged solely for a recording overrun
         // read byte-identically to a routine next-onset clamp that is NOT
         // flagged, so the reviewer was told to look and not told why.
-        match self.overran_recording {
+        if self.overran_recording > 0 {
+            write!(f, " past-recording-end={}", self.overran_recording)?;
+        }
+        // Also stated separately, and for the same reason: it is the count a
+        // reviewer needs and the only one the four buckets cannot show, since a
+        // clamp on top of an attribution moves it out of `assumed`.
+        match self.attributed {
             0 => Ok(()),
-            n => write!(f, " past-recording-end={n}"),
+            n => write!(f, " attributed={n}"),
         }
     }
 }
@@ -748,12 +905,77 @@ mod tally_tests {
         assert_eq!(tally.total(), 2);
     }
 
+    /// RED FIRST (2026-09-07 review, item 2): an attribution a later
+    /// adjustment wrapped is still an attribution.
+    ///
+    /// `record` classifies on the outermost origin, which is right for "what
+    /// is this number now" and wrong for "did we choose the word it belongs
+    /// to". Postprocessing clamps and rebalances routinely sit on top of a
+    /// DP-attributed onset, and every such word left `assumed` at zero and
+    /// `needs_review` false: the reviewer was told there was nothing to look
+    /// at in exactly the population the DP had guessed at.
     #[test]
-    fn a_recording_clamp_survives_a_later_repair() {
-        // Why `overran_recording` recurses: an ordering repair on top of a
-        // recording clamp leaves the outermost variant reporting the repair,
-        // and the overrun would go uncounted if only the top were inspected.
-        let repaired = Origin::RepairedForOrder {
+    fn an_attributed_onset_a_later_clamp_wrapped_still_asks_for_review() {
+        let attributed = Origin::AttributedByCharAlignment {
+            was: Box::new(Origin::EngineMeasured {
+                engine: EngineId::new("wav2vec_fa"),
+            }),
+            edits: CharEdits {
+                transcript_only: 1,
+                label_only: 0,
+            },
+        };
+        let clamped = Origin::ClampedTo {
+            bound: ClampBound::NextOnset,
+            was: Box::new(attributed.clone()),
+            original: FileMs::new(1_500),
+            overshoot: Ms(200),
+        };
+        let rebalanced = Origin::RebalancedWithNeighbour {
+            was: Box::new(attributed.clone()),
+            original: FileMs::new(1_400),
+        };
+
+        // The predicate itself: bare, clamped and rebalanced all report it.
+        assert!(attributed.attributed_by_alignment());
+        assert!(clamped.attributed_by_alignment());
+        assert!(rebalanced.attributed_by_alignment());
+        // And it is narrower than "assumed anywhere underneath": a fallback
+        // DURATION capped at a real neighbouring onset had its invented
+        // magnitude replaced by a measurement, which is not this case.
+        assert!(
+            !Origin::ClampedTo {
+                bound: ClampBound::NextOnset,
+                was: Box::new(Origin::FallbackDuration { assumed: Ms(500) }),
+                original: FileMs::new(1_500),
+                overshoot: Ms(200),
+            }
+            .attributed_by_alignment()
+        );
+
+        let mut tally = ProvenanceTally::default();
+        tally.record(&clamped);
+        tally.record(&rebalanced);
+        // What the numbers ARE now is still an adjustment, so the four buckets
+        // are unchanged and still sum to the total.
+        assert_eq!(tally.adjusted, 2);
+        assert_eq!(tally.assumed, 0);
+        assert_eq!(tally.total(), 2);
+        // What a reviewer needs is the cross-cutting count.
+        assert_eq!(tally.attributed, 2);
+        assert!(tally.needs_review());
+        assert!(
+            tally.to_string().contains("attributed=2"),
+            "the summary must say why it is asking, got: {tally}"
+        );
+    }
+
+    #[test]
+    fn a_recording_clamp_survives_a_later_rebalance() {
+        // Why `overran_recording` recurses: a rebalance on top of a recording
+        // clamp leaves the outermost variant reporting the rebalance, and the
+        // overrun would go uncounted if only the top were inspected.
+        let repaired = Origin::RebalancedWithNeighbour {
             was: Box::new(Origin::ClampedTo {
                 bound: ClampBound::RecordingEnd,
                 was: Box::new(Origin::EngineMeasured {

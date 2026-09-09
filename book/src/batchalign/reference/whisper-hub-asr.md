@@ -1,7 +1,7 @@
 # `whisper_hub` ASR Engine
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 ## What it is
 
@@ -17,8 +17,8 @@ only path to coherent transcription.
 |--------|--------------|-------------|
 | `rev` *(default)* | Rev.AI cloud API | Languages where Rev.AI quality is good (English, Spanish, most European). |
 | `whisper` | Stock `openai/whisper-large-v3` via HF transformers | Languages where stock Whisper handles the acoustic + language combo well. |
-| `whisperx` | WhisperX worker (Whisper + FA) | Fine-grained alignment needs. |
-| `whisper_oai` | OpenAI Whisper API | Latency-sensitive cloud transcription in supported languages. |
+| `whisper_rs` | whisper.cpp in-process (Rust-native) | Local transcription with no Python worker. |
+| `whisperx`, `whisper_oai` | Nothing: **not implemented** | Never. Both are accepted names with no implementation and are refused at submission. |
 | **`whisper_hub`** | **HF community fine-tune by model_id** | **Languages where both Rev.AI and stock Whisper fail.** |
 | `tencent`, `aliyun`, `funaudio` | Cantonese providers | Chinese variants only. |
 

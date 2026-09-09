@@ -159,8 +159,9 @@ pub(super) fn transcribe_impl(
 /// paired with ISO 639-1 (whisper.cpp's language token). Restricted to
 /// the languages whisper.cpp's large models genuinely support well; a
 /// silent default-to-English would mask real misconfiguration. The
-/// Rev.AI preflight code at `crates/batchalign/src/revai/preflight.rs`
-/// keeps a fuller table; lifting both into a shared
+/// Rev.AI submission preflight at
+/// `crates/batchalign/src/types/revai_language.rs`
+/// (`try_revai_language_hint`) keeps a fuller table; lifting both into a shared
 /// `LanguageCode3::to_iso_639_1()` on `batchalign-types` is the right
 /// follow-up (tracked in the whisper-asr book page). A round-trip test
 /// below keeps the two directions from drifting.

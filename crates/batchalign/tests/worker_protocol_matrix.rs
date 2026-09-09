@@ -155,15 +155,88 @@ fn fa_backend_label(backend: FaBackendV2) -> &'static str {
         FaBackendV2::Whisper => "whisper",
         FaBackendV2::Wave2vec => "wave2vec",
         FaBackendV2::Wav2vecCanto => "wav2vec_canto",
+        FaBackendV2::Qwen3 => "qwen3",
     }
 }
 
 /// Return the stable label for one speaker backend.
+/// Whether a backend must appear in a request fixture.
+///
+/// A TOTAL match per family, with no catch-all, so adding a backend variant
+/// breaks compilation here and its author has to say which side it falls on.
+/// A hand-written list of string literals cannot do that, which is how three
+/// of the seven ASR backends and one of the three speaker backends came to be
+/// uncovered under a comment describing exactly that defect.
+enum FixtureCoverage {
+    /// The V2 worker wire carries it, so a request fixture must exist.
+    Required,
+    /// It never reaches the Python V2 worker, so no fixture can be written.
+    NotOnThisWire,
+}
+
+fn asr_fixture_coverage(backend: AsrBackendV2) -> FixtureCoverage {
+    match backend {
+        AsrBackendV2::LocalWhisper
+        | AsrBackendV2::WhisperHub
+        | AsrBackendV2::HkTencent
+        | AsrBackendV2::HkAliyun
+        | AsrBackendV2::HkFunaudio
+        | AsrBackendV2::HkQwen => FixtureCoverage::Required,
+        // The Rust control plane owns the Rev.AI call end to end;
+        // `validate_asr_request` refuses a Rev.AI request on this wire, so a
+        // fixture would describe a request nobody can send.
+        AsrBackendV2::Revai => FixtureCoverage::NotOnThisWire,
+    }
+}
+
+fn fa_fixture_coverage(backend: FaBackendV2) -> FixtureCoverage {
+    match backend {
+        FaBackendV2::Whisper
+        | FaBackendV2::Wave2vec
+        | FaBackendV2::Wav2vecCanto
+        | FaBackendV2::Qwen3 => FixtureCoverage::Required,
+    }
+}
+
+fn speaker_fixture_coverage(backend: SpeakerBackendV2) -> FixtureCoverage {
+    match backend {
+        SpeakerBackendV2::PyannoteAi | SpeakerBackendV2::Pyannote | SpeakerBackendV2::Nemo => {
+            FixtureCoverage::Required
+        }
+    }
+}
+
 fn speaker_backend_label(backend: SpeakerBackendV2) -> &'static str {
     match backend {
         SpeakerBackendV2::PyannoteAi => "pyannote_ai",
         SpeakerBackendV2::Pyannote => "pyannote",
         SpeakerBackendV2::Nemo => "nemo",
+    }
+}
+
+/// Assert that every backend of one family that the wire can name has a
+/// request fixture.
+///
+/// The three families ran the same nine lines, differing only in which `ALL`,
+/// which coverage match, which label and which noun. The exhaustive matches
+/// above are what buy the invariant, and they stay per family; this loop is
+/// the part that was copied.
+fn assert_every_required_backend_has_a_fixture<Backend: Copy>(
+    family: &str,
+    all: &[Backend],
+    coverage: impl Fn(Backend) -> FixtureCoverage,
+    label: impl Fn(Backend) -> &'static str,
+    covered: &BTreeSet<String>,
+) {
+    for backend in all.iter().copied() {
+        match coverage(backend) {
+            FixtureCoverage::NotOnThisWire => {}
+            FixtureCoverage::Required => assert!(
+                covered.contains(label(backend)),
+                "request fixtures should cover {family} backend {}",
+                label(backend)
+            ),
+        }
     }
 }
 
@@ -517,6 +590,10 @@ fn validate_forced_alignment_request(
     match (fa_request.backend, fa_request.text_mode) {
         (FaBackendV2::Whisper, FaTextModeV2::SpaceJoined)
         | (FaBackendV2::Wave2vec, FaTextModeV2::SpaceJoined)
+        // Qwen3 is handed the word list and rebuilds its own transcript, so
+        // like wave2vec it never reads this text; space_joined is what the
+        // builder emits and the only shape accepted here.
+        | (FaBackendV2::Qwen3, FaTextModeV2::SpaceJoined)
         | (FaBackendV2::Wav2vecCanto, FaTextModeV2::CharJoined) => Ok(()),
         // `--pauses` on the onset-only decoder: one token per character, so
         // onsets land inside words. Only Whisper reads this text at all.
@@ -529,6 +606,9 @@ fn validate_forced_alignment_request(
         }
         (FaBackendV2::Wav2vecCanto, FaTextModeV2::SpaceJoined | FaTextModeV2::CharSpaced) => {
             Err("forced-alignment backend wav2vec_canto requires char_joined text".into())
+        }
+        (FaBackendV2::Qwen3, FaTextModeV2::CharJoined | FaTextModeV2::CharSpaced) => {
+            Err("forced-alignment backend qwen3 requires space_joined text".into())
         }
     }
 }
@@ -876,24 +956,33 @@ fn worker_protocol_v2_request_manifest_covers_live_backend_matrix() {
         }
     }
 
-    for backend in ["local_whisper", "hk_tencent", "hk_aliyun", "hk_funaudio"] {
-        assert!(
-            asr_backends.contains(backend),
-            "request fixtures should cover ASR backend {backend}"
-        );
-    }
-    for backend in ["whisper", "wave2vec", "wav2vec_canto"] {
-        assert!(
-            fa_backends.contains(backend),
-            "request fixtures should cover forced-alignment backend {backend}"
-        );
-    }
-    for backend in ["pyannote", "nemo"] {
-        assert!(
-            speaker_backends.contains(backend),
-            "request fixtures should cover speaker backend {backend}"
-        );
-    }
+    assert_every_required_backend_has_a_fixture(
+        "ASR",
+        &AsrBackendV2::ALL,
+        asr_fixture_coverage,
+        asr_backend_label,
+        &asr_backends,
+    );
+    // EVERY backend the wire can name, so adding one to `FaBackendV2` without
+    // a fixture fails here instead of passing silently. That is what happened
+    // to `qwen3`: this list was three literals and the set only had to CONTAIN
+    // them, so a fourth backend, its two refusal arms in
+    // `validate_forced_alignment_request`, and four regenerated schemas all
+    // went unwitnessed.
+    assert_every_required_backend_has_a_fixture(
+        "forced-alignment",
+        &FaBackendV2::ALL,
+        fa_fixture_coverage,
+        fa_backend_label,
+        &fa_backends,
+    );
+    assert_every_required_backend_has_a_fixture(
+        "speaker",
+        &SpeakerBackendV2::ALL,
+        speaker_fixture_coverage,
+        speaker_backend_label,
+        &speaker_backends,
+    );
 }
 
 #[test]

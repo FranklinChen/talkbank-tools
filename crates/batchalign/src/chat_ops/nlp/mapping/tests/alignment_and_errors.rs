@@ -185,13 +185,12 @@ fn test_mwt_gra_dont_contraction() {
 #[test]
 fn test_clean_lemma_apostrophe_fallback_to_text() {
     // clean_lemma("'", "'") must not return empty, fallback to surface text
-    let (result, unknown) = clean_lemma("'", "'");
+    let result = clean_lemma("'", "'");
     assert!(
         !result.is_empty(),
         "clean_lemma must never return empty string"
     );
     assert_eq!(result, "'", "Expected fallback to surface text \"'\"");
-    assert!(!unknown, "Not an unknown token");
 }
 
 #[test]

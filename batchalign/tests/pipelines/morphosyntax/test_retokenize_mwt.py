@@ -15,6 +15,8 @@ Each test isolates one question about the tokenization/MWT pipeline.
 
 import pytest
 
+from batchalign.worker._pipeline_cache import static_pipelines
+
 # Stanza pipeline fixtures are provided by conftest.py in this directory.
 
 
@@ -185,8 +187,7 @@ class TestBatchInferRetokenize:
 
         response = batch_infer_morphosyntax(
             req,
-            nlp_pipelines={"eng": nlp},
-            contexts={"eng": ctx},
+            pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
             nlp_lock=threading.Lock(),
             free_threaded=False,
         )
@@ -249,8 +250,7 @@ class TestWorkerPipelineRetokenize:
 
         response = batch_infer_morphosyntax(
             req,
-            nlp_pipelines=_state.stanza_pipelines,
-            contexts=_state.stanza_contexts or {},
+            pipelines=_state.stanza_pipelines,
             nlp_lock=threading.Lock(),
             free_threaded=False,
         )
@@ -306,8 +306,7 @@ def _run_v2_morphosyntax(nlp, ctx, tmp_path, *, retokenize, request_id):
     def _runner(req: BatchInferRequest) -> BatchInferResponse:
         return batch_infer_morphosyntax(
             req=req,
-            nlp_pipelines={"eng": nlp},
-            contexts={"eng": ctx},
+            pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
             nlp_lock=nlp_lock,
             free_threaded=False,
         )

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "batchalign3"
-version = "0.7.0"
+version = "0.8.0"
 description = "Transcription, alignment, and language-sample analysis for TalkBank CHAT transcripts"
 readme = "batchalign/README.md"
 license = "BSD-3-Clause"

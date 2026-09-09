@@ -45,6 +45,7 @@ mod inject_and_parse;
 mod postprocess_continuous;
 mod replaced_word_and_compound;
 mod timed_utterance_gate;
+mod token_label_remap;
 mod two_pass_and_strategy;
 mod update_bullet;
 mod utr_and_monotonicity;

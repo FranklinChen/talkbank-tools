@@ -53,11 +53,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: rust-workspace
+          # Audits read dependencies but compile no workspace targets.
+          shared-key: dependency-audit
+          cache-targets: false
       - name: Validate committed lockfile
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: RustSec audit

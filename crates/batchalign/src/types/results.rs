@@ -16,7 +16,7 @@ use talkbank_model::ChatFile;
 use super::traces::{
     AsrPipelineTrace, AsrTokenTrace, FaDecisionTrace, FaEvidenceSourceTrace, FaFallbackEventTrace,
     FaGroupTrace, FaTimelineTrace, FaTimingDecisionTrace, RetokenizationTrace, TimedWordTrace,
-    TimingTrace, UtteranceTrace, ViolationTrace, WordTrace,
+    TimingTrace, UtteranceTrace, WordTrace,
 };
 use crate::api::DurationSeconds;
 
@@ -24,7 +24,7 @@ use crate::api::DurationSeconds;
 // Forced alignment
 // ---------------------------------------------------------------------------
 
-/// Structured result from the internal `crate::fa::process_fa` pipeline.
+/// Structured result from the internal `crate::fa::run_fa_from_ast` pipeline.
 pub(crate) struct FaResult {
     /// CHAT document after timing/media reconciliation.
     pub(crate) output: FaOutput,
@@ -40,8 +40,6 @@ pub(crate) struct FaResult {
     pub(crate) timing_decisions: Vec<FaTimingDecisionTrace>,
     /// Gap-healing policy used for this run.
     pub(crate) gap_healing: WordGapHealing,
-    /// Post-validation violations.
-    pub(crate) violations: Vec<ViolationTrace>,
     /// Engine fallback events captured during worker inference.
     pub(crate) fallback_events: Vec<FaFallbackEventTrace>,
 }
@@ -66,14 +64,6 @@ impl FaOutput {
         match self {
             Self::PassThrough(file) => file,
             Self::Processed(state) => state.as_chat_file(),
-        }
-    }
-
-    /// Serialize only after the output state has been chosen.
-    pub(crate) fn to_chat_string(&self) -> String {
-        match self {
-            Self::PassThrough(file) => batchalign_transform::serialize::to_chat_string(file),
-            Self::Processed(state) => state.to_chat_string(),
         }
     }
 }
@@ -104,29 +94,8 @@ impl FaResult {
             decisions: Vec::new(),
             timing_decisions: Vec::new(),
             gap_healing,
-            violations: Vec::new(),
             fallback_events: Vec::new(),
         })
-    }
-
-    /// Construct a result for an explicit dummy or NoAlign pass-through.
-    pub(crate) fn pass_through(
-        chat_file: ChatFile,
-        gap_healing: WordGapHealing,
-        engine: &str,
-        engine_version: &str,
-    ) -> Self {
-        Self {
-            output: FaOutput::PassThrough(chat_file),
-            group_evidence: Vec::new(),
-            engine: engine.to_owned(),
-            engine_version: engine_version.to_owned(),
-            decisions: Vec::new(),
-            timing_decisions: Vec::new(),
-            gap_healing,
-            violations: Vec::new(),
-            fallback_events: Vec::new(),
-        }
     }
 
     /// Attach the exact decision set after it has passed through CHAT
@@ -142,14 +111,13 @@ impl FaResult {
     }
 
     /// Convert into a [`FaTimelineTrace`] for dashboard visualization.
-    #[cfg(test)]
+    ///
+    /// This consumes the whole result, its CHAT output included. The document
+    /// itself no longer leaves through here: it leaves as the
+    /// [`crate::pipeline::post_validate::PostValidated`] proof that
+    /// `FaAdmission` produced, so a caller cannot obtain align's bytes without
+    /// also holding the evidence that they may be written.
     pub(crate) fn into_timeline_trace(self) -> FaTimelineTrace {
-        self.into_output_and_timeline().1
-    }
-
-    /// Split the reconciled CHAT output from its evidence timeline.
-    pub(crate) fn into_output_and_timeline(self) -> (FaOutput, FaTimelineTrace) {
-        let output = self.output;
         let mut groups = Vec::with_capacity(self.group_evidence.len());
         let mut evidence_sources = Vec::with_capacity(self.group_evidence.len());
         let mut cache_keys = Vec::with_capacity(self.group_evidence.len());
@@ -160,7 +128,7 @@ impl FaResult {
             cache_keys.push(evidence.cache_key);
             pre_injection_timings.push(evidence.pre_injection_timings);
         }
-        let timeline = FaTimelineTrace {
+        FaTimelineTrace {
             evidence_schema_version: crate::types::traces::CURRENT_FA_EVIDENCE_SCHEMA_VERSION,
             engine: self.engine,
             engine_version: self.engine_version,
@@ -181,10 +149,13 @@ impl FaResult {
                 .collect(),
             timing_decisions: self.timing_decisions,
             gap_healing: format!("{:?}", self.gap_healing),
-            violations: self.violations,
+            // Post-validation is a fail-closed gate: a violating file fails
+            // the command and no trace is produced for it, so there are never
+            // violations to report. The wire format still declares the field,
+            // and this is the one place that has to say so.
+            violations: Vec::new(),
             fallback_events: self.fallback_events,
-        };
-        (output, timeline)
+        }
     }
 }
 
@@ -311,7 +282,7 @@ mod fa_result_tests {
             "test-build",
         )
         .expect("timed output has one usable @Media declaration");
-        let output = result.output.to_chat_string();
+        let output = batchalign_transform::serialize::to_chat_string(result.output.as_chat_file());
 
         assert!(output.contains("@Media:\tsample, audio\n"));
         assert!(!output.contains("unlinked"));

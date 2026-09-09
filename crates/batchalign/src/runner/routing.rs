@@ -373,13 +373,92 @@ pub(super) async fn dispatch_job_with_execution_context(
     Ok(())
 }
 
-fn warn_invalid_dispatch_plan(job: &RunnerJobSnapshot) {
+/// Fail every pending file of a job whose plan was refused.
+///
+/// A `warn!` and a bare `return` used to be the whole response, so a job
+/// naming an unimplemented engine vanished: no file failed, no error was
+/// recorded, and the only trace was one log line nobody was reading. The
+/// refusal is a property of the request, so its files fail with
+/// `FailureCategory::Validation` and carry the refusal's own message.
+pub(super) async fn fail_files_for_refused_plan(
+    job: &RunnerJobSnapshot,
+    host: &DispatchHostContext,
+    refusal: &super::dispatch::DispatchPlanRefusal,
+) {
+    let message = refusal.to_string();
     warn!(
         job_id = %job.identity.job_id,
         correlation_id = %job.identity.correlation_id,
         command = %job.dispatch.command,
-        "Command plan could not be built from job options"
+        refusal = %message,
+        "Command plan refused; failing this job's files"
     );
+    let refused_at = unix_now();
+    for file in &job.pending_files {
+        record_plan_refusal_for_file(
+            host.sink().as_ref(),
+            &job.identity.job_id,
+            file.filename.as_ref(),
+            &message,
+            refused_at,
+        )
+        .await;
+    }
+}
+
+/// Record one file's plan refusal against a sink.
+///
+/// Split out from the loop above so the behaviour can be observed with a
+/// recording sink: the whole point of this function is WHICH store writes it
+/// makes, and a job snapshot plus a host context is not needed to check that.
+///
+/// It uses `record_setup_failure`, not a bare `fail`. This is a preflight
+/// rejection, so no attempt has been opened for the file, and `fail` alone
+/// records a terminal state with no attempt behind it: the operator gets an
+/// error with no attempt history. `record_setup_failure` documents itself as
+/// the route for exactly this case, and it opens a `FileSetup` attempt without
+/// advertising the file as actively processing.
+async fn record_plan_refusal_for_file(
+    sink: &dyn super::util::RunnerEventSink,
+    job_id: &crate::api::JobId,
+    filename: &str,
+    message: &str,
+    refused_at: crate::api::UnixTimestamp,
+) {
+    super::util::FileRunTracker::new(sink, job_id, filename)
+        .record_setup_failure(
+            refused_at,
+            message,
+            crate::scheduling::FailureCategory::Validation,
+            refused_at,
+        )
+        .await;
+}
+
+/// Build one command's dispatch plan, or fail this job's files and answer
+/// `None`.
+///
+/// The four audio dispatchers below each repeated the same six lines: match the
+/// plan constructor, and on a refusal call `fail_files_for_refused_plan` and
+/// return. One of them getting that wrong is a job that vanishes with nothing
+/// recorded, which is the exact failure `DispatchPlanRefusal` was introduced to
+/// stop, so the response lives in one place and the call sites state only which
+/// plan they want.
+async fn plan_or_fail_files<Plan>(
+    job: &RunnerJobSnapshot,
+    host: &DispatchHostContext,
+    from_job: impl FnOnce(
+        &RunnerJobSnapshot,
+        &crate::config::ServerConfig,
+    ) -> Result<Plan, super::dispatch::DispatchPlanRefusal>,
+) -> Option<Plan> {
+    match from_job(job, host.config()) {
+        Ok(plan) => Some(plan),
+        Err(refusal) => {
+            fail_files_for_refused_plan(job, host, &refusal).await;
+            None
+        }
+    }
 }
 
 async fn dispatch_forced_alignment_command(
@@ -390,8 +469,7 @@ async fn dispatch_forced_alignment_command(
     engine_version: &EngineVersion,
     num_workers: NumWorkers,
 ) {
-    let Some(plan) = FaDispatchPlan::from_job(job, host.config()) else {
-        warn_invalid_dispatch_plan(job);
+    let Some(plan) = plan_or_fail_files(job, host, FaDispatchPlan::from_job).await else {
         return;
     };
 
@@ -417,8 +495,7 @@ async fn dispatch_transcribe_command(
     engine_version: &EngineVersion,
     num_workers: NumWorkers,
 ) {
-    let Some(plan) = TranscribeDispatchPlan::from_job(job, host.config()) else {
-        warn_invalid_dispatch_plan(job);
+    let Some(plan) = plan_or_fail_files(job, host, TranscribeDispatchPlan::from_job).await else {
         return;
     };
 
@@ -444,8 +521,7 @@ async fn dispatch_benchmark_command(
     engine_version: &EngineVersion,
     num_workers: NumWorkers,
 ) {
-    let Some(plan) = BenchmarkDispatchPlan::from_job(job, host.config()) else {
-        warn_invalid_dispatch_plan(job);
+    let Some(plan) = plan_or_fail_files(job, host, BenchmarkDispatchPlan::from_job).await else {
         return;
     };
 
@@ -470,8 +546,8 @@ async fn dispatch_media_analysis_command(
     cache: &Arc<UtteranceCache>,
     num_workers: NumWorkers,
 ) {
-    let Some(plan) = MediaAnalysisDispatchPlan::from_job(job, host.config()) else {
-        warn_invalid_dispatch_plan(job);
+    let Some(plan) = plan_or_fail_files(job, host, MediaAnalysisDispatchPlan::from_job).await
+    else {
         return;
     };
 
@@ -530,8 +606,47 @@ async fn resolve_runtime_capability_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use super::record_plan_refusal_for_file;
     use crate::ReleasedCommand;
+    use crate::api::JobId;
     use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind};
+    use crate::runner::util::test_sink::RecordingSink;
+    use crate::scheduling::{FailureCategory, WorkUnitKind};
+
+    /// RED FIRST (review item 3): a refused plan used to call `fail` with no
+    /// `start_file_attempt` before it, so the file went terminal with no
+    /// attempt history at all. `record_setup_failure` is the documented route
+    /// for a preflight rejection that still wants one.
+    #[tokio::test]
+    async fn a_refused_plan_records_a_setup_attempt_before_failing_the_file() {
+        let sink = RecordingSink::default();
+        record_plan_refusal_for_file(
+            &sink,
+            &JobId::from("job-refused"),
+            "sample.cha",
+            "command plan could not be built from job options",
+            crate::api::UnixTimestamp(1_700_000_000.0),
+        )
+        .await;
+
+        let attempts = sink.attempts();
+        assert_eq!(
+            attempts.len(),
+            1,
+            "a refused file must still get an attempt: {attempts:?}"
+        );
+        assert_eq!(attempts[0].filename, "sample.cha");
+        assert_eq!(attempts[0].work_unit_kind, WorkUnitKind::FileSetup);
+
+        let errors = sink.errors();
+        assert_eq!(errors.len(), 1, "the file must also fail: {errors:?}");
+        assert_eq!(errors[0].category, FailureCategory::Validation);
+        assert!(
+            errors[0].error.contains("could not be built"),
+            "the failure must carry the refusal's own message, got: {}",
+            errors[0].error
+        );
+    }
 
     /// The dispatch chain above intercepts each batched-text command by NAME
     /// (`else if use_infer && command == ReleasedCommand::Morphotag`, and four

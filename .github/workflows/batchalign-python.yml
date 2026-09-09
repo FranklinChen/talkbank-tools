@@ -22,8 +22,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-workspace
+        # No shared key: this job builds one package with no test targets, so
+        # a cache it saved would be thinner than any job that runs tests
+        # needs. See the note in the Rust workflow's own cache step.
       - name: Build dashboard
         run: make batchalign-dashboard-build
       # Push CI needs a fresh binary from this commit for packaging and smoke
@@ -36,6 +37,10 @@ jobs:
           name: cli-binary
           path: target/debug/batchalign3
           retention-days: 1
+          # Without this an empty upload is silent, and the consumer jobs then
+          # fail as `cargo: command not found` inside the smoke script's
+          # rebuild fallback rather than as the missing artifact they are.
+          if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
           name: dashboard-dist
@@ -59,16 +64,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: build-wheel-development
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/cli-binary
         with:
-          name: cli-binary
-          path: batchalign/_bin/
+          path: batchalign/_bin
       - uses: actions/download-artifact@v8
         with:
           name: dashboard-dist
           path: frontend/dist/
-      - name: Make CLI binary executable
-        run: chmod +x batchalign/_bin/batchalign3
       - name: Build development-profile ABI3 wheel
         # One cp313-abi3 wheel is valid on every supported Python. The test
         # matrix below installs this exact artifact under 3.13 and 3.14.
@@ -203,12 +205,9 @@ jobs:
       - name: Install frontend deps
         working-directory: frontend
         run: npm ci
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/cli-binary
         with:
-          name: cli-binary
-          path: target/debug/
-      - name: Make CLI binary executable
-        run: chmod +x target/debug/batchalign3
+          path: target/debug
       - name: Verify dashboard API artifacts
         env:
           BATCHALIGN_BIN: ${{ github.workspace }}/target/debug/batchalign3
@@ -238,12 +237,7 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-workspace
+      # This job consumes artifacts; it does not compile Rust.
       - uses: actions/download-artifact@v8
         with:
           name: dashboard-dist
@@ -252,12 +246,9 @@ jobs:
         with:
           name: wheel
           path: dist/
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/cli-binary
         with:
-          name: cli-binary
-          path: target/debug/
-      - name: Make CLI binary executable
-        run: chmod +x target/debug/batchalign3
+          path: target/debug
       - name: Install batchalign
         run: |
           uv sync --group dev --no-install-project
@@ -354,6 +345,7 @@ jobs:
 
   dashboard-smoke:
     name: Dashboard Smoke
+    needs: build-cli
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -364,16 +356,13 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             frontend/e2e/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cli-binary
         with:
-          shared-key: dashboard-release
+          path: target/debug
       - name: Run smoke suite
         env:
           BATCHALIGN_PLAYWRIGHT_WITH_DEPS: "1"
-          RUSTFLAGS: -C debuginfo=0
+          BATCHALIGN_BIN: ${{ github.workspace }}/target/debug/batchalign3
         run: bash scripts/run_react_dashboard_smoke.sh
 
   dashboard-e2e:
@@ -395,22 +384,14 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: dashboard-release
+      # This job consumes artifacts; it does not compile Rust.
       - uses: actions/download-artifact@v8
         with:
           name: wheel
           path: dist/
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/cli-binary
         with:
-          name: cli-binary
-          path: target/debug/
-      - name: Make CLI binary executable
-        run: chmod +x target/debug/batchalign3
+          path: target/debug
       - name: Install from pre-built wheel
         run: |
           uv sync --group dev --no-install-project
@@ -431,7 +412,6 @@ jobs:
           # in place. Pointing at the artifact downloaded above is what
           # makes this job sub-15-minute.
           BATCHALIGN_BIN: ${{ github.workspace }}/target/debug/batchalign3
-          RUSTFLAGS: -C debuginfo=0
         run: |
           BATCHALIGN_PYTHON="$(uv run --no-sync python -c 'import sys; print(sys.executable)')"
           export BATCHALIGN_PYTHON

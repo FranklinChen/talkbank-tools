@@ -34,6 +34,14 @@
     },
     {
       "schema": "execute_request",
+      "file": "execute_request_asr_whisper_hub_prepared_audio.json"
+    },
+    {
+      "schema": "execute_request",
+      "file": "execute_request_asr_provider_media_qwen.json"
+    },
+    {
+      "schema": "execute_request",
       "file": "execute_request_fa_prepared_audio.json"
     },
     {
@@ -47,6 +55,10 @@
     {
       "schema": "execute_request",
       "file": "execute_request_fa_char_spaced_prepared_audio.json"
+    },
+    {
+      "schema": "execute_request",
+      "file": "execute_request_fa_qwen3_prepared_audio.json"
     },
     {
       "schema": "execute_request",
@@ -71,6 +83,10 @@
     {
       "schema": "execute_request",
       "file": "execute_request_speaker_nemo_prepared_audio.json"
+    },
+    {
+      "schema": "execute_request",
+      "file": "execute_request_speaker_pyannote_ai_prepared_audio.json"
     },
     {
       "schema": "execute_request",

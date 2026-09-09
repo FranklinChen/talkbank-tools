@@ -189,6 +189,21 @@ impl WordSpan {
     pub const fn end(&self) -> &RecordedInstant {
         &self.end
     }
+
+    /// Take both ends, consuming the span.
+    ///
+    /// For the caller that OWNS its span and is building the value that
+    /// replaces it: `alignment::token_map`'s lowering needs both origins by
+    /// value, and reaching them through the borrowing accessors above meant
+    /// cloning each one back out, twice per word, on every aligned group. An
+    /// `Origin` is a boxed chain rather than a scalar, so that is not a free
+    /// copy.
+    ///
+    /// The borrowing accessors stay for readers that keep the span; this adds
+    /// no way to BUILD one, so the constructor gate above is untouched.
+    pub fn into_parts(self) -> (RecordedInstant, RecordedInstant) {
+        (self.start, self.end)
+    }
 }
 
 #[cfg(test)]

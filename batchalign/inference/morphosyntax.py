@@ -18,10 +18,14 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ValidationError, model_validator
 
 from batchalign.inference._domain_types import LanguageCode
+from batchalign.worker._pipeline_cache import (
+    LoadedPipeline,
+    PipelineLookup,
+    retokenize_key,
+)
 
 if TYPE_CHECKING:
     from batchalign.inference._tokenizer_realign import TokenizerContext
-    from batchalign.inference.types import StanzaNLP
 
 from batchalign.providers import (
     BatchInferRequest,
@@ -523,18 +527,110 @@ def validate_ud_words(sents: list[list[UdWordRaw]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Failure vocabulary
+# ---------------------------------------------------------------------------
+
+
+class MorphosyntaxFailure(StrEnum):
+    """Why one language group of a batch produced no morphosyntactic analysis.
+
+    A closed set rather than an ad-hoc string per site: each member is a
+    distinct operational situation with a distinct fix (install the language,
+    investigate a crash, investigate a tokenization drift), and naming them
+    here is what stops the next such path being written as a bare
+    ``L.warning`` with nothing returned.
+    """
+
+    PIPELINE_RAISED = "Stanza pipeline raised"
+    PIPELINE_MISSING = "no Stanza pipeline loaded"
+    SENTENCE_COUNT_MISMATCH = "Stanza sentence count mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageGroupFailure:
+    """One language group's failure, carrying where and why it happened.
+
+    Every item in the group gets the SAME failure, because the group is the
+    unit Stanza is invoked on: when it fails, nothing is known about any of
+    its utterances.
+    """
+
+    kind: MorphosyntaxFailure
+    lang: LanguageCode
+    detail: str
+
+    def message(self) -> str:
+        """The operator-facing sentence, used for both the log and the wire.
+
+        One renderer, so the line an operator reads in the worker log and the
+        string the Rust side reports for the failed file cannot disagree.
+        """
+        return f"{self.kind.value} for language {self.lang}: {self.detail}"
+
+    def response(self) -> InferResponse:
+        """The per-item response carrying this failure to the Rust consumer.
+
+        ``result`` is deliberately left unset. An empty UD document is a
+        LEGAL analysis (it is what an utterance with no words gets), so
+        returning one here would be indistinguishable from success: the Rust
+        side would inject empty ``%mor`` and ``%gra`` tiers and write the
+        file. With an error it fails the file instead, which is what
+        ``crates/batchalign/src/morphosyntax/worker.rs`` does with any
+        per-item error.
+        """
+        return InferResponse(error=self.message(), elapsed_s=0.0)
+
+
+_UNDECIDED_ERROR = (
+    "morphosyntax decided nothing for this item; refusing to report an empty "
+    "analysis as success"
+)
+"""Fail-closed placeholder for an item no code path decided.
+
+Reaching it is a defect in ``batch_infer_morphosyntax`` rather than a fact
+about the utterance, which is exactly why it must not be an empty result: an
+unforeseen path then fails the file loudly instead of silently emptying its
+tiers.
+"""
+
+
+def _finalized(
+    results: list[InferResponse | None],
+    *,
+    elapsed_s: float | None,
+) -> BatchInferResponse:
+    """Settle every item's decision into the batch response.
+
+    ``None`` means "no path decided this item" and becomes an error (see
+    ``_UNDECIDED_ERROR``). ``elapsed_s`` is stamped on the first item only,
+    which is the batch-level timing convention the Rust side reads; ``None``
+    leaves the timings alone, for the early return that did no work.
+    """
+    settled = [
+        r if r is not None else InferResponse(error=_UNDECIDED_ERROR, elapsed_s=0.0)
+        for r in results
+    ]
+    if settled and elapsed_s is not None:
+        first = settled[0]
+        settled[0] = InferResponse(
+            result=first.result, error=first.error, elapsed_s=elapsed_s
+        )
+    return BatchInferResponse(results=settled)
+
+
+# ---------------------------------------------------------------------------
 # Inference function
 # ---------------------------------------------------------------------------
 
 
 def batch_infer_morphosyntax(
     req: BatchInferRequest,
-    nlp_pipelines: dict[LanguageCode, StanzaNLP],
-    contexts: dict[LanguageCode, TokenizerContext],
+    pipelines: PipelineLookup,
     nlp_lock: threading.Lock,
     free_threaded: bool,
     mwt_lexicon: dict[str, list[str]] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    load_pipeline: Callable[[LanguageCode], None] | None = None,
 ) -> BatchInferResponse:
     """Batch Stanza inference: (words, lang) -> UdResponse.
 
@@ -542,10 +638,15 @@ def batch_infer_morphosyntax(
     ----------
     req : BatchInferRequest
         Batch of MorphosyntaxBatchItem payloads.
-    nlp_pipelines : dict
-        Pre-loaded Stanza Pipeline instances keyed by ISO-3 code.
-    contexts : dict
-        Tokenizer realignment contexts keyed by ISO-3 code.
+    pipelines : PipelineLookup
+        One atomic read of a loaded pipeline AND the tokenizer context built
+        for it, keyed by ISO-3 code (or a suffixed variant key). In the worker
+        this is the BOUNDED pipeline cache, so a lookup is also a use: it
+        decides what stays resident from what is read here. It is ONE lookup
+        rather than a pipeline mapping beside a context mapping because those
+        were two separately locked reads with an eviction window between them:
+        the second could miss, and `tok_ctx` silently became `None` or another
+        language's context while the pipeline in hand was the right one.
     nlp_lock : threading.Lock
         Lock guarding Stanza calls on GIL-enabled Python.
     free_threaded : bool
@@ -555,6 +656,13 @@ def batch_infer_morphosyntax(
         expansion tokens (e.g. ``{"gonna": ["going", "to"]}``).
         When provided, matching tokens in Stanza's output are
         expanded according to this lexicon.
+    load_pipeline : callable, optional
+        Loader invoked with a language code when ``pipelines`` has no
+        pipeline for it, before that is reported as a failure. The worker
+        supplies ``load_stanza_models``; a bounded cache can evict a language
+        loaded earlier in the same batch, and this is what brings it back.
+        Absent (the default, used by unit tests), a miss is reported straight
+        away rather than reaching for a model download.
     """
 
     @contextlib.contextmanager
@@ -575,10 +683,17 @@ def batch_infer_morphosyntax(
         except ValidationError:
             items.append(None)
 
-    empty_ud: JSONObject = {"sentences": []}
-    results: list[InferResponse] = [
-        InferResponse(result=empty_ud, elapsed_s=0.0) for _ in range(n)
-    ]
+    # UNDECIDED until some path below decides. This used to be pre-filled with
+    # an empty UD document, which made "Stanza never ran" identical on the wire
+    # to "Stanza found nothing", so a whole language group could fail and the
+    # file was still written with empty %mor and %gra tiers. Every path now
+    # writes its own answer, and anything left undecided fails closed in
+    # `_finalized`.
+    results: list[InferResponse | None] = [None] * n
+
+    # The ONE legitimately empty analysis: an utterance with no words has no
+    # morphology, and that is a fact about the utterance rather than a failure.
+    no_words_result: JSONObject = {"sentences": []}
 
     by_lang: dict[LanguageCode, list[StanzaInput]] = {}
     for i, item in enumerate(items):
@@ -586,6 +701,7 @@ def batch_infer_morphosyntax(
             results[i] = InferResponse(error="Invalid batch item", elapsed_s=0.0)
             continue
         if not item.words:
+            results[i] = InferResponse(result=no_words_result, elapsed_s=0.0)
             continue
 
         words = list(item.words)
@@ -607,7 +723,7 @@ def batch_infer_morphosyntax(
         )
 
     if not by_lang:
-        return BatchInferResponse(results=results)
+        return _finalized(results, elapsed_s=None)
 
     for lang_code, lang_items in by_lang.items():
         indices = [item.item_index for item in lang_items]
@@ -620,30 +736,55 @@ def batch_infer_morphosyntax(
             and lang_code in ("zho", "cmn")
             and req.lang in ("zho", "cmn")
         )
+        entry: LoadedPipeline | None = None
         if use_retok_pipeline:
-            retok_key = f"{lang_code}:retok"
-            nlp = nlp_pipelines.get(retok_key)
-            if nlp is None:
+            retok_key = retokenize_key(lang_code)
+            entry = pipelines.loaded(retok_key)
+            if entry is None:
                 # Lazy-load the retokenize pipeline on first request
                 from batchalign.worker._stanza_loading import (
                     load_stanza_retokenize_model,
                 )
 
                 load_stanza_retokenize_model(lang_code)
-                nlp = nlp_pipelines.get(retok_key)
-            if nlp is None:
+                entry = pipelines.loaded(retok_key)
+            if entry is None:
                 L.warning(
                     "Failed to load retokenize pipeline for %s",
                     lang_code,
                 )
                 use_retok_pipeline = False
         if not use_retok_pipeline:
-            nlp = nlp_pipelines.get(lang_code)
-        if nlp is None:
-            L.warning(
-                "No Stanza pipeline for language %s -- items will have empty UdResponse",
-                lang_code,
+            entry = pipelines.loaded(lang_code)
+        # Why the pipeline is missing, when we know: a failed reload says
+        # something the bare absence does not, and it is the operator's actual
+        # lead. Kept rather than logged and dropped.
+        missing_reason = "this worker has no loaded pipeline for the language"
+        if entry is None and load_pipeline is not None:
+            # The worker's pipeline cache is BOUNDED, so a language loaded
+            # earlier in this same batch can have been evicted to make room for
+            # a later one. Ask the loader once and look again; only a second
+            # miss is a real failure. A raise here is not one either: it is one
+            # more way to have no pipeline, and the miss below reports it.
+            try:
+                load_pipeline(lang_code)
+            except Exception as reload_error:
+                missing_reason = f"loading it failed: {reload_error}"
+                L.warning(
+                    "Reloading the Stanza pipeline for %s failed: %s",
+                    lang_code,
+                    reload_error,
+                )
+            entry = pipelines.loaded(lang_code)
+        if entry is None:
+            failure = LanguageGroupFailure(
+                kind=MorphosyntaxFailure.PIPELINE_MISSING,
+                lang=lang_code,
+                detail=missing_reason,
             )
+            L.warning("%s", failure.message())
+            for idx in indices:
+                results[idx] = failure.response()
             continue
 
         # Space-joined for every mode. Stanza's neural tokenizer
@@ -654,15 +795,23 @@ def batch_infer_morphosyntax(
         # defined as the space-joined boundaries, which is what the retokenize
         # arm was rebuilding by hand.
         combined = "\n\n".join(item.text for item in lang_items)
-        if use_retok_pipeline:
-            retok_key = f"{lang_code}:retok"
-            tok_ctx = (
-                contexts.get(retok_key)
-                or contexts.get(lang_code)
-                or contexts.get(req.lang)
-            )
-        else:
-            tok_ctx = contexts.get(lang_code) or contexts.get(req.lang)
+        # The context comes off the ENTRY WE ARE ABOUT TO RUN, not from a
+        # second lookup by the same key. Those were two locked reads with an
+        # eviction window between them, so under concurrent installs the
+        # realigner could be handed `None`, or another language's context,
+        # alongside the right pipeline. `LoadedPipeline` cannot be split, so
+        # this pairing is now the type's, not the caller's.
+        tok_ctx = entry.context
+        if tok_ctx is None:
+            # A genuinely different key, so a genuinely separate lookup: the
+            # retokenize pipeline has no realignment context of its own and
+            # borrows the plain pipeline's. A miss here means no realignment,
+            # which `_realignment_mode` handles.
+            for fallback_key in (lang_code, req.lang):
+                fallback = pipelines.loaded(fallback_key)
+                if fallback is not None and fallback.context is not None:
+                    tok_ctx = fallback.context
+                    break
 
         # `retokenize` is the whole condition: `use_retok_pipeline` is a
         # narrowing of it (Mandarin, both job and utterance), so it adds
@@ -678,7 +827,7 @@ def batch_infer_morphosyntax(
         try:
             with _maybe_lock():
                 with _realignment_applied(mode):
-                    doc = nlp(combined)
+                    doc = entry.nlp(combined)
 
             sents = doc.to_dict()
 
@@ -693,12 +842,18 @@ def batch_infer_morphosyntax(
             validate_ud_words(sents)
 
             if len(sents) != len(indices):
-                L.warning(
-                    "Stanza sentence count mismatch for language %s (expected %d, got %d)",
-                    lang_code,
-                    len(indices),
-                    len(sents),
+                # Stanza returned a different number of sentences than the
+                # utterances we sent, so no sentence can be attributed to any
+                # utterance. That is a failure of the whole group, not a
+                # licence to publish empty tiers for it.
+                failure = LanguageGroupFailure(
+                    kind=MorphosyntaxFailure.SENTENCE_COUNT_MISMATCH,
+                    lang=lang_code,
+                    detail=f"expected {len(indices)} sentences, got {len(sents)}",
                 )
+                L.warning("%s", failure.message())
+                for idx in indices:
+                    results[idx] = failure.response()
             else:
                 # For Cantonese, override Stanza POS with PyCantonese.
                 # Stanza's Mandarin model scores ~50% on Cantonese vocabulary;
@@ -725,27 +880,25 @@ def batch_infer_morphosyntax(
                         elapsed_s=0.0,
                     )
         except Exception as e:
-            L.warning(
-                "Stanza batch failed for language %s (%d items): %s",
-                lang_code,
-                len(indices),
-                e,
+            # The narration stays, but it is no longer the only place the fact
+            # goes: a log line is where lost information looks like it was
+            # handled. Every item of the group carries the failure home, so
+            # the Rust side fails the file instead of writing empty tiers.
+            failure = LanguageGroupFailure(
+                kind=MorphosyntaxFailure.PIPELINE_RAISED,
+                lang=lang_code,
+                detail=str(e),
             )
+            L.warning("%s (%d items)", failure.message(), len(indices))
+            for idx in indices:
+                results[idx] = failure.response()
 
-        # Report progress: how many items have been processed so far
-        # (across all language groups).
+        # Report progress: how many items have been decided so far
+        # (across all language groups), whether they succeeded or failed.
         if progress_callback is not None:
-            completed_so_far = sum(
-                1 for r in results if r.result != empty_ud or r.error is not None
-            )
+            completed_so_far = sum(1 for r in results if r is not None)
             progress_callback(completed_so_far, n)
 
     elapsed = time.monotonic() - t0
-    if results:
-        first = results[0]
-        results[0] = InferResponse(
-            result=first.result, error=first.error, elapsed_s=elapsed
-        )
-
     L.info("batch_infer morphosyntax: %d items, %.3fs", n, elapsed)
-    return BatchInferResponse(results=results)
+    return _finalized(results, elapsed_s=elapsed)

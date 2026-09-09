@@ -541,6 +541,7 @@ mod tests {
 
     use super::*;
     use crate::extract::extract_words;
+    use talkbank_model::alignment::helpers::PositionalDomain;
 
     const HEADER: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
                           @ID:\teng|corpus|CHI|2;||||Target_Child|||\n";
@@ -570,7 +571,7 @@ mod tests {
             Err(e) => panic!("fixture {body:?} must parse: {e:?}"),
         };
 
-        let extracted = extract_words(&chat_file, TierDomain::Mor);
+        let extracted = extract_words(&chat_file, PositionalDomain::Mor);
         let expected = extracted.first().map_or(0, |u| u.words.len());
 
         let mut utterance = chat_file

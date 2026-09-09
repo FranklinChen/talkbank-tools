@@ -8,7 +8,7 @@
 //!
 //! `batchalign-cli`/API submission
 //! → `runner::dispatch_fa_infer`
-//! → [`process_fa`]
+//! → [`run_fa_from_ast`]
 //! → `crate::chat_ops::fa::{group_utterances, parse_fa_response, apply_fa_results}`
 //! → FA worker transport adapter
 //! → validation + serialization.
@@ -44,8 +44,9 @@ use crate::chat_ops::fa::{
 use crate::chat_ops::{CacheKey, CacheTaskName};
 use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
-use batchalign_transform::parse::{is_ca, is_dummy, is_no_align, parse_lenient};
-use batchalign_transform::validate::{ValidityLevel, validate_output, validate_to_level};
+use crate::pipeline::post_validate::PostValidated;
+use batchalign_transform::parse::{is_ca, is_dummy, is_no_align};
+use batchalign_transform::validate::{ValidityLevel, validate_to_level};
 use tracing::{info, warn};
 
 use crate::api::DurationMs;
@@ -53,8 +54,195 @@ use crate::chat_ops::fa::Grouping;
 use crate::error::ServerError;
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 use crate::types::results::{FaGroupEvidence, FaOutput, FaResult};
-use crate::types::traces::{FaEvidenceSourceTrace, FaGroupTrace, TimingTrace, ViolationTrace};
+use crate::types::traces::{FaEvidenceSourceTrace, FaGroupTrace, TimingTrace};
 use transport::{FaInferencePlan, FaWorkerTransport, UncheckedFaWorkerBatch, plan_fa_inference};
+
+/// The validity level forced alignment admits an input at.
+///
+/// Stated ONCE. Its output gate reads the level off the [`FaAdmission`] the
+/// admission check produced, so there is no second place for a bar to be
+/// written down and no way for the two to disagree.
+const FA_ADMISSION_LEVEL: ValidityLevel = ValidityLevel::MainTierValid;
+
+/// Proof that an FA input cleared pre-validation, carrying the level it
+/// cleared and the exclusive route to a returned [`FaResult`].
+///
+/// # Why this is a type
+///
+/// Two defects lived in the gap this closes, and both were invisible in
+/// review because the correct-looking code was spread over three functions.
+///
+/// 1. The gate ran at ONE of the four `Ok(FaResult ...)` returns. The
+///    `%wor`-reuse fast path, the no-groups path and the incremental
+///    no-groups path each finalized a model (bullet repair, monotonicity
+///    stripping, decision retention) and returned it having judged nothing.
+///    That fast path is the ordinary rerun route, so the gate was absent from
+///    the commonest way FA output reaches disk. This type is now the only way
+///    to build the returned value, so a new early return cannot skip it: it
+///    has nothing to return. There are exactly two routes, [`Self::finish`]
+///    for a document FA processed and [`Self::pass_through`] for a declared
+///    `@Options: dummy` / `NoAlign` document, and both hand back an
+///    [`AdmittedFaResult`] whose fields are private to this module.
+/// 2. Where the gate did run it restated its level as
+///    `ValidityLevel::StructurallyComplete`, while admission demanded
+///    `MainTierValid`. `ValidityLevel` is `Ord`, so that is strictly lower:
+///    output degraded from L2 to L1 by the run itself passed. The level is
+///    [`FA_ADMISSION_LEVEL`] on both sides now, read from the constant by both
+///    [`Self::admit`] and [`Self::finish`], so restating it is not something a
+///    caller can do.
+///
+/// # Why it carries nothing
+///
+/// It held a `level: ValidityLevel` field that was assigned
+/// `FA_ADMISSION_LEVEL` at its one construction and read back in `finish`: a
+/// copy of a constant, kept in step by hand, and a value a future caller could
+/// have set to something else. The proof is the EXISTENCE of the value, not
+/// anything inside it, so the type is zero-sized and `finish` reads the
+/// constant directly.
+///
+/// The private `()` field is what keeps it unforgeable. A unit struct
+/// `FaAdmission;` would be constructible anywhere the name is visible, which
+/// is the whole crate, and this type's entire job is to be obtainable only by
+/// passing the gate.
+pub(super) struct FaAdmission(());
+
+impl FaAdmission {
+    /// Run FA's pre-validation gate. The only constructor.
+    pub(super) fn admit(
+        file: &crate::chat_ops::ChatFile,
+        parse_errors: &[crate::chat_ops::ParseError],
+    ) -> Result<Self, ServerError> {
+        match validate_to_level(file, parse_errors, FA_ADMISSION_LEVEL) {
+            Ok(()) => Ok(Self(())),
+            Err(errors) => {
+                let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+                Err(ServerError::Validation(format!(
+                    "align pre-validation failed: {}",
+                    msgs.join("; ")
+                )))
+            }
+        }
+    }
+
+    /// Admit a `@Options: dummy` / `NoAlign` document the command refuses to
+    /// touch, and hand back the value the caller returns.
+    ///
+    /// The second and last route to an [`AdmittedFaResult`]. It exists because
+    /// `FaResult::pass_through` used to be a `pub(crate)` constructor that
+    /// built the returned `Ok` value directly at three sites, which made this
+    /// type's own claim to be the only route false. The proof it carries is
+    /// `PostValidated::pass_through`: NOT gated, because gating a dummy file
+    /// re-judges the INPUT against a bar the input never had to meet (it has
+    /// no `@Participants`, so it fails L1) and would refuse a document the
+    /// researcher asked us to leave alone. That refusal is not hypothetical:
+    /// it is what the writer's own second gate did until this proof started
+    /// travelling to it.
+    ///
+    /// # It takes the input TEXT, and that is the point
+    ///
+    /// `align` promises a `@Options: dummy` or `NoAlign` document back
+    /// UNCHANGED, and the book says `NoAlign` is a strict pass-through with
+    /// zero modifications. Until 2026-09-07 the proof was built with
+    /// `PostValidated::declined_stripping_decision_tiers` (then named
+    /// `declined_document`), which SERIALIZES THE MODEL, so the
+    /// bytes written were a round trip through the parser and the serializer
+    /// and every difference that round trip makes reached disk unexamined:
+    /// `@Comment:\tkept   ` came back without its trailing spaces. Nothing was
+    /// gating those bytes, because this is the one route that judges nothing,
+    /// so it is the one route where a silent rewrite could not be caught.
+    ///
+    /// The text therefore travels with the model from the seam that READ it:
+    /// the dispatch task carries the bytes it read off disk, and both entry
+    /// points take the same [`FaInputDocument`], so the incremental path hands
+    /// on the very bytes the full path would.
+    pub(super) fn pass_through(
+        chat_file: crate::chat_ops::ChatFile,
+        original_text: &str,
+        gap_healing: crate::chat_ops::fa::WordGapHealing,
+        engine: &str,
+        engine_version: &str,
+    ) -> AdmittedFaResult {
+        let document =
+            PostValidated::pass_through(original_text, crate::api::ReleasedCommand::Align);
+        AdmittedFaResult {
+            // Written out rather than hidden behind a `FaResult::pass_through`
+            // constructor: that constructor was the hole this type exists to
+            // close, and there is nothing left for it to be reused by.
+            result: FaResult {
+                output: FaOutput::PassThrough(chat_file),
+                group_evidence: Vec::new(),
+                engine: engine.to_owned(),
+                engine_version: engine_version.to_owned(),
+                decisions: Vec::new(),
+                timing_decisions: Vec::new(),
+                gap_healing,
+                fallback_events: Vec::new(),
+            },
+            document,
+        }
+    }
+
+    /// Gate a finished FA result and hand back the value the caller returns.
+    ///
+    /// Fail-closed: a file whose aligned output fails the gate fails THIS file
+    /// (`ServerError::Validation` classifies as `FailureCategory::Validation`),
+    /// so `finalize_success` never runs and nothing is written. A refusal is
+    /// therefore reported through the file's failure rather than through a
+    /// trace nobody would read, which is why an `FaResult` carries no
+    /// violations at all: the wire format's field is filled in, empty, where
+    /// the trace is built.
+    ///
+    /// The gate's PROOF is kept, not dropped. It used to be discarded and the
+    /// dispatch seam re-serialized `output.to_chat_string()` afterwards, so
+    /// the L2-gated bytes were never the bytes written; the writer then
+    /// manufactured a second, weaker proof of its own over text this one had
+    /// never seen.
+    /// It CONSUMES the admission, so one admitted input yields at most one
+    /// finished result. Taking `&self` let `admit(&a)` be followed by
+    /// `finish(result_for_b)`, and by a second `finish` after that; nothing is
+    /// deleted by the change, but the mismatched pair stops type-checking.
+    pub(super) fn finish(self, result: FaResult) -> Result<AdmittedFaResult, ServerError> {
+        let document = PostValidated::gate(
+            result.output.as_chat_file(),
+            FA_ADMISSION_LEVEL,
+            crate::api::ReleasedCommand::Align,
+        )
+        .map_err(|failure| ServerError::Validation(failure.to_string()))?;
+        Ok(AdmittedFaResult { result, document })
+    }
+}
+
+/// A finished FA run whose CHAT bytes are already proven writable.
+///
+/// The phase type that closes the loop the admission opens: an `FaResult` is a
+/// document plus its evidence, and this is that pair AFTER
+/// [`FaAdmission::finish`] gated it or [`FaAdmission::pass_through`] declared
+/// it untouched. Its fields are private to this module, so the only values of
+/// this type in the program are the ones those two functions returned.
+pub(crate) struct AdmittedFaResult {
+    /// The run's evidence, for the dashboard timeline.
+    result: FaResult,
+    /// The bytes the writer may persist, and the proof that it may.
+    document: PostValidated,
+}
+
+impl AdmittedFaResult {
+    /// Take the proven bytes, discarding the evidence timeline.
+    pub(crate) fn into_document(self) -> PostValidated {
+        self.document
+    }
+
+    /// Split the proven bytes from the evidence timeline.
+    ///
+    /// Both halves leave together because a caller that wants the timeline
+    /// still has to write the document, and handing out the timeline alone
+    /// would leave the bytes with no route to disk.
+    pub(crate) fn into_document_and_timeline(
+        self,
+    ) -> (PostValidated, crate::types::traces::FaTimelineTrace) {
+        (self.document, self.result.into_timeline_trace())
+    }
+}
 
 /// Cache task name for FA results.
 const CACHE_TASK: CacheTaskName = CacheTaskName::ForcedAlignment;
@@ -391,75 +579,82 @@ fn assemble_group_evidence(
 // Per-file FA processing
 // ---------------------------------------------------------------------------
 
-/// Process a single CHAT file through the forced alignment pipeline.
+/// A CHAT document as forced alignment received it.
 ///
-/// Returns a structured [`FaResult`] containing a reconciled CHAT output state,
-/// group info, timing data, and validation results. The runner owns the sole
-/// serialization boundary and decides which evidence to persist.
+/// The model, the parse errors that came with it, and the BYTES it was read
+/// as, in one value, because the three are only ever right together: the
+/// errors describe that parse and no other, and the text is the only thing
+/// that can keep align's promise to hand a `@Options: dummy` or `NoAlign`
+/// document back byte-identical. As three parameters, nothing stopped a
+/// caller pairing one file's model with another file's text, and the text was
+/// simply absent, which is how the pass-through came to be a re-serialization.
+pub(crate) struct FaInputDocument<'a> {
+    /// The parsed document FA works on.
+    chat_file: crate::chat_ops::ChatFile,
+    /// The errors that parse reported, carried so admission judges the same
+    /// parse the model came from.
+    parse_errors: Vec<crate::chat_ops::ParseError>,
+    /// The bytes the document was read as.
+    ///
+    /// NOT a serialization of `chat_file`, and not required to still describe
+    /// it: the dispatch path runs the UTR pre-pass over the model between the
+    /// read and this call, so the two legitimately diverge. What it is for is
+    /// the one route that applies NOTHING, where the input's own bytes are the
+    /// correct output.
+    text: &'a str,
+}
+
+impl<'a> FaInputDocument<'a> {
+    /// Bundle a parsed document with the bytes it was read as.
+    ///
+    /// Deliberately not `parse(text)`: the dispatch path hands over a model
+    /// the UTR pre-pass has already edited, so deriving one from the other
+    /// here would either undo that work or make a false claim about it.
+    pub(crate) fn new(
+        chat_file: crate::chat_ops::ChatFile,
+        parse_errors: Vec<crate::chat_ops::ParseError>,
+        text: &'a str,
+    ) -> Self {
+        Self {
+            chat_file,
+            parse_errors,
+            text,
+        }
+    }
+}
+
+/// Run forced alignment on a pre-parsed `ChatFile`.
+///
+/// THE FA entry point, and the only one. There used to be a `process_fa(&str)`
+/// beside it that parsed a string and delegated here; its last caller was the
+/// incremental path, which held the model all along and serialized it so that
+/// this function could parse it back.
+///
+/// Returns a structured [`FaResult`] containing a reconciled CHAT output
+/// state, group info, timing data, and validation results. The runner owns the
+/// sole serialization boundary and decides which evidence to persist.
 ///
 /// Algorithm outline:
-/// 1. Parse leniently and run pre-validation (`MainTierValid`).
+/// 1. Pre-validate the document it was handed (`MainTierValid`).
 /// 2. Group utterances into FA windows.
 /// 3. Resolve cache hits/misses per group.
 /// 4. Send miss groups through the FA worker transport adapter.
 /// 5. Parse responses and align to transcript words in Rust.
 /// 6. Apply timings + postprocessing (`apply_fa_results`).
 /// 7. Reconcile media/timing typestate and run full post-validation.
-pub(crate) async fn process_fa(
-    chat_text: &str,
-    audio: &AudioContext<'_>,
-    worker_lang: &crate::api::LanguageCode3,
-    services: PipelineServices<'_>,
-    fa_params: &FaParams,
-    progress: Option<&ProgressSender>,
-) -> Result<FaResult, ServerError> {
-    run_fa_impl(chat_text, audio, worker_lang, services, fa_params, progress).await
-}
-
-pub(crate) async fn run_fa_impl(
-    chat_text: &str,
-    audio: &AudioContext<'_>,
-    worker_lang: &crate::api::LanguageCode3,
-    services: PipelineServices<'_>,
-    fa_params: &FaParams,
-    progress: Option<&ProgressSender>,
-) -> Result<FaResult, ServerError> {
-    // 1. Parse
-    let parser = crate::chat_parser();
-    let (chat_file, parse_errors) = parse_lenient(&parser, chat_text);
-    if !parse_errors.is_empty() {
-        warn!(
-            num_errors = parse_errors.len(),
-            "Parse errors in FA input (continuing with recovery)"
-        );
-    }
-
-    run_fa_from_ast(
-        chat_file,
-        parse_errors,
-        audio,
-        worker_lang,
-        services,
-        fa_params,
-        progress,
-    )
-    .await
-}
-
-/// Run forced alignment on a pre-parsed `ChatFile`.
-///
-/// This is the primary FA entry point when the caller already owns a `ChatFile`
-/// AST (e.g., after UTR injection). It avoids the serialize→re-parse cycle that
-/// `process_fa(&str)` performs.
 pub(crate) async fn run_fa_from_ast(
-    mut chat_file: crate::chat_ops::ChatFile,
-    parse_errors: Vec<crate::chat_ops::ParseError>,
+    document: FaInputDocument<'_>,
     audio: &AudioContext<'_>,
     worker_lang: &crate::api::LanguageCode3,
     services: PipelineServices<'_>,
     fa_params: &FaParams,
     progress: Option<&ProgressSender>,
-) -> Result<FaResult, ServerError> {
+) -> Result<AdmittedFaResult, ServerError> {
+    let FaInputDocument {
+        mut chat_file,
+        parse_errors,
+        text: chat_text,
+    } = document;
     // 1a′. Suppress %wor for Conversation Analysis transcripts.
     // CA transcripts (@Options: CA) use prosodic notation (⌈⌉⌊⌋, arrows,
     // lengthening marks) that %wor cannot represent. Generating %wor for
@@ -473,8 +668,9 @@ pub(crate) async fn run_fa_from_ast(
 
     // 1b. Skip dummy files
     if is_dummy(&chat_file) {
-        return Ok(FaResult::pass_through(
+        return Ok(FaAdmission::pass_through(
             chat_file,
+            chat_text,
             fa_params.gap_healing,
             fa_params.engine.as_wire_name(),
             services.engine_version.as_ref(),
@@ -492,23 +688,18 @@ pub(crate) async fn run_fa_from_ast(
     //
     // See book/src/batchalign/developer/commands/align.md: "NoAlign: strict pass-through".
     if is_no_align(&chat_file) {
-        return Ok(FaResult::pass_through(
+        return Ok(FaAdmission::pass_through(
             chat_file,
+            chat_text,
             fa_params.gap_healing,
             fa_params.engine.as_wire_name(),
             services.engine_version.as_ref(),
         ));
     }
 
-    // 1d. Pre-validation gate (L2: MainTierValid)
-    if let Err(errors) = validate_to_level(&chat_file, &parse_errors, ValidityLevel::MainTierValid)
-    {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return Err(ServerError::Validation(format!(
-            "align pre-validation failed: {}",
-            msgs.join("; ")
-        )));
-    }
+    // 1d. Pre-validation gate. The level lives on `FaAdmission`, and the
+    // proof it returns is what the output gate later reads its bar from.
+    let admission = FaAdmission::admit(&chat_file, &parse_errors)?;
 
     // 1e. Cheap rerun path: if the file already has complete, reusable `%wor`
     // timing, rebuild main-tier bullets and optionally regenerate `%wor`
@@ -550,13 +741,15 @@ pub(crate) async fn run_fa_from_ast(
             crate::chat_ops::fa::FaDecisions::without_injection(Vec::new(), Vec::new(), finalized),
         );
 
-        return Ok(FaResult::without_groups(
-            chat_file,
-            fa_params.gap_healing,
-            fa_params.engine.as_wire_name(),
-            services.engine_version.as_ref(),
-        )?
-        .with_written_decisions(written));
+        return admission.finish(
+            FaResult::without_groups(
+                chat_file,
+                fa_params.gap_healing,
+                fa_params.engine.as_wire_name(),
+                services.engine_version.as_ref(),
+            )?
+            .with_written_decisions(written),
+        );
     }
 
     // 1f. Per-utterance partial reuse: when some (but not all) utterances have
@@ -657,13 +850,15 @@ pub(crate) async fn run_fa_from_ast(
                 finalized,
             ),
         );
-        return Ok(FaResult::without_groups(
-            chat_file,
-            fa_params.gap_healing,
-            fa_params.engine.as_wire_name(),
-            services.engine_version.as_ref(),
-        )?
-        .with_written_decisions(written));
+        return admission.finish(
+            FaResult::without_groups(
+                chat_file,
+                fa_params.gap_healing,
+                fa_params.engine.as_wire_name(),
+                services.engine_version.as_ref(),
+            )?
+            .with_written_decisions(written),
+        );
     }
 
     info!(
@@ -984,23 +1179,9 @@ pub(crate) async fn run_fa_from_ast(
     let decision_traces = decision_records.into_iter().map(Into::into).collect();
     let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
 
-    // 10. Post-validation check (warn only, cross-speaker overlap is normal in
-    //    conversation data).
+    // 10. Post-validation runs in `FaAdmission::finish`, below, at the level
+    //    this file was ADMITTED at, together with every other `Ok` return.
     let output = FaOutput::processed(chat_file)?;
-    let violations = if let Err(errors) = validate_output(output.as_chat_file(), "align") {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        warn!(errors = ?msgs, "align post-validation warnings (non-fatal)");
-        errors
-            .iter()
-            .map(|e| ViolationTrace {
-                code: format!("L{}", e.level as u8),
-                message: e.message.clone(),
-                utterance_index: None,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     // 10. Build group traces
     let group_traces: Vec<FaGroupTrace> = groups
@@ -1025,7 +1206,7 @@ pub(crate) async fn run_fa_from_ast(
         pre_injection_timings,
     )?;
 
-    Ok(FaResult {
+    admission.finish(FaResult {
         output,
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
@@ -1033,7 +1214,6 @@ pub(crate) async fn run_fa_from_ast(
         decisions: decision_traces,
         timing_decisions,
         gap_healing: fa_params.gap_healing,
-        violations,
         fallback_events,
     })
 }
@@ -1044,6 +1224,154 @@ pub(crate) use incremental::process_fa_incremental;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_ops::fa::WordGapHealing;
+    use talkbank_model::model::Line;
+
+    /// An L2-valid file: participants, languages, terminator, main-tier
+    /// content, and a `@Media` line so `FaOutput::processed` can reconcile.
+    const ALIGNED: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, audio\n\
+*CHI:\thello world . \u{15}0_500\u{15}\n\
+@End\n";
+
+    fn parse_aligned(text: &str) -> crate::chat_ops::ChatFile {
+        let parser = crate::chat_parser();
+        let (file, errors) = batchalign_transform::parse::parse_lenient(&parser, text);
+        assert!(errors.is_empty(), "fixture must parse cleanly: {errors:?}");
+        file
+    }
+
+    /// A fast-path-shaped result: no groups, built exactly as the `%wor`-reuse
+    /// rerun route builds one.
+    fn fast_path_result(file: crate::chat_ops::ChatFile) -> FaResult {
+        FaResult::without_groups(
+            file,
+            WordGapHealing::PreserveMeasured,
+            "test_engine",
+            "test-build",
+        )
+        .expect("the fixture has one usable @Media declaration")
+    }
+
+    /// RED FIRST (2026-09-07 review, item 1): a document `align` declares it
+    /// will not touch must be written back BYTE-IDENTICAL.
+    ///
+    /// The pass-through proof was built with the constructor now called
+    /// `PostValidated::declined_stripping_decision_tiers`, which serializes
+    /// the MODEL, so the
+    /// bytes written were a parse-and-serialize round trip of the input rather
+    /// than the input. This route judges nothing by design, so nothing was
+    /// looking, and the trailing spaces on the `@Comment` line here were gone
+    /// from the file the researcher got back after asking us to leave it alone.
+    ///
+    /// The `assert_ne!` is the precondition and it is what makes this test
+    /// worth having: without a construct the round trip actually changes, the
+    /// assertion below would hold under both behaviours.
+    #[test]
+    fn a_declared_pass_through_carries_the_input_bytes_not_a_reserialization() {
+        const DUMMY: &str = "@UTF8\n@Begin\n@Options:\tdummy\n@Comment:\tkept   \n\
+*PAR:\thello .\n@End\n";
+        let parser = crate::chat_parser();
+        let (chat_file, _errors) = batchalign_transform::parse::parse_lenient(&parser, DUMMY);
+        assert_ne!(
+            batchalign_transform::serialize::to_chat_string(&chat_file),
+            DUMMY,
+            "precondition: re-serializing this model is NOT the identity, so a \
+             proof built from the model cannot be the input's bytes"
+        );
+
+        let admitted = FaAdmission::pass_through(
+            chat_file,
+            DUMMY,
+            WordGapHealing::PreserveMeasured,
+            "test_engine",
+            "test-build",
+        );
+
+        assert_eq!(
+            admitted.into_document().as_str(),
+            DUMMY,
+            "a document align declines to touch must be written back unchanged"
+        );
+    }
+
+    /// RED FIRST (review item 1): the `%wor`-reuse and no-groups fast paths
+    /// used to return `Ok(FaResult ...)` without running the gate at all, and
+    /// the `%wor`-reuse path is the ordinary rerun route. A finalized model
+    /// that fails `validate_output("align")` must be REFUSED, not returned.
+    #[test]
+    fn a_fast_path_result_failing_the_align_output_check_is_refused() {
+        let admitted = parse_aligned(ALIGNED);
+        let admission = FaAdmission::admit(&admitted, &[]).expect("the fixture is L2-valid");
+
+        let mut degraded = parse_aligned(ALIGNED);
+        for line in &mut degraded.lines {
+            if let Line::Utterance(utt) = line {
+                utt.main.content.terminator = None;
+            }
+        }
+
+        let Err(failure) = admission.finish(fast_path_result(degraded)) else {
+            panic!("a fast-path output that lost a terminator must be refused");
+        };
+        let rendered = failure.to_string();
+        assert!(
+            rendered.contains("lost its terminator"),
+            "the refusal must name what broke, got: {rendered}"
+        );
+    }
+
+    /// RED FIRST (review item 2): the gate used to restate its level as
+    /// `StructurallyComplete` while admission demanded `MainTierValid`, so a
+    /// run that degraded its own input from L2 to L1 passed. The level now
+    /// comes from the admission, so this output is refused.
+    #[test]
+    fn output_degraded_from_l2_to_l1_is_refused() {
+        let admitted = parse_aligned(ALIGNED);
+        let admission = FaAdmission::admit(&admitted, &[]).expect("the fixture is L2-valid");
+
+        let mut degraded = parse_aligned(ALIGNED);
+        for line in &mut degraded.lines {
+            if let Line::Utterance(utt) = line {
+                // Empty main tier: still L1 (speaker declared, terminator
+                // present), no longer L2.
+                utt.main.content.content = talkbank_model::model::TierContentItems::new(Vec::new());
+            }
+        }
+        assert!(
+            batchalign_transform::validate::validate_to_level(
+                &degraded,
+                &[],
+                ValidityLevel::StructurallyComplete
+            )
+            .is_ok(),
+            "precondition: the degraded output still satisfies L1, so only a \
+             gate at the ADMITTED level can catch it"
+        );
+
+        let Err(failure) = admission.finish(fast_path_result(degraded)) else {
+            panic!("output degraded below its admission level must be refused");
+        };
+        assert!(
+            failure.to_string().contains("empty main tier"),
+            "the refusal must name the L2 failure, got: {failure}"
+        );
+    }
+
+    /// An output that still meets the bar its input was admitted at passes.
+    #[test]
+    fn an_undegraded_fast_path_result_is_admitted() {
+        let admitted = parse_aligned(ALIGNED);
+        let admission = FaAdmission::admit(&admitted, &[]).expect("the fixture is L2-valid");
+        assert!(
+            admission
+                .finish(fast_path_result(parse_aligned(ALIGNED)))
+                .is_ok(),
+            "an unchanged output must still pass its own gate"
+        );
+    }
 
     #[test]
     fn cache_task_name_is_stable() {

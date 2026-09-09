@@ -18,7 +18,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::media::transcode::{PcmEncoding, Transcode, TranscodeError};
-use crate::media::window::{EmptySegment, MediaWindow};
+use crate::media::window::{DecodedFrames, EmptySegment, MediaWindow};
 use crate::types::worker_v2::{
     ArtifactRefV2, ByteLengthV2, ByteOffsetV2, ChannelCountV2, FrameCountV2,
     PreparedAudioEncodingV2, PreparedAudioRefV2, PreparedTextEncodingV2, PreparedTextRefV2,
@@ -39,17 +39,26 @@ pub enum PreparedArtifactErrorV2 {
     #[error(transparent)]
     Transcode(#[from] TranscodeError),
 
-    /// The requested audio segment falls entirely beyond the end of the source
-    /// file.  `ffmpeg` exits with code 0 in this case but writes zero bytes,
-    /// which would cause downstream ML models to crash on empty tensors.
+    /// The requested audio segment yielded no whole samples, which would make
+    /// a downstream ML model crash on an empty tensor.
     ///
     /// Callers that encounter this error should skip the group rather than
     /// propagating a hard failure, the utterances will remain unaligned.
     ///
-    /// Serves both empties: a window that holds nothing, and a window that
-    /// produced nothing. They are the same fact to a caller, so they arrive
-    /// here together.
-    #[error("empty audio segment: {0} falls past the end of the file")]
+    /// # It does not say the window was past the end of the file
+    ///
+    /// It used to, in this message and in the one on
+    /// `RequestBuildErrorV2::EmptyAudioSegment`, and the claim was never
+    /// something the measuring code could know: `ffmpeg` exits 0 and writes
+    /// nothing for a window past the end, and it does the same for a window
+    /// whose write was truncated. The reason the measurement DID see travels
+    /// on the value, so the message states it instead of inventing one.
+    ///
+    /// This doc also used to say it served "a window that holds nothing" as
+    /// well as one that produced nothing. It does not: `MediaWindow::new`
+    /// refuses a window whose end is not after its start, so the first of
+    /// those two is unconstructible and only the second reaches here.
+    #[error("empty audio segment: {0}")]
     EmptyAudioSegment(EmptySegment),
 
     /// Filesystem or process-management error.
@@ -167,21 +176,28 @@ impl PreparedArtifactStoreV2 {
             let produced =
                 Transcode::window(&source, window, PcmEncoding::F32LeRaw).produce(&output_path)?;
             let byte_len = produced.byte_len;
-            let sample_bytes = std::mem::size_of::<f32>() as u64;
-            let frame_count = byte_len / sample_bytes;
 
-            // ffmpeg exits with code 0 even when the requested segment falls
-            // entirely past the end of the source file, but produces an empty
-            // output.  An empty tensor would cause downstream ML models (e.g.,
-            // Wave2Vec) to crash with opaque kernel-size errors.  Return a typed
-            // error so callers can skip the group gracefully instead.
-            if frame_count == 0 {
-                let _ = fs::remove_file(&output_path);
-                return Err(PreparedArtifactErrorV2::EmptyAudioSegment(EmptySegment {
-                    path: source.display().to_string(),
-                    window,
-                }));
-            }
+            // ffmpeg exits with code 0 and writes an empty (or truncated)
+            // output rather than failing, and an empty tensor crashes the
+            // downstream models with an opaque kernel-size error. So the
+            // measurement is the gate, and it is THIS function's job: nothing
+            // upstream can see the byte length and nothing downstream can.
+            //
+            // The reason travels with the failure. It used to be `frame_count
+            // == 0` and an error built from the window alone, which threw away
+            // the one fact only this line could observe; `error.rs` then
+            // documented a reason nobody here had witnessed.
+            let frame_count = match DecodedFrames::measure_f32le(byte_len) {
+                DecodedFrames::Frames(frames) => frames,
+                DecodedFrames::None(reason) => {
+                    let _ = fs::remove_file(&output_path);
+                    return Err(PreparedArtifactErrorV2::EmptyAudioSegment(EmptySegment {
+                        path: source.display().to_string(),
+                        window,
+                        reason,
+                    }));
+                }
+            };
 
             Ok(PreparedAudioRefV2 {
                 id,
@@ -191,7 +207,7 @@ impl PreparedArtifactStoreV2 {
                 // two literals mirroring constants in another module.
                 channels: ChannelCountV2(produced.channels),
                 sample_rate_hz: SampleRateHzV2(produced.sample_rate_hz),
-                frame_count: FrameCountV2(frame_count),
+                frame_count: FrameCountV2(frame_count.get()),
                 byte_offset: ByteOffsetV2(0),
                 byte_len: ByteLengthV2(byte_len),
             })
@@ -343,7 +359,27 @@ impl PreparedArtifactRuntimeV2 {
 mod tests {
     use super::*;
     use crate::media::tools::MediaTool;
+    // Named only here: the production path receives a reason from
+    // `DecodedFrames::measure_f32le` and never spells the type.
+    use crate::media::window::EmptyReason;
     use crate::time::FileMs;
+
+    /// The reason a decode of `byte_len` bytes reports, FROM THE MEASUREMENT.
+    ///
+    /// The only way a test can obtain an [`EmptyReason`], and since 2026-09-07
+    /// the only way anything can: the variants were public, and the message
+    /// test below wrote the struct literal, so it asserted a reason nothing had
+    /// measured and would have gone on passing after the measurement stopped
+    /// producing that reason at all. Going through the producer makes the same
+    /// test evidence about the pair.
+    fn measured_reason(byte_len: u64) -> EmptyReason {
+        match DecodedFrames::measure_f32le(byte_len) {
+            DecodedFrames::None(reason) => reason,
+            DecodedFrames::Frames(frames) => {
+                panic!("expected an empty decode of {byte_len} bytes, got {frames} whole frames")
+            }
+        }
+    }
 
     /// Create a temporary prepared-artifact store for unit tests.
     fn test_store() -> (PreparedArtifactStoreV2, tempfile::TempDir) {
@@ -528,6 +564,43 @@ mod tests {
         // rather than pattern-matching two loose integers out of the variant.
         assert_eq!(segment.window.start().get(), 500);
         assert_eq!(segment.window.end().get(), 600);
+        // And the reason is the one the measurement actually saw. This is the
+        // real past-the-end case, so ffmpeg writes nothing at all; the value
+        // says that rather than the message asserting it, and the expectation
+        // comes from the same measurement rather than from a literal.
+        assert_eq!(segment.reason, measured_reason(0));
+    }
+
+    /// The message states the reason that was measured and does not assert a
+    /// cause the measurement cannot know.
+    ///
+    /// This variant's message, and the one on
+    /// `RequestBuildErrorV2::EmptyAudioSegment`, both used to end with "past
+    /// the end of the file". A truncated write produces the same zero whole
+    /// frames from a window well inside the file, so the claim was a guess
+    /// wearing the grammar of a fact. A partial frame is the case that proves
+    /// it: bytes WERE written, so the segment plainly was not past the end.
+    #[test]
+    fn an_empty_segment_reports_what_was_measured_not_a_guessed_cause() {
+        let window = MediaWindow::new(FileMs::new(0), FileMs::new(100))
+            .expect("a window that ends after it starts");
+        let rendered = PreparedArtifactErrorV2::EmptyAudioSegment(EmptySegment {
+            path: "clip.wav".to_owned(),
+            window,
+            // Three bytes of a four-byte sample, obtained by MEASURING three
+            // bytes rather than by asserting what that measurement would say.
+            reason: measured_reason(3),
+        })
+        .to_string();
+
+        assert!(
+            rendered.contains("less than one 4-byte sample"),
+            "the message should carry what the decoder wrote: {rendered}"
+        );
+        assert!(
+            !rendered.contains("past the end"),
+            "the message must not assert a cause nothing measured: {rendered}"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # User Workflow Migration (batchalign2 -> batchalign3)
 
 **Status:** Current
-**Last updated:** 2026-08-28 14:01 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 This page describes durable differences between:
 
@@ -149,6 +149,10 @@ current typed options:
 - `transcribe`: `--whisper`, `--whisperx`, `--whisper-oai`, `--rev`,
   `--diarize`, `--nodiarize`
 - `benchmark`: `--whisper`, `--whisper-oai`, `--rev`
+
+`--whisperx` and `--whisper-oai` still parse, and the engines they select are
+not implemented in BA3: the job is refused at submission with a message naming
+the engines that work.
 
 **`transcribe` keeps BA2's opt-in surface but intentionally improves its
 diarization semantics.** Both systems keep `--diarize` as an opt-in path with a

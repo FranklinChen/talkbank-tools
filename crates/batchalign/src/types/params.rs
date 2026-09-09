@@ -364,7 +364,7 @@ impl AudioContext<'_> {
 /// Forced alignment processing parameters.
 ///
 /// Groups the 5 FA-specific parameters that are always passed together
-/// through `process_fa` and `process_fa_incremental`.
+/// through `run_fa_from_ast` and `process_fa_incremental`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FaParams {
     /// Whether post-processing heals small gaps between words (`--pauses`

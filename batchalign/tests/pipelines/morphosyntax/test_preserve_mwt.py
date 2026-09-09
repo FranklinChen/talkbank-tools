@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 
 import pytest
 
+from batchalign.worker._pipeline_cache import static_pipelines
+
 # Stanza pipeline fixtures are provided by conftest.py in this directory.
 
 
@@ -132,8 +134,7 @@ class TestPreserveIPCEmitsRangeTokens:
 
         response = batch_infer_morphosyntax(
             req,
-            nlp_pipelines={"eng": nlp},
-            contexts={"eng": ctx},
+            pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
             nlp_lock=threading.Lock(),
             free_threaded=False,
         )
@@ -180,8 +181,7 @@ class TestPreserveIPCEmitsRangeTokens:
 
         response = batch_infer_morphosyntax(
             req,
-            nlp_pipelines={"eng": nlp},
-            contexts={"eng": ctx},
+            pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
             nlp_lock=threading.Lock(),
             free_threaded=False,
         )
@@ -258,8 +258,7 @@ class TestPreserveIPCClitcIsAUX:
         nlp, ctx = english_pipeline_with_postprocessor
         response = batch_infer_morphosyntax(
             _build_req(words),
-            nlp_pipelines={"eng": nlp},
-            contexts={"eng": ctx},
+            pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
             nlp_lock=threading.Lock(),
             free_threaded=False,
         )

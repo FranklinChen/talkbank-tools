@@ -10,7 +10,7 @@ use crate::api::ReleasedCommand;
 use crate::worker::InferTask;
 
 use super::materialize::OutputPolicy;
-use super::recipe::{ExecutionMode, Recipe};
+use super::recipe::Recipe;
 
 /// High-level command family in the replacement architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,6 +314,14 @@ impl CommandIoProfile {
 
 /// Static command metadata for the recipe-runner catalog.
 ///
+/// # One thing it deliberately does NOT declare
+///
+/// The execution mode. It was a `pub execution_mode: ExecutionMode` field
+/// written out by all thirteen entries beside the recipe that already carries
+/// it, held equal by a drift test in `catalog.rs`, which is a standing
+/// confession that one of the two should not exist. The recipe owns the
+/// stages, so it owns their mode: ask `entry.recipe.mode`.
+///
 /// Every field is DECLARED per command in `catalog.rs`; nothing here is
 /// inferred from the command's name or position. Three of these fields
 /// (`capability_kind`, `io_profile`, `runner_dispatch_kind`) were until
@@ -329,8 +337,6 @@ pub(crate) struct CatalogEntry {
     pub family: CommandFamily,
     /// Planner shape used to derive work units.
     pub planner: PlannerKind,
-    /// Execution mode surfaced to the runtime.
-    pub execution_mode: ExecutionMode,
     /// Whether the command is advertised straight from one infer task or
     /// synthesized by the server from lower-level capability.
     pub capability_kind: CommandCapabilityKind,

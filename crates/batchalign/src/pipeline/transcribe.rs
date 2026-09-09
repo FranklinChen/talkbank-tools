@@ -1303,7 +1303,12 @@ fn stage_run_morphosyntax<'a, 'ctx>(
             },
         };
         ctx.chat_text = Some(
-            crate::morphosyntax::process_morphosyntax(input, ctx.services, &mor_params).await?,
+            crate::morphosyntax::process_morphosyntax(input, ctx.services, &mor_params)
+                .await?
+                // The transcribe pipeline threads CHAT text between stages and
+                // gates its own final output; the morphotag proof is
+                // discharged into that text here.
+                .into_text(),
         );
         Ok(())
     })

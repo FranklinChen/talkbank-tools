@@ -25,6 +25,7 @@ from typing import Any
 
 from batchalign.inference._tokenizer_realign import TokenizerContext
 from batchalign.inference.morphosyntax import batch_infer_morphosyntax
+from batchalign.worker._pipeline_cache import static_pipelines
 from batchalign.worker._types import BatchInferRequest, InferTask
 
 
@@ -112,8 +113,7 @@ def test_realignment_context_is_set_before_nlp_in_normal_mode() -> None:
 
     batch_infer_morphosyntax(
         request,
-        nlp_pipelines={"eng": fake_nlp},  # type: ignore[dict-item]
-        contexts={"eng": ctx},
+        pipelines=static_pipelines({"eng": fake_nlp}, {"eng": ctx}),  # type: ignore[dict-item]
         nlp_lock=threading.Lock(),
         free_threaded=False,
     )
@@ -168,8 +168,7 @@ def test_realignment_context_cleared_after_nlp_call() -> None:
 
     batch_infer_morphosyntax(
         request,
-        nlp_pipelines={"eng": fake_nlp},  # type: ignore[dict-item]
-        contexts={"eng": ctx},
+        pipelines=static_pipelines({"eng": fake_nlp}, {"eng": ctx}),  # type: ignore[dict-item]
         nlp_lock=threading.Lock(),
         free_threaded=False,
     )
@@ -222,8 +221,7 @@ def test_no_realignment_when_retokenize_requested() -> None:
 
     batch_infer_morphosyntax(
         request,
-        nlp_pipelines={"eng": fake_nlp},  # type: ignore[dict-item]
-        contexts={"eng": ctx},
+        pipelines=static_pipelines({"eng": fake_nlp}, {"eng": ctx}),  # type: ignore[dict-item]
         nlp_lock=threading.Lock(),
         free_threaded=False,
     )

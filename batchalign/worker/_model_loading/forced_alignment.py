@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typing
 
+from batchalign.inference.qwen_forced_alignment import QWEN_FORCED_ALIGNER_MODEL_ID
 from batchalign.worker._types import FaEngine, WorkerBootstrapRuntime, _state
 
 
@@ -29,6 +30,16 @@ def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         )
         _state.fa_engine = FaEngine.WAV2VEC_CANTO
         _state.fa_model_name = "wav2vec-canto-v1"
+    elif backend is FaEngine.QWEN3:
+        from batchalign.inference.qwen_forced_alignment import load_qwen_fa
+
+        # The SAME aligner the Qwen3-ASR engine loads for its own word
+        # timestamps, here on its own. `lang` fixes the model's language label
+        # at bootstrap, so an unsupported language fails before the download
+        # rather than after it.
+        _state.qwen_fa_host = load_qwen_fa(lang, device_policy=bootstrap.device_policy)
+        _state.fa_engine = FaEngine.QWEN3
+        _state.fa_model_name = QWEN_FORCED_ALIGNER_MODEL_ID
     elif backend is FaEngine.WHISPER:
         from batchalign.inference.fa import load_whisper_fa
 
@@ -66,6 +77,9 @@ _LEGACY_FA_WIRE_NAMES: dict[str, FaEngine] = {
     "whisper_fa": FaEngine.WHISPER,
     "cantonese_fa": FaEngine.WAV2VEC_CANTO,
 }
+# NOTE: `qwen3_fa` deliberately has no entry here. Its Rust persistence wire
+# name and its dispatch name are the same string, so `FaEngine(choice)` already
+# resolves it; an alias would be a second spelling of one name.
 
 
 def resolve_fa_engine(engine_overrides: dict[str, str] | None) -> FaEngine:

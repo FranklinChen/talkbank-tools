@@ -9,6 +9,7 @@ use crate::error::ServerError;
 use crate::infer_retry::Cancellation;
 use crate::params::MorphosyntaxParams;
 use crate::pipeline::PipelineServices;
+use crate::pipeline::post_validate::PostValidated;
 use crate::text_batch::{TextBatchFileInput, TextBatchFileResults};
 use crate::worker::pool::WorkerPool;
 
@@ -53,6 +54,10 @@ pub(crate) trait WorkerGateway: Send + Sync {
     /// separate argument rather than a field on `MorphotagRuntimeOptions`
     /// because it is an output port, not an option: options say what to compute,
     /// this says where to narrate it.
+    ///
+    /// Returns the gate-proven output rather than a bare string, so a caller
+    /// cannot report a morphotag file as succeeded without the proof that its
+    /// output passed post-validation.
     async fn morphotag_single(
         &self,
         chat_text: &str,
@@ -61,7 +66,7 @@ pub(crate) trait WorkerGateway: Send + Sync {
         options: MorphotagRuntimeOptions,
         progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
         cancellation: Cancellation<'_>,
-    ) -> Result<String, ServerError>;
+    ) -> Result<PostValidated, ServerError>;
 
     /// Run utterance segmentation over one cross-file batch of CHAT inputs.
     ///
@@ -145,12 +150,15 @@ impl WorkerGateway for PooledWorkerGateway {
             progress: None,
             cancellation,
         };
+        // Compare consumes the text, not the proof: its output is a
+        // comparison artifact, never a written CHAT file.
         crate::morphosyntax::process_morphosyntax(
             chat_text,
             PipelineServices::new(&self.pool, &self.cache, &self.engine_version),
             &params,
         )
         .await
+        .map(PostValidated::into_text)
     }
 
     async fn morphotag_single(
@@ -161,7 +169,7 @@ impl WorkerGateway for PooledWorkerGateway {
         options: MorphotagRuntimeOptions,
         progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
         cancellation: Cancellation<'_>,
-    ) -> Result<String, ServerError> {
+    ) -> Result<PostValidated, ServerError> {
         let params = MorphosyntaxParams {
             lang,
             tokenization_mode: options.tokenization_mode,

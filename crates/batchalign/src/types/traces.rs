@@ -239,6 +239,12 @@ pub struct FaTimelineTrace {
     /// serialization boundary shared with the dashboard.
     pub gap_healing: String,
     /// Validation violations detected (e.g. E362, E704).
+    ///
+    /// Empty on every trace FA now emits: align post-validation is a
+    /// fail-closed gate, so a file with violations fails and never reaches
+    /// the point where a timeline is written. Retained because this struct is
+    /// a serialization boundary shared with the dashboard, which still
+    /// declares the field.
     pub violations: Vec<ViolationTrace>,
     /// Engine fallback events that occurred while aligning this file.
     pub fallback_events: Vec<FaFallbackEventTrace>,
@@ -713,20 +719,23 @@ pub enum OriginTrace {
         /// Distance beyond the bound.
         overshoot_ms: u64,
     },
-    /// A gap was distributed by word count.
-    EstimatedFromWordCount {
-        /// Gap distributed across the run.
-        gap_ms: u64,
-        /// Words preceding this position in the run.
-        words_before: usize,
-        /// Total words sharing the gap.
-        words_total: usize,
-    },
-    /// A boundary was moved to restore ordering.
-    RepairedForOrder {
-        /// Provenance before the ordering repair.
+    /// A boundary between two words was moved so a word that had collapsed
+    /// to near-zero duration keeps a usable extent.
+    ///
+    /// The alias is load-bearing, not decoration: this tag was written
+    /// `repaired_for_order` for the whole life of the stored traces on disk,
+    /// and `OriginTrace` is a WIRE type. Renaming it without the alias made
+    /// every stored trace carrying the old tag fail to deserialize, so a
+    /// dashboard read of any earlier run's evidence broke. The rename is a
+    /// change of NAME, not of meaning, so the old spelling still reads.
+    /// Contrast `estimated_from_word_count`, which is retired rather than
+    /// renamed and must stay refused; see
+    /// [`tests::a_retired_word_count_estimate_no_longer_deserializes`].
+    #[serde(alias = "repaired_for_order")]
+    RebalancedWithNeighbour {
+        /// Provenance before the rebalance.
         was: Box<OriginTrace>,
-        /// Boundary before the repair.
+        /// Boundary before the rebalance.
         original_ms: u64,
     },
     /// A boundary was copied from a neighbor.
@@ -745,6 +754,21 @@ pub enum OriginTrace {
     FallbackDuration {
         /// Constant duration supplied by the fallback.
         assumed_ms: u64,
+    },
+    /// A measured onset was attached to this word by character alignment
+    /// rather than by matching the label to the word.
+    ///
+    /// The instant underneath is the engine's; the ATTRIBUTION is ours, so the
+    /// nesting is the point: a reviewer can see both that a measurement exists
+    /// and that we chose which word it belongs to. The two counts say how far
+    /// the fit was from exact.
+    AttributedByCharAlignment {
+        /// Provenance of the instant, before attribution.
+        was: Box<OriginTrace>,
+        /// Characters of the word no label character matched.
+        transcript_only: usize,
+        /// Characters of the labels no word character matched.
+        label_only: usize,
     },
 }
 
@@ -771,16 +795,7 @@ impl From<&Origin> for OriginTrace {
                 original_ms: original.get(),
                 overshoot_ms: overshoot.0,
             },
-            Origin::EstimatedFromWordCount {
-                gap,
-                words_before,
-                words_total,
-            } => Self::EstimatedFromWordCount {
-                gap_ms: gap.0,
-                words_before: *words_before,
-                words_total: *words_total,
-            },
-            Origin::RepairedForOrder { was, original } => Self::RepairedForOrder {
+            Origin::RebalancedWithNeighbour { was, original } => Self::RebalancedWithNeighbour {
                 was: Box::new(Self::from(was.as_ref())),
                 original_ms: original.get(),
             },
@@ -791,6 +806,11 @@ impl From<&Origin> for OriginTrace {
             Origin::DerivedFromNextOnset => Self::DerivedFromNextOnset,
             Origin::FallbackDuration { assumed } => Self::FallbackDuration {
                 assumed_ms: assumed.0,
+            },
+            Origin::AttributedByCharAlignment { was, edits } => Self::AttributedByCharAlignment {
+                was: Box::new(Self::from(was.as_ref())),
+                transcript_only: edits.transcript_only,
+                label_only: edits.label_only,
             },
         }
     }
@@ -850,7 +870,7 @@ mod tests {
             original: FileMs::new(90),
             overshoot: Ms(10),
         };
-        let adjusted_end = Origin::RepairedForOrder {
+        let adjusted_end = Origin::RebalancedWithNeighbour {
             was: Box::new(measured),
             original: FileMs::new(220),
         };
@@ -869,8 +889,46 @@ mod tests {
         assert_eq!(json["start_origin"]["bound"], "utterance_bullet");
         assert_eq!(json["start_origin"]["was"]["kind"], "engine_measured");
         assert_eq!(json["start_origin"]["was"]["engine"], "wav2vec_fa");
-        assert_eq!(json["end_origin"]["kind"], "repaired_for_order");
+        assert_eq!(json["end_origin"]["kind"], "rebalanced_with_neighbour");
         assert_eq!(json["end_origin"]["was"]["kind"], "engine_measured");
+    }
+
+    /// The word-count estimate was RETIRED (2026-09-07) because nothing in
+    /// the pipeline ever produced it: the word-count arithmetic in
+    /// `chat_ops::fa::grouping` yields an audio WINDOW, and the timings that
+    /// come back inside that window are measured by the engine.
+    ///
+    /// `OriginTrace` is a wire type, so the retirement is asserted here rather
+    /// than by a type: a running program can only observe the removal by the
+    /// tag failing to deserialize. A trace bearing this kind can now only be
+    /// corrupt or hand-forged, and reading it back would reintroduce exactly
+    /// the fabricated provenance the `Origin` type exists to prevent.
+    #[test]
+    fn a_retired_word_count_estimate_no_longer_deserializes() {
+        let stored = r#"{"kind":"estimated_from_word_count","gap_ms":290,"words_before":40,"words_total":180}"#;
+        assert!(
+            serde_json::from_str::<OriginTrace>(stored).is_err(),
+            "the retired word-count estimate must not deserialize back into existence"
+        );
+    }
+
+    /// RED FIRST: a trace stored under the OLD tag must still deserialize.
+    /// The rename `repaired_for_order` -> `rebalanced_with_neighbour` is a
+    /// change of name, not of meaning, and this is a wire type: without the
+    /// alias every trace already on disk stopped reading back.
+    #[test]
+    fn a_trace_stored_under_the_old_order_repair_tag_still_deserializes() {
+        let stored =
+            r#"{"kind":"repaired_for_order","was":{"kind":"transcript_bullet"},"original_ms":220}"#;
+        let decoded: OriginTrace =
+            serde_json::from_str(stored).expect("the old tag must still read back");
+        match decoded {
+            OriginTrace::RebalancedWithNeighbour { was, original_ms } => {
+                assert_eq!(original_ms, 220);
+                assert!(matches!(*was, OriginTrace::TranscriptBullet));
+            }
+            other => panic!("the old tag must decode to the renamed variant, got: {other:?}"),
+        }
     }
 
     /// A trimmed word and a dropped word are different facts (2026-09-02):

@@ -68,6 +68,7 @@ mod tests {
     #[test]
     fn asr_backend_mapping_distinguishes_live_v2_worker_modes() {
         use crate::options::UtrEngine;
+        use crate::types::engines::AsrEngineName;
         assert_eq!(AsrBackend::from(&UtrEngine::RevAi), AsrBackend::RustRevAi);
         assert_eq!(
             AsrBackend::from(&UtrEngine::Whisper),
@@ -77,43 +78,66 @@ mod tests {
             AsrBackend::from(&UtrEngine::HkTencent),
             AsrBackend::Worker(AsrWorkerMode::HkTencentV2)
         );
-        assert_eq!(AsrBackend::from_engine_name("rev"), AsrBackend::RustRevAi);
+        let backend = |engine: AsrEngineName| {
+            AsrBackend::try_from_engine(&engine).expect("engine is implemented")
+        };
+        assert_eq!(backend(AsrEngineName::RevAi), AsrBackend::RustRevAi);
         assert_eq!(
-            AsrBackend::from_engine_name("tencent"),
+            backend(AsrEngineName::HkTencent),
             AsrBackend::Worker(AsrWorkerMode::HkTencentV2)
         );
         assert_eq!(
-            AsrBackend::from_engine_name("aliyun"),
+            backend(AsrEngineName::HkAliyun),
             AsrBackend::Worker(AsrWorkerMode::HkAliyunV2)
         );
         assert_eq!(
-            AsrBackend::from_engine_name("funaudio"),
+            backend(AsrEngineName::HkFunaudio),
             AsrBackend::Worker(AsrWorkerMode::HkFunaudioV2)
-        );
-        assert_eq!(
-            AsrBackend::from_engine_name("whisper_oai"),
-            AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2)
         );
     }
 
+    /// Provenance must name the engine that was SELECTED, for every engine the
+    /// build can run.
+    ///
+    /// The case list used to include `("whisper_oai", "whisper")`, pinning the
+    /// defect: `whisper_oai` fell through a catch-all to stock local Whisper
+    /// and the transcript then claimed "whisper". Selection now refuses it, so
+    /// the pair is unrepresentable and the table covers only real engines. The
+    /// closing assertion makes the table exhaustive over `AsrEngineName::ALL`,
+    /// so a new engine variant fails this test until its provenance is stated.
     #[test]
     fn asr_backend_provenance_names_preserve_every_engine_identity() {
+        use crate::types::engines::{AsrEngineName, SelectableEngine};
+
         let cases = [
-            ("rev", "rev"),
-            ("whisper_rs", "whisper_rs"),
-            ("whisper_oai", "whisper"),
-            ("whisper_hub", "whisper_hub"),
-            ("tencent", "tencent"),
-            ("aliyun", "aliyun"),
-            ("funaudio", "funaudio"),
-            ("qwen", "qwen"),
+            (AsrEngineName::RevAi, "rev"),
+            (AsrEngineName::WhisperRs, "whisper_rs"),
+            (AsrEngineName::Whisper, "whisper"),
+            (AsrEngineName::WhisperHub, "whisper_hub"),
+            (AsrEngineName::HkTencent, "tencent"),
+            (AsrEngineName::HkAliyun, "aliyun"),
+            (AsrEngineName::HkFunaudio, "funaudio"),
+            (AsrEngineName::HkQwen, "qwen"),
         ];
 
-        for (input_name, expected_provenance) in cases {
+        for (engine, expected_provenance) in &cases {
             assert_eq!(
-                AsrBackend::from_engine_name(input_name).provenance_name(),
-                expected_provenance,
+                AsrBackend::try_from_engine(engine)
+                    .expect("every engine in this table is implemented")
+                    .provenance_name(),
+                *expected_provenance,
                 "provenance must retain the selected ASR engine identity"
+            );
+        }
+
+        for engine in AsrEngineName::ALL {
+            let covered = cases.iter().any(|(listed, _)| listed == engine);
+            let refused = AsrBackend::try_from_engine(engine).is_err();
+            assert!(
+                covered || refused,
+                "{} is neither covered by this provenance table nor refused by \
+                 selection; state which it is",
+                engine.as_wire_name()
             );
         }
     }

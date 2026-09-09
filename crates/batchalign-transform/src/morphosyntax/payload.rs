@@ -10,7 +10,7 @@
 //! the same iteration shape over `ChatFile.lines`.
 
 use talkbank_model::WriteChat;
-use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::{Line, SpeakerCode};
 
 use crate::extract::{self, ExtractedWord};
@@ -204,7 +204,7 @@ pub fn collect_payloads(
             let mut words = Vec::new();
             extract::collect_utterance_content(
                 &utt.main.content.content,
-                TierDomain::Mor,
+                PositionalDomain::Mor,
                 &mut words,
             );
 
@@ -423,7 +423,7 @@ pub fn validate_mor_alignment(
             continue;
         };
 
-        let main_count = count_tier_positions(&utt.main.content.content, TierDomain::Mor);
+        let main_count = count_tier_positions(&utt.main.content.content, PositionalDomain::Mor);
         let mor_count = mor.len();
 
         if main_count != mor_count {

@@ -11,9 +11,9 @@ use super::recipe::{
     ExecutionMode, Recipe, RecipeStage, RecipeStageId, RecipeStagePresence, StageExecutionKind,
 };
 
-pub(super) const TRANSCRIBE_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::SequentialPerUnit,
-    stages: &[
+pub(super) const TRANSCRIBE_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -85,11 +85,11 @@ pub(super) const TRANSCRIBE_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat],
         ),
     ],
-};
+);
 
-pub(super) const TRANSCRIBE_S_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::SequentialPerUnit,
-    stages: &[
+pub(super) const TRANSCRIBE_S_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -161,11 +161,11 @@ pub(super) const TRANSCRIBE_S_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat],
         ),
     ],
-};
+);
 
-pub(super) const ALIGN_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::SequentialPerUnit,
-    stages: &[
+pub(super) const ALIGN_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -202,11 +202,11 @@ pub(super) const ALIGN_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat],
         ),
     ],
-};
+);
 
-pub(super) const COMPARE_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::ReferenceProjection,
-    stages: &[
+pub(super) const COMPARE_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::ReferenceProjection,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -267,11 +267,11 @@ pub(super) const COMPARE_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat, RecipeStageId::CompareMetrics],
         ),
     ],
-};
+);
 
-pub(super) const BENCHMARK_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::Composite,
-    stages: &[
+pub(super) const BENCHMARK_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::Composite,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -308,11 +308,11 @@ pub(super) const BENCHMARK_RECIPE: Recipe = Recipe {
             &[RecipeStageId::RunCompareRecipe],
         ),
     ],
-};
+);
 
-pub(super) const MORPHOTAG_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::BatchedStage,
-    stages: &[
+pub(super) const MORPHOTAG_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::BatchedStage,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -349,11 +349,11 @@ pub(super) const MORPHOTAG_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat],
         ),
     ],
-};
+);
 
-pub(super) const UTSEG_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::BatchedStage,
-    stages: &[
+pub(super) const UTSEG_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::BatchedStage,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -390,11 +390,11 @@ pub(super) const UTSEG_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat],
         ),
     ],
-};
+);
 
-pub(super) const TRANSLATE_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::BatchedStage,
-    stages: &[
+pub(super) const TRANSLATE_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::BatchedStage,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -431,11 +431,11 @@ pub(super) const TRANSLATE_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat],
         ),
     ],
-};
+);
 
-pub(super) const COREF_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::BatchedStage,
-    stages: &[
+pub(super) const COREF_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::BatchedStage,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -472,11 +472,11 @@ pub(super) const COREF_RECIPE: Recipe = Recipe {
             &[RecipeStageId::SerializeChat],
         ),
     ],
-};
+);
 
-pub(super) const OPENSMILE_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::SequentialPerUnit,
-    stages: &[
+pub(super) const OPENSMILE_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -506,11 +506,11 @@ pub(super) const OPENSMILE_RECIPE: Recipe = Recipe {
             &[RecipeStageId::MediaAnalysis],
         ),
     ],
-};
+);
 
-pub(super) const DIARIZE_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::SequentialPerUnit,
-    stages: &[
+pub(super) const DIARIZE_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -540,11 +540,11 @@ pub(super) const DIARIZE_RECIPE: Recipe = Recipe {
             &[RecipeStageId::MediaAnalysis],
         ),
     ],
-};
+);
 
-pub(super) const SPEAKER_IDENTIFY_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::SequentialPerUnit,
-    stages: &[
+pub(super) const SPEAKER_IDENTIFY_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -578,11 +578,11 @@ pub(super) const SPEAKER_IDENTIFY_RECIPE: Recipe = Recipe {
             &[RecipeStageId::MediaAnalysis],
         ),
     ],
-};
+);
 
-pub(super) const AVQI_RECIPE: Recipe = Recipe {
-    mode: ExecutionMode::SequentialPerUnit,
-    stages: &[
+pub(super) const AVQI_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
         RecipeStage::new(
             RecipeStageId::PlanWorkUnits,
             RecipeStagePresence::Required,
@@ -612,4 +612,4 @@ pub(super) const AVQI_RECIPE: Recipe = Recipe {
             &[RecipeStageId::MediaAnalysis],
         ),
     ],
-};
+);

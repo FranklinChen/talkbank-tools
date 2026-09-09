@@ -36,11 +36,18 @@
 //! # What it deliberately leaves to callers
 //!
 //! Whether a SUCCESSFUL transcode that produced zero bytes is an error.
-//! `ffmpeg` exits 0 when a requested window falls entirely past the end of the
-//! source, and the two consumers legitimately differ: one reports an
+//! `ffmpeg` exits 0 and writes an empty or truncated output rather than
+//! failing, and the two consumers legitimately differ: one reports an
 //! empty-segment error naming the window, the other has no window to name.
 //! [`ProducedMedia`] therefore reports the byte length as a FACT and judges
 //! nothing.
+//!
+//! This said `ffmpeg` exits 0 "when a requested window falls entirely past the
+//! end of the source" until 2026-09-07. That is the unwitnessable cause
+//! [`super::window::EmptyReason`] exists to replace, and it was already gone
+//! from `error.rs`: a truncated write produces the same zero bytes from a
+//! window well inside the file, and nothing on this path holds a source
+//! duration to tell the two apart.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

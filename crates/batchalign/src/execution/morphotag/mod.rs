@@ -136,8 +136,10 @@ pub(crate) async fn dispatch_morphotag_job(
             {
                 Ok(code) => code,
                 Err(err) => {
-                    let file_result =
-                        TextBatchFileResult::err(file_input.filename.clone(), err.to_string());
+                    let file_result = TextBatchFileResult::err(
+                        file_input.filename.clone(),
+                        crate::text_batch::TextWorkflowFileError::from_server_error(&err),
+                    );
                     write_morphotag_results(
                         &job_for_task,
                         &host_for_task,
@@ -172,10 +174,14 @@ pub(crate) async fn dispatch_morphotag_job(
                 )
                 .await;
             let file_result = match result {
-                Ok(text) => TextBatchFileResult::ok(file_input.filename.clone(), text),
-                Err(error) => {
-                    TextBatchFileResult::err(file_input.filename.clone(), error.to_string())
-                }
+                Ok(output) => TextBatchFileResult::ok(file_input.filename.clone(), output),
+                // `from_server_error`, not `to_string()`: a post-validation
+                // refusal is a validity failure, and stringifying it reported
+                // bad CHAT to the control plane as a provider failure.
+                Err(error) => TextBatchFileResult::err(
+                    file_input.filename.clone(),
+                    crate::text_batch::TextWorkflowFileError::from_server_error(&error),
+                ),
             };
             write_morphotag_results(
                 &job_for_task,

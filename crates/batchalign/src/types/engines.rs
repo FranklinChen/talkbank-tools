@@ -4,6 +4,7 @@
 //! No external plugin system, all engines are built-in.
 //! The [`EngineBackend`] trait provides a common interface.
 
+use batchalign_types::worker_v2::FaBackendV2;
 use serde::{Deserialize, Serialize};
 
 /// Shared behavior for all engine backend selectors.
@@ -264,6 +265,34 @@ pub struct UnknownEngineName {
     pub category: &'static str,
 }
 
+/// Error returned when a RECOGNIZED engine name selects an engine this build
+/// does not implement.
+///
+/// Deliberately distinct from [`UnknownEngineName`], which is a name nothing
+/// recognizes. This one parses, round-trips through the wire format, appears
+/// in `--help`, and has no runtime behind it: `whisperx` and `whisper_oai`
+/// are the standing cases, since nothing in this workspace implements either
+/// WhisperX or the OpenAI Whisper API.
+///
+/// It exists because backend selection used to end in a catch-all arm that
+/// mapped every unhandled name to stock local Whisper, so a job asking for
+/// one of those two ran a different engine and wrote that other engine's name
+/// into provenance. The catch-all is gone; the selector is now a total,
+/// exhaustive match over [`AsrEngineName`] whose refusal case is this type,
+/// so adding an engine variant without implementing it fails to compile
+/// rather than silently resolving to Whisper.
+///
+/// The message names only the engine that was refused. The list of engines
+/// that DO work is derived by the caller from the same selection function
+/// that produced this error, never restated as prose, so a refusal cannot
+/// recommend an engine that is itself unimplemented.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("ASR engine \"{}\" is accepted as a name but not implemented in this build", .engine.as_wire_name())]
+pub struct EngineNotImplemented {
+    /// The recognized but unimplemented engine.
+    pub engine: AsrEngineName,
+}
+
 /// Typed UTR engine selector.
 ///
 /// The wire format still uses the legacy string tokens (`"rev_utr"`,
@@ -387,6 +416,12 @@ impl<'de> Deserialize<'de> for UtrEngine {
 /// The wire format still uses the legacy string tokens (`"wav2vec_fa"`,
 /// `"whisper_fa"`, or a plugin-provided name), but the control plane works
 /// with this enum so dispatch does not branch on anonymous strings.
+///
+/// Everything an engine IS lives in [`FA_ENGINES`], one row per variant,
+/// reached through [`FaEngineName::spec`]. Adding a variant is a compile error
+/// in exactly one place, the pairing list passed to [`fa_engine_table`], which
+/// is also what builds the table; adding a FIELD is a compile error in every
+/// row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FaEngineName {
     /// MMS Wave2Vec forced alignment.
@@ -395,6 +430,11 @@ pub enum FaEngineName {
     Whisper,
     /// Wav2Vec Cantonese forced alignment (HK).
     Wav2vecCanto,
+    /// Qwen3 forced alignment: the standalone form of the aligner the
+    /// Qwen3-ASR engine already loads for its own word timestamps
+    /// (`Qwen/Qwen3-ForcedAligner-0.6B-hf`). Unlike the other three it is
+    /// NOT language-general; see its row in [`FA_ENGINES`].
+    Qwen3,
 }
 
 /// What an alignment engine can say about a word's extent.
@@ -412,54 +452,597 @@ pub enum FaTimingResolution {
     TokenOnsets,
 }
 
-impl FaEngineName {
-    /// What this engine reports about a word's extent.
-    pub fn timing_resolution(&self) -> FaTimingResolution {
+/// Which languages an engine can be asked for.
+///
+/// One field instead of the two functions this replaces: a `FaLanguageScope`
+/// enum that named the distinction, and a per-engine code list consulted only
+/// in the narrow case. The scope WAS the shape of the list, so the shape is
+/// now the variant and there is nothing left to keep in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageSupport {
+    /// The engine aligns against its own label set and never sees the
+    /// `@Languages:` header, so no declared code can make it wrong.
+    Any,
+    /// The engine is handed ONE language label for a whole group, so every
+    /// language whose words can appear in a group must be one of these
+    /// ISO-639-3 codes.
+    Only(&'static [&'static str]),
+}
+
+impl LanguageSupport {
+    /// Whether one ISO-639-3 code is covered.
+    pub fn covers(self, code: &str) -> bool {
         match self {
-            Self::Wave2Vec | Self::Wav2vecCanto => FaTimingResolution::WordIntervals,
-            Self::Whisper => FaTimingResolution::TokenOnsets,
+            Self::Any => true,
+            Self::Only(codes) => codes.contains(&code),
         }
     }
 
-    /// Longest audio window handed to this engine in one dispatch.
+    /// Whether the engine reads the language declaration at all.
     ///
-    /// A per-engine fact, so it lives on the engine rather than in a match at
-    /// the dispatch site: a new engine then cannot be added without stating
-    /// its window.
-    pub fn max_group_ms(&self) -> batchalign_types::domain::DurationMs {
-        match self {
-            // The CTC decoder's target length grows with the audio window, so
-            // wav2vec takes the shorter one.
-            Self::Wave2Vec | Self::Wav2vecCanto => batchalign_types::domain::DurationMs(15_000),
-            Self::Whisper => batchalign_types::domain::DurationMs(20_000),
+    /// The question admission asks first: a general engine can skip the whole
+    /// per-entry walk, including entries that do not parse.
+    ///
+    /// `const` so the fallback-target check below can run at compile time
+    /// rather than as a test nobody would write.
+    pub const fn is_language_general(self) -> bool {
+        matches!(self, Self::Any)
+    }
+}
+
+/// What happens to an FA group this engine failed on.
+///
+/// A policy, not a fact about the model, which is why it is a named variant
+/// rather than a boolean: "we do not retry" and "we cannot retry" read the
+/// same from a call site and mean different things to whoever adds the next
+/// engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaFallbackPolicy {
+    /// A recoverable CTC-decoder constraint (target too long, blank index in
+    /// the targets, a window shorter than the feature extractor's receptive
+    /// field) retries the whole group on the named engine.
+    ///
+    /// The target is carried rather than baked into the variant name, because
+    /// the retry does NOT go through [`validate_fa_language_support`]: the
+    /// group is re-dispatched on the target directly, so an engine admitted
+    /// for a file's languages can hand its work to one that never was. Naming
+    /// the target here makes that engine a value the compiler can check, and
+    /// the check is the `const` block beside [`FA_ENGINES`], which refuses a
+    /// target that is the failing engine itself, one that is not
+    /// [`LanguageSupport::Any`], and one whose
+    /// [`FaTimingResolution`] the evidence admission cannot read as a
+    /// fallback. Each refusal and why it exists is written out there.
+    ///
+    /// [`validate_fa_language_support`]: crate::types::request
+    RetryGroupOn(FaEngineName),
+    /// The group is left unaligned. Either the engine IS a fallback target,
+    /// or retrying would silently substitute another model's timings.
+    NoFallback,
+}
+
+/// Everything one forced-alignment engine is, stated once.
+///
+/// # Why this exists
+///
+/// Adding `Qwen3` cost one enum variant and then fifteen separate per-engine
+/// edits spread over five files and two crates: seven `match`es in this module
+/// alone, the wire-backend enum next door, the two direction maps, the
+/// fallback policy, and the language scope plus its code list. Every one of
+/// them was exhaustive, so the compiler did demand an answer; it demanded them
+/// one file at a time, days apart, with no single place that says what an
+/// engine IS.
+///
+/// # What is compiler-enforced, exactly
+///
+/// A new engine must be unable to compile until its author has stated every
+/// fact, and each half of that is enforced by a different mechanism:
+///
+/// - **A new FIELD breaks every row.** This struct has every field required
+///   and **no `Default` impl**, so adding one is a compile error at each of
+///   the row constants until each states it. No plausible-looking blank is
+///   available.
+/// - **A new VARIANT breaks the pairing list.** [`FaEngineName::spec`] is
+///   generated by [`fa_engine_table`] from the same one-line-per-engine list
+///   that builds [`FA_ENGINES`], and its match is exhaustive over
+///   [`FaEngineName`], so a variant absent from that list does not compile and
+///   a variant present in it is necessarily present in the table. This was NOT
+///   true until 2026-09-07: `spec()` was a hand-written match returning
+///   standalone row constants, so a variant could compile with a row the table
+///   never saw, and every derivation from the table would then omit it.
+///
+/// What is NOT enforced by a type, and is checked by the `const` block beside
+/// [`FA_ENGINES`] instead: that no engine has two rows, that no spelling is
+/// accepted by two rows, and that every fallback target is language-general.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FaEngineSpec {
+    /// The variant this row describes. Read by the derivations below, and by
+    /// the test that pins each row to the variant whose `spec()` returns it.
+    pub engine: FaEngineName,
+
+    /// Stable wire-format token, persisted in JSON and SQLite and therefore
+    /// unchangeable.
+    pub wire_name: &'static str,
+
+    /// The single name this engine is advertised under in `--help`.
+    pub selection_name: &'static str,
+
+    /// Historical spellings that still resolve, NOT including
+    /// [`Self::selection_name`], which is added by the derivation.
+    ///
+    /// The wire name belongs here whenever it differs from the selection name,
+    /// since a persisted job option must still parse.
+    pub aliases: &'static [&'static str],
+
+    /// The name the Python worker sees in its `--engine-overrides` JSON and
+    /// uses to select which FA model to load.
+    ///
+    /// Must match `resolve_fa_engine` on the Python side.
+    pub dispatch_override_name: &'static str,
+
+    /// What this engine reports about a word's extent.
+    pub timing_resolution: FaTimingResolution,
+
+    /// Longest audio window handed to this engine in one dispatch.
+    pub max_group: batchalign_types::domain::DurationMs,
+
+    /// Resident memory footprint estimate for one worker process running this
+    /// engine, in MB. Feeds the admission gate's engine-aware reservation, see
+    /// [`super::super::worker::pool::memory_gate::engine_aware_startup_reservation_mb`].
+    pub resident_memory_mb: u64,
+
+    /// Which languages this engine can be asked for.
+    pub language_support: LanguageSupport,
+
+    /// What happens to a group this engine failed on.
+    pub fallback: FaFallbackPolicy,
+
+    /// The backend token this engine travels to the worker as.
+    pub worker_backend: FaBackendV2,
+}
+
+/// The ISO-639-3 codes the Qwen3 forced aligner is wired for.
+///
+/// MUST stay in step with `QWEN_LANG_LABELS` in
+/// `batchalign/inference/qwen_forced_alignment.py`, which is the only producer
+/// of the language label the model is handed. The Python side raises on a code
+/// it cannot map, so a drift between the two lists is a loud worker failure
+/// rather than a wrong alignment; this list exists so the refusal happens at
+/// admission instead, before a model is downloaded.
+///
+/// Narrower than the checkpoint's own advertised set (which also covers
+/// French, German, Italian, Japanese, Korean, Portuguese, Russian and
+/// Spanish). Widening it is a measurement, and Japanese and Korean
+/// additionally need optional tokenizer packages, so neither list guesses.
+const FA_QWEN3_LANGUAGES: &[&str] = &["yue", "zho", "cmn", "eng"];
+
+/// The MMS Wave2Vec aligner.
+const WAVE2VEC_FA_SPEC: FaEngineSpec = FaEngineSpec {
+    engine: FaEngineName::Wave2Vec,
+    wire_name: "wav2vec_fa",
+    selection_name: "wav2vec",
+    aliases: &["wav2vec_fa", "wave2vec"],
+    dispatch_override_name: "wave2vec",
+    timing_resolution: FaTimingResolution::WordIntervals,
+    // The CTC decoder's target length grows with the audio window, so the
+    // wav2vec family takes the shorter one.
+    max_group: batchalign_types::domain::DurationMs(15_000),
+    // MMS / torchaudio Wave2Vec FA models: ~1.2 GB + runtime margin.
+    resident_memory_mb: WAVE2VEC_FA_RSS_MB,
+    // Aligns against its own label set and never sees the declaration.
+    language_support: LanguageSupport::Any,
+    fallback: FaFallbackPolicy::RetryGroupOn(FaEngineName::Whisper),
+    worker_backend: FaBackendV2::Wave2vec,
+};
+
+/// Whisper token-timestamp alignment, which is also the fallback target.
+const WHISPER_FA_SPEC: FaEngineSpec = FaEngineSpec {
+    engine: FaEngineName::Whisper,
+    wire_name: "whisper_fa",
+    selection_name: "whisper",
+    aliases: &["whisper_fa"],
+    dispatch_override_name: "whisper",
+    timing_resolution: FaTimingResolution::TokenOnsets,
+    max_group: batchalign_types::domain::DurationMs(20_000),
+    // Whisper-large-v2 FA: ~3 GB weights + tokenizer + Python runtime. Same
+    // shape as Whisper-large-v3 ASR, hence the shared constant.
+    resident_memory_mb: WHISPER_LARGE_V3_RSS_MB,
+    // Language-general in the same way its ASR is.
+    language_support: LanguageSupport::Any,
+    // It is the fallback target and cannot fall back to itself.
+    fallback: FaFallbackPolicy::NoFallback,
+    worker_backend: FaBackendV2::Whisper,
+};
+
+/// The Cantonese Wave2Vec aligner.
+const WAV2VEC_CANTO_FA_SPEC: FaEngineSpec = FaEngineSpec {
+    engine: FaEngineName::Wav2vecCanto,
+    wire_name: "cantonese_fa",
+    selection_name: "cantonese",
+    // This engine answered to three spellings before it had a canonical name,
+    // and the book used a fourth.
+    aliases: &["cantonese_fa", "wav2vec_canto", "wav2vec_fa_canto"],
+    dispatch_override_name: "wav2vec_canto",
+    timing_resolution: FaTimingResolution::WordIntervals,
+    max_group: batchalign_types::domain::DurationMs(15_000),
+    // Same model shape as the general wave2vec aligner.
+    resident_memory_mb: WAVE2VEC_FA_RSS_MB,
+    // It only adds a romanization step, which is itself gated on `yue`.
+    language_support: LanguageSupport::Any,
+    fallback: FaFallbackPolicy::RetryGroupOn(FaEngineName::Whisper),
+    worker_backend: FaBackendV2::Wav2vecCanto,
+};
+
+/// The Qwen3 forced aligner.
+const QWEN3_FA_SPEC: FaEngineSpec = FaEngineSpec {
+    engine: FaEngineName::Qwen3,
+    wire_name: "qwen3_fa",
+    // `qwen3_fa` is canonical, so it is also the selection name. The other two
+    // spellings are conveniences and NOT a house style: no other FA engine
+    // carries a hyphenated alias, and the underscore spellings elsewhere in
+    // this table are historical rather than parallel. Read the rows, never
+    // generalise from one of them.
+    selection_name: "qwen3_fa",
+    aliases: &["qwen3-fa", "qwen3"],
+    dispatch_override_name: "qwen3_fa",
+    // The aligner returns `start_time` AND `end_time` per word
+    // (`decode_forced_alignment`), so its durations are measured, not derived
+    // from the next onset.
+    timing_resolution: FaTimingResolution::WordIntervals,
+    // The Qwen aligner is an encoder over the whole window with no CTC
+    // target-length limit, and its ASR sibling already runs 180 s chunks. It
+    // takes the wav2vec window anyway: an FA group is a grouping decision
+    // about the transcript, not about the model, and a wider window here would
+    // change which words are grouped together without any measurement saying
+    // it should.
+    max_group: batchalign_types::domain::DurationMs(15_000),
+    // Qwen3-ForcedAligner-0.6B: ~2.4 GB of float32 weights plus the processor
+    // and the Python runtime.
+    resident_memory_mb: QWEN3_FA_RSS_MB,
+    // Handed ONE language label for a whole group.
+    language_support: LanguageSupport::Only(FA_QWEN3_LANGUAGES),
+    // No fallback, and that is a decision rather than an omission. Two halves:
+    //
+    // 1. None of the recoverable CTC failures is reachable for it. Its aligner
+    //    is a transformer encoder scored per token, not a CTC decoder, so
+    //    there is no target-length limit and no blank index, and its feature
+    //    extractor pads short windows.
+    // 2. Its own characteristic failure, a word its tokenizer keeps no
+    //    character of, is not a group-level failure at all: the Python host
+    //    folds the aligner's units back onto the requested words and returns
+    //    that word UNTIMED, timing the rest. Retrying the whole group on
+    //    Whisper would replace measured Qwen3 timings with Whisper ones for
+    //    every word that DID align, and the wire records timings per word
+    //    without recording which engine produced each, so the substitution
+    //    would be invisible afterwards. One untimed word is the smaller and
+    //    the honest loss.
+    fallback: FaFallbackPolicy::NoFallback,
+    worker_backend: FaBackendV2::Qwen3,
+};
+
+/// Pair every [`FaEngineName`] variant with its row, once.
+///
+/// # Why a macro, when nothing else in this file needs one
+///
+/// The table only enforces what something reads it. Before this macro,
+/// [`FA_ENGINES`] was a hand-written list and `spec()` was a hand-written
+/// exhaustive match returning standalone row constants, so a new variant
+/// compiled perfectly well by returning a new constant nobody added to the
+/// list. Everything derived FROM the list (`ALL`, the accepted-name table, the
+/// language-general remedy line) then silently omitted that engine: it could
+/// not be selected by name, its persisted wire name failed to parse, and it
+/// appeared in no diagnostic. The test that was supposed to catch this
+/// iterated `FaEngineName::ALL`, which IS the list, so the missing variant was
+/// invisible to it.
+///
+/// Rust cannot enumerate an enum's variants without a macro or a derive. Of
+/// the three available routes this is the one that keeps the enum readable:
+/// the variants and their prose stay hand-written above, each row stays a
+/// named constant with its own reasoning, and only the one-line-per-engine
+/// PAIRING lives here. The alternatives were a macro that also emits the enum
+/// (airtight, but the reader can no longer see the enum), or `strum::EnumIter`
+/// (a compiler-generated witness, but a new direct dependency, and it yields a
+/// runtime iteration rather than a compile error).
+///
+/// # What it enforces
+///
+/// The match it generates is exhaustive over [`FaEngineName`], so a variant
+/// missing from this list does not compile; and the list it generates is the
+/// same list, so a variant present in the match is necessarily present in
+/// [`FA_ENGINES`]. The `const` block additionally pins each row's own
+/// [`FaEngineSpec::engine`] field to the variant it was paired with, so a row
+/// cannot be attached to the wrong engine.
+macro_rules! fa_engine_table {
+    ($($variant:ident => $spec:ident),+ $(,)?) => {
+        /// Every forced-alignment engine, in help-display order.
+        ///
+        /// THE declaration. `ALL`, the accepted-name table, and the
+        /// language-general remedy list are all DERIVED from it below rather
+        /// than restated.
+        pub const FA_ENGINES: &[FaEngineSpec] = &[$($spec),+];
+
+        impl FaEngineName {
+            /// This engine's row in [`FA_ENGINES`].
+            ///
+            /// THE one exhaustive match over the FA roster, generated from the
+            /// same list that builds the table, so the row it returns is
+            /// necessarily a row of the table. Every other per-engine answer
+            /// in this workspace reads a field off what this returns.
+            pub const fn spec(self) -> &'static FaEngineSpec {
+                match self {
+                    $(Self::$variant => &$spec,)+
+                }
+            }
         }
+
+        /// Each row names the variant it was paired with.
+        const _: () = {
+            $(
+                assert!(
+                    matches!($spec.engine, FaEngineName::$variant),
+                    concat!(
+                        "the FA row paired with FaEngineName::",
+                        stringify!($variant),
+                        " declares a different engine in its own `engine` field",
+                    ),
+                );
+            )+
+        };
+    };
+}
+
+fa_engine_table! {
+    Wave2Vec => WAVE2VEC_FA_SPEC,
+    Whisper => WHISPER_FA_SPEC,
+    Wav2vecCanto => WAV2VEC_CANTO_FA_SPEC,
+    Qwen3 => QWEN3_FA_SPEC,
+}
+
+/// How many engines the table declares.
+const FA_ENGINE_COUNT: usize = FA_ENGINES.len();
+
+/// `ALL` derived from the table, so the two cannot disagree.
+///
+/// A `const fn` rather than a second hand-written list: the previous `ALL` was
+/// the third place a new variant had to be named, and the coherence test that
+/// catches an omission is a runtime check for something that can be a
+/// derivation.
+const fn engines_from_table() -> [FaEngineName; FA_ENGINE_COUNT] {
+    // Every slot is overwritten by the loop; the fill value is never observed,
+    // and the table is non-empty by construction (an empty one would fail to
+    // index here, at compile time).
+    let mut out = [FA_ENGINES[0].engine; FA_ENGINE_COUNT];
+    let mut i = 0;
+    while i < FA_ENGINE_COUNT {
+        out[i] = FA_ENGINES[i].engine;
+        i += 1;
+    }
+    out
+}
+
+/// Backing storage for [`SelectableEngine::ALL`].
+const FA_ENGINE_ALL: [FaEngineName; FA_ENGINE_COUNT] = engines_from_table();
+
+/// How many accepted spellings the table declares: one canonical selection
+/// name per engine, plus that engine's aliases.
+const fn accepted_name_count() -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < FA_ENGINE_COUNT {
+        count += 1 + FA_ENGINES[i].aliases.len();
+        i += 1;
+    }
+    count
+}
+
+/// The size of the derived accepted-name table.
+const FA_ACCEPTED_NAME_COUNT: usize = accepted_name_count();
+
+/// The accepted-name table derived from the rows.
+///
+/// Canonical name first for each engine, then its aliases. `SelectableEngine`
+/// requires this to be COMPLETE (every canonical name present), which a
+/// derivation cannot get wrong and a hand-written list did get wrong in three
+/// of the four categories.
+const fn accepted_names_from_table() -> [(&'static str, FaEngineName); FA_ACCEPTED_NAME_COUNT] {
+    // As above: every slot is overwritten before it is read.
+    let mut out = [("", FA_ENGINES[0].engine); FA_ACCEPTED_NAME_COUNT];
+    let mut out_index = 0;
+    let mut i = 0;
+    while i < FA_ENGINE_COUNT {
+        let spec = &FA_ENGINES[i];
+        out[out_index] = (spec.selection_name, spec.engine);
+        out_index += 1;
+        let mut alias = 0;
+        while alias < spec.aliases.len() {
+            out[out_index] = (spec.aliases[alias], spec.engine);
+            out_index += 1;
+            alias += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Backing storage for [`SelectableEngine::accepted_names`].
+const FA_ACCEPTED_NAMES: [(&str, FaEngineName); FA_ACCEPTED_NAME_COUNT] =
+    accepted_names_from_table();
+
+/// `str` equality in a `const` context, which [`str::eq`] is not.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Facts about the FA table that a reader would otherwise have to hold in
+/// their head, checked while the crate compiles.
+///
+/// A `const` block rather than a test, because each is a property of the
+/// DECLARATION and has no input: there is nothing to arrange, nothing to run,
+/// and a test would only report at `cargo test` what the compiler can refuse
+/// outright.
+///
+/// Engine identity is compared here as `engine as u8`, the discriminant, not
+/// with `==`: [`FaEngineName`] derives [`PartialEq`], but `PartialEq::eq` is
+/// not a `const fn`, so it is unavailable in this context. The enum is
+/// fieldless, so the discriminant IS the identity and the cast is exact.
+///
+/// 1. **No engine has two rows.** The macro's match would merely warn about an
+///    unreachable arm, while `ALL` and the accepted-name table would carry the
+///    engine twice.
+/// 2. **No spelling is accepted by two rows.**
+///    [`SelectableEngine::resolve_variant`] is FIRST MATCH, so a duplicate
+///    silently belongs to whichever row is listed earlier: adding `"whisper"`
+///    to the Qwen3 row's aliases would change what `--fa-engine whisper`
+///    means, with every existing test still green.
+/// 3. **No engine is its own fallback target.** A retry re-dispatches the same
+///    group to the same model, which fails the same way, so the row is a
+///    guaranteed waste of one worker call and a whole audio window.
+/// 4. **Every fallback target is language-general.** A retry is re-dispatched
+///    on the target WITHOUT a second pass through
+///    `validate_fa_language_support`, so a language-restricted target would
+///    align a file with an engine nobody admitted for its language. Today that
+///    holds by accident, because the only target is Whisper and Whisper is
+///    [`LanguageSupport::Any`]; here it holds because it is checked.
+/// 5. **Every fallback target reports TOKEN ONSETS.** The policy generalised
+///    to "retry on the engine this row names" while the evidence admission it
+///    feeds stayed specific to one response SHAPE, and this is where the two
+///    are tied back together. See the assertion's own message.
+const _: () = {
+    let mut i = 0;
+    while i < FA_ENGINE_COUNT {
+        let mut j = i + 1;
+        while j < FA_ENGINE_COUNT {
+            assert!(
+                FA_ENGINES[i].engine as u8 != FA_ENGINES[j].engine as u8,
+                "two rows of FA_ENGINES declare the same engine",
+            );
+            j += 1;
+        }
+        match FA_ENGINES[i].fallback {
+            FaFallbackPolicy::RetryGroupOn(target) => {
+                assert!(
+                    FA_ENGINES[i].engine as u8 != target as u8,
+                    "an FA engine must not name itself as its own retry target: the retry \
+                     re-dispatches the identical group to the identical model, so it fails \
+                     the identical way, and the evidence admission would then see an \
+                     effective engine equal to the requested one and refuse the response as \
+                     an ineffective fallback",
+                );
+                assert!(
+                    target.spec().language_support.is_language_general(),
+                    "an FA fallback target must be language-general: the retry does not \
+                     re-run language admission, so a restricted target would align a file \
+                     with an engine nobody admitted for its language",
+                );
+                assert!(
+                    matches!(
+                        target.spec().timing_resolution,
+                        FaTimingResolution::TokenOnsets,
+                    ),
+                    "an FA fallback target must report TOKEN ONSETS, because the fallback \
+                     POLICY and the evidence ADMISSION are one mechanism split across two \
+                     files. `FaRawEvidence::admit_requested` recognises a fallback only by \
+                     the response SHAPE: a token-onset payload proves an effective engine \
+                     other than the one requested, while an interval payload is attributed \
+                     to the requested engine itself. Retrying on an interval engine would \
+                     therefore make a SUCCESSFUL retry indistinguishable from no fallback \
+                     at all, and the Fallback route would refuse it as ineffective and \
+                     throw its timings away",
+                );
+            }
+            FaFallbackPolicy::NoFallback => {}
+        }
+        i += 1;
+    }
+
+    let mut i = 0;
+    while i < FA_ACCEPTED_NAME_COUNT {
+        let mut j = i + 1;
+        while j < FA_ACCEPTED_NAME_COUNT {
+            assert!(
+                !str_eq(FA_ACCEPTED_NAMES[i].0, FA_ACCEPTED_NAMES[j].0),
+                "two FA engine rows accept the same spelling; the resolver is first \
+                 match, so the later row would never receive it",
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
+impl FaEngineName {
+    /// The engine behind one wire backend token.
+    ///
+    /// The one match this table could NOT absorb, and deliberately so: it is
+    /// exhaustive over [`FaBackendV2`], which is a different enum in a
+    /// different crate, and a new backend on the wire is its own obligation to
+    /// route. The forward direction is [`FaEngineSpec::worker_backend`]; the
+    /// two are pinned as a bijection by
+    /// `fa_engine_and_worker_backend_are_a_bijection`.
+    pub const fn from_worker_backend(backend: FaBackendV2) -> Self {
+        match backend {
+            FaBackendV2::Whisper => Self::Whisper,
+            FaBackendV2::Wave2vec => Self::Wave2Vec,
+            FaBackendV2::Wav2vecCanto => Self::Wav2vecCanto,
+            FaBackendV2::Qwen3 => Self::Qwen3,
+        }
+    }
+
+    /// What this engine reports about a word's extent.
+    pub fn timing_resolution(&self) -> FaTimingResolution {
+        self.spec().timing_resolution
+    }
+
+    /// Longest audio window handed to this engine in one dispatch.
+    pub fn max_group_ms(&self) -> batchalign_types::domain::DurationMs {
+        self.spec().max_group
+    }
+
+    /// Which languages this engine can be asked for.
+    pub fn language_support(&self) -> LanguageSupport {
+        self.spec().language_support
+    }
+
+    /// What happens to a group this engine failed on.
+    pub fn fallback_policy(&self) -> FaFallbackPolicy {
+        self.spec().fallback
+    }
+
+    /// The backend token this engine travels to the worker as.
+    pub fn worker_backend(&self) -> FaBackendV2 {
+        self.spec().worker_backend
     }
 }
 
 impl EngineBackend for FaEngineName {
     fn wire_name(&self) -> &'static str {
-        match self {
-            Self::Wave2Vec => "wav2vec_fa",
-            Self::Whisper => "whisper_fa",
-            Self::Wav2vecCanto => "cantonese_fa",
-        }
+        self.spec().wire_name
     }
 
     fn is_rust_owned(&self) -> bool {
+        // Not a per-engine fact: no FA engine runs in-process today, so there
+        // is nothing for the table to state.
         false
     }
 
     fn try_from_wire_name(name: &str) -> Option<Self> {
-        Self::ACCEPTED_NAMES
-            .iter()
-            .find(|(accepted, _)| *accepted == name)
-            .map(|(_, engine)| *engine)
+        Self::resolve_variant(name)
     }
 }
 
 impl SelectableEngine for FaEngineName {
     type Selected = Self;
-    const ALL: &'static [Self] = &[Self::Wave2Vec, Self::Whisper, Self::Wav2vecCanto];
+    const ALL: &'static [Self] = &FA_ENGINE_ALL;
     // Wave2Vec returns word-level start AND end; Whisper FA returns token
     // onsets only, so an end has to be derived from the next onset and the
     // last word of a group has none to derive from. Measured beats derived,
@@ -470,15 +1053,11 @@ impl SelectableEngine for FaEngineName {
     const CATEGORY: &'static str = "FA";
 
     fn selection_name(&self) -> &'static str {
-        match self {
-            Self::Wave2Vec => "wav2vec",
-            Self::Whisper => "whisper",
-            Self::Wav2vecCanto => "cantonese",
-        }
+        self.spec().selection_name
     }
 
     fn accepted_names() -> &'static [(&'static str, Self)] {
-        Self::ACCEPTED_NAMES
+        &FA_ACCEPTED_NAMES
     }
 
     fn resolve(name: &str) -> Option<Self> {
@@ -487,32 +1066,16 @@ impl SelectableEngine for FaEngineName {
 }
 
 impl FaEngineName {
-    /// Canonical names first, then every historical spelling. This category had
-    /// the most in circulation: the Cantonese engine alone answered to three,
-    /// and the book used a fourth.
-    const ACCEPTED_NAMES: &'static [(&'static str, Self)] = &[
-        ("wav2vec", Self::Wave2Vec),
-        ("whisper", Self::Whisper),
-        ("cantonese", Self::Wav2vecCanto),
-        ("wav2vec_fa", Self::Wave2Vec),
-        ("wave2vec", Self::Wave2Vec),
-        ("whisper_fa", Self::Whisper),
-        ("cantonese_fa", Self::Wav2vecCanto),
-        ("wav2vec_canto", Self::Wav2vecCanto),
-        ("wav2vec_fa_canto", Self::Wav2vecCanto),
-    ];
-
     /// The override name used in worker pool keys for dispatch.
     ///
-    /// Must match `fa_backend_override_name()` in `worker/pool/execute_v2.rs`.
-    /// These are the names the Python worker sees in its `--engine-overrides`
-    /// JSON and uses to select which FA model to load.
+    /// Reads [`FaEngineSpec::dispatch_override_name`], which carries the
+    /// contract. The doc here used to name `fa_backend_override_name()` in
+    /// `worker/pool/execute_v2.rs` as the function that must agree; no such
+    /// function exists any more, and the party that has to agree is
+    /// `resolve_fa_engine` in
+    /// `batchalign/worker/_model_loading/forced_alignment.py`.
     pub fn dispatch_override_name(&self) -> &'static str {
-        match self {
-            Self::Wave2Vec => "wave2vec",
-            Self::Whisper => "whisper",
-            Self::Wav2vecCanto => "wav2vec_canto",
-        }
+        self.spec().dispatch_override_name
     }
 
     /// Parse one persisted wire-format token.
@@ -543,15 +1106,7 @@ impl FaEngineName {
     /// 16 GB Large+Fleet). See
     /// [`super::super::worker::pool::memory_gate::engine_aware_startup_reservation_mb`].
     pub fn resident_memory_mb(&self) -> u64 {
-        match self {
-            // Whisper-large-v2 FA: ~3 GB weights + tokenizer + Python
-            // runtime. Same shape as Whisper-large-v3 ASR, hence the
-            // shared constant.
-            Self::Whisper => WHISPER_LARGE_V3_RSS_MB,
-            // MMS / torchaudio Wave2Vec FA models: ~1.2 GB + runtime
-            // margin. Cantonese FA is the same shape.
-            Self::Wave2Vec | Self::Wav2vecCanto => WAVE2VEC_FA_RSS_MB,
-        }
+        self.spec().resident_memory_mb
     }
 }
 
@@ -928,6 +1483,13 @@ pub(crate) const WHISPER_LARGE_V3_RSS_MB: u64 = 3_500;
 /// forced-alignment model (including the Cantonese variant): ~1.2 GB
 /// torchaudio weights + runtime margin.
 pub(crate) const WAVE2VEC_FA_RSS_MB: u64 = 1_800;
+
+/// Resident memory estimate for a worker running the Qwen3 forced aligner
+/// (`Qwen/Qwen3-ForcedAligner-0.6B-hf`): ~0.6 B parameters at float32 is
+/// ~2.4 GB of weights, plus the processor and the Python runtime. Between the
+/// wave2vec and Whisper classes, so it gets its own constant rather than
+/// borrowing one that would understate the reservation.
+pub(crate) const QWEN3_FA_RSS_MB: u64 = 3_000;
 
 impl Serialize for TranslateEngineName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -1904,6 +2466,28 @@ mod selectable_engine_tests {
         }
     }
 
+    /// Every spelling of the Qwen3 aligner reaches the Qwen3 aligner.
+    ///
+    /// A wire format, so it stays a test: these tokens are persisted in stored
+    /// job options and typed on a command line, and no type of ours pins what
+    /// a past build wrote or what a user types. The round-trip is the point:
+    /// what `as_wire_name` emits must be what `from_wire_name` accepts.
+    #[test]
+    fn every_spelling_of_qwen3_fa_resolves_to_it() {
+        for name in ["qwen3_fa", "qwen3-fa", "qwen3"] {
+            assert_eq!(
+                FaEngineName::resolve(name),
+                Some(FaEngineName::Qwen3),
+                "{name} did not resolve to the Qwen3 aligner"
+            );
+        }
+        assert_eq!(FaEngineName::Qwen3.as_wire_name(), "qwen3_fa");
+        assert_eq!(
+            FaEngineName::from_wire_name(FaEngineName::Qwen3.as_wire_name()).unwrap(),
+            FaEngineName::Qwen3
+        );
+    }
+
     /// The default aligner must report word intervals, not bare onsets.
     ///
     /// POLICY: an onset-only engine is a legitimate engine, it just cannot be
@@ -1935,6 +2519,10 @@ mod selectable_engine_tests {
                 FaEngineName::Wav2vecCanto,
                 FaTimingResolution::WordIntervals,
             ),
+            // Qwen3's aligner reports both ends of every word, so it is an
+            // interval engine. Pinned because the whole reason it is worth
+            // exposing standalone is that its durations are measured.
+            (FaEngineName::Qwen3, FaTimingResolution::WordIntervals),
             (FaEngineName::Whisper, FaTimingResolution::TokenOnsets),
         ] {
             assert_eq!(
@@ -1953,5 +2541,32 @@ mod selectable_engine_tests {
         assert!(FaEngineName::ALL.contains(&FaEngineName::DEFAULT));
         assert!(AsrEngineName::ALL.contains(&AsrEngineName::DEFAULT));
         assert!(TranslateEngineName::ALL.contains(&TranslateEngineName::DEFAULT));
+    }
+
+    /// The engine roster and the wire backend vocabulary invert each other.
+    ///
+    /// A ROUNDTRIP between two functions in two crates, which is what a test
+    /// is legitimately for: `FaEngineSpec::worker_backend` is a field in
+    /// `batchalign`, `FaEngineName::from_worker_backend` is an exhaustive
+    /// match over an enum owned by `batchalign-types`, and no signature says
+    /// they are inverses. Both directions are checked, so neither a new engine
+    /// pointed at an occupied backend nor a new backend routed to the wrong
+    /// engine can pass.
+    #[test]
+    fn fa_engine_and_worker_backend_are_a_bijection() {
+        for &engine in FaEngineName::ALL {
+            assert_eq!(
+                FaEngineName::from_worker_backend(engine.worker_backend()),
+                engine,
+                "{engine:?} does not survive a round trip through its wire backend"
+            );
+        }
+        for backend in batchalign_types::worker_v2::FaBackendV2::ALL {
+            assert_eq!(
+                FaEngineName::from_worker_backend(backend).worker_backend(),
+                backend,
+                "{backend:?} does not survive a round trip through its engine"
+            );
+        }
     }
 }

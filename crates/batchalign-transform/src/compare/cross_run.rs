@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 use talkbank_model::ErrorCollector;
-use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::ChatFile;
 use talkbank_parser::TreeSitterParser;
 
@@ -736,7 +736,7 @@ fn speaker_words_and_excluded(
     file: &ChatFile,
     exclusions: &BTreeSet<String>,
 ) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, usize>) {
-    let extracted = extract::extract_words(file, TierDomain::Mor);
+    let extracted = extract::extract_words(file, PositionalDomain::Mor);
     let mut result = BTreeMap::new();
     let mut excluded = BTreeMap::new();
     for utterance in extracted {

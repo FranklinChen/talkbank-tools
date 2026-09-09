@@ -6,9 +6,7 @@
 
 use crate::api::WorkerLanguage;
 use crate::types::engines::{AsrEngineName, EngineOverrides, FaEngineName};
-use crate::types::worker_v2::{
-    AsrBackendV2, ExecuteRequestV2, FaBackendV2, InferenceTaskV2, TaskRequestV2,
-};
+use crate::types::worker_v2::{AsrBackendV2, ExecuteRequestV2, InferenceTaskV2, TaskRequestV2};
 use crate::worker::error::WorkerError;
 use crate::worker::{InferTask, WorkerBootstrapMode, WorkerTarget};
 
@@ -110,7 +108,7 @@ fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOverrides {
             ..EngineOverrides::default()
         },
         TaskRequestV2::ForcedAlignment(request) => EngineOverrides {
-            fa: Some(fa_backend_engine(request.backend)),
+            fa: Some(FaEngineName::from_worker_backend(request.backend)),
             ..EngineOverrides::default()
         },
         _ => EngineOverrides::default(),
@@ -146,22 +144,14 @@ fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
     }
 }
 
-fn fa_backend_engine(backend: FaBackendV2) -> FaEngineName {
-    match backend {
-        FaBackendV2::Whisper => FaEngineName::Whisper,
-        FaBackendV2::Wave2vec => FaEngineName::Wave2Vec,
-        FaBackendV2::Wav2vecCanto => FaEngineName::Wav2vecCanto,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::LanguageCode3;
     use crate::types::engines::SelectableEngine;
     use crate::types::worker_v2::{
-        AsrInputV2, AsrRequestV2, FaTextModeV2, ForcedAlignmentRequestV2, MorphosyntaxRequestV2,
-        PreparedAudioInputV2, WorkerArtifactIdV2, WorkerRequestIdV2,
+        AsrInputV2, AsrRequestV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2,
+        MorphosyntaxRequestV2, PreparedAudioInputV2, WorkerArtifactIdV2, WorkerRequestIdV2,
     };
     use crate::worker::{WorkerBootstrapMode, WorkerProfile, WorkerTarget};
 

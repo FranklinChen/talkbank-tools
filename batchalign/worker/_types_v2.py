@@ -86,6 +86,8 @@ class FaBackendV2(str, Enum):
     WHISPER = "whisper"
     WAVE2VEC = "wave2vec"
     WAV2VEC_CANTO = "wav2vec_canto"
+    # Mirrors `crates/batchalign-types/src/worker_v2/requests.rs::FaBackendV2::Qwen3`.
+    QWEN3 = "qwen3"
 
 
 class SpeakerBackendV2(str, Enum):

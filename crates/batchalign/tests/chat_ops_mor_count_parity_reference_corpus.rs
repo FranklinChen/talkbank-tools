@@ -40,7 +40,7 @@
 use std::path::PathBuf;
 
 use batchalign_transform::extract;
-use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::{ChatFile, Line};
 use talkbank_parser::TreeSitterParser;
 use walkdir::WalkDir;
@@ -121,7 +121,7 @@ fn mor_alignable_count_parity_across_reference_corpus() {
             let mut extracted = Vec::new();
             extract::collect_utterance_content(
                 &utt.main.content.content,
-                TierDomain::Mor,
+                PositionalDomain::Mor,
                 &mut extracted,
             );
             let extract_count = extracted.len();

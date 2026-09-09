@@ -92,13 +92,96 @@ pub struct Estimates {
     pub windows_clamped: usize,
 }
 
-/// Whisper CTC forced-alignment hard limit on the total number of label tokens
-/// (characters) that can appear in a single FA group.
+/// The most label BYTES any one FA group may carry, whatever engine aligns it.
 ///
-/// Exceeding this limit causes a Python-side `ValueError: Labels' sequence
-/// length N cannot exceed the maximum allowed length of 448 tokens`. Groups
-/// must be split by char count as well as by time window to stay under this.
-pub const WHISPER_FA_MAX_LABEL_TOKENS: usize = 448;
+/// The number is Whisper's CTC decoder limit, which is stated in TOKENS:
+/// exceeding it causes a Python-side `ValueError: Labels' sequence length N
+/// cannot exceed the maximum allowed length of 448 tokens`. It is applied to
+/// EVERY group, not only Whisper's, and the name says so, because the previous
+/// name (`WHISPER_FA_MAX_LABEL_TOKENS`) claimed an engine-specific contract
+/// that nothing here can honour: [`group_utterances`] is never told which
+/// engine will align its groups. Its two production call sites pass a CHAT
+/// file, a millisecond budget and a recording, so gating the cap on the engine
+/// is a change to those call sites and to this signature, not to this
+/// constant. Until then the tightest engine's limit is applied uniformly,
+/// which is conservative for the others: a group smaller than an engine needs
+/// is a waste, where one larger than it accepts is a failed request.
+///
+/// # Why BYTES, and why that is the conservative choice
+///
+/// The budget is not the same quantity as the limit, so one of the two
+/// directions of error is safe and the other is not. Every token of any of
+/// these tokenizers occupies at least one UTF-8 byte of the text it covers, so
+/// a byte count BOUNDS the token count from above: under the byte cap implies
+/// under the token limit, for every script. A CHARACTER count does not bound
+/// it, and outside ASCII it is smaller than the byte count, so counting
+/// characters LOOSENS the cap against a limit stated in tokens and can let a
+/// group through that provokes the very `ValueError` the cap exists to
+/// prevent. It was briefly changed to characters on the reasoning that "a
+/// token is a character", which is true of no tokenizer any of these engines
+/// uses.
+///
+/// Bytes therefore over-split non-Latin scripts, roughly threefold for
+/// Devanagari, CJK and most Indic scripts and twofold for Cyrillic and Greek.
+/// That is a known and deliberate cost: more, smaller FA groups still align
+/// correctly, where an oversized group is a hard engine failure. Tightening it
+/// means asking the engine for its real tokenizer, not swapping one proxy for
+/// a looser one.
+///
+/// # Known limit: this bounds a MERGE, not every group
+///
+/// The cap is enforced in [`PendingGroup::append`], which is the only place
+/// two utterances are joined. A SINGLE utterance whose own labels exceed the
+/// cap is never split: it becomes its own group and is sent as it stands. So
+/// the guarantee is "merging never creates an oversized group", not "no group
+/// exceeds the cap". Splitting one utterance would mean splitting its audio
+/// window and its word list at a position nothing here can justify, so it is
+/// deliberately left to the engine to refuse.
+///
+/// The unit is a BYTE. See [`LabelBytes`], which is the only way to produce a
+/// value that may be compared against this.
+pub const MAX_GROUP_LABEL_BYTES: usize = 448;
+
+/// A count of label BYTES, the unit [`MAX_GROUP_LABEL_BYTES`] is in.
+///
+/// # Why this is a type and not a `usize`
+///
+/// The field it replaces was a bare `usize`, so nothing said which quantity it
+/// held and nothing stopped a differently-counted number being assigned to it.
+/// That is exactly what happened: the field was renamed to `characters` and
+/// refilled from `chars().count()`, changing the meaning of the budget without
+/// changing the type of anything, and the constant it is compared against went
+/// on being a token limit. Naming the variable carefully was what the code did
+/// instead of typing it, and that careful naming was the tell that this type
+/// was owed.
+///
+/// [`LabelBytes::of`] is the sole constructor, so a count in any other unit
+/// has no route into the budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LabelBytes(usize);
+
+impl LabelBytes {
+    /// Count one label's UTF-8 bytes. The boundary: raw text in, budget out.
+    fn of(text: &str) -> Self {
+        Self(text.len())
+    }
+
+    /// Sum a group's labels.
+    fn total<'a>(labels: impl IntoIterator<Item = &'a String>) -> Self {
+        Self(labels.into_iter().map(|label| Self::of(label).0).sum())
+    }
+
+    /// The two groups' labels together, saturating rather than wrapping so an
+    /// absurd input cannot make an oversized group look small.
+    fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    /// Whether this many labels is more than one group may carry.
+    fn exceeds_group_cap(self) -> bool {
+        self.0 > MAX_GROUP_LABEL_BYTES
+    }
+}
 
 /// Maximum extension (ms) into the gap after the last utterance in a group.
 ///
@@ -221,7 +304,7 @@ pub fn group_utterances(
                 continue;
             }
         };
-        let characters = extracted.iter().map(String::len).sum();
+        let label_bytes = LabelBytes::total(extracted.iter());
         let words = extracted
             .drain(..)
             .enumerate()
@@ -235,7 +318,7 @@ pub fn group_utterances(
             window,
             words,
             utterance_indices: vec![UtteranceIdx::new(utt_idx)],
-            characters,
+            label_bytes,
         };
         pending = Some(match pending.take() {
             None => next,
@@ -318,14 +401,17 @@ struct PendingGroup {
     window: GroupWindow,
     words: Vec<FaWord>,
     utterance_indices: Vec<UtteranceIdx>,
-    characters: usize,
+    label_bytes: LabelBytes,
 }
 
 impl PendingGroup {
     fn append(&mut self, mut next: Self) -> Result<(), Self> {
         if next.window.window.audio_start().get() < self.window.window.audio_start().get()
             || next.window.window.end().get() > self.window.end_limit.get()
-            || self.characters + next.characters > WHISPER_FA_MAX_LABEL_TOKENS
+            || self
+                .label_bytes
+                .saturating_add(next.label_bytes)
+                .exceeds_group_cap()
         {
             return Err(next);
         }
@@ -336,7 +422,7 @@ impl PendingGroup {
             .get()
             .saturating_sub(self.window.window.end().get());
         self.window.window = self.window.window.extend_by(Ms(extension));
-        self.characters += next.characters;
+        self.label_bytes = self.label_bytes.saturating_add(next.label_bytes);
         self.words.append(&mut next.words);
         self.utterance_indices.append(&mut next.utterance_indices);
         Ok(())

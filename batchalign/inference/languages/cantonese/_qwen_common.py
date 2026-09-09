@@ -35,6 +35,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from batchalign.inference._domain_types import LanguageCode
+from batchalign.inference.qwen_forced_alignment import (
+    QWEN_FORCED_ALIGNER_MODEL_ID,
+    ForcedAligner,
+    QwenForcedAligner,
+    QwenLanguageLabel,
+    SpokenWindowWords,
+    resolve_qwen_language,
+)
 
 from ._asr_types import AsrElement, AsrGenerationPayload, AsrMonologue, TimedWord
 from ._qwen_chunking import (
@@ -54,24 +62,12 @@ from ._qwen_chunking import (
 L = logging.getLogger("batchalign.hk.qwen")
 
 
-# ISO-639-3 → English language label expected by Qwen3-ASR's
-# ``language=`` parameter. Pinned in code rather than via pycountry
-# because pycountry returns ``"Yue Chinese"`` for ``yue``, which Qwen
-# does not accept (silent fall-through to auto-detect). The fix is
-# explicit per-code mapping with a fail-loud default.
-_QWEN_LANG_LABELS: dict[LanguageCode, str] = {
-    "yue": "Cantonese",
-    "zho": "Chinese",
-    "cmn": "Chinese",
-    "eng": "English",
-}
-
-
-# Canonical forced-alignment companion from the Qwen3-ASR family, in the `-hf`
-# spelling the native module targets. Word-level timestamps are load-bearing
-# (the downstream FA pipeline injects them into `%wor`), so the aligner is
-# never optional: see `LoadedQwen`, whose existence is what guarantees it.
-_QWEN_FORCED_ALIGNER_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
+# The language-label map, the aligner checkpoint id and the aligner call all
+# moved to `batchalign.inference.qwen_forced_alignment` when the aligner became
+# a first-class FA engine in its own right. They are imported above rather than
+# restated here: the ASR engine and the `qwen3_fa` engine drive the same
+# aligner, and two copies of that call is how two coordinate conversions come
+# to disagree.
 
 
 def _check_native_checkpoint(model_id: str) -> None:
@@ -92,17 +88,6 @@ def _check_native_checkpoint(model_id: str) -> None:
             f"module, which targets the '-hf' repositories: pass "
             f"{model_id + '-hf'!r} instead."
         )
-
-
-def _resolve_qwen_language(lang: LanguageCode) -> str:
-    label = _QWEN_LANG_LABELS.get(lang)
-    if label is None:
-        raise ValueError(
-            f"Qwen3-ASR has no language label mapped for ISO-639-3 "
-            f"{lang!r}; add it to _QWEN_LANG_LABELS in "
-            f"_qwen_common.py if the model supports the language."
-        )
-    return label
 
 
 @dataclass
@@ -151,12 +136,15 @@ class LoadedQwen:
     A test is the wrong instrument for that. This type has one constructor,
     which loads both or raises, so "transcribe with no aligner" has no
     signature to travel through and the test that watched for it is gone.
+
+    The aligner is now the shared `ForcedAligner` rather than a loose
+    processor/model pair of `Any`s, so the pairing is a type as well as a
+    constructor: the standalone `qwen3_fa` engine loads exactly the same thing.
     """
 
     processor: Any
     model: Any
-    aligner_processor: Any
-    aligner: Any
+    aligner: ForcedAligner
 
     @classmethod
     def load(
@@ -165,7 +153,6 @@ class LoadedQwen:
         from transformers import (  # type: ignore[import-not-found]
             AutoModelForMultimodalLM,
             AutoProcessor,
-            Qwen3ASRForTokenClassification,
         )
 
         return cls(
@@ -173,9 +160,8 @@ class LoadedQwen:
             model=AutoModelForMultimodalLM.from_pretrained(
                 model_id, device_map=device, dtype=dtype
             ),
-            aligner_processor=AutoProcessor.from_pretrained(aligner_id),
-            aligner=Qwen3ASRForTokenClassification.from_pretrained(
-                aligner_id, device_map=device, dtype=dtype
+            aligner=QwenForcedAligner.load(
+                aligner_id=aligner_id, device=device, dtype=dtype
             ),
         )
 
@@ -250,7 +236,7 @@ class QwenRecognizer:
         # stale checkpoint id surfaces at worker startup rather than on the
         # first inference request, minutes into a job.
         _check_native_checkpoint(model_id)
-        self._qwen_language = _resolve_qwen_language(lang)
+        self._qwen_language: QwenLanguageLabel = resolve_qwen_language(lang)
 
     def warm(self) -> None:
         """Force the lazy model load. Call at worker bootstrap so the
@@ -289,14 +275,14 @@ class QwenRecognizer:
 
         self._model = LoadedQwen.load(
             model_id=self.model_id,
-            aligner_id=_QWEN_FORCED_ALIGNER_MODEL_ID,
+            aligner_id=QWEN_FORCED_ALIGNER_MODEL_ID,
             device=self.device,
             dtype=dtype,
         )
         L.info(
             "Qwen3-ASR loaded: model=%s, aligner=%s, lang=%s (%s), device=%s, dtype=%s",
             self.model_id,
-            _QWEN_FORCED_ALIGNER_MODEL_ID,
+            QWEN_FORCED_ALIGNER_MODEL_ID,
             self.lang,
             self._qwen_language,
             self.device,
@@ -365,38 +351,24 @@ class QwenRecognizer:
     ) -> list[tuple[float, float, str]]:
         """Word timings for one chunk, converted into recording-relative time.
 
-        The aligner reports against the window it was handed, so every value
-        it returns goes through ``chunk.to_file``. That conversion is the one
-        thing in this file that is silently wrong when omitted.
+        The aligner call itself is shared with the standalone ``qwen3_fa``
+        engine and lives in ``inference.qwen_forced_alignment``. What is NOT
+        shared, and stays here, is the conversion: the aligner answers in
+        window time (`WindowAlignedWord`), and only this caller holds the
+        chunk offset that turns it into recording time. That conversion is the
+        one thing in this file that is silently wrong when omitted, so it has
+        exactly one site.
+
+        The `SpokenWindowWords` step is the second thing this caller owns: it
+        reads aligner units as WORDS, so a unit with no text is not one of its
+        answers. The FA fold must keep every unit in position, which is why the
+        filter cannot live in `align`.
         """
-        import torch  # type: ignore[import-not-found]
-
-        inputs, word_lists = loaded.aligner_processor.prepare_forced_aligner_inputs(
-            audio=chunk.samples, transcript=text, language=self._qwen_language
-        )
-        inputs = inputs.to(loaded.aligner.device, loaded.aligner.dtype)
-        with torch.inference_mode():
-            logits = loaded.aligner(**inputs).logits
-        aligned = loaded.aligner_processor.decode_forced_alignment(
-            logits=logits,
-            input_ids=inputs["input_ids"],
-            word_lists=word_lists,
-            timestamp_token_id=loaded.aligner.config.timestamp_token_id,
-        )[0]
-
-        timings: list[tuple[float, float, str]] = []
-        for word in aligned:
-            token = str(word.get("text", "") or "")
-            if not token.strip():
-                continue
-            timings.append(
-                (
-                    chunk.to_file(float(word["start_time"])),
-                    chunk.to_file(float(word["end_time"])),
-                    token,
-                )
-            )
-        return timings
+        alignment = loaded.aligner.align(chunk.samples, text, self._qwen_language)
+        return [
+            (chunk.to_file(word.start_s), chunk.to_file(word.end_s), word.text)
+            for word in SpokenWindowWords.of_units(alignment.words).words
+        ]
 
     def _run_model(
         self, source_path: str, decode_budget_seconds: float | None = None

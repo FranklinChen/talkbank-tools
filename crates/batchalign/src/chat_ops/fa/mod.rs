@@ -40,7 +40,7 @@ pub use self::alignment::parse_fa_response;
 pub use self::expand_for_fillers::expand_bullets_for_edge_fillers;
 pub use self::extraction::collect_fa_words;
 pub use self::grouping::{
-    Estimates, FaGroup, Grouping, Placement, WHISPER_FA_MAX_LABEL_TOKENS, count_utterance_timing,
+    Estimates, FaGroup, Grouping, MAX_GROUP_LABEL_BYTES, Placement, count_utterance_timing,
     estimate_untimed_boundaries, group_utterances,
 };
 pub use self::injection::inject_timings_for_utterance;

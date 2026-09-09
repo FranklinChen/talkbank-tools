@@ -1,6 +1,6 @@
 [package]
 name = "batchalign"
-version = "0.7.0"
+version = "0.8.0"
 description = "batchalign3: command-line interface, application, server, worker pool, cache"
 edition.workspace = true
 license.workspace = true
@@ -157,6 +157,7 @@ rubato = { workspace = true, optional = true }
 audioadapter-buffers = { workspace = true, optional = true }
 # Default-model auto-fetch (ggml-large-v3 from ggerganov/whisper.cpp).
 hf-hub = { workspace = true, optional = true }
+unicode-normalization = "0.1.25"
 
 # whisper-rs compiles whisper.cpp (C/C++). On macOS the Metal backend is always
 # built; CoreML/CUDA are additive opt-ins via the whisper-rs-coreml/-cuda

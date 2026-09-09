@@ -143,7 +143,7 @@ where
                     job.dispatch.command,
                     file_index,
                     filename,
-                    &file_output,
+                    file_output,
                 )
                 .await
                 {
@@ -158,8 +158,14 @@ where
                         );
                         lifecycle
                             .fail(
-                                &format!("Failed to write {command_label} output: {error}"),
-                                FailureCategory::System,
+                                // Both the sentence and the category come off
+                                // the typed failure: a document refused by the
+                                // output gate is a validity failure that wrote
+                                // nothing, not a system-level write error, and
+                                // this call site used to hardcode `System` and
+                                // the word "Failed to write" for both.
+                                &error.operator_message(command_label),
+                                error.category(),
                                 finished_at,
                             )
                             .await;
@@ -392,7 +398,11 @@ mod tests {
             output: Self::AttemptOutput,
         ) -> Result<FileOutput, ServerError> {
             Ok(FileOutput::Chat {
-                text: output,
+                document: crate::runner::dispatch::audio_output::gate_built_chat_output(
+                    &output,
+                    ReleasedCommand::Transcribe,
+                )
+                .map_err(|failure| ServerError::Validation(failure.to_string()))?,
                 merge_abbreviations: MergeAbbreviations::Leave,
             })
         }

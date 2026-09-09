@@ -1,7 +1,7 @@
 # Rev.AI Integration
 
 **Status:** Current
-**Last updated:** 2026-09-03 05:50 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Rev.AI is the default ASR engine for `batchalign3 transcribe`, and the default
 UTR engine for `batchalign3 align`.
@@ -94,10 +94,10 @@ If you do not want cloud ASR, use a local Whisper model:
 batchalign3 transcribe recordings/ -o transcripts/ --asr-engine whisper --lang eng
 ```
 
-For the OpenAI Whisper API instead of the local model:
+For Rust-native whisper.cpp, run in-process with no Python worker:
 
 ```bash
-batchalign3 transcribe recordings/ -o transcripts/ --asr-engine whisper-oai --lang eng
+batchalign3 transcribe recordings/ -o transcripts/ --asr-engine whisper_rs --lang eng
 ```
 
 ## When an upload fails

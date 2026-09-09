@@ -11,43 +11,8 @@ use async_trait::async_trait;
 
 use crate::api::{ChatText, DisplayPath, LanguageCode3};
 use crate::error::ServerError;
-
-/// Owned serialized CHAT text produced by a text workflow.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OwnedChatText(String);
-
-impl OwnedChatText {
-    /// Wrap one owned CHAT string.
-    pub(crate) fn new(text: String) -> Self {
-        Self(text)
-    }
-}
-
-impl From<String> for OwnedChatText {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl std::fmt::Display for OwnedChatText {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::ops::Deref for OwnedChatText {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl AsRef<str> for OwnedChatText {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
+use crate::pipeline::post_validate::{PostValidated, PostValidationFailure};
+use crate::scheduling::FailureCategory;
 
 /// Maximum number of per-item failure samples retained inline on a
 /// ``TextWorkflowFileError::ItemErrors`` value.
@@ -87,13 +52,31 @@ pub(crate) struct ItemError {
 /// and silently dropped instead of failing the file.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum TextWorkflowFileError {
-    /// Batch-level failure with no per-item attribution: worker spawn
-    /// failure, IPC error, schema mismatch, pre- or post-validation
-    /// rejection, serialization error. Preserves the legacy stringly
-    /// shape so existing callsites that build a free-form message keep
-    /// working unchanged.
-    #[error("{0}")]
-    Batch(String),
+    /// A failure the control plane has already classified, carried with its
+    /// verdict.
+    ///
+    /// A refusal on validity grounds is one of these, built by
+    /// [`TextWorkflowFileError::validation`], so the control plane hears "bad
+    /// CHAT" rather than "the provider gave up". That used to be a
+    /// `Validation(String)` variant of its own, which is exactly
+    /// `Categorised(FailureCategory::Validation, _)` spelled a second time:
+    /// two representations of one state, held in agreement by `category()`
+    /// answering the same thing for both.
+    ///
+    /// The message is carried rendered rather than as a typed
+    /// `ValidationError`, which is not `Eq`, and this enum is compared in
+    /// tests.
+    ///
+    /// [`TextWorkflowFileError::from_server_error`] used to ask
+    /// `classify_server_error` for a category and then throw all but one
+    /// answer away, folding `MemoryPressure`, `ModelAccessDenied`, `System`
+    /// and every retryable class into `Batch`, which reports
+    /// `ProviderTerminal`. A retryable provider failure was therefore recorded
+    /// as terminal and never retried, and an out-of-memory kill was reported
+    /// as the provider giving up. The verdict now travels with the message
+    /// instead of being recomputed or collapsed.
+    #[error("{1}")]
+    Categorised(FailureCategory, String),
 
     /// One or more per-item inferences failed. Affects exactly the
     /// file these items came from (other files in the same cross-file
@@ -114,12 +97,52 @@ pub(crate) enum TextWorkflowFileError {
 }
 
 impl TextWorkflowFileError {
-    /// Construct one batch-level workflow error from a message.
+    /// Construct one validity-grounds failure for this file from a message.
     ///
-    /// Used by callsites that build a free-form message (pre- and
-    /// post-validation reporters, infer-batch outer errors).
-    pub(crate) fn batch(message: impl Into<String>) -> Self {
-        Self::Batch(message.into())
+    /// Prefer the `From<PostValidationFailure>` conversion for an output-gate
+    /// refusal; this constructor is for the pre-validation gates, which
+    /// already build their own message.
+    pub(crate) fn validation(message: impl Into<String>) -> Self {
+        Self::Categorised(FailureCategory::Validation, message.into())
+    }
+
+    /// Classify this failure for the control plane.
+    ///
+    /// Written as an exhaustive `match` with no catch-all so a new variant
+    /// has to state its own category instead of inheriting a default. The
+    /// call site that used to hardcode `ProviderTerminal` for every text
+    /// failure is `execution::text_io::write_text_results`. There is
+    /// deliberately no uncategorised variant left for a new call site to
+    /// reach for.
+    pub(crate) fn category(&self) -> FailureCategory {
+        match self {
+            // Already classified, by the control plane's own classifier or by
+            // `Self::validation`; the verdict is carried, never re-derived
+            // here. It replaced a `Batch(String)` variant that had no category
+            // to carry and therefore answered `ProviderTerminal` for
+            // everything, memory pressure and retryable provider failures
+            // included.
+            Self::Categorised(category, _) => *category,
+            // Per-item engine failures come from the provider by definition.
+            Self::ItemErrors { .. } => FailureCategory::ProviderTerminal,
+        }
+    }
+
+    /// Attribute one orchestration error to this file, carrying the control
+    /// plane's own classification verbatim.
+    ///
+    /// `classify_server_error` is the owner of "what kind of failure is this",
+    /// so its answer is stored rather than matched on: the two-arm match that
+    /// used to live here kept `Validation` and collapsed every other verdict
+    /// into `Batch`, which reports `ProviderTerminal`. That silently retyped
+    /// memory pressure, model-access denials, system errors and every
+    /// retryable provider failure as a terminal provider failure, so the
+    /// runner's retry policy could not see the cases it exists for.
+    pub(crate) fn from_server_error(error: &ServerError) -> Self {
+        Self::Categorised(
+            crate::runner::util::classify_server_error(error),
+            error.to_string(),
+        )
     }
 
     /// Construct one per-item workflow error from a list of failing
@@ -139,17 +162,34 @@ impl TextWorkflowFileError {
     }
 }
 
-impl From<String> for TextWorkflowFileError {
-    fn from(value: String) -> Self {
-        Self::batch(value)
+impl ServerError {
+    /// Carry one already-classified text-workflow failure, verdict included.
+    ///
+    /// Lives here, beside [`TextWorkflowFileError`], because the category must
+    /// be that error's OWN answer: an `impl` in `error.rs` would take a
+    /// category as a parameter and hand every call site a chance to pick the
+    /// wrong one, which is precisely the defect this replaces.
+    pub(crate) fn from_classified_failure(error: &TextWorkflowFileError) -> Self {
+        Self::ClassifiedFailure {
+            category: error.category(),
+            message: error.to_string(),
+        }
     }
 }
 
-impl From<&str> for TextWorkflowFileError {
-    fn from(value: &str) -> Self {
-        Self::batch(value)
+impl From<PostValidationFailure> for TextWorkflowFileError {
+    fn from(value: PostValidationFailure) -> Self {
+        Self::validation(value.to_string())
     }
 }
+
+// There is deliberately no `From<String>` / `From<&str>`. A bare string cannot
+// say what kind of failure it is, and while those conversions existed the
+// natural thing to write at a call site produced `Batch`, hence
+// `ProviderTerminal`, for failures that were nothing of the sort: a coref
+// batch break and a translate language-resolution refusal both landed there.
+// Every call site now names a constructor, which is where the category is
+// stated.
 
 /// Collapse a flat ``Vec<Result<R, String>>`` into either the
 /// successful responses or a typed ``ItemErrors`` failure.
@@ -210,18 +250,28 @@ pub(crate) struct TextBatchFileResult {
     /// Stable file identity for this output or error.
     pub filename: DisplayPath,
     /// File-local workflow outcome.
-    pub result: Result<OwnedChatText, TextWorkflowFileError>,
+    ///
+    /// The success side is a [`PostValidated`] proof, not a bare string: the
+    /// writer (`execution::text_io::write_text_results`) reads this field, so
+    /// output that has not passed the post-validation gate has no route to
+    /// disk.
+    pub result: Result<PostValidated, TextWorkflowFileError>,
 }
 
 /// Cross-file outputs for one text workflow family.
 pub(crate) type TextBatchFileResults = Vec<TextBatchFileResult>;
 
 impl TextBatchFileResult {
-    /// Construct one successful named file result.
-    pub(crate) fn ok(filename: impl Into<DisplayPath>, text: impl Into<OwnedChatText>) -> Self {
+    /// Construct one successful named file result from gate-proven output.
+    ///
+    /// Takes the proof by value, so the only way to report success for a file
+    /// is to hold evidence that its output passed the post-validation gate
+    /// (or that the command left the document untouched). See
+    /// [`PostValidated`] for the full enumeration of routes to that proof.
+    pub(crate) fn ok(filename: impl Into<DisplayPath>, output: PostValidated) -> Self {
         Self {
             filename: filename.into(),
-            result: Ok(text.into()),
+            result: Ok(output),
         }
     }
 
@@ -243,15 +293,20 @@ pub(crate) struct TextBatchFileInput {
     /// Stable file identity for this input.
     pub filename: DisplayPath,
     /// Owned serialized CHAT document for this file.
-    pub chat_text: OwnedChatText,
+    ///
+    /// A plain `String`, not a newtype. It was an `OwnedChatText` wrapper with
+    /// `new`, an infallible `From<String>`, `Display`, `Deref` and `AsRef` and
+    /// no invariant to prove, so it forbade nothing and every borrow of it went
+    /// through a `Deref` straight back to `str`. The BORROWED counterpart
+    /// [`ChatText`] is a different matter: it is the parameter type at the
+    /// workflow seams below, where it says which of several `&str` a caller is
+    /// passing.
+    pub chat_text: String,
 }
 
 impl TextBatchFileInput {
     /// Construct one named batch input from a filename and CHAT text.
-    pub(crate) fn new(
-        filename: impl Into<DisplayPath>,
-        chat_text: impl Into<OwnedChatText>,
-    ) -> Self {
+    pub(crate) fn new(filename: impl Into<DisplayPath>, chat_text: impl Into<String>) -> Self {
         Self {
             filename: filename.into(),
             chat_text: chat_text.into(),
@@ -355,19 +410,124 @@ where
 mod tests {
     use super::*;
 
+    /// A file refused on validity grounds must reach the control plane as
+    /// `Validation`, not as a provider failure. `write_text_results` used to
+    /// hardcode `ProviderTerminal` for every text failure, which reported bad
+    /// CHAT as "the provider gave up on this file".
+    /// RED FIRST (review item 5): a per-item PROVIDER failure must reach the
+    /// control plane as `ProviderTerminal`. `run_text_pipeline` rendered the
+    /// typed `ItemErrors` into `ServerError::Validation(String)`, which
+    /// `classify_server_error` answers with `Validation`: the retry policy
+    /// never saw a provider failure, and the operator was told the CHAT was
+    /// bad.
     #[test]
-    fn batch_error_renders_as_bare_message() {
-        let e = TextWorkflowFileError::batch("worker spawn failed: oom");
-        assert_eq!(e.to_string(), "worker spawn failed: oom");
+    fn a_per_item_provider_failure_stays_provider_terminal_through_server_error() {
+        let items = TextWorkflowFileError::item_errors(
+            "translate",
+            vec![ItemError {
+                item_index: 0,
+                message: "Translation failed: ConnectionResetError(54)".to_string(),
+            }],
+        );
+        assert_eq!(items.category(), FailureCategory::ProviderTerminal);
+
+        let carried = ServerError::from_classified_failure(&items);
+        assert_eq!(
+            crate::runner::util::classify_server_error(&carried),
+            FailureCategory::ProviderTerminal,
+            "the provider verdict must survive the ServerError boundary"
+        );
+        assert_eq!(
+            TextWorkflowFileError::from_server_error(&carried).category(),
+            FailureCategory::ProviderTerminal,
+            "and the round trip back to the per-file error must not lose it"
+        );
+        assert!(
+            carried.to_string().contains("ConnectionResetError"),
+            "the engine's own message must survive, got: {carried}"
+        );
     }
 
     #[test]
-    fn batch_error_round_trips_via_from_string() {
-        let e: TextWorkflowFileError = "boom".to_owned().into();
-        match e {
-            TextWorkflowFileError::Batch(s) => assert_eq!(s, "boom"),
-            other => panic!("expected Batch variant, got: {other:?}"),
+    fn a_validation_failure_is_categorised_as_validation() {
+        let e = TextWorkflowFileError::validation("utseg post-validation failed: ...");
+        assert_eq!(e.category(), FailureCategory::Validation);
+    }
+
+    /// The converse, so the new variant cannot silently re-categorise the
+    /// one that keeps its own answer: per-item engine failures stay
+    /// `ProviderTerminal` because they come from the provider by definition.
+    #[test]
+    fn item_failures_stay_provider_terminal() {
+        assert_eq!(
+            TextWorkflowFileError::item_errors(
+                "translate",
+                vec![ItemError {
+                    item_index: 0,
+                    message: "boom".into(),
+                }],
+            )
+            .category(),
+            FailureCategory::ProviderTerminal
+        );
+    }
+
+    /// RED FIRST: `from_server_error` must carry the control plane's OWN
+    /// verdict for every class, not keep `Validation` and collapse the rest.
+    ///
+    /// The collapse is what this replaces: it reported memory pressure, a
+    /// denied model download, a disk failure and a retryable provider error
+    /// all as `ProviderTerminal`, so the runner's retry policy never saw the
+    /// one case it exists for. The expectations here are read from
+    /// `classify_server_error`, which is the owner.
+    #[test]
+    fn from_server_error_carries_every_category_verbatim() {
+        let cases: Vec<(ServerError, FailureCategory)> = vec![
+            (
+                ServerError::Validation("morphotag post-validation failed".into()),
+                FailureCategory::Validation,
+            ),
+            (
+                ServerError::MemoryPressure("host is out of memory".into()),
+                FailureCategory::MemoryPressure,
+            ),
+            (
+                ServerError::ModelAccessDenied("gated repository".into()),
+                FailureCategory::ModelAccessDenied,
+            ),
+            (
+                ServerError::Persistence("disk full".into()),
+                FailureCategory::System,
+            ),
+            (ServerError::Cancelled, FailureCategory::Cancelled),
+        ];
+        for (error, expected) in cases {
+            let rendered = error.to_string();
+            let attributed = TextWorkflowFileError::from_server_error(&error);
+            assert_eq!(
+                attributed.category(),
+                expected,
+                "wrong category for {rendered}"
+            );
+            assert_eq!(
+                attributed.to_string(),
+                rendered,
+                "the message must survive the attribution"
+            );
         }
+    }
+
+    /// A categorised failure renders as its bare message, exactly as the
+    /// other variants do: the category is for the control plane, and the
+    /// operator sees the engine's own words.
+    #[test]
+    fn categorised_error_renders_as_bare_message() {
+        let e = TextWorkflowFileError::Categorised(
+            FailureCategory::MemoryPressure,
+            "worker killed: out of memory".into(),
+        );
+        assert_eq!(e.to_string(), "worker killed: out of memory");
+        assert_eq!(e.category(), FailureCategory::MemoryPressure);
     }
 
     #[test]

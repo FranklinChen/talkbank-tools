@@ -679,6 +679,15 @@ pub fn run(root: &Path) -> Result<()> {
         println!("ci-hygiene: release operations OK");
     }
 
+    // The CLI binary is compiled once and consumed by six jobs. This refuses
+    // any workflow that fetches it around the composite action that restores
+    // the executable bit the artifact upload drops.
+    if let Err(msg) = crate::ci_artifact_flow::check(root) {
+        all_failures.push(msg);
+    } else {
+        println!("ci-hygiene: CLI binary artifact flow OK");
+    }
+
     if all_failures.is_empty() {
         println!("ci-hygiene: all checks passed");
         Ok(())

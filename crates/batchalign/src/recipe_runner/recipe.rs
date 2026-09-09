@@ -1,13 +1,7 @@
 //! Typed recipe metadata for the recipe-runner spike.
 
-#[cfg(test)]
-use std::collections::BTreeSet;
 use std::fmt;
 
-#[cfg(test)]
-use crate::api::ReleasedCommand;
-#[cfg(test)]
-use crate::error::ServerError;
 use crate::runner::util::FileStage;
 
 /// How a command recipe owns execution.
@@ -67,6 +61,15 @@ pub(crate) enum RecipeStageId {
 }
 
 impl RecipeStageId {
+    /// Equality usable inside a `const fn`.
+    ///
+    /// The derived `PartialEq` is not const, and [`Recipe::check`] must run at
+    /// compile time. The enum is fieldless, so the discriminant IS the
+    /// identity and the cast is exact.
+    const fn same(self, other: Self) -> bool {
+        self as u8 == other as u8
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::PlanWorkUnits => "plan_work_units",
@@ -152,62 +155,177 @@ impl RecipeStage {
     }
 }
 
+/// Why a stage list is not a legal recipe.
+///
+/// A sum type rather than a formatted string, for two reasons. It is returned
+/// from a `const fn`, where formatting does not exist; and a test asserting
+/// "the message contains 'declared after'" is a substring check standing in
+/// for a fact the type can carry outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecipeCheck {
+    /// The stage list is a legal recipe.
+    Ok,
+    /// A stage lists itself as its own prerequisite.
+    SelfDependency(RecipeStageId),
+    /// A prerequisite exists in the recipe but is declared AFTER its dependent.
+    /// The runtime walks `stages` in declaration order, so it would run second.
+    DependencyDeclaredLater {
+        /// The dependent stage.
+        stage: RecipeStageId,
+        /// The prerequisite declared too late.
+        dependency: RecipeStageId,
+    },
+    /// A prerequisite is not in the recipe at all.
+    DependencyNotInRecipe {
+        /// The dependent stage.
+        stage: RecipeStageId,
+        /// The prerequisite that is missing.
+        dependency: RecipeStageId,
+    },
+    /// One stage id appears twice.
+    DuplicateStage(RecipeStageId),
+}
+
+/// Proof that a [`Recipe`] went through [`Recipe::new`].
+///
+/// A private zero-sized field, which is the whole mechanism: `Recipe`'s own
+/// fields stay readable everywhere, and no module outside this one can write
+/// `Recipe { mode, stages }` and skip the check. Without it the constructor
+/// would be a convention, and a convention is what the `#[cfg(test)]`
+/// validator already was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Validated;
+
 /// Static recipe metadata for one released command.
+///
+/// Every value of this type is a VALID recipe: dependencies exist, are
+/// declared before their dependents, and no stage id repeats. That is checked
+/// by [`Recipe::new`] at COMPILE time, because the catalog's recipes are
+/// `const` items, so a malformed recipe is a build failure rather than a
+/// runtime surprise on the one command nobody submitted this week.
+///
+/// Before 2026-09-07 the checker was `#[cfg(test)]` and returned a
+/// `Result`, so the shipped recipes were validated only insofar as some test
+/// remembered to walk them
+/// (`rg -c 'const \w+_RECIPE: Recipe' recipes.rs` counts them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Recipe {
     /// Top-level execution mode for the command.
     pub mode: ExecutionMode,
     /// Ordered recipe stages.
     pub stages: &'static [RecipeStage],
+    /// Evidence that [`Recipe::new`] checked `stages`.
+    _validated: Validated,
 }
 
 impl Recipe {
-    /// Validate the recipe metadata for one released command.
+    /// Build a recipe, refusing an illegal stage list at compile time.
     ///
-    /// Checks three things, in one pass so that ORDER is checked too. The
+    /// THE only way to obtain a `Recipe`. The panic messages are static
+    /// because a `const` panic cannot format; the variant naming the offending
+    /// stage is available to a caller that wants detail, via [`Self::check`],
+    /// and the compiler points at the offending `const` item either way.
+    ///
+    /// The `panic!`s below are the refusal mechanism of `const` evaluation,
+    /// which has no other: every caller is a `const` item in the catalog, so
+    /// they fire at COMPILE time and never in a running process. `expect`
+    /// rather than `allow`, so that if the lint ever stops firing here the
+    /// justification is re-examined instead of silently kept.
+    #[expect(
+        clippy::panic,
+        reason = "compile-time refusal inside a const fn; the workspace ban is on runtime panics"
+    )]
+    pub(crate) const fn new(mode: ExecutionMode, stages: &'static [RecipeStage]) -> Self {
+        match Self::check(stages) {
+            RecipeCheck::Ok => Self {
+                mode,
+                stages,
+                _validated: Validated,
+            },
+            RecipeCheck::SelfDependency(_) => {
+                panic!("recipe stage depends on itself")
+            }
+            RecipeCheck::DependencyDeclaredLater { .. } => {
+                panic!("recipe stage depends on a stage declared after it")
+            }
+            RecipeCheck::DependencyNotInRecipe { .. } => {
+                panic!("recipe stage depends on a stage that is not in the recipe")
+            }
+            RecipeCheck::DuplicateStage(_) => panic!("recipe declares one stage twice"),
+        }
+    }
+
+    /// Decide whether a stage list is a legal recipe.
+    ///
+    /// Checks three things in ONE pass, so that ORDER is checked too. The
     /// runtime executes `stages` in declaration order, so a prerequisite
-    /// declared after its dependent would run after it; the graph is only
-    /// meaningful if the declared sequence is a topological order of it.
+    /// declared after its dependent would run after it; the dependency graph
+    /// is only meaningful if the declared sequence is a topological order of
+    /// it. A two-pass form cannot see that, because collecting every id first
+    /// makes a forward reference indistinguishable from a backward one.
     ///
-    /// The earlier two-pass form could not see that: it collected every stage
-    /// id first, then checked dependencies against the complete set, which
-    /// makes a forward reference indistinguishable from a backward one. All 12
-    /// shipped recipes were already ordered correctly; nothing was enforcing it.
-    #[cfg(test)]
-    pub(crate) fn validate(&self, command: ReleasedCommand) -> Result<(), ServerError> {
-        let mut already_declared = BTreeSet::new();
-        for stage in self.stages {
-            for dependency in stage.depends_on {
-                if *dependency == stage.id {
-                    return Err(ServerError::Validation(format!(
-                        "recipe for {command} has self-dependency on stage {}",
-                        stage.id
-                    )));
+    /// Written with index loops rather than iterators because it must be
+    /// callable from a `const` context, where `Iterator` is not available.
+    pub(crate) const fn check(stages: &'static [RecipeStage]) -> RecipeCheck {
+        let mut i = 0;
+        while i < stages.len() {
+            let stage = stages[i];
+
+            // Every prerequisite must already have been DECLARED, i.e. appear
+            // somewhere in stages[0..i].
+            let dependencies = stage.depends_on;
+            let mut d = 0;
+            while d < dependencies.len() {
+                let dependency = dependencies[d];
+                if dependency.same(stage.id) {
+                    return RecipeCheck::SelfDependency(stage.id);
                 }
-                if !already_declared.contains(dependency) {
-                    // Distinguish the two ways this happens, because they need
-                    // different fixes: reorder the stages, or add the missing one.
-                    let reason = if self.stages.iter().any(|other| other.id == *dependency) {
-                        "declared after it"
-                    } else {
-                        "not in the recipe"
+
+                let mut earlier = 0;
+                let mut declared_before = false;
+                while earlier < i {
+                    if stages[earlier].id.same(dependency) {
+                        declared_before = true;
+                        break;
+                    }
+                    earlier += 1;
+                }
+
+                if !declared_before {
+                    // Distinguish the two ways this happens: they need
+                    // different fixes (reorder the stages, or add the missing
+                    // one).
+                    let mut later = i;
+                    while later < stages.len() {
+                        if stages[later].id.same(dependency) {
+                            return RecipeCheck::DependencyDeclaredLater {
+                                stage: stage.id,
+                                dependency,
+                            };
+                        }
+                        later += 1;
+                    }
+                    return RecipeCheck::DependencyNotInRecipe {
+                        stage: stage.id,
+                        dependency,
                     };
-                    return Err(ServerError::Validation(format!(
-                        "recipe for {command}: stage {} depends on {dependency}, which is {reason}",
-                        stage.id
-                    )));
                 }
+                d += 1;
             }
 
-            if !already_declared.insert(stage.id) {
-                return Err(ServerError::Validation(format!(
-                    "recipe for {command} has duplicate stage {}",
-                    stage.id
-                )));
+            // No stage id may repeat.
+            let mut earlier = 0;
+            while earlier < i {
+                if stages[earlier].id.same(stage.id) {
+                    return RecipeCheck::DuplicateStage(stage.id);
+                }
+                earlier += 1;
             }
+
+            i += 1;
         }
 
-        Ok(())
+        RecipeCheck::Ok
     }
 
     /// Return the ordered stage ids for inspection tests and docs.
@@ -285,62 +403,66 @@ mod tests {
     )];
 
     /// The two failure modes need different fixes (reorder the stages versus add
-    /// the missing one), so the message must tell them apart.
+    /// the missing one), so the verdict must tell them apart.
     #[test]
-    fn recipe_validation_rejects_dependency_outside_the_recipe() {
-        let recipe = Recipe {
-            mode: ExecutionMode::SequentialPerUnit,
-            stages: MISSING_DEPENDENCY_STAGES,
-        };
-        let error = recipe
-            .validate(ReleasedCommand::Transcribe)
-            .expect_err("a dependency that is not in the recipe must fail");
-        assert!(
-            error.to_string().contains("not in the recipe"),
-            "error should distinguish a missing stage from a misordered one, got: {error}"
-        );
+    fn recipe_check_rejects_dependency_outside_the_recipe() {
+        assert!(matches!(
+            Recipe::check(MISSING_DEPENDENCY_STAGES),
+            RecipeCheck::DependencyNotInRecipe { .. }
+        ));
     }
 
     /// The runtime executes `stages` in declaration order, so declaring a stage
     /// before its own prerequisite means running it before its prerequisite.
-    /// `validate` used to accept this: it collected every id in a first pass and
-    /// then checked dependencies against the complete set, which makes a forward
-    /// reference indistinguishable from a backward one.
+    /// An earlier two-pass check accepted this: it collected every id first and
+    /// then checked dependencies against the complete set, which makes a
+    /// forward reference indistinguishable from a backward one.
     #[test]
-    fn recipe_validation_rejects_dependency_declared_later() {
-        let recipe = Recipe {
-            mode: ExecutionMode::SequentialPerUnit,
-            stages: FORWARD_DEPENDENCY_STAGES,
-        };
-        let error = recipe
-            .validate(ReleasedCommand::Transcribe)
-            .expect_err("a prerequisite declared after its dependent must fail");
-        assert!(
-            error.to_string().contains("declared after"),
-            "error should name the ordering problem, got: {error}"
-        );
+    fn recipe_check_rejects_dependency_declared_later() {
+        assert!(matches!(
+            Recipe::check(FORWARD_DEPENDENCY_STAGES),
+            RecipeCheck::DependencyDeclaredLater { .. }
+        ));
     }
 
     #[test]
-    fn recipe_validation_accepts_unique_known_dependencies() {
-        let recipe = Recipe {
-            mode: ExecutionMode::SequentialPerUnit,
-            stages: VALID_STAGES,
-        };
-        recipe
-            .validate(ReleasedCommand::Transcribe)
-            .expect("valid recipe");
+    fn recipe_check_accepts_unique_known_dependencies() {
+        assert!(matches!(Recipe::check(VALID_STAGES), RecipeCheck::Ok));
     }
 
     #[test]
-    fn recipe_validation_rejects_duplicate_stage_ids() {
-        let recipe = Recipe {
-            mode: ExecutionMode::SequentialPerUnit,
-            stages: DUPLICATE_STAGES,
-        };
-        let error = recipe
-            .validate(ReleasedCommand::Compare)
-            .expect_err("duplicate id should fail");
-        assert!(error.to_string().contains("duplicate stage"));
+    fn recipe_check_rejects_duplicate_stage_ids() {
+        assert!(matches!(
+            Recipe::check(DUPLICATE_STAGES),
+            RecipeCheck::DuplicateStage(RecipeStageId::PlanWorkUnits)
+        ));
+    }
+
+    /// A stage listing itself as its own prerequisite: the one failure mode
+    /// with no fixture before, because the old test set never built one.
+    const SELF_DEPENDENT_STAGES: &[RecipeStage] = &[RecipeStage::new(
+        RecipeStageId::PlanWorkUnits,
+        RecipeStagePresence::Required,
+        StageExecutionKind::PerWorkUnit,
+        FileStage::Reading,
+        &[RecipeStageId::PlanWorkUnits],
+    )];
+
+    #[test]
+    fn recipe_check_rejects_a_stage_that_depends_on_itself() {
+        assert!(matches!(
+            Recipe::check(SELF_DEPENDENT_STAGES),
+            RecipeCheck::SelfDependency(RecipeStageId::PlanWorkUnits)
+        ));
+    }
+
+    /// `check` runs in a const context, which is what makes `Recipe::new`
+    /// reject a bad recipe at COMPILE time rather than at some later runtime
+    /// moment. If this stops compiling, the catalog has lost its compile-time
+    /// guarantee and validation has silently become a runtime concern again.
+    #[test]
+    fn the_check_is_usable_in_a_const_context() {
+        const VERDICT: RecipeCheck = Recipe::check(VALID_STAGES);
+        assert!(matches!(VERDICT, RecipeCheck::Ok));
     }
 }

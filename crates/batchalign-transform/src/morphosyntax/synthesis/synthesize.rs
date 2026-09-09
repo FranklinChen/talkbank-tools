@@ -23,7 +23,7 @@ pub fn synthesize_special_form_mor(form_type: &FormType, surface: &str) -> Mor {
     // `clean_lemma(lemma, text)` falls back to `text` when `lemma`
     // is unrecoverable; for synthesis the caller's `surface` is both
     // the lemma source and the fallback, so we pass it twice.
-    let (cleaned, _is_unknown) = clean_lemma(surface, surface);
+    let cleaned = clean_lemma(surface, surface);
     let mut word = MorWord::new(PosCategory::new(rule.scat), MorStem::new(&cleaned));
     for feature in rule.features {
         word = word.with_feature(feature);

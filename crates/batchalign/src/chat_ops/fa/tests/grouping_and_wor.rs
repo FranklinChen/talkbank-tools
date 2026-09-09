@@ -214,10 +214,10 @@ fn test_wor_policy_untranscribed_tokens_excluded_from_fa_and_wor() {
 }
 
 #[test]
-fn test_group_utterances_splits_on_whisper_token_limit() {
-    // Two utterances each with 50 five-character words = 250 chars per utterance.
-    // Combined = 500 chars > WHISPER_FA_MAX_LABEL_TOKENS (448).
-    // Both fit in a 60-second window, so without the char limit they'd be one group.
+fn test_group_utterances_splits_on_label_byte_cap() {
+    // Two utterances each with 50 five-byte words = 250 bytes per utterance.
+    // Combined = 500 bytes > MAX_GROUP_LABEL_BYTES (448).
+    // Both fit in a 60-second window, so without the byte limit they'd be one group.
     let fifty_words = vec!["abcde"; 50].join(" ");
     let chat_text = format!(
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|test|CHI|||||Child|||\n*CHI:\t{fifty_words} .\x15100_5000\x15\n*CHI:\t{fifty_words} .\x155000_10000\x15\n@End\n"
@@ -227,17 +227,103 @@ fn test_group_utterances_splits_on_whisper_token_limit() {
     assert_eq!(
         groups.len(),
         2,
-        "expected 2 groups (50+50 words × 5 chars = 500 > 448 token limit), got {}",
+        "expected 2 groups (50+50 words x 5 bytes = 500 > the 448 label-byte cap), got {}",
         groups.len()
     );
-    // Every group must stay within the Whisper token limit.
+    // Every group must stay within the label cap, counted in BYTES, which is
+    // the unit the cap is measured in and the only one that bounds the
+    // engine's token count from above.
     for (i, group) in groups.iter().enumerate() {
-        let chars: usize = group.words.iter().map(|w| w.text.len()).sum();
+        let bytes: usize = group.words.iter().map(|w| w.text.len()).sum();
         assert!(
-            chars <= WHISPER_FA_MAX_LABEL_TOKENS,
-            "group {i} has {chars} chars, exceeds {WHISPER_FA_MAX_LABEL_TOKENS} token limit"
+            bytes <= MAX_GROUP_LABEL_BYTES,
+            "group {i} has {bytes} label bytes, exceeds the {MAX_GROUP_LABEL_BYTES} cap"
         );
     }
+}
+
+/// The group label cap counts UTF-8 BYTES, and on non-Latin script that is
+/// deliberately conservative: it splits earlier than the engine requires.
+///
+/// The cap stands in for a limit stated in TOKENS, which grouping cannot
+/// measure: it is never told which engine will align a group, and no
+/// tokenizer's segmentation is available here. Every token of every one of
+/// these tokenizers occupies at least one UTF-8 byte, so a byte count bounds
+/// the token count from ABOVE, and staying under the byte cap guarantees
+/// staying under the token limit. A CHARACTER count carries no such
+/// guarantee: outside ASCII it is smaller than the byte count, so counting
+/// characters would let through groups whose token count exceeds the limit,
+/// which is the hard `ValueError` this cap exists to prevent.
+///
+/// This fixture is the worked case. Two utterances of 30 three-character
+/// Devanagari words are 180 CHARACTERS together, well under the cap, and 540
+/// BYTES together, over it. They do not merge, and that split is the
+/// conservative answer: more, smaller FA groups align correctly, where an
+/// oversized group is a hard engine failure.
+#[test]
+fn test_group_utterances_splits_non_latin_conservatively_by_bytes() {
+    // U+0928 U+092E U+0938: three codepoints, nine UTF-8 bytes.
+    let thirty_words = vec!["\u{928}\u{92e}\u{938}"; 30].join(" ");
+    let chat_text = format!(
+        "@UTF8\n@Begin\n@Languages:\thin\n@Participants:\tCHI Child\n@ID:\thin|test|CHI|||||Child|||\n*CHI:\t{thirty_words} .\x15100_5000\x15\n*CHI:\t{thirty_words} .\x155000_10000\x15\n@End\n"
+    );
+    let chat = parse_chat(&chat_text);
+    let groups = group_utterances(&chat, 60_000, &test_recording(10_000)).groups;
+    let chars: usize = groups
+        .iter()
+        .flat_map(|group| group.words.iter())
+        .map(|word| word.text.chars().count())
+        .sum();
+    assert_eq!(
+        chars, 180,
+        "fixture sits UNDER the cap counted in characters"
+    );
+    assert_eq!(
+        groups.len(),
+        2,
+        "540 bytes is over the 448-byte cap, so the two utterances must not \
+         merge: counting characters here would loosen a cap that stands in for \
+         a token limit"
+    );
+    for (i, group) in groups.iter().enumerate() {
+        let bytes: usize = group.words.iter().map(|word| word.text.len()).sum();
+        assert!(
+            bytes <= MAX_GROUP_LABEL_BYTES,
+            "group {i} has {bytes} label bytes, over the {MAX_GROUP_LABEL_BYTES} cap"
+        );
+    }
+}
+
+/// The KNOWN LIMIT of the cap, stated as a test rather than only as prose: it
+/// bounds a MERGE, not every group.
+///
+/// `PendingGroup::append` is the only place the cap is consulted, and it is
+/// the only place two utterances are joined. One utterance whose own labels
+/// exceed the cap becomes its own group and is sent as it stands, because
+/// splitting it would mean splitting its audio window and its word list at a
+/// position nothing in grouping can justify. So "no group exceeds the cap" is
+/// NOT what this code guarantees, and a reader who assumes it will be wrong
+/// exactly here.
+#[test]
+fn test_group_utterances_does_not_split_one_oversized_utterance() {
+    // 100 five-byte words plus separators: 500 label bytes in one utterance.
+    let hundred_words = vec!["abcde"; 100].join(" ");
+    let chat_text = format!(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|test|CHI|||||Child|||\n*CHI:\t{hundred_words} .\x15100_5000\x15\n@End\n"
+    );
+    let chat = parse_chat(&chat_text);
+    let groups = group_utterances(&chat, 60_000, &test_recording(10_000)).groups;
+    assert_eq!(
+        groups.len(),
+        1,
+        "one utterance is never split into two groups"
+    );
+    let bytes: usize = groups[0].words.iter().map(|word| word.text.len()).sum();
+    assert!(
+        bytes > MAX_GROUP_LABEL_BYTES,
+        "the fixture must actually exceed the cap for this limit to be pinned, \
+         got {bytes} bytes"
+    );
 }
 
 /// Untimed utterances are ESTIMATED into the grouping, not dropped from it.

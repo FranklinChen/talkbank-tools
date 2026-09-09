@@ -5,7 +5,10 @@ use std::path::Path;
 
 use serde::Serialize;
 use talkbank_model::ErrorCollector;
-use talkbank_model::alignment::helpers::TierDomain;
+use talkbank_model::alignment::helpers::PositionalDomain;
+use talkbank_model::alignment::{
+    WorSlotTiming, WorTimingBinding, WorTimingCorrespondence, corroborate_wor_timing,
+};
 use talkbank_model::model::ChatFile;
 use talkbank_parser::TreeSitterParser;
 
@@ -357,7 +360,7 @@ struct MorToken {
 }
 
 fn morph_tokens(file: &ChatFile) -> BTreeMap<String, Vec<Vec<MorToken>>> {
-    let extracted = extract::extract_words(file, TierDomain::Mor);
+    let extracted = extract::extract_words(file, PositionalDomain::Mor);
     let utterances: Vec<_> = file.utterances().collect();
     let mut per_speaker: BTreeMap<String, Vec<Vec<MorToken>>> = BTreeMap::new();
     for entry in extracted {
@@ -535,12 +538,10 @@ fn alignment_tokens(
     file: &ChatFile,
     speaker_map: Option<&BTreeMap<String, String>>,
 ) -> Vec<AlignedToken> {
-    let extracted = extract::extract_words(file, TierDomain::Wor);
-    let utterances: Vec<_> = file.utterances().collect();
     let mut speaker_ordinals = BTreeMap::<String, usize>::new();
     let mut result = Vec::new();
-    for entry in extracted {
-        let source_speaker = entry.speaker.as_str().to_string();
+    for utterance in file.utterances() {
+        let source_speaker = utterance.main.speaker.as_str().to_string();
         let speaker = speaker_map
             .and_then(|map| map.get(&source_speaker))
             .cloned()
@@ -548,24 +549,54 @@ fn alignment_tokens(
         let ordinal = speaker_ordinals.entry(speaker.clone()).or_default();
         let utterance_index = *ordinal;
         *ordinal += 1;
-        let timed_words: Vec<_> = utterances
-            .get(entry.utterance_index.raw())
-            .and_then(|utterance| utterance.wor_tier())
-            .map(|tier| tier.words().collect())
-            .unwrap_or_default();
-        for (token, word) in entry.words.iter().enumerate() {
-            let timing = timed_words
-                .get(token)
-                .and_then(|word| word.inline_bullet.as_ref())
-                .map(|bullet| TokenTiming {
-                    start_ms: bullet.timing.start_ms,
-                    end_ms: bullet.timing.end_ms,
-                });
+        // The `%wor` scale is the main tier's projection (chatter 0.23.0: the
+        // count and the pairing are `WorMainTierProjection`'s, and the
+        // extractor no longer offers a `%wor` domain). The projected tier
+        // carries one word per slot; timing is read only through
+        // `bind_timing`, which proves the `%wor` tier's slot count matches
+        // before any pairing exists. A drifted or missing `%wor` tier yields
+        // untimed tokens rather than the by-index zip this used to do, which
+        // could pair a word with another word's bullet.
+        let projection = utterance.main.wor_projection();
+        let generated = projection.generate_tier();
+        let slot_texts: Vec<String> = generated
+            .words()
+            .map(|word| normalize(word.cleaned_text()))
+            .collect();
+        // `generate_tier` borrows the projection and `bind_timing` consumes
+        // it, so one projection (one walk of the main tier) serves both.
+        // Timing is read only from a CORROBORATED pairing: equal counts admit
+        // the positional pairing, and `corroborate_wor_timing` then proves
+        // each `%wor` display token matches its main-tier word, which is what
+        // chatter's type graph requires before a bullet may be trusted (a
+        // same-count edit to either tier would otherwise pair a word with
+        // another word's timing). Missing, drifted and uncorroborated tiers
+        // all yield untimed tokens; which of the three it was is chatter's
+        // diagnostic and is not carried into the comparison yet.
+        let untimed = || vec![None; slot_texts.len()];
+        let timings: Vec<Option<TokenTiming>> = match projection.bind_timing(utterance.wor_tier()) {
+            WorTimingBinding::CountMatched(matched) => match corroborate_wor_timing(matched) {
+                WorTimingCorrespondence::Corroborated(corroborated) => corroborated
+                    .slots()
+                    .iter()
+                    .map(|slot| match slot.timing() {
+                        WorSlotTiming::Timed(interval) => Some(TokenTiming {
+                            start_ms: interval.start().get(),
+                            end_ms: interval.end().get(),
+                        }),
+                        WorSlotTiming::Unaligned => None,
+                    })
+                    .collect(),
+                WorTimingCorrespondence::Uncorroborated(_) => untimed(),
+            },
+            WorTimingBinding::Missing(_) | WorTimingBinding::Drifted(_) => untimed(),
+        };
+        for (token, (text, timing)) in slot_texts.into_iter().zip(timings).enumerate() {
             result.push(AlignedToken {
                 speaker: speaker.clone(),
                 utterance: utterance_index,
                 token,
-                text: normalize(word.text.as_str()),
+                text,
                 timing,
             });
         }

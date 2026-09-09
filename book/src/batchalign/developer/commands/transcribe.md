@@ -1,7 +1,7 @@
 # transcribe: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-08-31 22:01 EDT
+**Last updated:** 2026-09-07 07:04 EDT
 
 Implementation guide for the `transcribe` command. For user-facing
 documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe.md).
@@ -231,7 +231,7 @@ execute_v2 request:
 {
   "task": "asr",
   "prepared_audio": { path, start_ms, end_ms, sample_rate },
-  "engine": "whisper" | "whisperx" | "whisper_oai" | "tencent" | ...,
+  "engine": "whisper" | "whisper_hub" | "tencent" | ...,
   "language": "eng",
   "num_speakers": 2
 }

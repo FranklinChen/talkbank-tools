@@ -1,0 +1,38 @@
+name: Download CLI binary
+description: >
+  Place this commit's batchalign3 binary, ready to run, in a directory. The
+  binary is built once by the build-cli job and consumed by every job that
+  needs to run it, which is what keeps those jobs from each spending five
+  minutes on a duplicate debug compile.
+
+  This exists because the download alone is not enough. The artifact upload
+  zips its files and drops the POSIX mode, so the binary comes back at 644
+  and the executable bit has to be restored by whoever downloads it. Five
+  jobs each wrote those two steps out; a sixth that wrote only the first
+  would fail much later, inside a script, as a permission error rather than
+  as the missing chmod it is. Downloading and restoring the bit are one
+  operation, so they are one action.
+
+inputs:
+  path:
+    description: >
+      Directory to place the binary in, without a trailing slash. The two
+      shapes in use are `target/debug` (where a script or an env var expects
+      to find a locally built binary) and `batchalign/_bin` (where the wheel
+      build expects a pre-staged one).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: cli-binary
+        path: ${{ inputs.path }}
+    - name: Restore the executable bit the artifact upload dropped
+      shell: bash
+      # Through the environment rather than expanded into the script text, so
+      # the input cannot reach bash as code.
+      env:
+        CLI_BINARY_DIR: ${{ inputs.path }}
+      run: chmod +x "$CLI_BINARY_DIR/batchalign3"

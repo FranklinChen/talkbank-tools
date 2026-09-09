@@ -1,7 +1,7 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-09-02 00:33 EDT
+**Last updated:** 2026-09-07 19:45 EDT
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
@@ -167,7 +167,7 @@ alternatives. Output
 Not a separate CLI command, triggered by `batchalign3 transcribe --diarize`.
 
 **When to use:** This path is primarily for Whisper-based transcription
-(`--asr-engine whisper`, `whisperx`, `whisper-oai`), where the ASR engine does
+(`--asr-engine whisper`, `whisper_hub`, `whisper_rs`), where the ASR engine does
 not return speaker labels. For Rev.AI (the default engine), speaker labels are
 already present in the ASR response and are always applied without
 `--diarize`, so the normal Rev.AI path already produces speaker-attributed
@@ -620,6 +620,75 @@ typed decision per file, `PassthroughDecision::CopiedThrough(_)` or
 returns a `PassthroughReport` naming every file it withheld; the CLI prints
 one line per withheld file so the operator sees what did not travel through
 and why.
+
+---
+
+## `--merge-abbrev` Applies to What the Command WROTE
+
+`--merge-abbrev` collapses runs of single letters that name a known
+abbreviation (`F B I` becomes `FBI`). It is a policy applied to a command's
+OUTPUT, so it runs only on a document the command actually modified.
+
+A document the command handed back untouched is written back byte-identical,
+with the merge NOT applied. That covers every declared pass-through:
+
+| Case | Commands | Written |
+|------|----------|---------|
+| `@Options: dummy` | align, morphotag, utseg, translate, coref | Unchanged |
+| `@Options: NoAlign` | align | Unchanged |
+| `@Options: CA`, where the command declines to analyze | morphotag | Unchanged apart from the decision-tier strip the command declares |
+| No analyzable payload collected | utseg, translate | Unchanged |
+
+This is a deliberate narrowing. The merge used to run on the finished TEXT at
+the writer, after any output gate, so it applied to those documents too: a
+dummy file passed through `align --merge-abbrev` came back with its letters
+merged even though the command had otherwise declined to touch it, and the
+bytes written were bytes no gate had judged. The merge is now a transition on
+the typed output proof (`PostValidated::with_abbreviations_merged`), which
+re-runs the same judgement over the merged model and returns a pass-through
+unchanged.
+
+If the MERGED document fails that judgement, the file fails and nothing is
+written, and the error says the merge is what broke it rather than blaming the
+command's own output. The unmerged document was admissible and is deliberately
+not written in its place: a merge that breaks a document that had passed is a
+defect in the merge, and shipping past it would leave nobody looking at it.
+
+The practical consequence for a corpus: running a command with
+`--merge-abbrev` over a directory can no longer alter a file the command
+skipped.
+
+### `compare` and `benchmark` reached that gate on 2026-09-07
+
+Both write their primary CHAT output through the text writer rather than the
+CHAT writer seam, and both ran the merge over the finished text and wrote its
+result, so nothing had judged what they put on disk. Their two materializers
+build a `ChatFile` and now hand back the same typed proof every other command
+uses, with the merge as a transition on it.
+
+Neither command admits its input at any validity level: the gold companion and
+the ASR transcript are both parsed leniently and neither is checked against a
+level. So neither is judged against a level on the way out either. What is
+checked is PRESERVATION: the artifact is compared against a census of the
+document it descends from, and it is refused only for what the command
+destroyed, an utterance dropped or a terminator lost that the input had.
+
+A file that fails reports
+
+```text
+compare post-validation failed (output must not lose what the input had): After compare: utterance by *PAR lost its terminator
+```
+
+as that file's error, with the other files in the job unaffected.
+
+Operator-visible consequence: a document that arrives already missing a
+terminator is still written, exactly as it always was. Between the gate landing
+and 2026-09-07 it was not: the gate ran `validate_output`, whose terminator
+check asks whether the document HAS terminators rather than whether this command
+kept them, so a gold companion with one terminator-less non-CA utterance became
+a hard failure with no output at all for a fault compare could not have caused.
+A reference transcript carrying `@Options: CA` waives the terminator
+requirement in either direction and was never affected.
 
 ---
 

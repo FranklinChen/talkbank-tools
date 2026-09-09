@@ -200,7 +200,8 @@ mod tests {
             _options: MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
             unreachable!()
         }
 
@@ -216,7 +217,15 @@ mod tests {
             state.batch_sizes.push(files.len());
             files
                 .iter()
-                .map(|file| TextBatchFileResult::ok(file.filename.clone(), file.chat_text.clone()))
+                .map(|file| {
+                    TextBatchFileResult::ok(
+                        file.filename.clone(),
+                        crate::pipeline::post_validate::PostValidated::for_test(
+                            file.chat_text.clone(),
+                            crate::api::ReleasedCommand::Utseg,
+                        ),
+                    )
+                })
                 .collect()
         }
 
@@ -240,7 +249,11 @@ mod tests {
     }
 
     fn utseg_snapshot(staging_dir: &std::path::Path, merge_abbrev: bool) -> RunnerJobSnapshot {
-        let text = "@UTF8\n@Begin\n*PAR:\tF B I .\n@End\n";
+        // L1-valid on purpose: the write path re-gates when it merges
+        // abbreviations, so a fixture the real gate would refuse could not
+        // exercise the merge at all.
+        let text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n\
+@ID:\teng|test|PAR|||||Participant|||\n*PAR:\tF B I .\n@End\n";
         let input_dir = staging_dir.join("input");
         std::fs::create_dir_all(&input_dir).unwrap();
         std::fs::write(input_dir.join("a.cha"), text).unwrap();

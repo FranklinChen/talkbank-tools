@@ -335,11 +335,38 @@ impl StageExecutor for CompareStageExecutor {
             }
             RecipeStageId::MaterializeOutputs => {
                 state.lifecycle(ctx).stage(FileStage::Writing).await;
-                let outputs = state.outputs.take().ok_or_else(|| {
+                let CompareMaterializedOutputs {
+                    chat_output,
+                    metrics_csv,
+                } = state.outputs.take().ok_or_else(|| {
                     crate::error::ServerError::Validation(
                         "compare output materialization ran before compare outputs existed".into(),
                     )
                 })?;
+                // The merge is the LAST transition on the proof, so the bytes
+                // written are bytes the gate judged. It ran on the finished
+                // TEXT here until 2026-09-07 (`merge_abbreviations_in_chat_text`
+                // over `chat_output`, then write the result), which put a
+                // transform after the only thing that had looked at the
+                // document. A refusal is returned, not warned about: this
+                // stage's `Result` is what fails the file.
+                //
+                // The flag stays a `bool` here rather than the
+                // `MergeAbbreviations` enum the two dispatch writers use:
+                // `runner::dispatch` is private to `runner` and re-exports
+                // nothing, so sharing the vocabulary would mean widening two
+                // module boundaries for a two-variant enum.
+                let chat_output = if ctx.should_merge_abbrev {
+                    // POLICY: the refusal carries `unmerged`, an admissible
+                    // compare output, and this stage declines to write it. A
+                    // merge that breaks the gate its input passed is a defect
+                    // in the merge, and writing past it would hide one.
+                    chat_output.with_abbreviations_merged().map_err(|refused| {
+                        crate::error::ServerError::Validation(refused.to_string())
+                    })?
+                } else {
+                    chat_output
+                };
                 let Some(artifacts) =
                     planning::artifact_set_for_source(plan, &state.unit.main.display_path)
                 else {
@@ -352,21 +379,13 @@ impl StageExecutor for CompareStageExecutor {
                 for artifact in &artifacts.files {
                     match artifact.role {
                         MaterializedArtifactRole::Primary => {
-                            let chat_output = if ctx.should_merge_abbrev {
-                                batchalign_transform::merge_abbreviations_in_chat_text(
-                                    &crate::chat_parser(),
-                                    &outputs.chat_output,
-                                )
-                            } else {
-                                outputs.chat_output.clone()
-                            };
                             let target = ChatOutputTarget::new(
                                 &ctx.job.filesystem,
                                 state.file_index,
                                 &artifact.display_path,
                             );
                             if let Err(error) =
-                                write_text_output_artifact(&target, &chat_output).await
+                                write_text_output_artifact(&target, chat_output.as_str()).await
                             {
                                 warn!(
                                     error = %error,
@@ -388,14 +407,12 @@ impl StageExecutor for CompareStageExecutor {
                                 state.file_index,
                                 &artifact.display_path,
                             );
-                            if let Err(error) =
-                                tokio::fs::write(&csv_path, &outputs.metrics_csv).await
-                            {
+                            if let Err(error) = tokio::fs::write(&csv_path, &metrics_csv).await {
                                 warn!(error = %error, "Failed to write compare CSV");
                             }
                             state.consolidated_metrics = Some(parse_consolidated_metrics_row(
                                 &artifact.display_path,
-                                &outputs.metrics_csv,
+                                &metrics_csv,
                             )?);
                         }
                     }
@@ -568,7 +585,8 @@ mod tests {
             _options: crate::execution::MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
             unreachable!("compare tests do not call morphotag_single")
         }
 

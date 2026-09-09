@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::api::{DisplayPath, ReleasedCommand};
 use crate::command_model;
+use crate::pipeline::post_validate::PostValidated;
 use crate::store::{PendingJobFile, RunnerFilesystemConfig, RunnerJobSnapshot};
 
 use super::materialize::{
@@ -215,6 +216,12 @@ pub(crate) async fn write_text_output_artifact(
 /// existing on-disk text is inside the `[ba3 <command> | ...]` provenance
 /// comment for `command`.
 ///
+/// This is the seam that touches disk, so it takes the [`PostValidated`]
+/// proof rather than the bytes: a caller cannot gate one document and write
+/// another, and there is no signature here for an ungated `String` to travel
+/// through. The command comes off the proof for the same reason, so the
+/// provenance line this suppresses is the one the gated command wrote.
+///
 /// Use this for any pipeline that injects a `ProvenanceComment` for a
 /// known [`ReleasedCommand`] before serializing CHAT. The gate eliminates
 /// the "re-running the same command produced a 1-line timestamp/version
@@ -239,9 +246,10 @@ pub(crate) async fn write_text_output_artifact(
 /// is no scenario where it is correct to update one and not the other.
 pub(crate) async fn write_chat_output_artifact_with_provenance_gate(
     target: &ChatOutputTarget<'_>,
-    content: &str,
-    command: ReleasedCommand,
+    document: &PostValidated,
 ) -> std::io::Result<()> {
+    let content = document.as_str();
+    let command = document.command();
     let write_path = target.primary_path();
     write_chat_if_meaningful_diff(&write_path, content, command).await?;
 
@@ -607,8 +615,7 @@ mod tests {
         let target = ChatOutputTarget::new(&filesystem, 0, &display);
         write_chat_output_artifact_with_provenance_gate(
             &target,
-            candidate,
-            ReleasedCommand::Morphotag,
+            &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
         )
         .await
         .expect("gated write");
@@ -668,8 +675,7 @@ mod tests {
         let target = ChatOutputTarget::new(&filesystem, 0, &display);
         write_chat_output_artifact_with_provenance_gate(
             &target,
-            candidate,
-            ReleasedCommand::Morphotag,
+            &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
         )
         .await
         .expect("gated write");
@@ -720,8 +726,7 @@ mod tests {
         let target = ChatOutputTarget::new(&filesystem, 0, &display);
         write_chat_output_artifact_with_provenance_gate(
             &target,
-            candidate,
-            ReleasedCommand::Morphotag,
+            &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
         )
         .await
         .expect("gated write");

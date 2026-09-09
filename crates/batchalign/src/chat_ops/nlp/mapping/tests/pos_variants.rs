@@ -394,14 +394,16 @@ fn test_comma_lemma_early_return() {
 
 #[test]
 fn test_clean_lemma_strips_special_chars() {
-    // Verify clean_lemma handles various problematic lemmas
-    let (cleaned, unknown) = clean_lemma("$test.", "test");
-    assert_eq!(cleaned, "test");
-    assert!(!unknown);
-
-    let (cleaned, unknown) = clean_lemma("0word", "0word");
-    assert_eq!(cleaned, "word");
-    assert!(unknown);
+    // Verify clean_lemma handles various problematic lemmas.
+    // The zero-prefixed case that used to be asserted here is gone, and the
+    // reason first written here ("a CHAT word cannot begin with a digit") was
+    // wrong. A leading `0` is CHAT's OMISSION marker (`WordCategory::Omission`),
+    // and an omission never reaches a `%mor` payload ("Omissions never align"),
+    // so the branch was unreachable in production while being destructive if it
+    // ever fired: it returned `text[1..]`, dropping the word's first character.
+    // The behaviour after the deletion is pinned by
+    // `mor_word::tests::clean_lemma_keeps_a_leading_zero_intact`.
+    assert_eq!(clean_lemma("$test.", "test"), "test");
 }
 
 #[test]

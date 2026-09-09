@@ -315,8 +315,38 @@ pub enum ServerError {
     #[error("memory pressure: {0}")]
     MemoryPressure(String),
 
-    /// An FA audio segment request produced zero samples because the requested
-    /// time window falls past the end of the source audio file.
+    /// A per-file text-workflow failure the control plane has ALREADY
+    /// classified, carried with its verdict.
+    ///
+    /// `run_text_pipeline` used to render its typed `TextWorkflowFileError`
+    /// into `Validation(String)`, which retyped every PER-ITEM PROVIDER
+    /// failure as bad input: `TextWorkflowFileError::ItemErrors` classifies as
+    /// `ProviderTerminal`, and `Validation` does not, so the runner's retry
+    /// and reporting policy could not see the case it exists for. The verdict
+    /// travels with the message now instead of being re-derived from it by
+    /// `classify_server_error`.
+    ///
+    /// Build one only with [`ServerError::from_classified_failure`], so the
+    /// category is always the producing error's own answer and never a
+    /// caller's guess.
+    #[error("{message}")]
+    ClassifiedFailure {
+        /// The control plane's verdict for this failure.
+        category: crate::scheduling::FailureCategory,
+        /// The failure, rendered by the workflow that produced it.
+        message: String,
+    },
+
+    /// An FA audio segment request produced no whole sample frames.
+    ///
+    /// The segment says WHY, in `EmptyReason`, issued by the code that
+    /// measured the decode's byte length. This doc claimed until 2026-09-07
+    /// that the cause was "the requested time window falls past the end of the
+    /// source audio file", which nothing had established: the measuring party
+    /// holds a byte length and no source duration, and `fa::transport`'s own
+    /// handler says the opposite in a comment ("that does not prove the window
+    /// is past EOF; very short in-range windows can do this"). The reason is
+    /// evidence now, so no reader has to guess it off a log line.
     ///
     /// This is not a fatal error at the file level: the FA pipeline handles it
     /// by leaving the affected group's words unaligned rather than aborting.
@@ -423,6 +453,11 @@ impl ServerError {
             Self::WhisperEngine(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::MemoryPressure(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            // A per-file workflow verdict, recorded against the job's file
+            // rows rather than answered over HTTP. `BAD_GATEWAY` matches the
+            // `AsrProvider` arm, since the commonest carried verdict is a
+            // provider failure and the caller's request was fine.
+            Self::ClassifiedFailure { .. } => StatusCode::BAD_GATEWAY,
             // EmptyFaAudioSegment is an internal skip signal, never returned as HTTP.
             Self::EmptyFaAudioSegment(..) => StatusCode::INTERNAL_SERVER_ERROR,
             // JobNotInLocalStore is an internal consistency error, not a
