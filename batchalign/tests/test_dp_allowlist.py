@@ -32,6 +32,18 @@ ALLOWED_DP_ALIGN_CALLS = {
     "crates/batchalign/src/chat_ops/fa/utr/two_pass.rs": 1,
 }
 
+# Allowlisted `dp_align::align_chars` call sites, the same shape. Character
+# level alignment is the costlier form (n and m are characters, not words), so
+# a site earns its row only by bounding its own input:
+#
+# - chat_ops/fa/alignment/residue.rs: the residue remap between transcript
+#   tokens and aligner labels (adopted 2026-09-07). Bounded BEFORE the call by
+#   `MAX_RESIDUE_ALIGN_CHARS` on both sides; over budget it returns the typed
+#   `UntimedReason::ResidueTooLongToAlign` rather than aligning.
+ALLOWED_DP_ALIGN_CHARS_CALLS = {
+    "crates/batchalign/src/chat_ops/fa/alignment/residue.rs": 1,
+}
+
 
 def _find_pattern(path: Path, pattern: str) -> list[tuple[int, str]]:
     regex = re.compile(pattern)
@@ -72,4 +84,10 @@ def test_chat_ops_dp_calls_are_allowlisted() -> None:
         "is the problem and the call is what needs rethinking.\n"
         f"expected: {ALLOWED_DP_ALIGN_CALLS}\ngot:      {dict(sorted(actual.items()))}"
     )
-    assert not align_chars_hits
+    actual_chars = Counter(rel for rel, _, _ in align_chars_hits)
+    assert dict(sorted(actual_chars.items())) == ALLOWED_DP_ALIGN_CHARS_CALLS, (
+        "dp_align::align_chars call sites changed. Same rule as above, with a "
+        "stricter bar: a character-level site is allowlisted only with the "
+        "bound on its input named in the reason.\n"
+        f"expected: {ALLOWED_DP_ALIGN_CHARS_CALLS}\ngot:      {dict(sorted(actual_chars.items()))}"
+    )
