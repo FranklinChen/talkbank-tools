@@ -304,6 +304,15 @@ impl BoundMorphosyntaxResponses<'_> {
                 let ctx = MappingContext {
                     lang: item.lang.clone(),
                 };
+                // What the transcriber wrote that Stanza never saw: the
+                // pauses, aligned to the payload's words. Read only by a
+                // chain that uses it.
+                let evidence = || {
+                    super::evidence::UtteranceEvidence::from_utterance(
+                        &utt.main.content.content,
+                        &words,
+                    )
+                };
 
                 // Apply grammatical-invariant rewrites to correct known
                 // Stanza defects (e.g., English copula 's + progressive
@@ -313,7 +322,7 @@ impl BoundMorphosyntaxResponses<'_> {
                 // `crate::morphosyntax` for the current rule set and
                 // `book/src/batchalign/reference/stanza-limitations.md` for the
                 // versioned defect registry.
-                let ud_sentence_rescued = apply_grammatical_invariants(ud_sentence, &ctx);
+                let ud_sentence_rescued = apply_grammatical_invariants(ud_sentence, &ctx, evidence);
 
                 // Choose mapping strategy based on tokenization mode:
                 //

@@ -16,7 +16,7 @@ use crate::morphosyntax::{UdId, UdPunctable, UdSentence, UniversalPos};
 /// CHAT main tiers are lowercase, so a capitalized word is the transcriber
 /// marking a proper name (`Gin (.) look at Momma !`): evidence the lexicon
 /// does not carry, and a reason to leave the word alone.
-fn is_transcriber_marked_name(text: &str) -> bool {
+pub(super) fn is_transcriber_marked_name(text: &str) -> bool {
     text.chars().next().is_some_and(char::is_uppercase)
 }
 
@@ -48,6 +48,10 @@ pub fn constrain_to_lexicon(mut sentence: UdSentence, verdicts: &LexiconVerdicts
             continue;
         };
         match verdict {
+            // A communicator among other categories is genuinely ambiguous
+            // to MOR; only the transcriber's evidence settles it, and that
+            // rule ran before this one.
+            LexiconVerdict::CommunicatorAmongOthers => continue,
             LexiconVerdict::Communicator => {
                 if upos == UniversalPos::Intj {
                     continue;
@@ -83,10 +87,10 @@ pub fn constrain_to_lexicon(mut sentence: UdSentence, verdicts: &LexiconVerdicts
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::morphosyntax::UdWord;
+    use crate::morphosyntax::evidence::UtteranceEvidence;
+    use crate::morphosyntax::invariants::test_support::{mor_texts, punct, word};
     use crate::morphosyntax::lexicon::{NounVerdict, RawVerdicts, VerdictSource};
-    use crate::morphosyntax::{
-        MappingContext, UdWord, apply_grammatical_invariants, map_ud_sentence,
-    };
 
     fn test_source() -> VerdictSource {
         VerdictSource {
@@ -101,6 +105,7 @@ mod tests {
         LexiconVerdicts::try_from(RawVerdicts {
             source: test_source(),
             communicator: communicator.iter().map(|s| s.to_string()).collect(),
+            communicator_among_others: vec![],
             noun,
         })
         .expect("test verdicts are well-formed")
@@ -124,31 +129,9 @@ mod tests {
         )
     }
 
-    /// A single-token word at `id`; the production builder with the id set.
-    fn word(
-        id: usize,
-        text: &str,
-        lemma: &str,
-        upos: UniversalPos,
-        feats: Option<&str>,
-        head: usize,
-        deprel: &str,
-    ) -> UdWord {
-        let mut w = UdWord::synthetic(text, lemma, upos, feats, head, deprel);
-        w.id = UdId::Single(id);
-        w
-    }
-
     fn with_xpos(mut word: UdWord, xpos: &str) -> UdWord {
         word.xpos = Some(xpos.to_string());
         word
-    }
-
-    fn punct(id: usize, text: &str, head: usize) -> UdWord {
-        let mut w = UdWord::synthetic(text, text, UniversalPos::Punct, None, head, "punct");
-        w.id = UdId::Single(id);
-        w.upos = UdPunctable::Punct(text.to_string());
-        w
     }
 
     fn range_parent(start: usize, end: usize, text: &str) -> UdWord {
@@ -179,21 +162,6 @@ mod tests {
         }
     }
 
-    fn mor_texts(sentence: &UdSentence) -> Vec<String> {
-        let ctx = MappingContext {
-            lang: talkbank_model::model::LanguageCode::new("eng").expect("valid language code"),
-        };
-        let rescued = apply_grammatical_invariants(sentence, &ctx);
-        let (mors, _gras) = map_ud_sentence(&rescued, &ctx).expect("mapping succeeds");
-        mors.iter()
-            .map(|mor| {
-                let mut out = String::new();
-                mor.write_chat(&mut out).expect("mor renders");
-                out
-            })
-            .collect()
-    }
-
     fn assert_untouched(sentence: UdSentence, verdicts: &LexiconVerdicts) {
         assert_eq!(constrain_to_lexicon(sentence.clone(), verdicts), sentence);
     }
@@ -203,7 +171,10 @@ mod tests {
     #[test]
     fn whoops_with_a_period_is_a_communicator_in_mor() {
         // The terminator is not a `%mor` item; the mapping emits it separately.
-        assert_eq!(mor_texts(&stanza_whoops()), vec!["intj|whoops"]);
+        assert_eq!(
+            mor_texts(&stanza_whoops(), UtteranceEvidence::none(0)),
+            vec!["intj|whoops"]
+        );
     }
 
     /// A one-word `banana !` comes back from Stanza as an interjection; the
@@ -219,7 +190,10 @@ mod tests {
                 punct(2, "!", 1),
             ],
         };
-        assert_eq!(mor_texts(&sentence), vec!["noun|banana"]);
+        assert_eq!(
+            mor_texts(&sentence, UtteranceEvidence::none(0)),
+            vec!["noun|banana"]
+        );
     }
 
     /// `doggy ?` is read as ADJ by Stanza 1.14.0 and is a noun-only ENTRY,
@@ -245,7 +219,10 @@ mod tests {
                 punct(2, "?", 1),
             ],
         };
-        assert_eq!(mor_texts(&sentence), vec!["adj|doggy-S1"]);
+        assert_eq!(
+            mor_texts(&sentence, UtteranceEvidence::none(0)),
+            vec!["adj|doggy-S1"]
+        );
     }
 
     #[test]

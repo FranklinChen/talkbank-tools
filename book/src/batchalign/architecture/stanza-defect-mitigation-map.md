@@ -43,9 +43,11 @@ flowchart TD
     pos --> postdep
 
     subgraph postdep["4. Post-depparse, pre-map-UD"]
+        d10["Defect 10: CHAT contraction expansion\n(crates/batchalign-transform/src/morphosyntax/invariants/\nenglish_contractions.rs)"]
+        d11["Defect 11: isolated communicator from transcriber evidence\n(crates/batchalign-transform/src/morphosyntax/evidence.rs,\ninvariants/discourse_marker.rs)"]
         d9["Defect 9: lexicon-licensed category constraint\n(crates/batchalign-transform/src/morphosyntax/invariants/\nlexicon_category.rs, data/eng_lexicon_verdicts.json)"]
         d1["Defect 1: finite-verb-main-clause rewrite\n(crates/batchalign-transform/src/morphosyntax/invariants/\nfinite_verb_main_clause.rs)"]
-        d9 --> d1
+        d10 --> d11 --> d9 --> d1
     end
 
     postdep --> ingress
@@ -65,14 +67,19 @@ flowchart TD
 
     classDef defect fill:#fdd,stroke:#900,color:#000
     classDef dp fill:#dfd,stroke:#060,color:#000
-    class d1,d2,d3,d5,d6,d7,d9 defect
+    class d1,d2,d3,d5,d6,d7,d9,d10,d11 defect
     class dp dp
 ```
 
-**Order within stage 4.** The lexicon constraint (Defect 9) runs before the
-finite-verb rescue (Defect 1): the rescue may promote an `-ing` word the
-lexicon licenses only as a noun to the clause's verb, and the clause-level
-invariant outranks the word-level one.
+**Order within stage 4.** Tokens first: the contraction expansion (Defect
+10) turns a whole `hafta` into the range Stanza should have returned, so
+every later rule sees `have` + `to`. Then the transcriber's evidence
+(Defect 11), then the lexicon constraint (Defect 9), then the finite-verb
+rescue (Defect 1): the rescue may promote an `-ing` word the lexicon
+licenses only as a noun to the clause's verb, and the clause-level
+invariant outranks the word-level ones. The evidence (`UtteranceEvidence`)
+is computed once per utterance in `injection.rs` from the CHAT AST, beside
+the payload words, and passed down the chain; Stanza never sees it.
 
 **Note on Defects 6 and 7.** Both are **content-quality** defects,
 not injection-gate failures. The `%mor` 1-to-1 count invariant holds
@@ -96,6 +103,9 @@ them. No pipeline gate rejects junk content.
 | [5](../reference/stanza-limitations.md#defect-5-mwt-processor-selection-must-come-from-the-live-capability-table-not-a-hardcoded-mirror) | Pipeline construction | `batchalign/worker/_stanza_loading.py::should_request_mwt` | `test_stanza_loading.py::TestShouldRequestMwt`; `test_stanza_config_parity.py::TestMwtCapabilityDriven`; `test_stanza_he_el_mwt_splits.py`; `test_he_el_mwt_end_to_end.py` | every 1.x through 1.14.0 |
 | [6](../reference/stanza-limitations.md#defect-6-italian-pos-layer-splits-words-with-clitic-shaped-endings-into-fake-verbclitic-compounds) | Unpatched content quality (POS layer, no hook; injection succeeds with junk content) | (none) | `test_stanza_mwt_probe_matrix.py::test_stanza_mwt_probe_with_postprocessor[ita__dell_opera_in_context]`, `[ita__parla_imperative_forte]`, `[ita__parla_imperative_piu_forte]`, `[ita__arancione_noun_bogus_verb]`, `[ita__piccolo_adj_bogus_verb]` (xfail, UD-level pins) | 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0 |
 | [7](../reference/stanza-limitations.md#defect-7-italian-sentence-initial-article-la-gets-junk-mwt-expansion-il--i) | Unpatched content quality (MWT processor, no hook; injection succeeds with junk content) | (none) | `test_stanza_mwt_probe_matrix.py::test_stanza_mwt_probe_with_postprocessor[ita__parla_3sg_storia_context]` (xfail, UD-level pin) | 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0 |
+| [9](../reference/stanza-limitations.md#defect-9-english-forms-the-childes-lexicon-licenses-for-one-category-get-another-from-sentence-final-punctuation) | Post-depparse, pre-map-UD | `crates/batchalign-transform/src/morphosyntax/invariants/lexicon_category.rs`, `lexicon.rs`, `data/eng_lexicon_verdicts.json` | `lexicon_category.rs` and `lexicon.rs` `#[cfg(test)]` | 1.11.1, 1.14.0 |
+| [10](../reference/stanza-limitations.md#defect-10-english-chat-contractions-outside-stanzas-mwt-vocabulary-are-left-whole-and-given-an-invented-category-and-lemma) | Post-depparse, pre-map-UD (first in the English chain) | `crates/batchalign-transform/src/morphosyntax/invariants/english_contractions.rs` | `english_contractions.rs` `#[cfg(test)]` | 1.14.0 |
+| [11](../reference/stanza-limitations.md#defect-11-english-tags-and-responses-set-off-by-a-pause-take-a-content-word-reading-from-the-terminator) | Post-depparse, pre-map-UD (evidence computed at injection) | `crates/batchalign-transform/src/morphosyntax/evidence.rs`, `invariants/discourse_marker.rs` | `evidence.rs` and `discourse_marker.rs` `#[cfg(test)]` | 1.14.0 |
 
 ## Stages without defects (today)
 

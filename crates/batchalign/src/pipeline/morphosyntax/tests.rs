@@ -384,7 +384,11 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
     let serialized = to_chat_string(&parsed);
     assert!(serialized.contains("@Options:\tCA"), "CHAT: {serialized}");
     assert!(!serialized.contains("noun|wrong"), "CHAT: {serialized}");
-    assert!(serialized.contains("noun|hello"), "CHAT: {serialized}");
+    // The injected response went through the production invariant chain:
+    // an isolated `hello` the worker read as a noun is a communicator
+    // (Defect 11, `discourse_marker.rs`), so the noun reading does not
+    // survive, and neither does the stale one.
+    assert!(serialized.contains("intj|hello"), "CHAT: {serialized}");
 }
 
 #[tokio::test]

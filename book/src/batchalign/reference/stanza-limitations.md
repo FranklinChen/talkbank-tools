@@ -1136,6 +1136,197 @@ with the constraint disabled and the constraint can be narrowed; the data
 file and rule stay until every verdict it carries is redundant, which no
 single model version is expected to make true.
 
+## Defect 10: English CHAT contractions outside Stanza's MWT vocabulary are left whole and given an invented category and lemma
+
+<a id="stanza-en-chat-contractions-not-expanded"></a>
+
+* **Stable slug:** ``stanza-en-chat-contractions-not-expanded``
+* **Stanza version:** 1.14.0 (confirmed 2026-09-10, `combined_charlm`,
+  MWT `gum`)
+* **MWT package:** `gum`
+* **Failure class:** tokenization and linguistic content. One CHAT word
+  that is two or three words is left as one token, so the category, lemma
+  and features are invented and the parse hangs the clause off the wrong
+  word.
+
+### Construction
+
+Stanza's English MWT expander knows `gonna`, `wanna` and `gotta` from its
+training data and returns `gon` + `na`, which the mapping renders as
+`verb|go-Part-Pres-S~part|to`. CHAT transcribers also write `hafta`, `hasta`,
+`hadta`, `oughta`, `useta`, `sposta`, `gimme`, `lemme` and `dunno`. The
+expander has never seen them, leaves them whole, and the tagger guesses:
+
+| input to Stanza | whole-token analysis | expanded input, Stanza's own analysis |
+|---|---|---|
+| `you hafta put that one in .` | `hafta` AUX, lemma `hafta`, `aux` of `put` (root) | `have` VERB root; `put` `xcomp` of `have`; `to` `mark` of `put`; `you` and `.` on `have` |
+| `do you hafta go ?` | `hafta` PART `Polarity=Neg`, `advmod` | `have` VERB root, `do` `aux` of `have` |
+| `lemme see .` | `lemme` INTJ, `discourse` of `see` | `let` root, `me` `obj`, `see` `xcomp` |
+| `I dunno .` | `dunno` VERB, lemma `dunno` | `know` root, `do` `aux`, `n't` `advmod` |
+
+Hinting the expander would only produce a seq2seq guess; the expansions are
+fixed.
+
+### Input and observed output
+
+```text
+*MOT:	you hafta put that one in .
+%mor:	pron|you-Prs-Nom-S2 aux|hafta-Fin-Ind-Pres-S2 verb|put-Inf-S ...   ← observed
+%gra:	1|3|NSUBJ 2|3|AUX 3|0|ROOT ...
+%mor:	pron|you-Prs-Nom-S2 verb|have-Fin-Ind-Pres-S2~part|to verb|put-Inf-S ...   ← correct
+%gra:	1|2|NSUBJ 2|0|ROOT 3|4|MARK 4|2|XCOMP 5|6|DET 6|4|OBJ 7|4|COMPOUND-PRT 8|2|PUNCT
+```
+
+### BA3 mitigation (ACTIVE)
+
+`crates/batchalign-transform/src/morphosyntax/invariants/english_contractions.rs`,
+first in the English stage-4 chain (tokens before categories): a typed table
+(`Contraction { surface, parts, complement }`, each `Part` with its text,
+lemma, UPOS, the features the form spells, and its `Attachment`: host,
+infinitival marker, object pronoun, auxiliary or negation) synthesizes
+exactly the shape Stanza produces for the words it does expand: a `Range`
+parent plus components, every later id and head renumbered, what depended
+on the token now depending on the host. The tree is reshaped the way Stanza
+parses the expanded words: when Stanza made the token a dependent of the
+verb it governs, the host is raised into that verb's position, the verb
+becomes its `xcomp`, `to` marks the verb, and the verb's dependents are
+re-homed the way Stanza attaches them in the expanded sentence: clause-level
+relations (subject, `punct`, `discourse`, `vocative`, `parataxis`) always
+move to the host, the verb's arguments (`obj`, `iobj`, `xcomp`, `ccomp`,
+particles) never do, and everything else (auxiliaries, copulas, negation,
+markers, conjunctions, adjuncts) goes with whichever predicate it precedes
+or follows: `do` and `n't` in `I don't hafta go` to the host, `be` in
+`hafta be pottie` and a final `now` to the verb (probed on 2026-09-10). The finite part keeps the `Person` and `Number`
+Stanza read off the subject; the table supplies the rest. `me` is `iobj`
+when the host already has an object (`gimme that`). Tokens Stanza already
+expanded are ranges and are never touched.
+
+Measured on the 100 Bates files (2026-09-10): 45 `hafta`/`hasta`
+expansions, every `%gra` consistent with its `%mor`, all files valid CHAT.
+
+### Tests
+
+* `invariants::english_contractions::tests::hafta_expands_to_have_plus_to_in_mor`
+  and `hafta_gra_has_the_host_as_root` run Stanza 1.14.0's exact whole-token
+  analysis through the production dispatcher and mapping and pin the `%mor`
+  and the `%gra`.
+* `expansion_raises_the_host_over_the_verb_it_governs`,
+  `a_host_read_as_a_modifier_is_raised_over_the_verb`,
+  `a_host_that_is_already_the_head_keeps_its_xcomp_child`,
+  `gimme_with_an_object_makes_me_the_indirect_object`,
+  `lemme_is_raised_over_the_bare_infinitive`, `three_part_dunno` pin each
+  shape; `every_contraction_has_one_host` checks the table;
+  `tokens_stanza_already_expanded_are_untouched` and
+  `unknown_words_are_untouched` pin the no-op paths.
+
+### Re-evaluation criteria
+
+On a Stanza upgrade, run `scripts/debug/stanza_pos_probe.py` (talkbank
+workspace) on `you hafta put that one in .`, `lemme see .` and `I dunno .`.
+A form the expander now splits arrives as a range and the table entry for it
+is redundant; remove it only when the expansion Stanza returns matches the
+table's (lemma, category, tree).
+
+## Defect 11: English tags and responses set off by a pause take a content-word reading from the terminator
+
+<a id="stanza-en-isolated-communicator-read-as-content-word"></a>
+
+* **Stable slug:** ``stanza-en-isolated-communicator-read-as-content-word``
+* **Stanza version:** 1.14.0 (confirmed 2026-09-10, `combined_charlm`)
+* **MWT package:** `gum`
+* **Failure class:** linguistic-content quality. The parse is fine; the
+  category of one word is wrong, and the evidence that settles it is in
+  the transcript, not in what Stanza is given.
+
+### Construction
+
+A word the CHILDES lexicon lists as a communicator among other categories
+(`okay` is also an adjective; `right` an adjective and adverb; `no` a
+determiner; `honey`, `boom`, `morning` nouns) is genuinely ambiguous to
+MOR, and MOR hands it to POST. Stanza, shown the terminator, resolves a tag
+question as the adjective: `put the lady on the chair (.) okay ?` gives
+`adj|okay-S1`. Defect 9's lexicon constraint cannot fire, because the
+lexicon does not settle it. What settles it is the pause: the transcriber
+set the word off, and a word set off on both sides (pause, separator or
+utterance edge) is a discourse element, not a constituent of the clause
+beside it. `you okay ?` has no pause and is a predicate.
+
+Which readings the evidence may overturn is decided by whether the reading
+can head an utterance by itself. An imperative can (`look !`, `see ?`,
+`wait .` are complete clauses, and UD tags them VERB), so a verb or
+auxiliary reading stands even where the lexicon has `co|look`. An isolated
+adjective, adverb, determiner, noun or pronoun cannot be a whole utterance
+without an elided predicate, so with the lexicon's communicator reading
+available, that is the reading. Measured against 716 files of CLAN MOR+POST
+output for the convention: `see` alone is `v|see` 124 of 124 times, `okay`
+alone is `co|okay` 731 of 768, `right` 90 of 91, `no` 903 of 923.
+
+### Input and observed output
+
+```text
+*MOT:	put the lady on the chair (.) okay ?
+%mor:	... noun|chair adj|okay-S1 ?     ← observed
+%mor:	... noun|chair intj|okay ?       ← correct
+
+*MOT:	ball (.) right .
+%mor:	noun|ball adj|right-S1 .         ← observed
+%mor:	noun|ball intj|right .           ← correct
+
+*MOT:	you okay ?
+%mor:	pron|you-Prs-Nom-S2 adj|okay-S1 ?   ← observed and correct: no pause
+```
+
+### BA3 mitigation (ACTIVE)
+
+* `crates/batchalign-transform/src/morphosyntax/evidence.rs`:
+  `UtteranceEvidence::from_utterance` re-walks the utterance's content in
+  the Mor domain (the same descent the payload extractor used) and records,
+  per payload word, whether a break precedes and follows it
+  (`WordIsolation`). A pause is a break; a separator the payload kept (a
+  comma, a CHAT tag or vocative marker) is a break on both sides; the
+  utterance edges are breaks. A word-like item the payload did not keep
+  (`xxx`, an omitted `0word`) is speech, not silence: it clears a pending
+  break and keeps the word before it off the utterance edge, so `my xxx
+  xxx .` is not a one-word utterance. A genuine mismatch leaves every later
+  word unbroken, which is the direction in which no rewrite fires.
+  Computed once per utterance in `injection.rs` beside the payload's words
+  and handed to `apply_grammatical_invariants`.
+* `crates/batchalign-transform/data/eng_lexicon_verdicts.json` and
+  `lexicon.rs`: a third verdict, `CommunicatorAmongOthers`, for the 90 forms
+  `co.cut` shares with other categories (`okay`, `right`, `no`, `well`,
+  `honey`, `boom`, ...). Defect 9's rule ignores it; only this rule uses it.
+* `crates/batchalign-transform/src/morphosyntax/invariants/discourse_marker.rs`:
+  after the contraction expansion and before the lexicon constraint, every
+  top-level, non-terminator token is paired with its payload word by
+  position (the same count the mapper makes: a range parent or a single
+  token is one `%mor` item), and an isolated word with a communicator
+  verdict whose Stanza category cannot stand alone (exhaustive match on
+  `UniversalPos`) becomes `intj|word`. The parse is kept.
+
+Measured on the 100 Bates files (2026-09-10): 181 rewrites in 76 files, all
+tags, responses, vocatives or onomatopoeia (`okay` 48, `right` 77, `no` 14,
+`honey` 10, `boom` 5, `morning`, `babe`, `so`, `fine`, `alright`, `well`,
+`vroom`, `knock`, `oh (.) my`); `look .` (88), `see ?` (60), `help !`,
+`wait`, `say +"/.` untouched; `%gra` byte-identical; all files valid CHAT.
+
+### Tests
+
+* `evidence::tests` parse CHAT and pin the isolation for a pause before the
+  final word, a predicate `okay`, an initial word before a pause, a one-word
+  utterance, a filler the payload drops, `xxx` slots, and a comma.
+* `invariants::discourse_marker::tests::an_isolated_okay_tag_is_an_interjection_in_mor`
+  runs Stanza's exact analysis through the production dispatcher and mapping
+  with the embedded lexicon; `without_the_pause_the_adjective_reading_stands`,
+  `an_isolated_imperative_keeps_its_verb_reading`,
+  `a_kept_separator_counts_as_a_payload_word` and the untouched cases pin
+  the rule's edges.
+
+### Re-evaluation criteria
+
+Stanza cannot fix this: it never receives the pause. The rule is retired only
+if the payload starts carrying prosodic evidence into the model, which no
+Stanza release offers.
+
 ## Defect 8: Italian imperative+enclitic compounds mid-sentence mis-tagged as ADJ
 
 <a id="stanza-it-compound-imperative-mid-sentence-adj"></a>

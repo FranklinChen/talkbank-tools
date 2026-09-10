@@ -217,6 +217,11 @@ pub struct RawVerdicts {
     pub source: VerdictSource,
     /// Forms licensed only as communicators, sorted.
     pub communicator: Vec<String>,
+    /// Forms licensed as communicators AND as something else (`okay`, `well`,
+    /// `right`), sorted. These get no category verdict on their own; a rule
+    /// with independent evidence that the word is a discourse element may
+    /// consult them.
+    pub communicator_among_others: Vec<String>,
     /// Forms licensed only as nouns, sorted by form.
     pub noun: Vec<NounVerdict>,
 }
@@ -240,6 +245,9 @@ pub enum LexiconVerdictsError {
 pub enum LexiconVerdict {
     /// Licensed only as a communicator: an interjection with no features.
     Communicator,
+    /// Licensed as a communicator among other categories: an interjection
+    /// only where something outside the lexicon says so.
+    CommunicatorAmongOthers,
     /// Licensed only as a noun, with the lemma and number the entry states.
     Noun(NounVerdict),
 }
@@ -300,8 +308,16 @@ impl TryFrom<RawVerdicts> for LexiconVerdicts {
             forms.insert(form, verdict);
             Ok(())
         };
-        for form in raw.communicator {
-            admit(form, LexiconVerdict::Communicator)?;
+        for (forms, verdict) in [
+            (raw.communicator, LexiconVerdict::Communicator),
+            (
+                raw.communicator_among_others,
+                LexiconVerdict::CommunicatorAmongOthers,
+            ),
+        ] {
+            for form in forms {
+                admit(form, verdict.clone())?;
+            }
         }
         for verdict in raw.noun {
             if !is_lowercase_token(&verdict.lemma) {
@@ -481,6 +497,7 @@ pub fn derive_verdicts(
     }
 
     let mut communicator = Vec::new();
+    let mut communicator_among_others = Vec::new();
     let mut noun = Vec::new();
     for (form, group) in &by_form {
         if !is_lowercase_token(form) {
@@ -491,6 +508,13 @@ pub fn derive_verdicts(
             .all(|e| e.scat.as_deref() == Some(PLAIN_COMMUNICATOR))
         {
             communicator.push(form.clone());
+            continue;
+        }
+        if group
+            .iter()
+            .any(|e| e.scat.as_deref() == Some(PLAIN_COMMUNICATOR))
+        {
+            communicator_among_others.push(form.clone());
             continue;
         }
         if group.iter().all(|e| e.scat.as_deref() == Some(PLAIN_NOUN)) {
@@ -507,10 +531,12 @@ pub fn derive_verdicts(
         }
     }
     communicator.sort();
+    communicator_among_others.sort();
     noun.sort_by(|a, b| a.form.cmp(&b.form));
     Ok(RawVerdicts {
         source,
         communicator,
+        communicator_among_others,
         noun,
     })
 }
@@ -685,6 +711,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(raw.communicator, vec!["whoops".to_string()]);
+        // `whoop` is a communicator among a noun and a verb.
+        assert_eq!(raw.communicator_among_others, vec!["whoop".to_string()]);
         assert_eq!(
             raw.noun,
             vec![
@@ -761,6 +789,7 @@ mod tests {
         let base = || RawVerdicts {
             source: source(),
             communicator: vec!["whoops".into()],
+            communicator_among_others: vec![],
             noun: vec![NounVerdict {
                 form: "doggy".into(),
                 lemma: "doggy".into(),
@@ -803,6 +832,7 @@ mod tests {
         let verdicts = LexiconVerdicts::try_from(RawVerdicts {
             source: source(),
             communicator: vec!["whoops".into()],
+            communicator_among_others: vec![],
             noun: vec![NounVerdict {
                 form: "doggy".into(),
                 lemma: "doggy".into(),
@@ -859,7 +889,18 @@ mod tests {
         assert_eq!(verdicts.verdict("doggy"), None);
         assert_eq!(verdicts.verdict("sticky"), None);
         assert_eq!(verdicts.verdict("building"), None);
-        assert_eq!(verdicts.verdict("whoop"), None);
-        assert_eq!(verdicts.verdict("well"), None);
+        // Ambiguous communicators are recorded as such, never as a category.
+        assert_eq!(
+            verdicts.verdict("okay"),
+            Some(&LexiconVerdict::CommunicatorAmongOthers)
+        );
+        assert_eq!(
+            verdicts.verdict("whoop"),
+            Some(&LexiconVerdict::CommunicatorAmongOthers)
+        );
+        assert_eq!(
+            verdicts.verdict("well"),
+            Some(&LexiconVerdict::CommunicatorAmongOthers)
+        );
     }
 }

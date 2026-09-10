@@ -160,7 +160,12 @@ demonstratives, verb/gerund) than it gained, so it stays. The lexical
 misreadings it causes on closed-class words (`whoops` as a plural noun,
 `byebye` as a noun, `ssh` as a verb) are corrected by the lexicon constraint,
 Defect 9; `doggy` as an adjective is not, because MOR itself could derive that
-reading (`dog` + `-y`).
+reading (`dog` + `-y`). A tag or response the lexicon leaves ambiguous
+(`... (.) okay ?`) is settled by evidence Stanza never receives at all: the
+CHAT pauses and separators, read off the AST per utterance and applied
+after the parse (Defect 11). CHAT contractions the MWT expander does not
+know (`hafta`, `gimme`, `dunno`) are sent as written and expanded after the
+parse into the shape Stanza gives the expanded words (Defect 10).
 
 This is constructed in `batchalign/inference/morphosyntax.py:273`:
 

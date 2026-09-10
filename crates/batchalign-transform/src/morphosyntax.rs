@@ -61,6 +61,7 @@
 
 pub use crate::inject::{MisalignmentClass, MisalignmentDiagnostic};
 
+pub mod evidence;
 mod features;
 mod gra_validate;
 mod injection;
@@ -86,6 +87,7 @@ mod tests;
 mod types;
 mod ud_types;
 
+pub use evidence::{UtteranceEvidence, WordIsolation};
 pub use gra_validate::validate_generated_gra;
 pub use injection::{InjectionResult, RetokenizationInfo, inject_results};
 pub use invariants::*;
