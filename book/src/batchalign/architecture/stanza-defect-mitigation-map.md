@@ -1,7 +1,7 @@
 # Stanza Defect Mitigation Map
 
 **Status:** Current
-**Last updated:** 2026-06-19 18:31 EDT
+**Last updated:** 2026-09-10 13:54 EDT
 
 Stanza is a third-party NLP library whose defects surface at different
 pipeline stages depending on the root cause. batchalign3's mitigation
@@ -43,7 +43,9 @@ flowchart TD
     pos --> postdep
 
     subgraph postdep["4. Post-depparse, pre-map-UD"]
+        d9["Defect 9: lexicon-licensed category constraint\n(crates/batchalign-transform/src/morphosyntax/invariants/\nlexicon_category.rs, data/eng_lexicon_verdicts.json)"]
         d1["Defect 1: finite-verb-main-clause rewrite\n(crates/batchalign-transform/src/morphosyntax/invariants/\nfinite_verb_main_clause.rs)"]
+        d9 --> d1
     end
 
     postdep --> ingress
@@ -63,9 +65,14 @@ flowchart TD
 
     classDef defect fill:#fdd,stroke:#900,color:#000
     classDef dp fill:#dfd,stroke:#060,color:#000
-    class d1,d2,d3,d5,d6,d7 defect
+    class d1,d2,d3,d5,d6,d7,d9 defect
     class dp dp
 ```
+
+**Order within stage 4.** The lexicon constraint (Defect 9) runs before the
+finite-verb rescue (Defect 1): the rescue may promote an `-ing` word the
+lexicon licenses only as a noun to the clause's verb, and the clause-level
+invariant outranks the word-level one.
 
 **Note on Defects 6 and 7.** Both are **content-quality** defects,
 not injection-gate failures. The `%mor` 1-to-1 count invariant holds

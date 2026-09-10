@@ -5,15 +5,13 @@ use crate::morphosyntax::{
     UniversalPos,
 };
 
-/// English-specific rewrite. Returns a (possibly-rewritten) clone of the input.
-pub fn rescue_english_copula_progressive(sentence: &UdSentence) -> UdSentence {
-    let Some(plan) = detect_rescue(sentence) else {
-        return sentence.clone();
-    };
-
-    let mut rewritten = sentence.clone();
-    apply_rescue(&mut rewritten, &plan);
-    rewritten
+/// English-specific rewrite, in place. Returns the input untouched when no
+/// rescue applies.
+pub fn rescue_english_copula_progressive(mut sentence: UdSentence) -> UdSentence {
+    if let Some(plan) = detect_rescue(&sentence) {
+        apply_rescue(&mut sentence, &plan);
+    }
+    sentence
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -29,13 +27,9 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
         return None;
     }
 
-    let has_range = sentence
-        .words
-        .iter()
-        .any(|w| matches!(w.id, UdId::Range(_, _)));
-    if !has_range {
-        return None;
-    }
+    // Only sentences with a multi-word token (`sink's`) can carry the
+    // possessive-particle misreading this rescue corrects.
+    sentence.mwt_component_ranges().next()?;
 
     let part = sentence.words.iter().find(|w| is_possessive_part(w))?;
     let possessor_id = part.head;
@@ -322,13 +316,13 @@ mod tests {
     }
 
     fn assert_unchanged(sentence: UdSentence) {
-        let out = rescue_english_copula_progressive(&sentence);
+        let out = rescue_english_copula_progressive(sentence.clone());
         assert_eq!(sentence, out, "expected rule to be a no-op");
     }
 
     #[test]
     fn sink_pattern_a_rewrite() {
-        let out = rescue_english_copula_progressive(&fixture_sink());
+        let out = rescue_english_copula_progressive(fixture_sink());
         let s = find_by_id(&out, 4);
         assert!(matches!(s.upos, UdPunctable::Value(UniversalPos::Aux)));
         assert_eq!(s.lemma, "be");
@@ -349,7 +343,7 @@ mod tests {
 
     #[test]
     fn lady_pattern_b_rewrite() {
-        let out = rescue_english_copula_progressive(&fixture_lady());
+        let out = rescue_english_copula_progressive(fixture_lady());
         let s = find_by_id(&out, 3);
         assert!(matches!(s.upos, UdPunctable::Value(UniversalPos::Aux)));
         assert_eq!(s.lemma, "be");

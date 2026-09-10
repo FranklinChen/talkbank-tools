@@ -1,7 +1,7 @@
 # NLP Engine Text Input Expectations
 
 **Status:** Current
-**Last updated:** 2026-08-30 19:35 EDT
+**Last updated:** 2026-09-10 13:54 EDT
 
 Comprehensive reference for what text format each NLP engine/tool in batchalign3
 expects as input, what preprocessing is applied, and what would break if raw
@@ -139,14 +139,28 @@ language text.
 
 **Task:** POS tagging, lemmatization, dependency parsing.
 
-**Input:** Space-joined cleaned words, one utterance per "sentence", multiple
-sentences separated by `\n\n`.
+**Input:** Space-joined cleaned words followed by the utterance terminator,
+one utterance per "sentence", multiple sentences separated by `\n\n`.
 
 **What Stanza receives:**
 
 ```text
-cleaned_word1 cleaned_word2 cleaned_word3\n\ncleaned_word4 cleaned_word5
+cleaned_word1 cleaned_word2 cleaned_word3 .\n\ncleaned_word4 cleaned_word5 ?
 ```
+
+The terminator is evidence for the model, never data: `StanzaInput` in
+`batchalign/inference/morphosyntax.py` appends it to the text and to the
+realigner's boundaries and strips it by position on the way back, so it never
+becomes a `%mor` item. It is sent for every language. Italian needs it
+(`dammela` does not MWT-expand without a period; see `stanza-limitations.md`),
+and English was measured on 2026-09-10 (100 CHILDES files, 14,347 utterances,
+same input and Stanza 1.14.0 with and without it): withholding it changed
+6.9% of `%mor` lines and lost more structural analyses (copulas,
+demonstratives, verb/gerund) than it gained, so it stays. The lexical
+misreadings it causes on closed-class words (`whoops` as a plural noun,
+`byebye` as a noun, `ssh` as a verb) are corrected by the lexicon constraint,
+Defect 9; `doggy` as an adjective is not, because MOR itself could derive that
+reading (`dog` + `-y`).
 
 This is constructed in `batchalign/inference/morphosyntax.py:273`:
 

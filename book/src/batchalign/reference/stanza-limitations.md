@@ -1,7 +1,7 @@
 # Stanza Limitations: Observed Defects with Version Pinning
 
 **Status:** Reference (living document, update when Stanza behavior changes)
-**Last updated:** 2026-07-31 21:40 EDT
+**Last updated:** 2026-09-10 13:54 EDT
 **Current Stanza pin:** `stanza[transformers]>=1.14.0,<1.15` (see `pyproject.toml`)
 **Current English MWT package:** `gum`
 
@@ -1017,6 +1017,124 @@ token, Defect 7 does not. See the
 audit context.
 
 ---
+
+## Defect 9: English forms the CHILDES lexicon licenses for one category get another from sentence-final punctuation
+
+<a id="stanza-en-lexicon-unambiguous-category-lost-to-terminator"></a>
+
+* **Stable slug:** ``stanza-en-lexicon-unambiguous-category-lost-to-terminator``
+* **Stanza version:** 1.11.1 and 1.14.0 (both confirmed 2026-09-10 with
+  `combined_charlm`; the `ewt` and `gum` POS packages show the same
+  behaviour for `whoops` and differ only on `doggy`)
+* **MWT package:** `gum`
+* **Failure class:** linguistic-content quality. Tokenization and the
+  parse are fine; the category, lemma and features of one word are wrong.
+
+### Construction
+
+Stanza's English model is trained on punctuated sentences and reads the
+terminator as evidence about the last content word. For most sentences that
+evidence helps (a 100-file measurement of withholding it lost more copulas,
+demonstratives and verb/gerund distinctions than it gained; see
+`nlp-engine-text-input.md`). For a word whose category is not in doubt, it
+can push the model into a category the CHILDES lexicon never licenses:
+
+| input to Stanza | `whoops` | `doggy` |
+|---|---|---|
+| `whoops` / `where 's the doggy` (no terminator) | INTJ | NOUN |
+| `whoops .` / `where 's the doggy ?` | NOUN `Number=Plur`, lemma `whoop` | ADJ `Degree=Pos` |
+
+The MOR lexicon (`TalkBank/mor`, `eng/eng/lex`) has `whoops` only in
+`co.cut` (communicator) and `doggy` only in `n-irr.cut` (`"dog-DIM"`).
+MOR+POST could not have produced either analysis: MOR licenses categories
+from the lexicon and POST only chooses among them.
+
+### Input and observed output
+
+```text
+*MOT:	whoops .
+%mor:	noun|whoop-Plur .          ← observed, Stanza 1.14.0 with the terminator
+%mor:	intj|whoops .              ← correct (and what BA3 produced before 2026-08-01)
+
+*MOT:	where's the doggy ?
+%mor:	adv|where~aux|be-Fin-Ind-Pres-S3 det|the-Def-Art adj|doggy-S1 ?   ← observed
+%mor:	adv|where~aux|be-Fin-Ind-Pres-S3 det|the-Def-Art noun|doggy ?     ← correct
+```
+
+### BA3 mitigation (ACTIVE)
+
+The lexicon is applied the way MOR applies it, as a constraint on the
+category, at stage 4 (post-depparse, pre-map-UD) beside the Defect 1
+rewrite:
+
+* `crates/batchalign-transform/data/eng_lexicon_verdicts.json`: for every
+  surface form whose entries across all `.cut` files license exactly one of
+  {communicator, plain noun} (and, for nouns, agree on lemma and number), the
+  verdict. Derived, not hand-written: `cargo run -p batchalign-transform
+  --example gen_eng_lexicon_verdicts -- <mor>/eng/eng/lex <commit> <out>`
+  reads the lexicon at a pinned `TalkBank/mor` commit recorded in the file's
+  `source` block, fails closed on any line it cannot parse, and validates the
+  result through the runtime's own constructor. Ambiguous forms (`whoop` is
+  `co`, `n` and `v`; `well`, `back`, `seed`) get no verdict.
+* A noun verdict is also withheld when MOR could derive a non-noun reading
+  by rule: the form minus a productive suffix (verb inflection `-s`, `-ing`,
+  `-ed`; the `0affix.cut` derivations whose result is not a noun, such as
+  adjectival `-y`, `-ish`, `-less`, `-able`, adverbial `-ly`, verbal `-ize`)
+  is a lexicon base of the class the suffix attaches to. That is what keeps
+  `sticky` (`stick` + `-y`), `building` and `feeling` (verb + `-ing`) and
+  `lives` (`live` + `-s`) out of the verdicts; without it every one of them
+  was wrongly rewritten in the first Bates run. It is also why `doggy` (`dog`
+  + `-y`) gets no verdict and its ADJ reading stands: the lexicon alone
+  cannot settle a form MOR itself would hand to POST. Communicator verdicts
+  carry no such guard: `co.cut` is a closed, curated class for
+  child-directed speech, and across the Bates measurement none of its
+  roughly seventy overrides was wrong.
+* `crates/batchalign-transform/src/morphosyntax/lexicon.rs`: the `.cut`
+  parser, verdict derivation with the derivability guard, and the validated
+  `LexiconVerdicts` type.
+* `crates/batchalign-transform/src/morphosyntax/invariants/lexicon_category.rs`:
+  where a verdict exists and Stanza's UPOS contradicts it, the category,
+  lemma and category-determined features are replaced (`intj|whoops`,
+  `intj|byebye`, `noun|banana`); the parse is kept, as the Cantonese POS
+  override keeps it. Three kinds of word are never touched: MWT components
+  (`gonna` arrives as `gon` + `na`, and `na` is a communicator), capitalized
+  words (CHAT main tiers are lowercase, so capitalization is the transcriber
+  marking a name: `Gin`), and a PROPN reading of a lexicon noun (`Rose`,
+  `Daisy`). It runs before the Defect 1 rescue, which outranks it.
+
+Onomatopoeia is not part of this: UD has no tag for it, and the transcriber
+marks it (`wooo@o`), which the special-form path already honours. Verb
+verdicts are deliberately excluded: a verb's tense and person were computed
+by Stanza under the wrong category and cannot be recovered from the lexicon.
+
+Regenerating the verdicts on 2026-09-10 required first fixing the upstream
+lexicon: a committed git conflict block in `adj.cut`, a stray marker in
+`n.cut`, 268 verbatim duplicate entries, 68 whitespace irregularities and one
+`)` for `}`; all repaired and pushed to `TalkBank/mor` (`6ef0745`, `a1c3fce`).
+
+### Tests
+
+* `lexicon::tests::embedded_english_verdicts_load` pins that the shipped
+  data loads, carries `whoops` and `banana`, and does NOT carry `whoop`,
+  `doggy`, `sticky` or `building`.
+* `invariants::lexicon_category::tests::whoops_with_a_period_is_a_communicator_in_mor`,
+  `banana_read_as_an_interjection_is_a_noun_in_mor` and
+  `doggy_is_derivable_and_therefore_left_to_stanza` run the exact Stanza
+  1.14.0 analyses through the production invariant dispatcher and mapping;
+  the third pins the mechanism's limit rather than hiding it.
+* The remaining tests in both modules pin the parser grammar (comments,
+  glosses, stems, affix entries), the ambiguity rule, the constructor's
+  refusals, and that ambiguous, unknown, proper-noun, range and punctuation
+  words are untouched.
+
+### Re-evaluation criteria
+
+On a Stanza upgrade, run `scripts/debug/stanza_pos_probe.py` (talkbank
+workspace) on `whoops .` and `where 's the doggy ?`. If the model returns
+INTJ and NOUN with the terminator present, the two seam tests still pass
+with the constraint disabled and the constraint can be narrowed; the data
+file and rule stay until every verdict it carries is redundant, which no
+single model version is expected to make true.
 
 ## Defect 8: Italian imperative+enclitic compounds mid-sentence mis-tagged as ADJ
 

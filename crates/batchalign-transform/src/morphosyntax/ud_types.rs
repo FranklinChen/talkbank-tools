@@ -379,6 +379,26 @@ pub struct UdSentence {
     pub words: Vec<UdWord>,
 }
 
+impl UdSentence {
+    /// The id spans of every multi-word token in this sentence (`gonna`
+    /// arrives as a `Range(1, 2)` parent followed by `gon` = 1 and `na` = 2).
+    /// Components carry Stanza's sub-token analysis, not a CHAT word's, which
+    /// is why word-level rewrites must not touch them.
+    pub fn mwt_component_ranges(
+        &self,
+    ) -> impl Iterator<Item = std::ops::RangeInclusive<usize>> + '_ {
+        self.words.iter().filter_map(|w| match w.id {
+            UdId::Range(start, end) => Some(start..=end),
+            UdId::Single(_) | UdId::Decimal(_) => None,
+        })
+    }
+
+    /// Whether the single-token id `id` is a component of a multi-word token.
+    pub fn is_mwt_component(&self, id: usize) -> bool {
+        self.mwt_component_ranges().any(|r| r.contains(&id))
+    }
+}
+
 /// Top-level UD response for one utterance.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct UdResponse {

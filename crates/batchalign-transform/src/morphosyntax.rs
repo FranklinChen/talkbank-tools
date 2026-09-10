@@ -70,6 +70,7 @@ mod lang_en;
 mod lang_fr;
 mod lang_it;
 mod lang_ja;
+pub mod lexicon;
 mod mapping_helpers;
 mod mapping_provenance;
 mod mor_word;
