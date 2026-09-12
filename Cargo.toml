@@ -18,7 +18,7 @@ members = [
 # released git tags under [workspace.dependencies].
 
 [workspace.package]
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
 authors = ["Franklin Chen <franklinchen@franklinchen.com>"]
 license = "BSD-3-Clause"
@@ -133,12 +133,12 @@ batchalign-transform = { path = "crates/batchalign-transform" }
 # ../chatter/crates/...; never commit a path override here. Adopt a newer chatter
 # by bumping the tag. talkbank-transform is the GENERIC transform;
 # batchalign-transform (above) holds the ML accretion.
-talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.1", default-features = false }
+talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2", default-features = false }
 # Stage 1 dedup: talkbank-tools no longer carries its own copies of these.
-talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.1" }
-talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.1" }
-talkbank-parser-re2c = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.1" }
-talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.1" }
+talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
+talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
+talkbank-parser-re2c = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
+talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
 
 phf = { version = "0.14", features = ["macros"] }
 phf_codegen = "0.14"
