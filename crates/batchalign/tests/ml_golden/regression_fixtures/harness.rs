@@ -86,6 +86,7 @@ fn command_options_for(manifest: &FixtureManifest) -> CommandOptions {
             ..AlignOptions::default()
         }),
         FixtureCommand::Transcribe => CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions {
                 override_media_cache: true,
                 ..CommonOptions::default()

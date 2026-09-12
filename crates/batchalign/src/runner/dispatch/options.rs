@@ -111,6 +111,7 @@ pub(crate) fn extract_fa_dispatch_params(
 /// Extracted parameters for the transcribe dispatch path.
 #[derive(Debug, PartialEq)]
 pub(crate) struct TranscribeDispatchParams {
+    pub auto_speakers: bool,
     pub asr_engine: AsrEngineName,
     pub speaker_engine: Option<crate::options::SpeakerEngineName>,
     pub diarize: bool,
@@ -145,6 +146,7 @@ pub(crate) fn extract_transcribe_dispatch_params(
     match options {
         CommandOptions::Transcribe(t) | CommandOptions::TranscribeS(t) => {
             Some(TranscribeDispatchParams {
+                auto_speakers: t.auto_speakers,
                 asr_engine: t.effective_asr_engine(),
                 speaker_engine: t.common.engine_overrides.speaker,
                 diarize: t.diarize,
@@ -524,6 +526,7 @@ mod tests {
     #[test]
     fn transcribe_dispatch_reads_all_fields() {
         let opts = CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: common_with_cache_override(),
             asr_engine: AsrEngineName::WhisperX,
             diarize: false,
@@ -551,6 +554,7 @@ mod tests {
     #[test]
     fn transcribe_s_dispatch_reads_all_fields() {
         let opts = CommandOptions::TranscribeS(TranscribeOptions {
+            auto_speakers: false,
             common: common_default(),
             asr_engine: AsrEngineName::RevAi,
             diarize: true,
@@ -580,6 +584,7 @@ mod tests {
         let mut common = common_default();
         common.engine_overrides.asr = Some(AsrEngineName::HkTencent);
         let opts = CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common,
             asr_engine: AsrEngineName::RevAi,
             diarize: false,
@@ -713,6 +718,7 @@ mod tests {
         assert!(extract_opensmile_dispatch_params(&align).is_none());
 
         let transcribe = CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: common_default(),
             asr_engine: AsrEngineName::RevAi,
             diarize: false,
@@ -759,6 +765,7 @@ mod tests {
                 review_level: Default::default(),
             }),
             CommandOptions::Transcribe(TranscribeOptions {
+                auto_speakers: false,
                 common: common.clone(),
                 asr_engine: AsrEngineName::RevAi,
                 diarize: false,

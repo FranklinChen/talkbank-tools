@@ -63,6 +63,7 @@ fn build_options(_global: &GlobalOpts, args: &BenchArgs) -> CommandOptions {
             ..AlignOptions::default()
         }),
         BenchTarget::Transcribe => CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common,
             asr_engine: crate::options::AsrEngineName::RevAi,
             diarize: false,
@@ -72,6 +73,7 @@ fn build_options(_global: &GlobalOpts, args: &BenchArgs) -> CommandOptions {
             batch_size: 8,
         }),
         BenchTarget::TranscribeS => CommandOptions::TranscribeS(TranscribeOptions {
+            auto_speakers: false,
             common,
             asr_engine: crate::options::AsrEngineName::RevAi,
             diarize: true,

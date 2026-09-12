@@ -480,8 +480,12 @@ pub struct TranscribeArgs {
 
     /// Expected number of speakers. NOT a worker count: see `--workers`.
     /// No short flag by design; the book explains why `-n` was removed.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..))]
     pub num_speakers: u32,
+
+    /// Infer the speaker count instead of supplying an exact count (Rev.AI).
+    #[arg(long, conflicts_with = "num_speakers")]
+    pub auto_speakers: bool,
 
     // -- Hidden BA2 compatibility aliases --
     /// BA2 compat: use --diarization enabled instead.

@@ -497,6 +497,9 @@ fn stage_asr_infer<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> St
         };
         let num_speakers = NumSpeakers(ctx.opts.num_speakers as u32);
         let response = if let Some(backend) = ctx.opts.backend.as_non_rev() {
+            if ctx.opts.auto_speakers {
+                return Err(ServerError::Validation("automatic speaker counts currently require the Rev.AI ASR engine".into()));
+            }
             infer_asr(
                 ctx.services.pool,
                 &AsrInferParams {
@@ -515,7 +518,7 @@ fn stage_asr_infer<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> St
             let request = RevAsrEvidenceRequest::new(
                 provider_media,
                 &ctx.opts.lang,
-                num_speakers,
+                ctx.opts.expected_speakers(),
                 &RevAsrModelRevision::current(),
             )
             .map_err(|error| ServerError::Persistence(error.to_string()))?;
@@ -957,7 +960,7 @@ fn stage_speaker_diarization<'a, 'ctx>(
             num_speakers = ctx.opts.num_speakers,
             "Running dedicated speaker diarization"
         );
-        let expected_speakers = NumSpeakers(ctx.opts.num_speakers as u32);
+        let expected_speakers = ctx.opts.expected_speakers();
         let cache_policy = ctx.opts.cache_policies.speaker;
         let resolution = resolve_speaker_evidence_for_audio(
             ctx.services.pool,
@@ -966,7 +969,7 @@ fn stage_speaker_diarization<'a, 'ctx>(
             SpeakerEvidenceRunParams {
                 audio_path: ctx.audio_path,
                 backend: speaker_backend,
-                expected_speakers: Some(expected_speakers),
+                expected_speakers,
                 cache_policy,
             },
         )
@@ -1085,7 +1088,11 @@ fn stage_build_chat<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> S
             .unwrap_or(0);
         let participant_ids = generate_participant_ids(
             utterances,
-            ctx.opts.num_speakers.max(diarization_speaker_count),
+            if ctx.opts.auto_speakers {
+                diarization_speaker_count
+            } else {
+                ctx.opts.num_speakers.max(diarization_speaker_count)
+            },
         );
         let transcript = build_chat::transcript_from_asr_utterances(
             utterances,
@@ -1386,6 +1393,7 @@ mod tests {
 
     fn test_transcribe_options(speaker_backend: Option<SpeakerBackendV2>) -> TranscribeOptions {
         TranscribeOptions {
+            auto_speakers: false,
             backend: AsrBackend::RustRevAi,
             diarize: true,
             speaker_backend,

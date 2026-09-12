@@ -57,6 +57,7 @@ fn echo_submission() -> JobSubmission {
         media_subdir: Default::default(),
         source_dir: Default::default(),
         options: CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,

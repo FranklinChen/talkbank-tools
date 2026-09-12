@@ -16,6 +16,23 @@ fn typed_options_for(args: &[&str]) -> CommandOptions {
         .unwrap()
 }
 
+#[test]
+fn auto_speakers_roundtrips_and_conflicts_with_explicit_count() {
+    let options = typed_options_for(&["batchalign3", "transcribe", "input.wav", "--auto-speakers"]);
+    let encoded = serde_json::to_value(&options).expect("wire options");
+    let decoded: CommandOptions = serde_json::from_value(encoded).expect("wire roundtrip");
+    assert_eq!(decoded, options);
+    let CommandOptions::Transcribe(options) = options else { panic!("transcribe options") };
+    assert!(options.auto_speakers);
+    assert!(Cli::try_parse_from(["batchalign3", "transcribe", "input.wav", "--auto-speakers", "--num-speakers", "3"]).is_err());
+    assert!(Cli::try_parse_from(["batchalign3", "transcribe", "input.wav", "--num-speakers", "0"]).is_err());
+    let default = typed_options_for(&["batchalign3", "transcribe", "input.wav"]);
+    let mut old_wire = serde_json::to_value(default).expect("wire options");
+    old_wire.as_object_mut().expect("object").remove("auto_speakers");
+    let CommandOptions::Transcribe(old) = serde_json::from_value(old_wire).expect("old requests remain valid") else { panic!("transcribe options") };
+    assert!(!old.auto_speakers);
+}
+
 fn assert_typed_options_equivalent(lhs: &[&str], rhs: &[&str], note: &str) {
     let lhs_opts = typed_options_for(lhs);
     let rhs_opts = typed_options_for(rhs);

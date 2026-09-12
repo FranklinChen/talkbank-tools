@@ -218,6 +218,8 @@ impl AsrBackend {
 /// Options controlling the transcribe pipeline.
 #[derive(Clone)]
 pub struct TranscribeOptions {
+    /// Infer speaker count rather than imposing the job's numeric default.
+    pub auto_speakers: bool,
     /// Which runtime boundary owns raw ASR inference.
     pub(crate) backend: AsrBackend,
     /// Whether the command requested diarized speaker attribution.
@@ -256,6 +258,13 @@ pub struct TranscribeOptions {
     /// boundary so they reach the worker spawn argv, the `backend` enum
     /// only carries WHICH engine, not its configuration.
     pub engine_extras: std::collections::BTreeMap<String, String>,
+}
+
+impl TranscribeOptions {
+    /// Provider/diarizer count hint; automatic mode never uses a numeric sentinel.
+    pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
+        (!self.auto_speakers).then_some(crate::api::NumSpeakers(self.num_speakers as u32))
+    }
 }
 
 #[cfg(test)]

@@ -171,9 +171,20 @@ pub(super) fn fetch_revai_transcript(
     api_key: &super::RevAiApiKey,
     media: &VerifiedRevProviderMedia,
     lang: &LanguageSpec,
-    num_speakers: NumSpeakers,
+    num_speakers: Option<NumSpeakers>,
 ) -> crate::revai::Result<TranscriptResult> {
     let client = RevAiClient::new(api_key.as_str());
+    let options = rev_submit_options(lang, num_speakers, &media.metadata);
+    client.transcribe_bytes_blocking(
+        &media.bytes,
+        &media.upload_file_name,
+        media.upload_mime,
+        &options,
+        30,
+    )
+}
+
+fn rev_submit_options(lang: &LanguageSpec, num_speakers: Option<NumSpeakers>, metadata: &str) -> SubmitOptions {
     let lang_hint_str = match lang.as_resolved() {
         Some(code) => RevAiLanguageHint::from(code).as_str().to_string(),
         None => "auto".to_string(),
@@ -185,7 +196,7 @@ pub(super) fn fetch_revai_transcript(
         None
     } else {
         match lang_hint_str.as_str() {
-            "en" | "es" => Some(num_speakers.0),
+            "en" | "es" => num_speakers.map(|count| count.0),
             _ => None,
         }
     };
@@ -195,19 +206,22 @@ pub(super) fn fetch_revai_transcript(
         skip_postprocessing_hint(lang_hint_str.as_str())
     };
 
-    let options = SubmitOptions {
+    SubmitOptions {
         language: lang_hint_str,
         speakers_count,
         skip_postprocessing,
-        metadata: Some(media.metadata.clone()),
-    };
-    client.transcribe_bytes_blocking(
-        &media.bytes,
-        &media.upload_file_name,
-        media.upload_mime,
-        &options,
-        30,
-    )
+        metadata: Some(metadata.to_owned()),
+    }
+}
+
+#[test]
+fn auto_speakers_omits_provider_count_but_preserves_postprocessing() {
+    let lang = LanguageSpec::Resolved(LanguageCode3::eng());
+    let automatic = serde_json::to_value(rev_submit_options(&lang, None, "fixture")).expect("provider JSON");
+    assert!(automatic.get("speakers_count").is_none());
+    assert_eq!(automatic["skip_postprocessing"], true);
+    let exact = serde_json::to_value(rev_submit_options(&lang, Some(NumSpeakers(3)), "fixture")).expect("provider JSON");
+    assert_eq!(exact["speakers_count"], 3);
 }
 
 /// Rev.AI's inverse text normalization turns spoken forms into written forms.

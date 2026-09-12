@@ -142,6 +142,7 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
         // test-echo workers bypass real ASR; engine name is required by the
         // submission schema but not actually invoked.
         options: CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: AsrEngineName::RevAi,
             diarize: false,

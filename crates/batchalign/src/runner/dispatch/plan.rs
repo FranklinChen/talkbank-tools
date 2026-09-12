@@ -190,6 +190,7 @@ impl TranscribeDispatchPlan {
             speaker: overrides.policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
         };
         let TranscribeDispatchParams {
+            auto_speakers,
             asr_engine,
             speaker_engine,
             diarize,
@@ -208,6 +209,7 @@ impl TranscribeDispatchPlan {
         Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
+                auto_speakers,
                 // A refusal here means a persisted job names an engine this
                 // build cannot run. Submission validation refuses those up
                 // front, so reaching this arm means the job predates the
@@ -263,6 +265,7 @@ impl BenchmarkDispatchPlan {
         Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
+                auto_speakers: false,
                 // A refusal here means a persisted job names an engine this
                 // build cannot run. Submission validation refuses those up
                 // front, so reaching this arm means the job predates the
@@ -458,6 +461,28 @@ mod tests {
     };
     use crate::transcribe::AsrWorkerMode;
 
+    #[test]
+    fn auto_speakers_http_contract_reaches_provider_and_speaker_boundary() {
+        let submission: crate::api::JobSubmission = serde_json::from_value(json!({
+            "command": "transcribe", "lang": "eng", "num_speakers": 2,
+            "options": {"command": "transcribe", "asr_engine": "rev", "diarize": true,
+                "wor": true, "auto_speakers": true, "engine_overrides": {"speaker": "pyannote_ai"},
+                "override_media_cache": true, "debug_dir": "/data/evidence"},
+            "paths_mode": true, "source_paths": ["/data/input.wav"],
+            "output_paths": ["/data/output.cha"], "display_names": ["input.wav"]
+        })).expect("HTTP submission contract");
+        submission.validate().expect("supported automatic speaker request");
+        let mut job = make_snapshot(ReleasedCommand::Transcribe, submission.options, BTreeMap::new());
+        job.dispatch.num_speakers = NumSpeakers(2);
+        let plan = TranscribeDispatchPlan::from_job(&job, &ServerConfig::default()).expect("dispatch plan");
+        assert!(plan.base_options.auto_speakers);
+        assert_eq!(plan.base_options.expected_speakers(), None);
+        assert!(plan.base_options.speaker_backend.is_some());
+        assert!(plan.base_options.write_wor);
+        assert_eq!(plan.base_options.cache_policies.rev_asr, crate::params::CachePolicy::SkipCache);
+        assert_eq!(plan.base_options.cache_policies.speaker, crate::params::CachePolicy::SkipCache);
+    }
+
     fn make_snapshot(
         command: ReleasedCommand,
         options: CommandOptions,
@@ -537,6 +562,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::Transcribe,
             CommandOptions::Transcribe(TranscribeCommand {
+                auto_speakers: false,
                 common,
                 asr_engine: AsrEngineName::HkAliyun,
                 diarize: true,
@@ -579,6 +605,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::TranscribeS,
             CommandOptions::TranscribeS(TranscribeCommand {
+                auto_speakers: false,
                 common: CommonOptions::default(),
                 asr_engine: AsrEngineName::RevAi,
                 diarize: true,
@@ -622,6 +649,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::Transcribe,
             CommandOptions::Transcribe(TranscribeCommand {
+                auto_speakers: false,
                 common: CommonOptions::default(),
                 asr_engine: AsrEngineName::WhisperX,
                 diarize: false,
@@ -654,6 +682,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::Align,
             CommandOptions::Transcribe(TranscribeCommand {
+                auto_speakers: false,
                 common: CommonOptions::default(),
                 asr_engine: AsrEngineName::RevAi,
                 diarize: false,
@@ -684,6 +713,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::Diarize,
             CommandOptions::Transcribe(TranscribeCommand {
+                auto_speakers: false,
                 common: CommonOptions::default(),
                 asr_engine: AsrEngineName::RevAi,
                 diarize: false,
@@ -710,6 +740,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::Transcribe,
             CommandOptions::Transcribe(TranscribeCommand {
+                auto_speakers: false,
                 common: CommonOptions {
                     require_media_cache: true,
                     ..Default::default()
@@ -738,6 +769,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::TranscribeS,
             CommandOptions::TranscribeS(TranscribeCommand {
+                auto_speakers: false,
                 common: CommonOptions {
                     override_media_cache_tasks: vec!["rev_asr_evidence".to_owned()],
                     ..Default::default()
@@ -770,6 +802,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::TranscribeS,
             CommandOptions::TranscribeS(TranscribeCommand {
+                auto_speakers: false,
                 common: CommonOptions {
                     override_media_cache_tasks: vec!["speaker_diarization_raw_evidence".to_owned()],
                     ..Default::default()
@@ -828,6 +861,7 @@ mod tests {
         let snapshot = make_snapshot(
             ReleasedCommand::TranscribeS,
             CommandOptions::TranscribeS(TranscribeCommand {
+                auto_speakers: false,
                 common,
                 asr_engine: AsrEngineName::RevAi,
                 diarize: true,

@@ -432,6 +432,7 @@ mod tests {
         let language = WorkerLanguage::from(LanguageCode3::eng());
         let options =
             crate::options::CommandOptions::Transcribe(crate::options::TranscribeOptions {
+                auto_speakers: false,
                 common: crate::options::CommonOptions::default(),
                 asr_engine: AsrEngineName::Whisper,
                 diarize: false,

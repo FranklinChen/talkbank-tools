@@ -16,6 +16,7 @@ pub(super) fn transcribe_options(
     wor: WorTierPolicy,
 ) -> CommandOptions {
     CommandOptions::Transcribe(TranscribeOptions {
+        auto_speakers: false,
         common: CommonOptions {
             override_media_cache: true,
             ..CommonOptions::default()

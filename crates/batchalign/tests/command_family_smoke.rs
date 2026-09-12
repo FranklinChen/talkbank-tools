@@ -285,6 +285,7 @@ async fn smoke_transcribe() {
         base_url,
         ReleasedCommand::Transcribe,
         CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: AsrEngineName::RevAi,
             diarize: false,

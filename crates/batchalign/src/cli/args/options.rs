@@ -247,6 +247,7 @@ pub fn build_typed_options(
                 }
             };
             let variant = TranscribeOptions {
+                auto_speakers: a.auto_speakers,
                 common,
                 asr_engine,
                 diarize,

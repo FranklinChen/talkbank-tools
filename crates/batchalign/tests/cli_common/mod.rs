@@ -476,6 +476,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
             review_level: Default::default(),
         }),
         "transcribe" => CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,
@@ -485,6 +486,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
             utseg_fallback: false.into(),
         }),
         "transcribe_s" => CommandOptions::TranscribeS(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: true,
@@ -533,6 +535,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
         // compiles; the server will reject the submission based on the
         // mismatched command string.
         _ => CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,

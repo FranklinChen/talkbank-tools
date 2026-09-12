@@ -115,6 +115,14 @@ impl JobSubmission {
         // language-shaped message would send the operator hunting the wrong
         // thing.
         self.validate_asr_engine_implemented()?;
+        if let CommandOptions::Transcribe(options) | CommandOptions::TranscribeS(options) = &self.options {
+            if options.auto_speakers && options.effective_asr_engine() != AsrEngineName::RevAi {
+                return Err(ValidationError("automatic speaker counts currently require the Rev.AI ASR engine".into()));
+            }
+            if !options.auto_speakers && self.num_speakers.0 == 0 {
+                return Err(ValidationError("expected speaker count must be positive; use auto_speakers for inference".into()));
+            }
+        }
 
         // Validate the (command, lang) pairing is a legal one. Morphotag,
         // translate, and coref MUST submit `LanguageSpec::PerFile`; every
@@ -932,6 +940,7 @@ mod tests {
             media_subdir: Default::default(),
             source_dir: Default::default(),
             options: CommandOptions::Transcribe(TranscribeOptions {
+                auto_speakers: false,
                 common: CommonOptions::default(),
                 asr_engine,
                 diarize: false,
@@ -995,6 +1004,17 @@ mod tests {
             low.contains("known") || low.contains("quality") || low.contains("unusable"),
             "error must explain quality / known-broken reason; got: {msg}"
         );
+    }
+
+    #[test]
+    fn auto_speakers_refuses_unsupported_engine_at_submission() {
+        let mut submission = transcribe_submission("eng", AsrEngineName::Whisper);
+        let CommandOptions::Transcribe(options) = &mut submission.options else { panic!("transcribe") };
+        options.auto_speakers = true;
+        assert!(submission.validate().expect_err("unsupported automatic count").to_string().contains("automatic speaker counts"));
+        let CommandOptions::Transcribe(options) = &mut submission.options else { panic!("transcribe") };
+        options.asr_engine = AsrEngineName::RevAi;
+        submission.validate().expect("Rev automatic count is supported");
     }
 
     /// Guard rail: the deny-list must not over-reject. `eng` + Rev.AI is the

@@ -23,6 +23,7 @@ async fn parity_transcribe_disfluency_markup() {
     let output_path = out_dir.join("test.cha");
 
     let options = CommandOptions::Transcribe(TranscribeOptions {
+        auto_speakers: false,
         common: CommonOptions {
             override_media_cache: true,
             ..CommonOptions::default()
@@ -75,6 +76,7 @@ async fn parity_transcribe_retrace_markup() {
     let output_path = out_dir.join("test.cha");
 
     let options = CommandOptions::Transcribe(TranscribeOptions {
+        auto_speakers: false,
         common: CommonOptions {
             override_media_cache: true,
             ..CommonOptions::default()

@@ -115,6 +115,7 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
             .and_then(|name| name.to_str())
             .map(ToOwned::to_owned);
         let opts = TranscribeOptions {
+            auto_speakers: false,
             backend: AsrBackend::RustRevAi,
             diarize: args.diarize,
             speaker_backend: args.diarize.then_some(SpeakerBackendV2::PyannoteAi),

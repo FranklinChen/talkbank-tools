@@ -95,6 +95,7 @@ pub(crate) async fn transcribe_audio_clip(audio_name: &str, lang: &str, label: &
     let output_path = out_dir.join(format!("{audio_name}.cha"));
 
     let options = CommandOptions::Transcribe(TranscribeOptions {
+        auto_speakers: false,
         common: CommonOptions {
             override_media_cache: true,
             ..CommonOptions::default()

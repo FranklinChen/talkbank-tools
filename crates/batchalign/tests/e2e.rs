@@ -151,6 +151,7 @@ async fn e2e_empty_input() {
         media_subdir: Default::default(),
         source_dir: Default::default(),
         options: CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,
@@ -291,6 +292,7 @@ async fn e2e_override_media_cache_option() {
     let client = session.client();
 
     let options = CommandOptions::Transcribe(TranscribeOptions {
+        auto_speakers: false,
         common: CommonOptions {
             override_media_cache: true,
             ..CommonOptions::default()
@@ -331,6 +333,7 @@ async fn e2e_retokenize_option() {
     let client = session.client();
 
     let options = CommandOptions::Transcribe(TranscribeOptions {
+        auto_speakers: false,
         common: CommonOptions::default(),
         asr_engine: batchalign::options::AsrEngineName::RevAi,
         diarize: false,
@@ -671,6 +674,7 @@ async fn e2e_cancel_job() {
         media_subdir: Default::default(),
         source_dir: Default::default(),
         options: CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,
@@ -744,6 +748,7 @@ async fn e2e_job_status_lifecycle() {
         media_subdir: Default::default(),
         source_dir: Default::default(),
         options: CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,

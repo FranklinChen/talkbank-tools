@@ -378,6 +378,7 @@ mod tests {
                 lang: LanguageSpec::Resolved(LanguageCode3::eng()),
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Transcribe(TranscribeCommand {
+                    auto_speakers: false,
                     common: CommonOptions::default(),
                     asr_engine: AsrEngineName::RevAi,
                     diarize: false,
@@ -479,6 +480,7 @@ mod tests {
         let services = PipelineServices::new(&pool, &cache, &engine_version);
         let sink = StoreRunnerEventSink::wrap(store.clone());
         let mut opts = crate::transcribe::TranscribeOptions {
+            auto_speakers: false,
             backend: AsrBackend::Worker(crate::transcribe::AsrWorkerMode::LocalWhisperV2),
             diarize: false,
             speaker_backend: None,

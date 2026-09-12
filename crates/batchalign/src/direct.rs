@@ -272,6 +272,7 @@ mod tests {
                 .into_owned()
                 .into(),
             options: CommandOptions::Transcribe(TranscribeOptions {
+                auto_speakers: false,
                 common: CommonOptions::default(),
                 asr_engine: AsrEngineName::RevAi,
                 diarize: false,

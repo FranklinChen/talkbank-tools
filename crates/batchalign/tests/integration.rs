@@ -61,6 +61,7 @@ fn test_submission(files: Vec<FilePayload>) -> JobSubmission {
         media_subdir: Default::default(),
         source_dir: Default::default(),
         options: CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,
@@ -1074,6 +1075,7 @@ async fn paths_mode_job() {
         media_subdir: Default::default(),
         source_dir: Default::default(),
         options: CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             diarize: false,

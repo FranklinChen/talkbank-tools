@@ -143,7 +143,7 @@ struct RevAsrEvidenceKeyMaterial<'a> {
     #[serde(flatten)]
     provider_presentation: &'a RevProviderPresentation,
     requested_language: String,
-    expected_speakers: u32,
+    expected_speakers: Option<u32>,
     request_policy_revision: &'static str,
     model_revision: &'a str,
 }
@@ -168,16 +168,22 @@ pub(crate) struct RevAsrEvidenceRequest {
     model_revision: RevAsrModelRevision,
     provider_media: PreparedRevProviderMedia,
     requested_language: LanguageSpec,
-    expected_speakers: NumSpeakers,
+    expected_speakers: Option<NumSpeakers>,
 }
 
 impl RevAsrEvidenceRequest {
     pub(crate) fn new(
         provider_media: PreparedRevProviderMedia,
         requested_language: &LanguageSpec,
-        expected_speakers: NumSpeakers,
+        expected_speakers: impl Into<Option<NumSpeakers>>,
         model_revision: &RevAsrModelRevision,
     ) -> Result<Self, RevAsrEvidenceCacheError> {
+        let expected_speakers = expected_speakers.into();
+        if expected_speakers.is_some_and(|count| count.0 == 0) {
+            return Err(RevAsrEvidenceCacheError::InvalidRequest(
+                "expected speaker count must be positive or automatic".to_owned(),
+            ));
+        }
         if requested_language.is_per_file() {
             return Err(RevAsrEvidenceCacheError::InvalidRequest(
                 "Rev.AI transcribe evidence cannot use per-file language routing".to_owned(),
@@ -188,7 +194,7 @@ impl RevAsrEvidenceRequest {
             request_identity_revision: REV_ASR_REQUEST_IDENTITY_REVISION,
             provider_presentation: &provider_media.presentation,
             requested_language: requested_language.to_string(),
-            expected_speakers: expected_speakers.0,
+            expected_speakers: expected_speakers.map(|count| count.0),
             request_policy_revision: REV_ASR_REQUEST_POLICY_REVISION,
             model_revision: model_revision.as_str(),
         };
@@ -212,7 +218,7 @@ impl RevAsrEvidenceRequest {
             source_media_blake3: self.provider_media.source_digest.0.clone(),
             provider_presentation: self.provider_media.presentation.clone(),
             requested_language: self.requested_language.to_string(),
-            expected_speakers: self.expected_speakers.0,
+            expected_speakers: self.expected_speakers.map(|count| count.0),
             request_policy_revision: REV_ASR_REQUEST_POLICY_REVISION,
             model_revision: self.model_revision.as_str().to_owned(),
             raw_evidence_key: self.cache_key.to_string(),
@@ -223,7 +229,7 @@ impl RevAsrEvidenceRequest {
     pub(crate) async fn from_audio(
         audio_path: &Path,
         requested_language: &LanguageSpec,
-        expected_speakers: NumSpeakers,
+        expected_speakers: impl Into<Option<NumSpeakers>>,
         model_revision: &RevAsrModelRevision,
     ) -> Result<Self, RevAsrEvidenceCacheError> {
         Self::new(
@@ -458,7 +464,7 @@ struct RevAsrEvidenceTraceSeed {
     #[serde(flatten)]
     provider_presentation: RevProviderPresentation,
     requested_language: String,
-    expected_speakers: u32,
+    expected_speakers: Option<u32>,
     request_policy_revision: &'static str,
     model_revision: String,
     raw_evidence_key: String,
@@ -544,7 +550,7 @@ struct RevAsrInferenceAuthorization {
 pub(crate) struct AuthorizedRevEvidenceRun {
     pub(super) provider_media: PreparedRevProviderMedia,
     pub(super) requested_language: LanguageSpec,
-    pub(super) expected_speakers: NumSpeakers,
+    pub(super) expected_speakers: Option<NumSpeakers>,
 }
 
 impl RevAsrInferenceAuthorization {
@@ -858,6 +864,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn auto_speakers_cache_identity_is_distinct_and_trace_records_null() {
+        // Request identity admission is pure: no media upload or temporary files.
+        let digest = RevProviderMediaDigest::from_bytes(b"provider media");
+        let media = PreparedRevProviderMedia {
+            source_path: PathBuf::from("fixture.wav"),
+            source_digest: digest.clone(),
+            presentation: RevProviderPresentation {
+                provider_media_blake3: digest,
+                preparation_recipe: RevMediaPreparationRecipe::SourceBytesLegacyAudioMpegV1,
+                upload_file_name: "fixture.wav".to_owned(),
+                upload_mime: "audio/mpeg",
+                upload_metadata: "fixture".to_owned(),
+            },
+        };
+        let language = LanguageSpec::Resolved(LanguageCode3::eng());
+        let revision = RevAsrModelRevision::current();
+        let automatic = RevAsrEvidenceRequest::new(media.clone(), &language, None, &revision).expect("automatic request");
+        let exact = RevAsrEvidenceRequest::new(media.clone(), &language, NumSpeakers(2), &revision).expect("exact request");
+        assert_ne!(automatic.cache_key(), exact.cache_key());
+        assert!(serde_json::to_value(automatic.trace_seed()).expect("trace")["expected_speakers"].is_null());
+        assert_eq!(serde_json::to_value(exact.trace_seed()).expect("trace")["expected_speakers"], 2);
+        assert!(RevAsrEvidenceRequest::new(media, &language, NumSpeakers(0), &revision).is_err());
+    }
+
     #[tokio::test]
     async fn rev_key_reuses_identical_media_but_invalidates_semantic_changes() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -962,7 +993,7 @@ mod tests {
             request_identity_revision: REV_ASR_REQUEST_IDENTITY_REVISION,
             provider_presentation: &request.provider_media.presentation,
             requested_language: request.requested_language.to_string(),
-            expected_speakers: request.expected_speakers.0,
+            expected_speakers: request.expected_speakers.map(|count| count.0),
             request_policy_revision: REV_ASR_REQUEST_POLICY_REVISION,
             model_revision: request.model_revision.as_str(),
         };

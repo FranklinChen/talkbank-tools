@@ -179,6 +179,7 @@ mod tests {
 
     fn sample_transcribe_options(backend: AsrBackend) -> TranscribeOptions {
         TranscribeOptions {
+            auto_speakers: false,
             backend,
             diarize: false,
             speaker_backend: None,

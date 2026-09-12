@@ -428,6 +428,7 @@ mod tests {
                 lang: LanguageSpec::Resolved(LanguageCode3::eng()),
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Transcribe(TranscribeOptions {
+                    auto_speakers: false,
                     common: CommonOptions::default(),
                     asr_engine: AsrEngineName::Whisper,
                     diarize: false,

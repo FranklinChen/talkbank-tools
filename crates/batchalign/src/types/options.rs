@@ -311,6 +311,9 @@ impl AlignOptions {
 /// Options for the `transcribe` and `transcribe_s` commands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscribeOptions {
+    /// Infer speaker count rather than imposing the job's numeric default.
+    #[serde(default)]
+    pub auto_speakers: bool,
     /// Shared options.
     #[serde(flatten)]
     pub common: CommonOptions,
@@ -830,6 +833,7 @@ mod tests {
     #[test]
     fn transcribe_roundtrip() {
         let opts = CommandOptions::Transcribe(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: AsrEngineName::WhisperX,
             diarize: true,
@@ -846,6 +850,7 @@ mod tests {
     #[test]
     fn transcribe_s_roundtrip() {
         let opts = CommandOptions::TranscribeS(TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions::default(),
             asr_engine: AsrEngineName::RevAi,
             diarize: true,
@@ -1000,6 +1005,7 @@ mod tests {
             ..Default::default()
         };
         let opts = TranscribeOptions {
+            auto_speakers: false,
             common: CommonOptions {
                 engine_overrides: overrides,
                 ..CommonOptions::default()
