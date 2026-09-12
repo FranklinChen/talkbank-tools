@@ -413,7 +413,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "batchalign"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "batchalign-transform"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -10877,7 +10877,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "batchalign-types",
  "blake3",

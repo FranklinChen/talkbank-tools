@@ -18,7 +18,7 @@ members = [
 # released git tags under [workspace.dependencies].
 
 [workspace.package]
-version = "0.8.3"
+version = "0.8.4"
 edition = "2024"
 authors = ["Franklin Chen <franklinchen@franklinchen.com>"]
 license = "BSD-3-Clause"

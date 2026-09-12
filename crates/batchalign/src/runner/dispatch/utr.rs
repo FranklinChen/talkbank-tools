@@ -891,9 +891,9 @@ mod utr_evidence_cache_tests {
         async fn infer(
             &self,
             _run: AuthorizedRevEvidenceRun,
-        ) -> Result<CompletedRevAsrEvidence, ServerError> {
+        ) -> Result<crate::revai::RevAsrInferenceOutcome, ServerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CompletedRevAsrEvidence {
+            Ok(crate::revai::RevAsrInferenceOutcome::Completed(CompletedRevAsrEvidence {
                 transcript_evidence: crate::revai::RevTranscriptEvidence::from_legacy_transcript(
                     serde_json::from_str(
                         r#"{
@@ -912,7 +912,7 @@ mod utr_evidence_cache_tests {
                     .expect("valid Rev transcript"),
                 ),
                 resolved_language: LanguageCode3::eng(),
-            })
+            }))
         }
     }
 

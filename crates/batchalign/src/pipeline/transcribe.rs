@@ -1420,16 +1420,16 @@ mod tests {
         async fn infer(
             &self,
             _run: AuthorizedRevEvidenceRun,
-        ) -> Result<CompletedRevAsrEvidence, ServerError> {
+        ) -> Result<crate::revai::RevAsrInferenceOutcome, ServerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CompletedRevAsrEvidence {
+            Ok(crate::revai::RevAsrInferenceOutcome::Completed(CompletedRevAsrEvidence {
                 transcript_evidence: RevTranscriptEvidence::from_provider_json(
                     r#"{"monologues":[{"speaker":0,"elements":[{"type":"text","value":"hello","ts":0.1,"end_ts":0.5,"confidence":0.9},{"type":"punct","value":".","ts":null,"end_ts":null,"confidence":null}]},{"speaker":1,"elements":[{"type":"text","value":"there","ts":0.6,"end_ts":1.0,"confidence":0.8},{"type":"punct","value":"?","ts":null,"end_ts":null,"confidence":null}]}]}"#
                         .to_owned(),
                 )
                 .expect("valid provider transcript fixture"),
                 resolved_language: LanguageCode3::eng(),
-            })
+            }))
         }
     }
 

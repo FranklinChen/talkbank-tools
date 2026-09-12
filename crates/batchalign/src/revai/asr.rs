@@ -18,6 +18,7 @@ use crate::transcribe::{AsrResponse, AsrToken};
 use super::{
     AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RevAsrEvidenceInference,
     VerifiedRevProviderMedia, load_revai_api_key,
+    RejectedRevLanguageEvidence, RevAsrInferenceOutcome,
 };
 use crate::types::revai_language::RevAiLanguageHint;
 
@@ -29,7 +30,7 @@ use crate::types::revai_language::RevAiLanguageHint;
 /// the completed job to populate `AsrResponse.lang`.
 async fn infer_revai_evidence(
     run: AuthorizedRevEvidenceRun,
-) -> Result<CompletedRevAsrEvidence, ServerError> {
+) -> Result<RevAsrInferenceOutcome, ServerError> {
     let api_key =
         load_revai_api_key().map_err(|error| ServerError::Validation(error.to_string()))?;
     tokio::task::spawn_blocking(move || {
@@ -89,36 +90,39 @@ async fn infer_revai_evidence(
             .map_err(ServerError::from)?;
         let (transcript_evidence, detected_language) = result.into_parts();
 
-        // Resolve the language. No silent fallback to English, if Language
-        // ID didn't return anything usable and the user didn't supply
-        // `--lang`, the file's `@Languages:` would be a lie. Surface the
-        // failure instead so the operator re-runs with `--lang <iso3>`.
-        let resolved_lang: LanguageCode3 = match &effective_lang {
-            LanguageSpec::Resolved(code) => code.clone(),
+        Ok(classify_language_response(transcript_evidence, lang, effective_lang, detected_language))
+    })
+    .await
+    .map_err(|error| ServerError::Validation(format!("Rev.AI task join error: {error}")))?
+}
+
+/// Language rejection must return the fetched bytes to the durable boundary.
+/// This does not infer a language from transcript contents or default English.
+pub(super) fn classify_language_response(
+    transcript_evidence: super::types::RevTranscriptEvidence,
+    requested_language: LanguageSpec,
+    effective_language: LanguageSpec,
+    detected_language: Option<String>,
+) -> RevAsrInferenceOutcome {
+        let resolved_lang = match &effective_language {
+            LanguageSpec::Resolved(code) => Some(code.clone()),
             // Auto: user asked Rev.AI to detect. PerFile: transcribe path
             // shouldn't see this: submission validation rejects it. Either
             // way the only honest source here is Rev.AI's `detected_language`.
             LanguageSpec::Auto | LanguageSpec::PerFile => detected_language
                 .as_deref()
                 .filter(|d| !d.is_empty() && *d != "auto")
-                .and_then(revai_code_to_iso639_3)
-                .ok_or_else(|| {
-                    ServerError::Validation(
-                        "Rev.AI did not return a usable detected language for `--lang auto`. \
-                         Re-run with an explicit `--lang <iso3>` so the @Languages header is \
-                         honest."
-                            .into(),
-                    )
-                })?,
+                .and_then(revai_code_to_iso639_3),
         };
-
-        Ok(CompletedRevAsrEvidence {
-            transcript_evidence,
-            resolved_language: resolved_lang,
-        })
-    })
-    .await
-    .map_err(|error| ServerError::Validation(format!("Rev.AI task join error: {error}")))?
+        match resolved_lang {
+            Some(resolved_language) => RevAsrInferenceOutcome::Completed(CompletedRevAsrEvidence {
+                transcript_evidence, resolved_language,
+            }),
+            None => RevAsrInferenceOutcome::UnresolvedLanguage(RejectedRevLanguageEvidence {
+                transcript_evidence, requested_language, effective_language,
+                detected_language,
+            }),
+        }
 }
 
 /// Production Rev.AI boundary carrying all inputs authorized by an evidence
@@ -136,7 +140,7 @@ impl RevAsrEvidenceInference for RevAsrService {
     async fn infer(
         &self,
         run: AuthorizedRevEvidenceRun,
-    ) -> Result<CompletedRevAsrEvidence, ServerError> {
+    ) -> Result<RevAsrInferenceOutcome, ServerError> {
         infer_revai_evidence(run).await
     }
 }
