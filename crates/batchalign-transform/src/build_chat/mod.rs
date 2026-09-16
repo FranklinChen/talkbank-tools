@@ -30,8 +30,8 @@ mod utterances;
 use talkbank_model::model::{ChatFile, Header, Line};
 
 pub use bridge::{
-    AsrDiagnosticError, AsrTranscript, LanguageInvalidWord, NamedAsrUtterances, TranscriptBuildError, build_chat_from_json,
-    transcript_from_asr_utterances,
+    AsrDiagnosticError, AsrTranscript, LanguageInvalidWord, NamedAsrUtterances,
+    TranscriptBuildError, build_chat_from_json, transcript_from_asr_utterances,
 };
 pub use schema::{ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc};
 pub use utterances::tag_marker_separator;

@@ -1098,7 +1098,8 @@ mod tests {
                 elements,
             }],
         };
-        let utts = process_raw_asr(&out, "eng").expect("test: ASR post-processing must not refuse this input");
+        let utts = process_raw_asr(&out, "eng")
+            .expect("test: ASR post-processing must not refuse this input");
         // One utterance, not two: period-strip caught `Dr.`.
         assert_eq!(
             utts.len(),

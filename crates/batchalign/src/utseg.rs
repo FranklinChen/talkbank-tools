@@ -1020,12 +1020,10 @@ mod tests {
 
         // Exactly what the evidence reader reconstructs from a retained
         // artifact: the admitted parts, then the receipt reattached.
-        let reconstructed = AdmittedUtsegPrediction::BoundaryModelWorkerDeclared {
-            response,
-            evidence,
-        }
-        .with_local_decision(receipt)
-        .expect("a receipt this policy produced must be accepted");
+        let reconstructed =
+            AdmittedUtsegPrediction::BoundaryModelWorkerDeclared { response, evidence }
+                .with_local_decision(receipt)
+                .expect("a receipt this policy produced must be accepted");
         assert!(matches!(
             reconstructed,
             AdmittedUtsegPrediction::BoundaryModelLocallyReapplied { .. }

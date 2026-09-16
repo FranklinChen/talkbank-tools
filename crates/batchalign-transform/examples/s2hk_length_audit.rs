@@ -53,8 +53,10 @@ impl Audit {
         }
         self.checked += 1;
         if let Err(refusal) = AlignedNormalization::admit([source]) {
-            self.changed
-                .push(format!("{source} ({} to {})", refusal.before, refusal.after));
+            self.changed.push(format!(
+                "{source} ({} to {})",
+                refusal.before, refusal.after
+            ));
         }
     }
 

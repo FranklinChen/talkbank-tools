@@ -1176,7 +1176,9 @@ mod tests {
             assert!(error.to_string().contains("at least 2"), "{error}");
         }
         assert_eq!(
-            DiarizationSpeakerCount::try_from(2).expect("two is the minimum").get(),
+            DiarizationSpeakerCount::try_from(2)
+                .expect("two is the minimum")
+                .get(),
             2
         );
         let automatic: CommandOptions = serde_json::from_str(r#"{"command":"diarize"}"#)

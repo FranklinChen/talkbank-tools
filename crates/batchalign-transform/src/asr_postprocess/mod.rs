@@ -298,9 +298,7 @@ mod integration_tests {
             "post-processing still reports utterances: {utterances:?}"
         );
         assert!(
-            utterances
-                .iter()
-                .all(|utterance| texts(utterance) == ["."]),
+            utterances.iter().all(|utterance| texts(utterance) == ["."]),
             "every token is a bare terminator: {utterances:?}"
         );
 
@@ -333,7 +331,8 @@ mod integration_tests {
             0.0,
             0.0,
         );
-        let utterances = process_raw_asr(&output, "yue").expect("test: ASR post-processing must not refuse this input");
+        let utterances = process_raw_asr(&output, "yue")
+            .expect("test: ASR post-processing must not refuse this input");
         build_and_reparse(&utterances, "yue");
     }
 
@@ -347,7 +346,8 @@ mod integration_tests {
         for ordinal in ["54ª", "54.ª"] {
             let output = single_element(ordinal, 3.16, 3.8);
 
-            let prepared = prepare_words_pre_expansion(&output.monologues[0].elements, "por").expect("test: ASR post-processing must not refuse this input");
+            let prepared = prepare_words_pre_expansion(&output.monologues[0].elements, "por")
+                .expect("test: ASR post-processing must not refuse this input");
             assert_eq!(prepared.len(), 1, "{ordinal}: {prepared:?}");
             assert_eq!(prepared[0].text.as_str(), ordinal);
             assert_eq!(
@@ -355,7 +355,8 @@ mod integration_tests {
                 (Some(3160), Some(3800))
             );
 
-            let utterances = process_raw_asr(&output, "por").expect("test: ASR post-processing must not refuse this input");
+            let utterances = process_raw_asr(&output, "por")
+                .expect("test: ASR post-processing must not refuse this input");
             assert_eq!(utterances.len(), 1, "{ordinal}: {utterances:?}");
             assert_eq!(texts(&utterances[0]), ["quinquagésima", "quarta", "."]);
             let words = &utterances[0].words;
@@ -377,7 +378,8 @@ mod integration_tests {
     #[test]
     fn portuguese_ordinal_abbreviation_period_is_not_a_sentence_end() {
         let output = single_element("54.ª. então", 3.16, 3.8);
-        let utterances = process_raw_asr(&output, "por").expect("test: ASR post-processing must not refuse this input");
+        let utterances = process_raw_asr(&output, "por")
+            .expect("test: ASR post-processing must not refuse this input");
         let all: Vec<Vec<&str>> = utterances.iter().map(texts).collect();
         assert_eq!(
             all,
@@ -392,7 +394,8 @@ mod integration_tests {
     #[test]
     fn portuguese_ordinal_beyond_rendered_range_passes_through_whole() {
         let output = single_element("1001.º.", 0.0, 1.0);
-        let prepared = prepare_words_pre_expansion(&output.monologues[0].elements, "por").expect("test: ASR post-processing must not refuse this input");
+        let prepared = prepare_words_pre_expansion(&output.monologues[0].elements, "por")
+            .expect("test: ASR post-processing must not refuse this input");
         let prepared: Vec<&str> = prepared.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(prepared, ["1001.º", "."]);
         assert_eq!(expand_number("1001.º", "por"), "1001.º");

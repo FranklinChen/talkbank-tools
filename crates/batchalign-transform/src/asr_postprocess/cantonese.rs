@@ -341,8 +341,8 @@ mod tests {
         let aligned = AlignedNormalization::admit(["聯", "係", "好"]).expect("length preserved");
         assert_eq!(aligned.units(), ["聯", "繫", "好"]);
 
-        let aligned = AlignedNormalization::admit(["真", "系", "好", "吵", "呀"])
-            .expect("length preserved");
+        let aligned =
+            AlignedNormalization::admit(["真", "系", "好", "吵", "呀"]).expect("length preserved");
         assert_eq!(aligned.units(), ["真", "係", "好", "嘈", "啊"]);
     }
 
@@ -362,7 +362,10 @@ mod tests {
             .iter()
             .map(|unit| normalize_cantonese(unit))
             .collect();
-        assert_eq!(per_unit, "聯係", "the phrase entry cannot match one character at a time");
+        assert_eq!(
+            per_unit, "聯係",
+            "the phrase entry cannot match one character at a time"
+        );
         assert_eq!(
             AlignedNormalization::admit(["聯", "係"])
                 .expect("length preserved")

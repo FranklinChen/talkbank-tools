@@ -33,13 +33,13 @@ use crate::common;
 
 use std::collections::BTreeMap;
 
+use crate::live_deadline::HarnessBudget;
 use batchalign::api::LanguageCode3;
 use batchalign::host_facts::PerProfile;
 use batchalign::worker::pool::WorkerPool;
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::pool_dispatch::{count_successes, echo_pool_config, launch_oversubscribed_dispatches};
 use common::resolve_python;
-use crate::live_deadline::HarnessBudget;
 use serde_json::json;
 
 const MAX_TOTAL: usize = 4;

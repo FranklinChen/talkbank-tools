@@ -323,7 +323,8 @@ fn test_numbered_asr_names_require_no_dense_speaker_population() {
         transcript_from_asr_utterances(&utterances, &[], &["eng".to_string()], None, false),
         Err(TranscriptBuildError::MissingParticipantCode(_))
     ));
-    let desc = NamedAsrUtterances::numbered(&utterances).into_transcript(&["eng".to_string()], None, false)
+    let desc = NamedAsrUtterances::numbered(&utterances)
+        .into_transcript(&["eng".to_string()], None, false)
         .expect("test: transcript_from_asr_utterances should succeed")
         .description;
     assert_eq!(desc.participants.len(), 1);
@@ -333,10 +334,15 @@ fn test_numbered_asr_names_require_no_dense_speaker_population() {
 
 #[test]
 fn test_numbered_asr_empty_population_and_missing_language() {
-    let empty = NamedAsrUtterances::numbered(&[]).into_transcript(&["eng".to_string()], None, false).unwrap();
+    let empty = NamedAsrUtterances::numbered(&[])
+        .into_transcript(&["eng".to_string()], None, false)
+        .unwrap();
     assert!(empty.description.participants.is_empty());
     assert!(empty.description.utterances.is_empty());
-    assert!(matches!(NamedAsrUtterances::numbered(&[]).into_transcript(&[], None, false), Err(TranscriptBuildError::MissingPrimaryLanguage)));
+    assert!(matches!(
+        NamedAsrUtterances::numbered(&[]).into_transcript(&[], None, false),
+        Err(TranscriptBuildError::MissingPrimaryLanguage)
+    ));
 }
 
 // ── ASR-to-CHAT validation gap regression tests ──────────────────────
@@ -666,7 +672,8 @@ fn disfluency_and_retrace_end_to_end() {
             ],
         }],
     };
-    let utts = asr_postprocess::process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = asr_postprocess::process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
 
     let desc = transcript_from_asr_utterances(
         &utts,
@@ -903,7 +910,8 @@ fn run_transcribe_to_description(
     lang: &str,
 ) -> Result<AsrTranscript, TranscriptBuildError> {
     let output = single_speaker_asr_output(tokens);
-    let utts = asr_postprocess::process_raw_asr(&output, lang).expect("test: ASR post-processing must not refuse this input");
+    let utts = asr_postprocess::process_raw_asr(&output, lang)
+        .expect("test: ASR post-processing must not refuse this input");
     transcript_from_asr_utterances(
         &utts,
         &["PAR1".to_string()],
@@ -1095,7 +1103,8 @@ fn asr_to_chat_roundtrip(
     output: &asr_postprocess::AsrOutput,
     lang: &str,
 ) -> (String, Vec<talkbank_model::ParseError>) {
-    let utts = asr_postprocess::process_raw_asr(output, lang).expect("test: ASR post-processing must not refuse this input");
+    let utts = asr_postprocess::process_raw_asr(output, lang)
+        .expect("test: ASR post-processing must not refuse this input");
     let desc = transcript_from_asr_utterances(
         &utts,
         &["PAR".to_string()],
@@ -1231,7 +1240,8 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
         ],
     };
 
-    let utts = asr_postprocess::process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = asr_postprocess::process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let desc = transcript_from_asr_utterances(
         &utts,
         &["PAR0".to_string(), "PAR1".to_string()],

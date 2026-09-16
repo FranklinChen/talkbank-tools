@@ -504,11 +504,10 @@ pub(crate) fn funaudio_segments_to_asr(
 
     py.detach(move || {
         let segments = match value {
-            serde_json::Value::Array(_) => {
-                serde_json::from_value::<Vec<FunasrSegmentWire>>(value).map_err(|error| {
+            serde_json::Value::Array(_) => serde_json::from_value::<Vec<FunasrSegmentWire>>(value)
+                .map_err(|error| {
                     BatchalignBoundaryError::internal(error.to_string()).into_py_err()
-                })?
-            }
+                })?,
             serde_json::Value::Object(_) => {
                 vec![
                     serde_json::from_value::<FunasrSegmentWire>(value).map_err(|error| {
@@ -597,9 +596,8 @@ mod tests {
     /// Build an admitted Tencent word whose timing came from a segment start
     /// plus offsets, the way `admit_tencent_words` produces one.
     fn tencent_word(word: &str, segment_start_ms: i64, offsets: (i64, i64)) -> TencentWordInput {
-        let interval =
-            AdmittedInterval::admit_offset_from(segment_start_ms, offsets.0, offsets.1)
-                .expect("test offsets are admissible");
+        let interval = AdmittedInterval::admit_offset_from(segment_start_ms, offsets.0, offsets.1)
+            .expect("test offsets are admissible");
         TencentWordInput {
             word: word.to_owned(),
             timing: WordTiming::from_admitted(interval),
@@ -791,7 +789,10 @@ mod tests {
             json["monologues"][0]["speaker"].get("label").is_none(),
             "an undiarized monologue has no label to carry"
         );
-        assert_eq!(json["monologues"][0]["elements"][0]["ts"], serde_json::Value::Null);
+        assert_eq!(
+            json["monologues"][0]["elements"][0]["ts"],
+            serde_json::Value::Null
+        );
     }
 
     /// A provider that DOES name speakers carries its own label through.

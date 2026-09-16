@@ -40,8 +40,7 @@ pub use direct_job_client::LiveDirectJobClient;
 #[allow(unused_imports)]
 pub use paths_mode::{
     submit_paths_and_complete, submit_paths_and_complete_direct,
-    submit_paths_and_complete_direct_with_speakers,
-    submit_paths_with_before_and_complete_direct,
+    submit_paths_and_complete_direct_with_speakers, submit_paths_with_before_and_complete_direct,
 };
 #[allow(unused_imports)]
 pub use server_job_client::LiveServerJobClient;
@@ -68,9 +67,7 @@ use batchalign::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::live_deadline::{
-    HarnessBudget, ProgressSnapshot, ServerTestDeadline, WaitSubject,
-};
+use crate::live_deadline::{HarnessBudget, ProgressSnapshot, ServerTestDeadline, WaitSubject};
 
 /// Cached worker backend that survives across isolated server and direct sessions.
 struct LiveFixtureBackend {

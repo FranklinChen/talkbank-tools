@@ -382,9 +382,7 @@ impl<'de> serde::Deserialize<'de> for UdRelationRepairKindV2 {
         Self::ALL
             .into_iter()
             .find(|kind| kind.wire_name() == name)
-            .ok_or_else(|| {
-                serde::de::Error::custom(format!("unknown UD relation repair {name:?}"))
-            })
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown UD relation repair {name:?}")))
     }
 }
 

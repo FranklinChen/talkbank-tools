@@ -890,12 +890,10 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
     let evidence = ReplayArtifact::read(&args.evidence)?;
     let retained = ReplayArtifact::read(&args.output_chat)?;
 
-    let response: crate::transcribe::AsrResponse =
-        serde_json::from_slice(&response_artifact.bytes).map_err(|source| {
-            UtsegReplayRefusal::AsrResponse {
-                path: args.asr_response.clone(),
-                source,
-            }
+    let response: crate::transcribe::AsrResponse = serde_json::from_slice(&response_artifact.bytes)
+        .map_err(|source| UtsegReplayRefusal::AsrResponse {
+            path: args.asr_response.clone(),
+            source,
         })?;
     let (language, items) =
         AdmittedUtsegEvidence::admit(&evidence.bytes, UtsegEvidencePhase::PreChat)?.into_parts();
@@ -1013,7 +1011,10 @@ mod tests {
     fn replay(
         evidence: &str,
         retained: &str,
-    ) -> (tempfile::TempDir, Result<UtsegReplayReport, UtsegReplayRefusal>) {
+    ) -> (
+        tempfile::TempDir,
+        Result<UtsegReplayReport, UtsegReplayRefusal>,
+    ) {
         let dir = tempfile::tempdir().expect("temporary directory");
         let input_chat = dir.path().join("input.cha");
         let evidence_path = dir.path().join("evidence.json");
@@ -1079,8 +1080,8 @@ mod tests {
     #[test]
     fn evidence_from_an_older_schema_is_refused_by_name() {
         let retained = retained_output(vec![0, 0, 1, 1, 1]);
-        let legacy = evidence_json(&[0, 0, 1, 1, 1])
-            .replace("\"schema_version\":4", "\"schema_version\":2");
+        let legacy =
+            evidence_json(&[0, 0, 1, 1, 1]).replace("\"schema_version\":4", "\"schema_version\":2");
         // The substitution is the whole fixture. If the writer's shape changes
         // and this stops matching, the "legacy" artifact would still be current
         // and readable, and the test would quietly prove nothing instead of
@@ -1183,9 +1184,11 @@ mod tests {
         assert!(rendered.contains("clip"), "{rendered}");
         assert!(rendered.contains("--media-name"), "{rendered}");
 
-        let refusal =
-            refuse_rebuild_property_disagreement(&parse_fixture(WITH_WOR), &parse_fixture(WITHOUT_WOR))
-                .expect_err("a %wor tier on one side only must refuse");
+        let refusal = refuse_rebuild_property_disagreement(
+            &parse_fixture(WITH_WOR),
+            &parse_fixture(WITHOUT_WOR),
+        )
+        .expect_err("a %wor tier on one side only must refuse");
         assert!(
             matches!(refusal, UtsegReplayRefusal::WorDisagreement { .. }),
             "{refusal:?}"

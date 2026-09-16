@@ -658,16 +658,14 @@ fn observed_native_commit(
     model_path: &std::path::Path,
     requested: &HubCommitV2,
 ) -> Result<HubCommitV2, ModelPlanError> {
-    let seen = model_path.components().find_map(|component| {
-        HubCommitV2::try_from(component.as_os_str().to_str()?).ok()
-    });
+    let seen = model_path
+        .components()
+        .find_map(|component| HubCommitV2::try_from(component.as_os_str().to_str()?).ok());
     match seen {
-        Some(seen) if seen != *requested => {
-            Err(ModelPlanError::NativeWhisperRevisionMismatch {
-                requested: requested.as_str().to_owned(),
-                observed: seen.as_str().to_owned(),
-            })
-        }
+        Some(seen) if seen != *requested => Err(ModelPlanError::NativeWhisperRevisionMismatch {
+            requested: requested.as_str().to_owned(),
+            observed: seen.as_str().to_owned(),
+        }),
         Some(seen) => Ok(seen),
         None => Ok(requested.clone()),
     }
@@ -943,7 +941,10 @@ mod tests {
             &extras(&[(FUNAUDIO_MODEL_OVERRIDE_KEY, PARAFORMER_CHECKPOINT)]),
         )
         .expect("paraformer resolves");
-        assert!(matches!(paraformer, AsrRequestedModelsV2::Paraformer { .. }));
+        assert!(matches!(
+            paraformer,
+            AsrRequestedModelsV2::Paraformer { .. }
+        ));
         assert!(paraformer.is_fully_pinned());
     }
 
@@ -1008,10 +1009,7 @@ mod tests {
             resolve_asr_models(AsrBackendV2::WhisperHub, Some(&lang("eng")), &extras(&[]))
                 .expect_err("this build seeds no English whisper_hub fine-tune");
         assert!(
-            matches!(
-                refusal,
-                ModelPlanError::WhisperHubHasNoDefaultModel { .. }
-            ),
+            matches!(refusal, ModelPlanError::WhisperHubHasNoDefaultModel { .. }),
             "{refusal:?}"
         );
         let message = refusal.to_string();

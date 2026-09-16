@@ -459,14 +459,22 @@ mod tests {
 
     /// FunASR timing entries from `(start_ms, end_ms)` pairs.
     fn spans(pairs: &[(i64, i64)]) -> Vec<Value> {
-        pairs.iter().map(|(start, end)| json!([start, end])).collect()
+        pairs
+            .iter()
+            .map(|(start, end)| json!([start, end]))
+            .collect()
     }
 
     fn values(projection: &HkAsrProjection) -> Vec<&str> {
         projection
             .monologues
             .iter()
-            .flat_map(|monologue| monologue.elements.iter().map(|element| element.value.as_str()))
+            .flat_map(|monologue| {
+                monologue
+                    .elements
+                    .iter()
+                    .map(|element| element.value.as_str())
+            })
             .collect()
     }
 
@@ -475,18 +483,29 @@ mod tests {
     #[test]
     fn paraformer_pairs_characters_from_raw_text_not_clauses_from_text()
     -> Result<(), FunasrAdmissionError> {
-        let projection = project_funasr_segments(
-            vec![wire(
-                "你好，世界。再见？",
-                spans(&[(0, 100), (100, 200), (5000, 5100), (5100, 5200), (9000, 9100), (9100, 9200)]),
-                None,
-                Some("你 好 世 界 再 见"),
-            )],
-        )?;
+        let projection = project_funasr_segments(vec![wire(
+            "你好，世界。再见？",
+            spans(&[
+                (0, 100),
+                (100, 200),
+                (5000, 5100),
+                (5100, 5200),
+                (9000, 9100),
+                (9100, 9200),
+            ]),
+            None,
+            Some("你 好 世 界 再 见"),
+        )])?;
 
-        assert_eq!(values(&projection), vec!["你", "好", "世", "界", "再", "见"]);
+        assert_eq!(
+            values(&projection),
+            vec!["你", "好", "世", "界", "再", "见"]
+        );
         let last = projection.monologues[0].elements.last();
-        assert_eq!(last.map(|element| (element.ts, element.end_ts)), Some((Some(9.1), Some(9.2))));
+        assert_eq!(
+            last.map(|element| (element.ts, element.end_ts)),
+            Some((Some(9.1), Some(9.2)))
+        );
         assert_eq!(projection.timed_words.len(), 6);
         Ok(())
     }
@@ -494,15 +513,14 @@ mod tests {
     /// SenseVoice reports punctuation as units with spans of their own. They
     /// must leave together with those spans, or every later unit shifts.
     #[test]
-    fn sensevoice_punctuation_units_leave_with_their_own_spans() -> Result<(), FunasrAdmissionError> {
-        let projection = project_funasr_segments(
-            vec![wire(
-                "<|en|><|NEUTRAL|><|Speech|><|withitn|>I, ok.",
-                spans(&[(0, 100), (100, 110), (200, 300), (300, 310)]),
-                Some(&["I", ",", "ok", "."]),
-                None,
-            )],
-        )?;
+    fn sensevoice_punctuation_units_leave_with_their_own_spans() -> Result<(), FunasrAdmissionError>
+    {
+        let projection = project_funasr_segments(vec![wire(
+            "<|en|><|NEUTRAL|><|Speech|><|withitn|>I, ok.",
+            spans(&[(0, 100), (100, 110), (200, 300), (300, 310)]),
+            Some(&["I", ",", "ok", "."]),
+            None,
+        )])?;
 
         assert_eq!(values(&projection), vec!["I", "ok"]);
         assert_eq!(projection.monologues[0].elements[1].ts, Some(0.2));
@@ -532,12 +550,15 @@ mod tests {
 
     #[test]
     fn a_count_mismatch_is_refused_instead_of_paired_by_position() {
-        let result = project_funasr_segments(
-            vec![
-                wire("hello", spans(&[(0, 100)]), Some(&["hello"]), None),
-                wire("hello world bye", spans(&[(0, 200)]), Some(&["hello", "world", "bye"]), None),
-            ],
-        );
+        let result = project_funasr_segments(vec![
+            wire("hello", spans(&[(0, 100)]), Some(&["hello"]), None),
+            wire(
+                "hello world bye",
+                spans(&[(0, 200)]),
+                Some(&["hello", "world", "bye"]),
+                None,
+            ),
+        ]);
         assert_eq!(
             result,
             Err(FunasrAdmissionError::CountMismatch {
@@ -550,9 +571,12 @@ mod tests {
 
     #[test]
     fn timing_with_only_display_text_is_refused() {
-        let result = project_funasr_segments(
-            vec![wire("你好。", spans(&[(0, 100), (100, 200)]), None, None)],
-        );
+        let result = project_funasr_segments(vec![wire(
+            "你好。",
+            spans(&[(0, 100), (100, 200)]),
+            None,
+            None,
+        )]);
         assert_eq!(
             result,
             Err(FunasrAdmissionError::MissingUnits {
@@ -564,17 +588,28 @@ mod tests {
 
     #[test]
     fn two_unit_lists_are_refused_as_ambiguous() {
-        let result = project_funasr_segments(
-            vec![wire("好", spans(&[(0, 100)]), Some(&["好"]), Some("好"))],
+        let result = project_funasr_segments(vec![wire(
+            "好",
+            spans(&[(0, 100)]),
+            Some(&["好"]),
+            Some("好"),
+        )]);
+        assert_eq!(
+            result,
+            Err(FunasrAdmissionError::AmbiguousUnits { segment: 0 })
         );
-        assert_eq!(result, Err(FunasrAdmissionError::AmbiguousUnits { segment: 0 }));
     }
 
     /// An entry that is not a pair of numbers is refused on SHAPE, before any
     /// bound can be judged, and names its position.
     #[test]
     fn a_timestamp_that_is_not_a_pair_of_numbers_is_refused_with_its_position() {
-        for bad in [json!("x"), json!([0]), json!([0, "x"]), json!([0, 100, 200])] {
+        for bad in [
+            json!("x"),
+            json!([0]),
+            json!([0, "x"]),
+            json!([0, 100, 200]),
+        ] {
             let result = project_funasr_segments(vec![wire(
                 "a b",
                 vec![json!([0, 100]), bad.clone()],
@@ -652,7 +687,12 @@ mod tests {
     fn untimed_display_text_splits_like_funasr() -> Result<(), FunasrAdmissionError> {
         let cantonese = project_funasr_segments(vec![wire("<|zh|> 真系", Vec::new(), None, None)])?;
         assert_eq!(values(&cantonese), vec!["真", "系"]);
-        assert!(cantonese.monologues[0].elements.iter().all(|element| element.ts.is_none()));
+        assert!(
+            cantonese.monologues[0]
+                .elements
+                .iter()
+                .all(|element| element.ts.is_none())
+        );
         assert!(cantonese.timed_words.is_empty());
 
         let mixed = project_funasr_segments(vec![wire(
@@ -667,9 +707,8 @@ mod tests {
 
     #[test]
     fn untimed_segments_still_prefer_funasr_unit_lists() -> Result<(), FunasrAdmissionError> {
-        let projection = project_funasr_segments(
-            vec![wire("你好。", Vec::new(), None, Some("你 好"))],
-        )?;
+        let projection =
+            project_funasr_segments(vec![wire("你好。", Vec::new(), None, Some("你 好"))])?;
         assert_eq!(values(&projection), vec!["你", "好"]);
         Ok(())
     }
@@ -698,7 +737,10 @@ mod tests {
 
     #[test]
     fn markup_is_stripped_only_when_closed() {
-        assert_eq!(strip_markup("<|zh|><|HAPPY|> hello <|NEUTRAL|> world"), " hello  world");
+        assert_eq!(
+            strip_markup("<|zh|><|HAPPY|> hello <|NEUTRAL|> world"),
+            " hello  world"
+        );
         assert_eq!(strip_markup("a <|b"), "a <|b");
     }
 

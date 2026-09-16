@@ -1,8 +1,7 @@
 //! ASR response conversion and speaker-track admission.
 
 use batchalign_transform::asr_postprocess::{
-    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
-    SpeakerIndex,
+    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs, SpeakerIndex,
 };
 use tracing::warn;
 

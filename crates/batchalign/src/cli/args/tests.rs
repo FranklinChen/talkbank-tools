@@ -22,14 +22,42 @@ fn auto_speakers_roundtrips_and_conflicts_with_explicit_count() {
     let encoded = serde_json::to_value(&options).expect("wire options");
     let decoded: CommandOptions = serde_json::from_value(encoded).expect("wire roundtrip");
     assert_eq!(decoded, options);
-    let CommandOptions::Transcribe(options) = options else { panic!("transcribe options") };
+    let CommandOptions::Transcribe(options) = options else {
+        panic!("transcribe options")
+    };
     assert!(options.auto_speakers);
-    assert!(Cli::try_parse_from(["batchalign3", "transcribe", "input.wav", "--auto-speakers", "--num-speakers", "3"]).is_err());
-    assert!(Cli::try_parse_from(["batchalign3", "transcribe", "input.wav", "--num-speakers", "0"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "batchalign3",
+            "transcribe",
+            "input.wav",
+            "--auto-speakers",
+            "--num-speakers",
+            "3"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "batchalign3",
+            "transcribe",
+            "input.wav",
+            "--num-speakers",
+            "0"
+        ])
+        .is_err()
+    );
     let default = typed_options_for(&["batchalign3", "transcribe", "input.wav"]);
     let mut old_wire = serde_json::to_value(default).expect("wire options");
-    old_wire.as_object_mut().expect("object").remove("auto_speakers");
-    let CommandOptions::Transcribe(old) = serde_json::from_value(old_wire).expect("old requests remain valid") else { panic!("transcribe options") };
+    old_wire
+        .as_object_mut()
+        .expect("object")
+        .remove("auto_speakers");
+    let CommandOptions::Transcribe(old) =
+        serde_json::from_value(old_wire).expect("old requests remain valid")
+    else {
+        panic!("transcribe options")
+    };
     assert!(!old.auto_speakers);
 }
 
@@ -669,7 +697,10 @@ fn file_list_conflicts_with_positional_paths() {
         "inputs.txt",
         "extra.cha",
     ]);
-    assert!(result.is_err(), "--file-list with positional paths must be rejected");
+    assert!(
+        result.is_err(),
+        "--file-list with positional paths must be rejected"
+    );
 }
 
 #[test]

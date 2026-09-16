@@ -112,7 +112,10 @@ impl PoolSpawnRuntime {
         &self,
         config: WorkerConfig,
     ) -> Result<WorkerHandle, WorkerError> {
-        let handle = self.0.as_ref().ok_or_else(|| Self::unbound("spawn a worker"))?;
+        let handle = self
+            .0
+            .as_ref()
+            .ok_or_else(|| Self::unbound("spawn a worker"))?;
         handle
             .spawn(async move { WorkerHandle::spawn(config).await })
             .await
@@ -154,7 +157,10 @@ impl PoolSpawnRuntime {
     /// The caller gets an `Option` rather than a silently dropped task so that
     /// "no loop was started" is a fact it has to handle rather than one it can
     /// assume away.
-    pub(super) fn spawn_background<F>(&self, future: F) -> Option<tokio::task::JoinHandle<F::Output>>
+    pub(super) fn spawn_background<F>(
+        &self,
+        future: F,
+    ) -> Option<tokio::task::JoinHandle<F::Output>>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,

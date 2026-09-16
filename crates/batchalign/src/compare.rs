@@ -606,8 +606,7 @@ mod tests {
         let main = make_chat(&[("PAR", "hello big world .")]);
         let gold = make_chat(&[("PAR", "hello world today .")]);
 
-        let output =
-            materialize_main_annotated(comparison_of(&main, &gold)).expect("materialized");
+        let output = materialize_main_annotated(comparison_of(&main, &gold)).expect("materialized");
 
         assert_eq!(
             output.annotated_main_chat.command(),

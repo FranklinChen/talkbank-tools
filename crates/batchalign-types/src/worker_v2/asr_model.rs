@@ -422,8 +422,9 @@ impl schemars::JsonSchema for ProviderParameterV2 {
 /// cannot reach the hub the honest answer is "load the default and tell me
 /// what you got". It has its own admission rule (the worker MUST report a
 /// commit) and it can never build a cache key.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestedRevisionV2 {
     /// Load exactly this hub commit.
@@ -452,8 +453,9 @@ pub enum RequestedRevisionV2 {
 }
 
 /// What the runtime actually loaded, as the worker observed it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObservedRevisionV2 {
     /// The runtime reported the hub commit it loaded.
@@ -477,8 +479,9 @@ pub enum ObservedRevisionV2 {
 // ---------------------------------------------------------------------------
 
 /// One model the plan pinned, before anything loaded it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub struct RequestedModelV2 {
     /// Which model.
     pub id: ModelIdV2,
@@ -487,8 +490,9 @@ pub struct RequestedModelV2 {
 }
 
 /// One model a worker loaded: what was asked for, and what was seen.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub struct LoadedModelV2 {
     /// Which model.
     pub id: ModelIdV2,
@@ -509,9 +513,7 @@ impl LoadedModelV2 {
     #[must_use]
     pub fn stamp_revision(&self) -> Option<StampSafeText> {
         match &self.observed {
-            ObservedRevisionV2::Commit { commit } => {
-                StampSafeText::try_from(commit.as_str()).ok()
-            }
+            ObservedRevisionV2::Commit { commit } => StampSafeText::try_from(commit.as_str()).ok(),
             ObservedRevisionV2::ContentDigest { digest } => {
                 StampSafeText::try_from(digest.as_str()).ok()
             }
@@ -714,8 +716,9 @@ impl std::fmt::Display for AsrCompositionShapeV2 {
 /// Carried on the ASR request. Struct variants with required fields: a Qwen
 /// request without an aligner, or a cloud request carrying a hub commit, has
 /// no representation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "engine", rename_all = "snake_case")]
 pub enum AsrRequestedModelsV2 {
     /// Hugging Face Whisper, stock or fine-tune.
@@ -854,8 +857,9 @@ impl AsrRequestedModelsV2 {
 ///
 /// Required on both ASR result types, so a response can never be applied
 /// without naming the models behind it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[derive(schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "engine", rename_all = "snake_case")]
 pub enum AsrModelIdentityV2 {
     /// Hugging Face Whisper, stock or fine-tune.
@@ -1333,7 +1337,9 @@ mod tests {
         let tag = RequestedRevisionV2::Tag {
             tag: RevisionTagV2::from_static("v2.0.4"),
         };
-        assert!(admit_observation(AsrModelRoleV2::Asr, &tag, &ObservedRevisionV2::NotExposed).is_ok());
+        assert!(
+            admit_observation(AsrModelRoleV2::Asr, &tag, &ObservedRevisionV2::NotExposed).is_ok()
+        );
         assert!(
             admit_observation(
                 AsrModelRoleV2::Asr,

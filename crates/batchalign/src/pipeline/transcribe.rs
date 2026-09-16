@@ -1964,14 +1964,17 @@ mod tests {
             }],
         };
 
-        let plain = prepare_asr_chunks(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+        let plain = prepare_asr_chunks(&output, "eng")
+            .expect("test: ASR post-processing must not refuse this input");
         let mut snapshot = AsrPipelineSnapshot::default();
-        let traced = prepare_asr_chunks_with_snapshot(&output, "eng", Some(&mut snapshot)).expect("test: ASR post-processing must not refuse this input");
+        let traced = prepare_asr_chunks_with_snapshot(&output, "eng", Some(&mut snapshot))
+            .expect("test: ASR post-processing must not refuse this input");
 
         assert!(
-            plain
+            plain.iter().any(|chunk| chunk
+                .words
                 .iter()
-                .any(|chunk| chunk.words.iter().any(|word| word.text.as_str() == "hundred")),
+                .any(|word| word.text.as_str() == "hundred")),
             "the fixture must actually expand a number, or it proves nothing: {plain:?}"
         );
         assert_eq!(plain, traced, "one preparation step, two entry points");

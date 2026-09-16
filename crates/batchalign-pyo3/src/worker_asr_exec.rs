@@ -8,7 +8,8 @@ use batchalign_types::api::{DurationSeconds, LanguageCode3};
 use batchalign_types::worker_v2::{
     AsrBackendV2, AsrElementKindV2, AsrElementV2, AsrInputV2, AsrModelIdentityV2, AsrMonologueV2,
     AsrRequestV2, ExecuteRequestV2, MonologueAsrResultV2, ProviderDiarizationV2,
-    ProviderSpeakerLabelV2, SpeakerAttributionV2, TaskRequestV2, TaskResultV2, WhisperChunkResultV2,
+    ProviderSpeakerLabelV2, SpeakerAttributionV2, TaskRequestV2, TaskResultV2,
+    WhisperChunkResultV2,
 };
 use numpy::IntoPyArray;
 use pyo3::prelude::*;

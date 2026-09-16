@@ -98,7 +98,8 @@ impl BaselineRow {
                 }],
             }],
         };
-        let pipeline_tokens = prepare_asr_chunks(&output, lang).expect("test: ASR post-processing must not refuse this input")
+        let pipeline_tokens = prepare_asr_chunks(&output, lang)
+            .expect("test: ASR post-processing must not refuse this input")
             .into_iter()
             .flat_map(|chunk| chunk.words)
             .map(|word| word.text.as_str().to_owned())

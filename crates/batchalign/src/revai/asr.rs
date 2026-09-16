@@ -16,9 +16,8 @@ use crate::error::ServerError;
 use crate::transcribe::{AsrResponse, AsrToken};
 
 use super::{
-    AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RevAsrEvidenceInference,
-    VerifiedRevProviderMedia, load_revai_api_key,
-    RejectedRevLanguageEvidence, RevAsrInferenceOutcome,
+    AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RejectedRevLanguageEvidence,
+    RevAsrEvidenceInference, RevAsrInferenceOutcome, VerifiedRevProviderMedia, load_revai_api_key,
 };
 use crate::types::revai_language::RevAiLanguageHint;
 
@@ -90,7 +89,12 @@ async fn infer_revai_evidence(
             .map_err(ServerError::from)?;
         let (transcript_evidence, detected_language) = result.into_parts();
 
-        Ok(classify_language_response(transcript_evidence, lang, effective_lang, detected_language))
+        Ok(classify_language_response(
+            transcript_evidence,
+            lang,
+            effective_lang,
+            detected_language,
+        ))
     })
     .await
     .map_err(|error| ServerError::Validation(format!("Rev.AI task join error: {error}")))?
@@ -104,25 +108,28 @@ pub(super) fn classify_language_response(
     effective_language: LanguageSpec,
     detected_language: Option<String>,
 ) -> RevAsrInferenceOutcome {
-        let resolved_lang = match &effective_language {
-            LanguageSpec::Resolved(code) => Some(code.clone()),
-            // Auto: user asked Rev.AI to detect. PerFile: transcribe path
-            // shouldn't see this: submission validation rejects it. Either
-            // way the only honest source here is Rev.AI's `detected_language`.
-            LanguageSpec::Auto | LanguageSpec::PerFile => detected_language
-                .as_deref()
-                .filter(|d| !d.is_empty() && *d != "auto")
-                .and_then(revai_code_to_iso639_3),
-        };
-        match resolved_lang {
-            Some(resolved_language) => RevAsrInferenceOutcome::Completed(CompletedRevAsrEvidence {
-                transcript_evidence, resolved_language,
-            }),
-            None => RevAsrInferenceOutcome::UnresolvedLanguage(RejectedRevLanguageEvidence {
-                transcript_evidence, requested_language, effective_language,
-                detected_language,
-            }),
-        }
+    let resolved_lang = match &effective_language {
+        LanguageSpec::Resolved(code) => Some(code.clone()),
+        // Auto: user asked Rev.AI to detect. PerFile: transcribe path
+        // shouldn't see this: submission validation rejects it. Either
+        // way the only honest source here is Rev.AI's `detected_language`.
+        LanguageSpec::Auto | LanguageSpec::PerFile => detected_language
+            .as_deref()
+            .filter(|d| !d.is_empty() && *d != "auto")
+            .and_then(revai_code_to_iso639_3),
+    };
+    match resolved_lang {
+        Some(resolved_language) => RevAsrInferenceOutcome::Completed(CompletedRevAsrEvidence {
+            transcript_evidence,
+            resolved_language,
+        }),
+        None => RevAsrInferenceOutcome::UnresolvedLanguage(RejectedRevLanguageEvidence {
+            transcript_evidence,
+            requested_language,
+            effective_language,
+            detected_language,
+        }),
+    }
 }
 
 /// Production Rev.AI boundary carrying all inputs authorized by an evidence
@@ -188,7 +195,11 @@ pub(super) fn fetch_revai_transcript(
     )
 }
 
-fn rev_submit_options(lang: &LanguageSpec, num_speakers: Option<NumSpeakers>, metadata: &str) -> SubmitOptions {
+fn rev_submit_options(
+    lang: &LanguageSpec,
+    num_speakers: Option<NumSpeakers>,
+    metadata: &str,
+) -> SubmitOptions {
     let lang_hint_str = match lang.as_resolved() {
         Some(code) => RevAiLanguageHint::from(code).as_str().to_string(),
         None => "auto".to_string(),
@@ -221,10 +232,12 @@ fn rev_submit_options(lang: &LanguageSpec, num_speakers: Option<NumSpeakers>, me
 #[test]
 fn auto_speakers_omits_provider_count_but_preserves_postprocessing() {
     let lang = LanguageSpec::Resolved(LanguageCode3::eng());
-    let automatic = serde_json::to_value(rev_submit_options(&lang, None, "fixture")).expect("provider JSON");
+    let automatic =
+        serde_json::to_value(rev_submit_options(&lang, None, "fixture")).expect("provider JSON");
     assert!(automatic.get("speakers_count").is_none());
     assert_eq!(automatic["skip_postprocessing"], true);
-    let exact = serde_json::to_value(rev_submit_options(&lang, Some(NumSpeakers(3)), "fixture")).expect("provider JSON");
+    let exact = serde_json::to_value(rev_submit_options(&lang, Some(NumSpeakers(3)), "fixture"))
+        .expect("provider JSON");
     assert_eq!(exact["speakers_count"], 3);
 }
 

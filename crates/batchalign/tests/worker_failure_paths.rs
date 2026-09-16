@@ -23,6 +23,7 @@ use crate::common;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use batchalign::api::{LanguageCode3, ReleasedCommand, WorkerLanguage};
 use batchalign::host_facts::PerProfile;
 use batchalign::worker::error::WorkerError;
@@ -30,7 +31,6 @@ use batchalign::worker::handle::{WorkerConfig, WorkerHandle};
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask, WorkerProfile};
 use common::resolve_python;
-use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use serde_json::{Value, json};
 
 macro_rules! require_python {

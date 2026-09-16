@@ -95,10 +95,14 @@ pub enum AsrDiagnosticError {
     },
 }
 
-fn write_utterance_dump(path: &std::path::Path, utterances: &[asr_postprocess::Utterance]) -> Result<(), AsrDiagnosticError> {
+fn write_utterance_dump(
+    path: &std::path::Path,
+    utterances: &[asr_postprocess::Utterance],
+) -> Result<(), AsrDiagnosticError> {
     let json = serde_json::to_vec_pretty(utterances)?;
     std::fs::write(path, json).map_err(|source| AsrDiagnosticError::Write {
-        path: path.to_owned(), source,
+        path: path.to_owned(),
+        source,
     })?;
     tracing::warn!(path = %path.display(), "BA3_DUMP_UTTERANCES wrote post-processed utterances");
     Ok(())
@@ -111,7 +115,9 @@ mod diagnostic_tests {
     #[test]
     fn diagnostic_write_reports_real_filesystem_failure() {
         let path = std::path::Path::new("");
-        assert!(matches!(write_utterance_dump(path, &[]), Err(AsrDiagnosticError::Write { path: failed, .. }) if failed == path));
+        assert!(
+            matches!(write_utterance_dump(path, &[]), Err(AsrDiagnosticError::Write { path: failed, .. }) if failed == path)
+        );
     }
 
     #[test]
@@ -184,25 +190,46 @@ impl<'a> NamedAsrUtterances<'a> {
     pub fn numbered(source: &'a [asr_postprocess::Utterance]) -> Self {
         Self {
             source,
-            named: source.iter().map(|utterance| NamedAsrUtterance {
-                utterance,
-                speaker_id: format!("PAR{}", utterance.speaker.as_usize()),
-            }).collect(),
+            named: source
+                .iter()
+                .map(|utterance| NamedAsrUtterance {
+                    utterance,
+                    speaker_id: format!("PAR{}", utterance.speaker.as_usize()),
+                })
+                .collect(),
         }
     }
 
     /// Admit explicit codes for this source; missing codes are not invented.
-    pub fn with_participant_ids(source: &'a [asr_postprocess::Utterance], ids: &[String]) -> Result<Self, TranscriptBuildError> {
-        let named = source.iter().map(|utterance| {
-            let speaker_id = ids.get(utterance.speaker.as_usize())
-                .ok_or(TranscriptBuildError::MissingParticipantCode(utterance.speaker))?.clone();
-            Ok(NamedAsrUtterance { utterance, speaker_id })
-        }).collect::<Result<_, TranscriptBuildError>>()?;
+    pub fn with_participant_ids(
+        source: &'a [asr_postprocess::Utterance],
+        ids: &[String],
+    ) -> Result<Self, TranscriptBuildError> {
+        let named = source
+            .iter()
+            .map(|utterance| {
+                let speaker_id = ids
+                    .get(utterance.speaker.as_usize())
+                    .ok_or(TranscriptBuildError::MissingParticipantCode(
+                        utterance.speaker,
+                    ))?
+                    .clone();
+                Ok(NamedAsrUtterance {
+                    utterance,
+                    speaker_id,
+                })
+            })
+            .collect::<Result<_, TranscriptBuildError>>()?;
         Ok(Self { source, named })
     }
 
     /// Build from the exact utterances admitted with these names.
-    pub fn into_transcript(self, langs: &[String], media_name: Option<&str>, write_wor: bool) -> Result<AsrTranscript, TranscriptBuildError> {
+    pub fn into_transcript(
+        self,
+        langs: &[String],
+        media_name: Option<&str>,
+        write_wor: bool,
+    ) -> Result<AsrTranscript, TranscriptBuildError> {
         build_named_asr_transcript(self, langs, media_name, write_wor)
     }
 }
@@ -246,7 +273,9 @@ fn build_named_asr_transcript(
     }
 
     let participants = build_asr_participants(&input.named);
-    let primary_lang_raw = langs.first().ok_or(TranscriptBuildError::MissingPrimaryLanguage)?;
+    let primary_lang_raw = langs
+        .first()
+        .ok_or(TranscriptBuildError::MissingPrimaryLanguage)?;
     let primary_lang_code = LanguageCode::new(primary_lang_raw).map_err(|source| {
         TranscriptBuildError::InvalidLanguageCode {
             lang: primary_lang_raw.to_string(),
@@ -312,12 +341,12 @@ fn build_named_asr_transcript(
     })
 }
 
-fn build_asr_participants(
-    utterances: &[NamedAsrUtterance<'_>],
-) -> Vec<ParticipantDesc> {
+fn build_asr_participants(utterances: &[NamedAsrUtterance<'_>]) -> Vec<ParticipantDesc> {
     let mut seen_speakers = std::collections::BTreeMap::new();
     for named in utterances {
-        seen_speakers.entry(named.utterance.speaker).or_insert(&named.speaker_id);
+        seen_speakers
+            .entry(named.utterance.speaker)
+            .or_insert(&named.speaker_id);
     }
 
     seen_speakers

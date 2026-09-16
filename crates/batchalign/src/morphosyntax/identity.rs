@@ -126,7 +126,8 @@ impl AdmittedMorphosyntaxResponse {
                 model: MorphosyntaxModelIdentityV2 {
                     stanza_version: crate::api::ReportedEngineName::try_from(stanza_version)
                         .expect("test Stanza version is a valid engine name"),
-                    lang: crate::api::LanguageCode3::try_new(lang).expect("test language is ISO 639-3"),
+                    lang: crate::api::LanguageCode3::try_new(lang)
+                        .expect("test language is ISO 639-3"),
                     pipeline: crate::types::worker_v2::MorphosyntaxPipelineV2::Standard,
                 },
                 repairs,
@@ -405,12 +406,19 @@ mod tests {
                 empty(),
                 "1.11.1",
                 "ita",
-                vec![repair(UdRelationRepairKindV2::UnknownRelation, "wat", "dep")],
+                vec![repair(
+                    UdRelationRepairKindV2::UnknownRelation,
+                    "wat",
+                    "dep",
+                )],
             ),
         ]);
         applied.extend(secondary);
         assert_eq!(applied.repair_count().map(NonZeroUsize::get), Some(3));
-        assert_eq!(applied.repair_tally(), "relation_alias=2 unknown_relation=1");
+        assert_eq!(
+            applied.repair_tally(),
+            "relation_alias=2 unknown_relation=1"
+        );
     }
 
     /// A response no model produced cannot carry repairs: the source that

@@ -292,18 +292,14 @@ impl AdmittedUtsegEvidence {
                     )
                     .map_err(refuse)?;
                     match local_decision {
-                        Some(receipt) => {
-                            admitted.with_local_decision(receipt).map_err(refuse)?
-                        }
+                        Some(receipt) => admitted.with_local_decision(receipt).map_err(refuse)?,
                         None => admitted,
                     }
                 }
-                UtsegEvidencePrediction::UnobservedAssignments { assignments } => admit_prediction(
-                    &request,
-                    assignments,
-                    UtsegPredictionOrigin::UnnamedWorker,
-                )
-                .map_err(refuse)?,
+                UtsegEvidencePrediction::UnobservedAssignments { assignments } => {
+                    admit_prediction(&request, assignments, UtsegPredictionOrigin::UnnamedWorker)
+                        .map_err(refuse)?
+                }
                 UtsegEvidencePrediction::Constituency { assignments } => {
                     admit_prediction(&request, assignments, UtsegPredictionOrigin::Constituency)
                         .map_err(refuse)?

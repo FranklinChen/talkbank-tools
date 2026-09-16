@@ -63,7 +63,9 @@ fn artifacts(
     retained: &str,
 ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let input = harness.home_dir().join("input.cha");
-    let evidence_path = harness.home_dir().join("input_post_chat_utseg_evidence.json");
+    let evidence_path = harness
+        .home_dir()
+        .join("input_post_chat_utseg_evidence.json");
     let output = harness.home_dir().join("output.cha");
     std::fs::write(&input, INPUT).expect("write input");
     std::fs::write(&evidence_path, evidence).expect("write evidence");
@@ -115,7 +117,8 @@ fn offline_utseg_replay_reports_a_reproduced_run_and_leaves_artifacts_alone() {
 fn offline_utseg_replay_exits_one_when_the_retained_output_is_not_reproduced() {
     let harness = CliHarness::new();
     let retained = retained_output(vec![0, 0, 1, 1, 1]);
-    let (input, evidence, output) = artifacts(&harness, &evidence_json(&[0, 0, 0, 0, 0]), &retained);
+    let (input, evidence, output) =
+        artifacts(&harness, &evidence_json(&[0, 0, 0, 0, 0]), &retained);
 
     harness
         .cmd()

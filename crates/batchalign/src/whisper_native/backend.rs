@@ -159,11 +159,10 @@ pub(super) fn transcribe_impl(
         // Built from the file this run actually loaded, not from a constant:
         // the path may be the auto-fetched default or one the host named, and
         // the result must say which weights produced it either way.
-        model: crate::model_manifest::native_whisper_identity(&cfg.model_path, cfg.source).map_err(
-            |error| WhisperNativeError::ModelIdentity {
+        model: crate::model_manifest::native_whisper_identity(&cfg.model_path, cfg.source)
+            .map_err(|error| WhisperNativeError::ModelIdentity {
                 reason: error.to_string(),
-            },
-        )?,
+            })?,
     })
 }
 

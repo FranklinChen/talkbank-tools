@@ -579,16 +579,29 @@ mod tests {
     #[test]
     fn asr_diagnostic_failure_is_system_not_bad_transcript() {
         use batchalign_transform::build_chat::{AsrDiagnosticError, TranscriptBuildError};
-        let error = super::ServerError::from(TranscriptBuildError::Diagnostic(AsrDiagnosticError::Write {
-            path: std::path::PathBuf::from("diagnostic.json"),
-            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        }));
-        assert_eq!(error.status_code(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(crate::runner::util::classify_server_error(&error), crate::scheduling::FailureCategory::System);
-        assert!(matches!(error, super::ServerError::TranscriptBuild(TranscriptBuildError::Diagnostic(AsrDiagnosticError::Write { source, .. })) if source.kind() == std::io::ErrorKind::PermissionDenied));
+        let error = super::ServerError::from(TranscriptBuildError::Diagnostic(
+            AsrDiagnosticError::Write {
+                path: std::path::PathBuf::from("diagnostic.json"),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+        ));
+        assert_eq!(
+            error.status_code(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            crate::runner::util::classify_server_error(&error),
+            crate::scheduling::FailureCategory::System
+        );
+        assert!(
+            matches!(error, super::ServerError::TranscriptBuild(TranscriptBuildError::Diagnostic(AsrDiagnosticError::Write { source, .. })) if source.kind() == std::io::ErrorKind::PermissionDenied)
+        );
         let invalid = super::ServerError::from(TranscriptBuildError::MissingPrimaryLanguage);
         assert_eq!(invalid.status_code(), axum::http::StatusCode::BAD_REQUEST);
-        assert_eq!(crate::runner::util::classify_server_error(&invalid), crate::scheduling::FailureCategory::Validation);
+        assert_eq!(
+            crate::runner::util::classify_server_error(&invalid),
+            crate::scheduling::FailureCategory::Validation
+        );
     }
 
     use super::*;

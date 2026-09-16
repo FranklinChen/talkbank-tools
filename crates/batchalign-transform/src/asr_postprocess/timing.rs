@@ -274,10 +274,7 @@ impl AdmittedInterval {
     /// shapes whose wire format speaks seconds.
     #[allow(clippy::cast_precision_loss)]
     pub fn as_seconds(self) -> (f64, f64) {
-        (
-            self.start_ms as f64 / 1000.0,
-            self.end_ms as f64 / 1000.0,
-        )
+        (self.start_ms as f64 / 1000.0, self.end_ms as f64 / 1000.0)
     }
 }
 
@@ -343,10 +340,7 @@ impl WordTiming {
     /// Absence is a state, never a zero. A zero-width span is admitted by
     /// [`AdmittedInterval`] and then reported here as untimed, because a span
     /// that covers no time cannot locate a word in audio.
-    pub fn from_seconds(
-        start_s: Option<f64>,
-        end_s: Option<f64>,
-    ) -> Result<Self, IntervalRefusal> {
+    pub fn from_seconds(start_s: Option<f64>, end_s: Option<f64>) -> Result<Self, IntervalRefusal> {
         match (start_s, end_s) {
             (None, None) => Ok(Self::Untimed(UntimedCause::ProviderReportedNoTiming)),
             (None, Some(_)) => Ok(Self::Untimed(UntimedCause::ProviderReportedNoStart)),

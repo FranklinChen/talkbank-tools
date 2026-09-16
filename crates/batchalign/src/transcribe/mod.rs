@@ -759,7 +759,8 @@ mod tests {
     /// → `into_transcript` → `build_chat` → `to_chat_string`.
     fn run_canned_response_to_chat(response: &AsrResponse, media_name: Option<&str>) -> String {
         let asr_output = convert_asr_response(response);
-        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang).expect("test: ASR post-processing must not refuse this input");
+        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang)
+            .expect("test: ASR post-processing must not refuse this input");
         let desc = build_chat::NamedAsrUtterances::numbered(&utterances)
             .into_transcript(&[response.lang.to_string()], media_name, false)
             .expect("test: transcript_from_asr_utterances should succeed")
@@ -952,7 +953,8 @@ mod tests {
     fn canned_revai_response_splits_on_embedded_periods() {
         let response = canned_revai_two_speaker_response();
         let asr_output = convert_asr_response(&response);
-        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang).expect("test: ASR post-processing must not refuse this input");
+        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang)
+            .expect("test: ASR post-processing must not refuse this input");
 
         // "program." and "ago." should create utterance boundaries, so we
         // expect more than 2 utterances from the 4-turn conversation.

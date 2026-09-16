@@ -1197,7 +1197,9 @@ mod tests {
 
         assert!(diarization.is_requested());
         assert_eq!(
-            diarization.requested_speakers().map(SeparatedSpeakersV2::get),
+            diarization
+                .requested_speakers()
+                .map(SeparatedSpeakersV2::get),
             Some(3),
         );
     }

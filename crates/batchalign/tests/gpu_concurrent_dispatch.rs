@@ -36,6 +36,7 @@ mod live_deadline;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use batchalign::api::{LanguageCode3, ReleasedCommand, WorkerLanguage};
 use batchalign::host_facts::PerProfile;
 use batchalign::types::worker_v2::{
@@ -46,7 +47,6 @@ use batchalign::worker::handle::WorkerRuntimeConfig;
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::resolve_python;
-use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use serde_json::json;
 
 macro_rules! require_python {

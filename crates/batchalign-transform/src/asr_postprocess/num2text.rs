@@ -207,7 +207,6 @@ pub fn expand_number(word: &str, lang: &str) -> String {
         OrdinalTokenExpansion::NotOrdinal => {}
     }
 
-
     // English ordinal/decade suffix handling. ASR engines emit these
     // as `"3rd"` / `"1950s"` style tokens; non-English ASR rarely
     // produces suffix-form ordinals (the convention is local), so

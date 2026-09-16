@@ -151,7 +151,9 @@ pub fn resolve_inputs(
                 });
             }
             let inputs = ResolvedInputs::from_candidates(
-                paths.iter().map(|path| ExistingInput::locate_positional(path)),
+                paths
+                    .iter()
+                    .map(|path| ExistingInput::locate_positional(path)),
             )?;
             Ok(ResolvedPaths {
                 inputs,
@@ -417,8 +419,10 @@ mod tests {
         assert_eq!(line.get(), 3);
         assert_eq!(path, &dir.path().join("missing.cha"));
         assert!(
-            err.to_string()
-                .starts_with(&format!("{}:3: input path does not exist: ", list.display())),
+            err.to_string().starts_with(&format!(
+                "{}:3: input path does not exist: ",
+                list.display()
+            )),
             "{err}"
         );
         assert_eq!(err.exit_code(), CliError::EXIT_USAGE);

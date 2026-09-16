@@ -1557,11 +1557,14 @@ mod tests {
             }
         }
 
-        let qwen = asr_identity(crate::types::engines::AsrEngineName::HkQwen, &BTreeMap::new())
-            .with_loaded_models(AsrModelIdentityV2::Qwen {
-                asr: loaded("Qwen/Qwen3-ASR-1.7B-hf", ASR),
-                aligner: loaded("Qwen/Qwen3-ForcedAligner-0.6B-hf", ALIGNER),
-            });
+        let qwen = asr_identity(
+            crate::types::engines::AsrEngineName::HkQwen,
+            &BTreeMap::new(),
+        )
+        .with_loaded_models(AsrModelIdentityV2::Qwen {
+            asr: loaded("Qwen/Qwen3-ASR-1.7B-hf", ASR),
+            aligner: loaded("Qwen/Qwen3-ForcedAligner-0.6B-hf", ALIGNER),
+        });
 
         let comment = transcribe_provenance(&LanguageCode3::yue(), &qwen, false, false).format();
         assert!(
@@ -1866,7 +1869,10 @@ mod tests {
             });
 
         let comment = transcribe_provenance(&LanguageCode3::zho(), &funaudio, true, false).format();
-        assert!(comment.contains(&format!("asr_model={expected}")), "{comment}");
+        assert!(
+            comment.contains(&format!("asr_model={expected}")),
+            "{comment}"
+        );
         assert_eq!(funaudio.to_string(), format!("funaudio ({expected})"));
         assert_eq!(
             UncheckedAsrWarning { asr: &funaudio }.to_string(),
@@ -2246,9 +2252,12 @@ mod tests {
             "{comment}"
         );
 
-        let (_, repaired_nothing) = AppliedAnalyses::take_applied(vec![
-            AdmittedMorphosyntaxResponse::for_test(empty_ud(), "1.11.1", "eng"),
-        ]);
+        let (_, repaired_nothing) =
+            AppliedAnalyses::take_applied(vec![AdmittedMorphosyntaxResponse::for_test(
+                empty_ud(),
+                "1.11.1",
+                "eng",
+            )]);
         let comment =
             morphotag_provenance(&LanguageCode3::eng(), &repaired_nothing, false).format();
         assert!(!comment.contains("ud_repairs"), "{comment}");
@@ -2283,14 +2292,12 @@ mod tests {
     /// The same, having repaired `repairs` relations.
     fn applied_that_repaired(repairs: usize) -> AppliedAnalyses {
         use crate::morphosyntax::identity::AdmittedMorphosyntaxResponse;
-        AppliedAnalyses::take_applied(vec![
-            AdmittedMorphosyntaxResponse::for_test_with_repairs(
-                empty_ud(),
-                "1.11.1",
-                "eng",
-                vec![a_repair("iob", "iobj"); repairs],
-            ),
-        ])
+        AppliedAnalyses::take_applied(vec![AdmittedMorphosyntaxResponse::for_test_with_repairs(
+            empty_ud(),
+            "1.11.1",
+            "eng",
+            vec![a_repair("iob", "iobj"); repairs],
+        )])
         .1
     }
 

@@ -226,9 +226,7 @@ async fn infer_asr_via_worker_v2(
                 | AsrWorkerMode::HkFunaudioV2
                 | AsrWorkerMode::HkQwenV2 => AsrInputSourceV2::ProviderMedia {
                     media_path: params.audio_path,
-                    diarization: ProviderDiarizationV2::for_expected_speakers(
-                        params.num_speakers,
-                    ),
+                    diarization: ProviderDiarizationV2::for_expected_speakers(params.num_speakers),
                 },
             },
             lang: worker_lang,

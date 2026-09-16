@@ -150,7 +150,6 @@ pub use batchalign_types::domain::ReleasedCommand;
 pub use types::{api, config, options, params, runtime, scheduling, traces};
 
 // ── Engine modules (always available) ────────────────────────────────
-pub(crate) mod model_manifest;
 pub mod benchmark;
 pub mod cache;
 pub(crate) mod capability;
@@ -173,6 +172,7 @@ pub mod host_policy;
 mod infer_retry;
 pub mod media;
 pub mod merge_verify;
+pub(crate) mod model_manifest;
 pub mod morphosyntax;
 mod pipeline;
 pub(crate) mod planning;

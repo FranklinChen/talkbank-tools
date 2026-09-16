@@ -33,9 +33,7 @@ use batchalign::worker::InferTask;
 use batchalign::worker::pool::PoolConfig;
 use batchalign::{AppState, create_app};
 
-use crate::live_deadline::{
-    HarnessBudget, ProgressSnapshot, ServerTestDeadline, WaitSubject,
-};
+use crate::live_deadline::{HarnessBudget, ProgressSnapshot, ServerTestDeadline, WaitSubject};
 
 /// Create a subprocess command for the published `batchalign3` binary.
 ///

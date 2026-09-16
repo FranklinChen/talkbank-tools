@@ -329,7 +329,11 @@ mod tests {
             // Leading zeros do not change the rank.
             ("054º", "quinquagésimo quarto"),
         ] {
-            assert_eq!(expand_ordinal_token(input, "por"), expanded(words), "{input}");
+            assert_eq!(
+                expand_ordinal_token(input, "por"),
+                expanded(words),
+                "{input}"
+            );
             assert_eq!(
                 expand_ordinal_token(input, "POR"),
                 expanded(words),

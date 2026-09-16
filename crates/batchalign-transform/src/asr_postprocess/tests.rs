@@ -18,7 +18,9 @@ fn missing_timestamp_endpoints_never_become_recording_start() {
     for (start, end) in [(None, Some(2.0)), (Some(1.0), None), (None, None)] {
         let element = AsrElement {
             value: AsrRawText::new("hello"),
-            ts: start.into(), end_ts: end.into(), kind: AsrElementKind::Text,
+            ts: start.into(),
+            end_ts: end.into(),
+            kind: AsrElementKind::Text,
         };
         let words = extract_timed_words(&[element]);
         assert_eq!(words.len(), 1);
@@ -44,7 +46,8 @@ fn bare_quote_element_is_stripped_at_stage_2c() {
         elem("Ross", 0.137, 0.685),
         elem("said", 0.685, 1.0),
     ];
-    let words = prepare_words_pre_expansion(&elements, "eng").expect("test: ASR post-processing must not refuse this input");
+    let words = prepare_words_pre_expansion(&elements, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
     assert!(
         !texts.contains(&"\""),
@@ -60,7 +63,8 @@ fn embedded_quote_in_multi_word_element_is_stripped_at_stage_3c() {
     // Stage 2c (which ran before the split). Stage 3c re-runs the
     // boundary-quote strip after the split to drop it.
     let elements = vec![elem("Ross.\" said.", 0.0, 1.0)];
-    let words = prepare_words_pre_expansion(&elements, "eng").expect("test: ASR post-processing must not refuse this input");
+    let words = prepare_words_pre_expansion(&elements, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
     assert!(
         !texts.contains(&"\""),
@@ -88,7 +92,8 @@ fn full_transcribe_pipeline_drops_isolated_quote_element() {
             ],
         }],
     };
-    let utterances = process_raw_asr(&asr_output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utterances = process_raw_asr(&asr_output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let bare_quote_utt = utterances
         .iter()
         .position(|u| u.words.iter().any(|w| w.text.as_str() == "\""));
@@ -299,7 +304,8 @@ fn test_process_raw_asr_golden_simple() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts.len(), 2);
 
     // First utterance: Hello world .
@@ -335,7 +341,8 @@ fn test_process_raw_asr_golden_compound() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts.len(), 1);
     // Utterance-initial cap (2026-04-23 rule) uppercases `The`.
     assert_eq!(utts[0].words[0].text, "The");
@@ -362,7 +369,8 @@ fn test_process_raw_asr_golden_number() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts.len(), 1);
     assert_eq!(utts[0].words[2].text, "five");
 }
@@ -409,7 +417,8 @@ fn test_process_raw_asr_splits_unpunctuated_turn_on_long_pause_starters() {
         }],
     };
 
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let texts: Vec<String> = utts
         .iter()
         .map(|utt| {
@@ -455,7 +464,8 @@ fn test_process_raw_asr_preserves_same_speaker_monologue_boundaries() {
         ],
     };
 
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let texts: Vec<String> = utts
         .iter()
         .map(|utt| {
@@ -521,7 +531,8 @@ fn test_process_raw_asr_golden_cantonese() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "yue").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "yue")
+        .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts.len(), 1);
     let tokens: Vec<&str> = utts[0]
         .words
@@ -540,7 +551,8 @@ fn test_process_raw_asr_no_cantonese_for_eng() {
             elements: vec![elem("系", 0.0, 0.5)],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts[0].words[0].text, "系"); // NOT normalized
 }
 
@@ -557,7 +569,8 @@ fn test_process_raw_asr_handles_single_chunk_cantonese_whisper_output() {
         }],
     };
 
-    let utts = process_raw_asr(&output, "yue").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "yue")
+        .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts.len(), 3);
     assert_eq!(utts[0].words.last().unwrap().text, "?");
     assert_eq!(utts[1].words.last().unwrap().text, "!");
@@ -593,7 +606,8 @@ fn test_process_raw_asr_keeps_ascii_words_intact_for_yue() {
         }],
     };
 
-    let utts = process_raw_asr(&output, "yue").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "yue")
+        .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts.len(), 1);
     assert_eq!(
         utts[0]
@@ -638,7 +652,8 @@ fn mor_punct_comma_stripped_from_asr_words() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
     assert!(
         !words.contains(&","),
@@ -664,7 +679,8 @@ fn mor_punct_trailing_comma_stripped() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
     // Utterance-initial cap (2026-04-23) uppercases the first
     // word; the assertion here is about comma-stripping, which
@@ -694,7 +710,8 @@ fn mor_punct_tag_marker_stripped() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
     assert!(
         !words.contains(&"\u{201E}"),
@@ -721,7 +738,8 @@ fn mor_punct_vocative_marker_stripped() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
     assert!(
         !words.contains(&"\u{2021}"),
@@ -748,7 +766,8 @@ fn rtl_comma_stripped() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
     assert!(
         !words.contains(&"،"),
@@ -777,7 +796,8 @@ fn stripped_empty_words_removed() {
             ],
         }],
     };
-    let utts = process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let utts = process_raw_asr(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
     assert_eq!(
         words,
@@ -810,12 +830,14 @@ fn split_pipeline_matches_monolithic_simple() {
         }],
     };
 
-    let monolithic = prepare_asr_chunks(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let monolithic = prepare_asr_chunks(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
 
     // Split path: pre-expand → expand → finalize per monologue.
     let mut split_result = Vec::new();
     for monologue in &output.monologues {
-        let words = prepare_words_pre_expansion(&monologue.elements, "eng").expect("test: ASR post-processing must not refuse this input");
+        let words = prepare_words_pre_expansion(&monologue.elements, "eng")
+            .expect("test: ASR post-processing must not refuse this input");
         let words = expand_numbers_in_words(words, "eng");
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "eng"));
     }
@@ -843,11 +865,13 @@ fn split_pipeline_matches_monolithic_cantonese() {
         }],
     };
 
-    let monolithic = prepare_asr_chunks(&output, "yue").expect("test: ASR post-processing must not refuse this input");
+    let monolithic = prepare_asr_chunks(&output, "yue")
+        .expect("test: ASR post-processing must not refuse this input");
 
     let mut split_result = Vec::new();
     for monologue in &output.monologues {
-        let words = prepare_words_pre_expansion(&monologue.elements, "yue").expect("test: ASR post-processing must not refuse this input");
+        let words = prepare_words_pre_expansion(&monologue.elements, "yue")
+            .expect("test: ASR post-processing must not refuse this input");
         let words = expand_numbers_in_words(words, "yue");
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "yue"));
     }
@@ -876,11 +900,13 @@ fn split_pipeline_matches_monolithic_multi_monologue() {
         ],
     };
 
-    let monolithic = prepare_asr_chunks(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let monolithic = prepare_asr_chunks(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
 
     let mut split_result = Vec::new();
     for monologue in &output.monologues {
-        let words = prepare_words_pre_expansion(&monologue.elements, "eng").expect("test: ASR post-processing must not refuse this input");
+        let words = prepare_words_pre_expansion(&monologue.elements, "eng")
+            .expect("test: ASR post-processing must not refuse this input");
         let words = expand_numbers_in_words(words, "eng");
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "eng"));
     }
@@ -908,7 +934,8 @@ fn split_pipeline_expands_currency_tokens() {
 
     // The monolithic path calls expand_number on every word, which
     // handles currency via try_expand_currency.
-    let monolithic = prepare_asr_chunks(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+    let monolithic = prepare_asr_chunks(&output, "eng")
+        .expect("test: ASR post-processing must not refuse this input");
     let m_texts: Vec<&str> = monolithic[0]
         .words
         .iter()
@@ -922,7 +949,8 @@ fn split_pipeline_expands_currency_tokens() {
     // The split path must also expand currency via the Rust residual pass.
     let mut split_result = Vec::new();
     for monologue in &output.monologues {
-        let mut words = prepare_words_pre_expansion(&monologue.elements, "eng").expect("test: ASR post-processing must not refuse this input");
+        let mut words = prepare_words_pre_expansion(&monologue.elements, "eng")
+            .expect("test: ASR post-processing must not refuse this input");
         // No Python expansion: currency is Rust-only.
         // Simulate what the pipeline does: call expand_number on each word.
         for word in &mut words {
