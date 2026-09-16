@@ -8,7 +8,6 @@
 //! - `ServerExecutionHost` / `DirectExecutionHost`, host-owned bundles
 //! - `QueuedJobOrchestrator`: host-owned re-queue policy trait
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,16 +19,16 @@ use crate::host_facts::EffectiveConfig;
 use crate::host_memory::HostMemoryError;
 use crate::runner::util::{RunnerEventSink, StoreRunnerEventSink};
 use crate::store::{JobStore, RunnerJobSnapshot};
-use crate::worker::InferTask;
 use crate::worker::pool::WorkerPool;
 
 /// Shared dependencies needed to build per-job runner tasks.
+///
+/// Carries no capability view: dispatch reads the selected worker's admitted
+/// report from the pool for each job, and test-echo workers answer every task.
 #[derive(Clone)]
 pub(crate) struct RunnerExecutionContext {
     pub(super) pool: Arc<WorkerPool>,
     pub(super) cache: Arc<UtteranceCache>,
-    pub(super) infer_tasks: Vec<InferTask>,
-    pub(super) engine_versions: BTreeMap<String, String>,
     pub(super) test_echo_mode: bool,
 }
 
@@ -37,15 +36,11 @@ impl RunnerExecutionContext {
     pub(crate) fn new(
         pool: Arc<WorkerPool>,
         cache: Arc<UtteranceCache>,
-        infer_tasks: Vec<InferTask>,
-        engine_versions: BTreeMap<String, String>,
         test_echo_mode: bool,
     ) -> Self {
         Self {
             pool,
             cache,
-            infer_tasks,
-            engine_versions,
             test_echo_mode,
         }
     }

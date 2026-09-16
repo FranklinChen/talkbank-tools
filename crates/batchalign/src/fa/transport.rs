@@ -13,7 +13,6 @@ use crate::chat_ops::fa::origin::EngineId;
 use crate::chat_ops::fa::{FaGroup, FaInferItem, WordGapHealing, WordTiming};
 use crate::error::{MissingForcedAlignmentEvidence, MissingRequiredEvidence, ServerError};
 use crate::params::CachePolicy;
-use crate::pipeline::PipelineServices;
 use crate::types::engines::SelectableEngine;
 use crate::types::traces::FaFallbackEventTrace;
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
@@ -230,14 +229,15 @@ pub(crate) struct FaWorkerUnalignedResult {
 pub(crate) enum FaWorkerTransport<'a> {
     /// Live typed worker-protocol V2 transport using prepared artifacts.
     V2 {
-        /// Shared pipeline services with worker-pool access.
-        services: PipelineServices<'a>,
+        /// FA services: worker-pool access plus the namespace admitted
+        /// evidence is recorded under.
+        services: super::FaServices<'a>,
     },
 }
 
 impl<'a> FaWorkerTransport<'a> {
     /// Return the production FA worker transport.
-    pub(crate) fn production(services: PipelineServices<'a>) -> Self {
+    pub(crate) fn production(services: super::FaServices<'a>) -> Self {
         Self::V2 { services }
     }
 
@@ -255,7 +255,7 @@ impl<'a> FaWorkerTransport<'a> {
 /// Dispatch staged worker-protocol V2 requests for each FA miss group and
 /// parse successful results back into the established Rust timing domain.
 async fn infer_groups_v2(
-    services: PipelineServices<'_>,
+    services: super::FaServices<'_>,
     batch: FaWorkerBatch<'_>,
 ) -> Result<Vec<FaWorkerGroupResult>, ServerError> {
     let request_namespace = NEXT_FA_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed);
@@ -320,7 +320,7 @@ async fn infer_groups_v2(
         // response with another group's key, window, or word cardinality.
         let admission = FaGroupEvidenceAdmission {
             requested_engine: batch.engine,
-            request_engine_version: services.engine_version,
+            cache_namespace: services.cache_namespace,
             cache_key: &batch.cache_keys[group_index],
             group_index,
             group,
@@ -437,7 +437,7 @@ fn unaligned_group_result(group_index: usize, group: &FaGroup) -> FaWorkerGroupR
 }
 
 async fn dispatch_group_request(
-    services: PipelineServices<'_>,
+    services: super::FaServices<'_>,
     artifacts: &PreparedArtifactRuntimeV2,
     batch: &FaWorkerBatch<'_>,
     request_namespace: u64,
@@ -470,6 +470,7 @@ async fn dispatch_group_request(
     })?;
 
     services
+        .pipeline
         .pool
         .dispatch_execute_v2(&batch.worker_lang, &request)
         .await
@@ -512,7 +513,7 @@ impl FaWorkerEvidenceResult {
 /// from independently reconstructing a six-value relationship by convention.
 struct FaGroupEvidenceAdmission<'a> {
     requested_engine: crate::types::engines::FaEngineName,
-    request_engine_version: &'a crate::api::EngineVersion,
+    cache_namespace: &'a crate::engine_reports::FaCacheNamespace,
     cache_key: &'a crate::chat_ops::CacheKey,
     group_index: usize,
     group: &'a FaGroup,
@@ -528,7 +529,7 @@ impl FaGroupEvidenceAdmission<'_> {
         let raw_evidence = FaRawEvidence::admit_requested(
             response,
             self.requested_engine,
-            self.request_engine_version,
+            self.cache_namespace,
             ExpectedFaWords::new(self.group.words.len()),
             self.cache_key,
             route,
@@ -996,10 +997,7 @@ mod tests {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("req-fa-v2-bad"),
             TaskResultV2::TranslationResult(TranslationResultV2 {
-                items: vec![TranslationItemResultV2 {
-                    raw_translation: Some("hola".into()),
-                    error: None,
-                }],
+                items: vec![TranslationItemResultV2::BlankInput],
             }),
             DurationSeconds(0.01),
         );

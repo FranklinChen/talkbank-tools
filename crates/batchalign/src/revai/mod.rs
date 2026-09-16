@@ -17,6 +17,8 @@ mod evidence_cache;
 mod types;
 mod utr;
 
+pub use evidence_cache::RetainedRevLanguageRejection;
+
 pub(crate) use asr::{RevAsrService, rev_evidence_to_asr_response};
 pub(crate) use client::{Result, RevAiClient, TranscriptResult, extract_timed_words};
 pub(crate) use credentials::{RevAiApiKey, load_revai_api_key};

@@ -23,6 +23,7 @@
 //! pipes, not TCP). These tests focus purely on HTTP client ↔ server behavior.
 
 mod common;
+mod live_deadline;
 
 use std::net::SocketAddr;
 use std::pin::Pin;

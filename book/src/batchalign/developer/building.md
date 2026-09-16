@@ -290,7 +290,10 @@ make lint-affected                # affected-Rust clippy + affected Python mypy
 ```
 
 Strictness lives in `mypy.ini`, and CI runs the same repo-native
-command shape.
+command shape. The per-module exemptions there are enumerated rather than
+wildcards, so a module nobody listed is checked by default; adding a new
+module needs no entry, and removing an existing entry, with its recorded error
+count, is the unit of work.
 
 Do not commit with mypy errors. Use `# type: ignore[<code>]` only when
 necessary, and always include the specific error code.

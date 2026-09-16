@@ -239,6 +239,175 @@
         "kind"
       ]
     },
+    "AsrModelIdentityV2": {
+      "description": "Every model a worker loaded for one ASR response, with what was asked for\nand what was seen.\n\nRequired on both ASR result types, so a response can never be applied\nwithout naming the models behind it.",
+      "oneOf": [
+        {
+          "description": "Hugging Face Whisper, stock or fine-tune.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The Whisper checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "whisper"
+            }
+          },
+          "required": [
+            "engine",
+            "asr"
+          ]
+        },
+        {
+          "description": "Qwen3-ASR and its forced aligner.",
+          "type": "object",
+          "properties": {
+            "aligner": {
+              "description": "The forced aligner loaded with it.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "asr": {
+              "description": "The Qwen3-ASR checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "qwen"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "aligner"
+          ]
+        },
+        {
+          "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The Paraformer checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "paraformer"
+            },
+            "punc": {
+              "description": "The punctuation model.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "vad": {
+              "description": "The voice-activity model.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "vad",
+            "punc"
+          ]
+        },
+        {
+          "description": "FunASR SenseVoice, with its voice-activity model.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The SenseVoice checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "sense_voice"
+            },
+            "vad": {
+              "description": "The voice-activity model.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "vad"
+          ]
+        },
+        {
+          "description": "whisper.cpp run in-process from one ggml weights file.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "native_whisper"
+            },
+            "ggml": {
+              "description": "The ggml weights file that was loaded.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "ggml"
+          ]
+        },
+        {
+          "description": "Tencent cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "tencent"
+            },
+            "engine_model_type": {
+              "description": "The engine-model type the request named.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "engine_model_type"
+          ]
+        },
+        {
+          "description": "Aliyun cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "aliyun"
+            },
+            "service": {
+              "description": "The service identity.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "service"
+          ]
+        },
+        {
+          "description": "Rev.AI cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "rev"
+            },
+            "provider": {
+              "description": "The provider constant.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "provider"
+          ]
+        }
+      ]
+    },
     "AsrMonologueV2": {
       "description": "One speaker-attributed monologue returned by a provider ASR backend.",
       "type": "object",
@@ -251,8 +420,8 @@
           }
         },
         "speaker": {
-          "description": "Stable speaker label chosen by the worker adapter.",
-          "type": "string"
+          "description": "Who the provider attributed this span to, if anyone.",
+          "$ref": "#/$defs/SpeakerAttributionV2"
         }
       },
       "required": [
@@ -338,6 +507,11 @@
       "format": "uint32",
       "minimum": 0
     },
+    "ContentDigestV2": {
+      "description": "A SHA-256 content digest: 64 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "CorefAnnotationV2": {
       "description": "One per-sentence coreference annotation returned by Python.",
       "type": "object",
@@ -391,26 +565,65 @@
     },
     "CorefItemResultV2": {
       "description": "One coreference item result returned by Python.",
-      "type": "object",
-      "properties": {
-        "annotations": {
-          "description": "Structured sparse annotations when inference succeeded.",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/$defs/CorefAnnotationV2"
-          }
+      "oneOf": [
+        {
+          "description": "The engine resolved the document.",
+          "type": "object",
+          "properties": {
+            "annotations": {
+              "description": "Structured sparse annotations (empty when no chains were found).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CorefAnnotationV2"
+              }
+            },
+            "engine": {
+              "description": "The coreference engine that produced them.",
+              "$ref": "#/$defs/ReportedEngineName"
+            },
+            "kind": {
+              "type": "string",
+              "const": "resolved"
+            }
+          },
+          "required": [
+            "kind",
+            "annotations",
+            "engine"
+          ]
         },
-        "error": {
-          "description": "Optional per-item runtime error.",
-          "type": [
-            "string",
-            "null"
+        {
+          "description": "The document had no sentences, so no engine ran.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "no_sentences"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The item failed; the file it belongs to fails with this message.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "Operator-facing failure message.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
           ]
         }
-      }
+      ]
     },
     "CorefResultV2": {
       "description": "Batched coreference response payload.",
@@ -444,6 +657,11 @@
       "type": "integer",
       "format": "uint64",
       "minimum": 0
+    },
+    "HubCommitV2": {
+      "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
     },
     "IndexedWordTimingResultV2": {
       "description": "Forced-alignment indexed response.",
@@ -498,6 +716,34 @@
       "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected, use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
       "type": "string"
     },
+    "LoadedModelV2": {
+      "description": "One model a worker loaded: what was asked for, and what was seen.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Which model.",
+          "$ref": "#/$defs/ModelIdV2"
+        },
+        "observed": {
+          "description": "The revision the runtime reported.",
+          "$ref": "#/$defs/ObservedRevisionV2"
+        },
+        "requested": {
+          "description": "The revision the plan asked for.",
+          "$ref": "#/$defs/RequestedRevisionV2"
+        }
+      },
+      "required": [
+        "id",
+        "requested",
+        "observed"
+      ]
+    },
+    "ModelIdV2": {
+      "description": "A model identifier as BA3 names it: a hub repo id, a ModelScope repo id, a ggml file name, or a provider service name. Stamp-safe text, because provenance records it byte for byte.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
     "MonologueAsrResultV2": {
       "description": "One ASR result built from provider-shaped speaker monologues.",
       "type": "object",
@@ -505,6 +751,10 @@
         "lang": {
           "description": "Transcript language reported by the provider adapter.",
           "$ref": "#/$defs/LanguageCode3"
+        },
+        "model": {
+          "description": "The models that produced this result, as the runtime observed them.\n\nRequired for the same reason as on [`WhisperChunkResultV2`]. For a\ncloud provider the composition names the service and the parameter it\nwas called with, never an account credential: an appkey identifies who\npaid, not what ran.",
+          "$ref": "#/$defs/AsrModelIdentityV2"
         },
         "monologues": {
           "description": "Speaker-grouped ASR output.",
@@ -516,29 +766,117 @@
       },
       "required": [
         "lang",
-        "monologues"
+        "monologues",
+        "model"
       ]
     },
     "MorphosyntaxItemResultV2": {
-      "description": "One morphosyntax item result returned by Python.",
-      "type": "object",
-      "properties": {
-        "error": {
-          "description": "Optional per-item runtime error.",
-          "type": [
-            "string",
-            "null"
+      "description": "One morphosyntax item result returned by Python.\n\nA tagged union, so an analysis cannot exist without the model that\nproduced it and an item cannot be both an analysis and an error.",
+      "oneOf": [
+        {
+          "description": "Stanza analyzed the item.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "analyzed"
+            },
+            "model": {
+              "description": "The model that produced them.",
+              "$ref": "#/$defs/MorphosyntaxModelIdentityV2"
+            },
+            "raw_sentences": {
+              "description": "Raw Stanza `doc.to_dict()` sentence arrays.",
+              "type": "array",
+              "items": true
+            },
+            "repairs": {
+              "description": "Every relation the worker rewrote inside `raw_sentences`, in the\norder it made them. Empty means it rewrote nothing.\n\nRequired, with no serde default, for the reason the model is:\na default would make \"this worker reports no repairs\" and \"this\nworker does not report repairs\" the same value on the wire, which\nis the shape that let a rewrite live only in a log line.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UdRelationRepairV2"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "raw_sentences",
+            "model",
+            "repairs"
           ]
         },
-        "raw_sentences": {
-          "description": "Raw Stanza `doc.to_dict()` sentence arrays when inference succeeded.",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": true
+        {
+          "description": "The item had no words, so no model ran and there is nothing to apply.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "no_words"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The item failed; the file it belongs to fails with this message.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "Operator-facing failure message.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
         }
-      }
+      ]
+    },
+    "MorphosyntaxModelIdentityV2": {
+      "description": "The Stanza model that analyzed one morphosyntax item, as reported by the\nworker that ran it.\n\nCarried per item rather than once per worker because one batch can span\nlanguage groups, and because the process that ran the item is the only\nhonest witness: a capability snapshot taken from another process (inside\n`transcribe`, the ASR worker) describes a different runtime.",
+      "type": "object",
+      "properties": {
+        "lang": {
+          "description": "Language whose Stanza pipeline analyzed the item.",
+          "$ref": "#/$defs/LanguageCode3"
+        },
+        "pipeline": {
+          "description": "Which pipeline variant ran, so provenance does not hide a\nretokenizing or POS-overriding path behind the plain Stanza name.",
+          "$ref": "#/$defs/MorphosyntaxPipelineV2"
+        },
+        "stanza_version": {
+          "description": "Installed Stanza package version (`stanza.__version__`).",
+          "$ref": "#/$defs/ReportedEngineName"
+        }
+      },
+      "required": [
+        "stanza_version",
+        "lang",
+        "pipeline"
+      ]
+    },
+    "MorphosyntaxPipelineV2": {
+      "description": "The morphosyntax pipeline variant that analyzed an item. Closed: a new variant must be named here before a worker can report it.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "type": "string",
+          "const": "mandarin_retokenize"
+        },
+        {
+          "type": "string",
+          "const": "cantonese_pycantonese_pos"
+        }
+      ]
     },
     "MorphosyntaxResultV2": {
       "description": "Batched morphosyntax response payload.",
@@ -554,6 +892,60 @@
       },
       "required": [
         "items"
+      ]
+    },
+    "ObservedRevisionV2": {
+      "description": "What the runtime actually loaded, as the worker observed it.",
+      "oneOf": [
+        {
+          "description": "The runtime reported the hub commit it loaded.",
+          "type": "object",
+          "properties": {
+            "commit": {
+              "description": "The observed commit.",
+              "$ref": "#/$defs/HubCommitV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "commit"
+            }
+          },
+          "required": [
+            "kind",
+            "commit"
+          ]
+        },
+        {
+          "description": "The runtime loaded a file with these contents.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "description": "The observed digest.",
+              "$ref": "#/$defs/ContentDigestV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "content_digest"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ]
+        },
+        {
+          "description": "The runtime exposes no revision at all. True of every ModelScope loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "not_exposed"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
       ]
     },
     "OpenSmileResultV2": {
@@ -615,6 +1007,152 @@
         "audio_file",
         "rows",
         "success"
+      ]
+    },
+    "ProviderParameterV2": {
+      "description": "A provider's own model-selection parameter (Tencent's EngineModelType, Aliyun's service identity, Rev.AI's constant). Never a credential.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "ProviderSpeakerLabelV2": {
+      "description": "A provider's own label for one speaker: non-empty, with no surrounding whitespace.",
+      "type": "string",
+      "minLength": 1
+    },
+    "ReportedEngineName": {
+      "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "RequestedRevisionV2": {
+      "description": "What the plan asked a worker to load.\n\n[`Self::Unpinned`] is a real state, not a placeholder: a user may name an\narbitrary hub model this build has no pin for, and if plan-time resolution\ncannot reach the hub the honest answer is \"load the default and tell me\nwhat you got\". It has its own admission rule (the worker MUST report a\ncommit) and it can never build a cache key.",
+      "oneOf": [
+        {
+          "description": "Load exactly this hub commit.",
+          "type": "object",
+          "properties": {
+            "commit": {
+              "description": "The pinned commit.",
+              "$ref": "#/$defs/HubCommitV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "commit"
+            }
+          },
+          "required": [
+            "kind",
+            "commit"
+          ]
+        },
+        {
+          "description": "Load exactly this published tag. Recorded as a tag, never as a commit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tag"
+            },
+            "tag": {
+              "description": "The pinned tag.",
+              "$ref": "#/$defs/RevisionTagV2"
+            }
+          },
+          "required": [
+            "kind",
+            "tag"
+          ]
+        },
+        {
+          "description": "Load the file with exactly these contents.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "description": "The pinned digest.",
+              "$ref": "#/$defs/ContentDigestV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "content_digest"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ]
+        },
+        {
+          "description": "Select the provider's model with this parameter.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "provider_parameter"
+            },
+            "parameter": {
+              "description": "The parameter sent to the provider.",
+              "$ref": "#/$defs/ProviderParameterV2"
+            }
+          },
+          "required": [
+            "kind",
+            "parameter"
+          ]
+        },
+        {
+          "description": "The plan could not pin this model, so the worker loads the hub default\nand must report the commit it observed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unpinned"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "RevisionTagV2": {
+      "description": "A release tag as a hub publishes it (for example ModelScope's `v2.0.4`). A tag is never recorded as a commit.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "SpeakerAttributionV2": {
+      "description": "Who a provider attributed one monologue to.\n\nTwo states, because there are two facts, and the wire used to have a\nspelling for only one of them. `speaker` was a bare string, so an engine\nthat separates no speakers at all (Aliyun, FunASR, Whisper, Qwen) had to\nwrite SOMETHING, and what it wrote was `\"0\"`: a label indistinguishable\nfrom a provider's real first speaker. Downstream that became\n`SpeakerIndex(0)` and a `PAR0` tier, so \"nobody was diarized\" and \"the\nprovider said speaker zero\" produced identical CHAT.\n\n`Undiarized` is now a state of its own, and an ABSENT label where\nseparation WAS requested is a refusal rather than a track number.",
+      "oneOf": [
+        {
+          "description": "The provider named a speaker; this is its own label for them.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "attributed"
+            },
+            "label": {
+              "description": "The provider's label, exactly as it spelled it.",
+              "$ref": "#/$defs/ProviderSpeakerLabelV2"
+            }
+          },
+          "required": [
+            "kind",
+            "label"
+          ]
+        },
+        {
+          "description": "The provider separates no speakers and named none. This is a claim\nabout the ENGINE, not a guess about the recording.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "undiarized"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
       ]
     },
     "SpeakerEmbeddingOutcomeV2": {
@@ -831,24 +1369,63 @@
       ]
     },
     "TranslationItemResultV2": {
-      "description": "One translation item result returned by Python.",
-      "type": "object",
-      "properties": {
-        "error": {
-          "description": "Optional per-item runtime error.",
-          "type": [
-            "string",
-            "null"
+      "description": "One translation item result returned by Python.\n\nA tagged union: a translation always names the engine that produced it.",
+      "oneOf": [
+        {
+          "description": "The engine translated the item.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "description": "The translation engine that produced it.",
+              "$ref": "#/$defs/ReportedEngineName"
+            },
+            "kind": {
+              "type": "string",
+              "const": "translated"
+            },
+            "raw_translation": {
+              "description": "Raw model translation.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "raw_translation",
+            "engine"
           ]
         },
-        "raw_translation": {
-          "description": "Raw model translation when inference succeeded.",
-          "type": [
-            "string",
-            "null"
+        {
+          "description": "The item's text was blank, so no engine ran.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "blank_input"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The item failed; the file it belongs to fails with this message.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "Operator-facing failure message.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
           ]
         }
-      }
+      ]
     },
     "TranslationResultV2": {
       "description": "Batched translation response payload.",
@@ -864,6 +1441,55 @@
       },
       "required": [
         "items"
+      ]
+    },
+    "UdRelationRepairKindV2": {
+      "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_relation"
+        },
+        {
+          "type": "string",
+          "const": "relation_case"
+        },
+        {
+          "type": "string",
+          "const": "relation_alias"
+        },
+        {
+          "type": "string",
+          "const": "unknown_relation"
+        }
+      ]
+    },
+    "UdRelationRepairV2": {
+      "description": "One relation rewrite a worker made inside an analysis it returned.\n\nCarries what it takes to attribute the rewrite as well as count it: the\nword it was made on, and both relations. The worker is the only witness,\nbecause the relation Stanza produced does not survive into the analysis it\nsends: by the time the server sees the item, the repaired relation is the\nonly one there.",
+      "type": "object",
+      "properties": {
+        "from_relation": {
+          "description": "The relation the model produced, verbatim.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which rewrite this is.",
+          "$ref": "#/$defs/UdRelationRepairKindV2"
+        },
+        "to_relation": {
+          "description": "The relation applied in its place, which the worker admits is a UD\nrelation before it builds this value.",
+          "type": "string"
+        },
+        "word": {
+          "description": "Surface form of the word whose relation was rewritten, so a reader can\nfind it in the transcript.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "from_relation",
+        "to_relation"
       ]
     },
     "UtsegAdjacencyPolicyRevisionV2": {
@@ -925,15 +1551,12 @@
           "$ref": "#/$defs/UtsegAdjacencyPolicyRevisionV2"
         },
         "model_id": {
-          "description": "HuggingFace model identifier selected by the resolver.",
+          "description": "HuggingFace model identifier the control plane pinned.",
           "type": "string"
         },
         "model_revision": {
-          "description": "Exact HuggingFace revision when the loaded config exposes one.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "The exact revision the worker loaded, and never anything else.\n\nRequired, and a [`HubCommitV2`] rather than a string: the boundary model\nis resolved from a pinned snapshot whose commit is read off the\ndirectory on disk, so a worker that cannot say which revision it loaded\nrefuses instead of reporting one. It was `Option<String>` while the\nmodel loaded by NAME and the revision was scraped from\n`config._commit_hash`, which could simply be absent; nothing downstream\ncould distinguish \"no revision\" from \"a revision nobody recorded\".",
+          "$ref": "#/$defs/HubCommitV2"
         },
         "normalization_revision": {
           "description": "Exact lexical-normalization semantics applied before inference.",
@@ -949,6 +1572,7 @@
       },
       "required": [
         "model_id",
+        "model_revision",
         "normalization_revision",
         "adjacency_policy_revision",
         "word_evidence"
@@ -1100,6 +1724,10 @@
           "description": "Transcript language.",
           "$ref": "#/$defs/LanguageCode3"
         },
+        "model": {
+          "description": "The models that produced this result, as the runtime observed them.\n\nRequired, and deliberately not defaulted: a transcript whose models are\nunknown cannot be stamped honestly or cached safely, and an optional\nfield would let every producer forget to fill it while still\ncompiling. The only route to a value is a loader that actually loaded\nsomething, so \"which models produced this text\" is answered by\nconstruction rather than by a downstream lookup that can miss.",
+          "$ref": "#/$defs/AsrModelIdentityV2"
+        },
         "text": {
           "description": "Concatenated transcript text.",
           "type": "string"
@@ -1108,7 +1736,8 @@
       "required": [
         "lang",
         "text",
-        "chunks"
+        "chunks",
+        "model"
       ]
     },
     "WhisperChunkSpanV2": {

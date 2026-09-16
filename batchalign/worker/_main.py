@@ -20,6 +20,8 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import argparse
+
     from batchalign.inference._domain_types import TcpPort
 
 from batchalign.device import DevicePolicy
@@ -72,7 +74,7 @@ def _gpu_has_cuda_device(force_cpu: bool) -> bool:
     return torch.cuda.is_available()
 
 
-def build_arg_parser():
+def build_arg_parser() -> argparse.ArgumentParser:
     """Build the internal worker CLI parser used by the Rust launcher."""
     import argparse
 
@@ -150,7 +152,7 @@ def build_arg_parser():
 
 
 def build_worker_bootstrap_runtime(
-    args,
+    args: argparse.Namespace,
     *,
     environ: Mapping[str, str] | None = None,
 ) -> WorkerBootstrapRuntime:
@@ -182,7 +184,7 @@ def build_worker_bootstrap_runtime(
     )
 
 
-def parse_worker_args(argv: Sequence[str] | None = None):
+def parse_worker_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse worker CLI arguments into the raw argparse namespace."""
     return build_arg_parser().parse_args(argv)
 

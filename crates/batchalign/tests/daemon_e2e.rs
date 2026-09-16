@@ -17,6 +17,7 @@
 )]
 
 use crate::cli_common;
+use crate::live_deadline::CliRunBudget;
 
 use predicates::prelude::*;
 
@@ -55,7 +56,7 @@ fn daemon_lifecycle_start_status_stop() {
             "--config",
             harness.server_config_path().to_str().unwrap(),
         ])
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(CliRunBudget::DaemonStart.as_duration())
         .ok();
 
     // The start command might fail if the port is taken, skip gracefully

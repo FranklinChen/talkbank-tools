@@ -1,7 +1,7 @@
 # scripts/
 
 **Status:** Current
-**Last updated:** 2026-06-30 13:55 EDT
+**Last updated:** 2026-09-16 09:28 EDT
 
 This directory is a shared toolbox for the batchalign3 workspace: generated
 artifact refreshes, drift checks, targeted smoke tests, diagnostics, and fixture
@@ -45,6 +45,7 @@ corpus-age fixers) were removed when this workspace became batchalign3-only.
 |---|---|---|
 | `check_dashboard_api_drift.sh` | Verifies generated dashboard API artifacts are up to date. | `make batchalign-dashboard-api-check` |
 | `check_ipc_type_drift.sh` | Verifies IPC JSON Schema artifacts match committed sources. | Direct script after IPC type changes |
+| `check_model_pin_drift.py` | Checks every pinned model in the manifest against its upstream (Hugging Face commits, ModelScope tag existence). Needs the network; queries public APIs only. Exits 0 match, 1 moved, 2 could not check. | Direct script when reviewing whether a pinned model should be upgraded |
 | `check_runtime_drift.py` | Verifies shared runtime constants still parse and expose expected keys. | `make batchalign-runtime-check` |
 | `run-drift-probes.sh` + `generate_drift_report.py` | Runs the Stanza drift probes and renders a report for inspection (never fails the caller). | Direct scripts for targeted investigation |
 | `lint/shellcheck-all.sh` | Runs shellcheck (strictest severity) over every tracked shell script. | `bash scripts/lint/shellcheck-all.sh` (also a CI job) |

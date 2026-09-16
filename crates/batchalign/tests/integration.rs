@@ -1328,7 +1328,9 @@ async fn server_starts_with_real_worker_capability_gate() {
 // ---------------------------------------------------------------------------
 
 async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -> JobInfo {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+    use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
+
+    let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(job_id));
     let mut poll_count = 0u32;
 
     loop {
@@ -1357,13 +1359,7 @@ async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -
             return info;
         }
 
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Job {job_id} did not finish within 60s (status: {:?})",
-            info.status
-        );
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        deadline.keep_waiting(ProgressSnapshot::job(&info)).await;
     }
 }
 

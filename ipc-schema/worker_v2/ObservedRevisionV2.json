@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ObservedRevisionV2",
+  "description": "What the runtime actually loaded, as the worker observed it.",
+  "oneOf": [
+    {
+      "description": "The runtime reported the hub commit it loaded.",
+      "type": "object",
+      "properties": {
+        "commit": {
+          "description": "The observed commit.",
+          "$ref": "#/$defs/HubCommitV2"
+        },
+        "kind": {
+          "type": "string",
+          "const": "commit"
+        }
+      },
+      "required": [
+        "kind",
+        "commit"
+      ]
+    },
+    {
+      "description": "The runtime loaded a file with these contents.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "description": "The observed digest.",
+          "$ref": "#/$defs/ContentDigestV2"
+        },
+        "kind": {
+          "type": "string",
+          "const": "content_digest"
+        }
+      },
+      "required": [
+        "kind",
+        "digest"
+      ]
+    },
+    {
+      "description": "The runtime exposes no revision at all. True of every ModelScope loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "not_exposed"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    }
+  ],
+  "$defs": {
+    "ContentDigestV2": {
+      "description": "A SHA-256 content digest: 64 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "HubCommitV2": {
+      "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  }
+}

@@ -33,11 +33,16 @@
     "lang": {
       "description": "Worker-runtime language hint for the transcript.\n\nThis may be a concrete ISO 639-3 code or the `\"auto\"` worker sentinel\nused by local Whisper auto-detect.",
       "$ref": "#/$defs/WorkerLanguage"
+    },
+    "models": {
+      "description": "The exact models the worker must load, resolved from BA3's own manifest\nbefore dispatch.\n\nThe identity travels WITH the plan rather than being discovered after a\nmodel has loaded, which is what lets a cache key be built without\nloading anything and lets the worker's report be checked against what\nwas asked for. The composition is closed per engine, so a Qwen request\nwithout its aligner cannot be built at all.",
+      "$ref": "#/$defs/AsrRequestedModelsV2"
     }
   },
   "required": [
     "lang",
     "backend",
+    "models",
     "input"
   ],
   "$defs": {
@@ -128,16 +133,176 @@
         }
       ]
     },
+    "AsrRequestedModelsV2": {
+      "description": "Every model of one engine's composition, as the plan requested them.\n\nCarried on the ASR request. Struct variants with required fields: a Qwen\nrequest without an aligner, or a cloud request carrying a hub commit, has\nno representation.",
+      "oneOf": [
+        {
+          "description": "Hugging Face Whisper, stock or fine-tune.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The Whisper checkpoint.",
+              "$ref": "#/$defs/RequestedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "whisper"
+            }
+          },
+          "required": [
+            "engine",
+            "asr"
+          ]
+        },
+        {
+          "description": "Qwen3-ASR and the forced aligner it needs for word timings.",
+          "type": "object",
+          "properties": {
+            "aligner": {
+              "description": "The forced aligner loaded with it.",
+              "$ref": "#/$defs/RequestedModelV2"
+            },
+            "asr": {
+              "description": "The Qwen3-ASR checkpoint.",
+              "$ref": "#/$defs/RequestedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "qwen"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "aligner"
+          ]
+        },
+        {
+          "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The Paraformer checkpoint.",
+              "$ref": "#/$defs/RequestedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "paraformer"
+            },
+            "punc": {
+              "description": "The punctuation model.",
+              "$ref": "#/$defs/RequestedModelV2"
+            },
+            "vad": {
+              "description": "The voice-activity model.",
+              "$ref": "#/$defs/RequestedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "vad",
+            "punc"
+          ]
+        },
+        {
+          "description": "FunASR SenseVoice, with its voice-activity model.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The SenseVoice checkpoint.",
+              "$ref": "#/$defs/RequestedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "sense_voice"
+            },
+            "vad": {
+              "description": "The voice-activity model.",
+              "$ref": "#/$defs/RequestedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "vad"
+          ]
+        },
+        {
+          "description": "Tencent cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "tencent"
+            },
+            "engine_model_type": {
+              "description": "The requested engine-model type.",
+              "$ref": "#/$defs/RequestedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "engine_model_type"
+          ]
+        },
+        {
+          "description": "Aliyun cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "aliyun"
+            },
+            "service": {
+              "description": "The fixed service identity.",
+              "$ref": "#/$defs/RequestedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "service"
+          ]
+        },
+        {
+          "description": "Rev.AI cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "rev"
+            },
+            "provider": {
+              "description": "The provider constant.",
+              "$ref": "#/$defs/RequestedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "provider"
+          ]
+        }
+      ]
+    },
+    "ContentDigestV2": {
+      "description": "A SHA-256 content digest: 64 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "DecodeBudgetSeconds": {
       "description": "Wall-clock decode budget for one ASR request, in seconds.\n\nNamed apart from a bare `DurationSeconds` because this quantity\ncarries a specific provenance contract: it is derived once, at\nrequest-build time, from the audio's own duration and\n[`DEADLINE_REALTIME_FACTOR`], and it is the value both the Python\ndecode loop (`_qwen_chunking.DecodeBudget`) and the Rust transport\nceiling (`TaskRequestV2::timeout_seconds_with_config`) are computed\nFROM. A generic duration carries no such contract, so reusing one\nhere would let a caller pass an unrelated seconds value where this\none is required.\n\nHAND-WRITTEN rather than built with `numeric_id!`: that macro gives its\ntype a PUBLIC inner field plus `From<f64>` and `Default` (a zero budget\nany caller could construct from nothing), which would make the \"only\nsanctioned constructor\" claim on [`Self::for_audio`] false -- a\n`DecodeBudgetSeconds(1.0)` or `DecodeBudgetSeconds::default()` written\nanywhere in the crate would compile and produce a budget with no\naudio duration behind it. The field here is private; [`Self::for_audio`]\nand [`Self::for_duration_ms`] are the only ways to construct one, and\n[`Self::as_seconds`] is the only way to read one back out.\n\nThe tuple constructor is unreachable from outside this module (proved\nby the compile_fail doctest below); `Default` and `From<f64>` are\nproved absent crate-wide by a `static_assertions::assert_not_impl_any!`\nbeneath this type, which runs on every `cargo test --lib`.\n\n```compile_fail\nuse batchalign_types::worker_v2::DecodeBudgetSeconds;\n// The inner field is private: this must not compile from outside\n// `batchalign_types::worker_v2::requests`.\nlet _ = DecodeBudgetSeconds(1.0);\n```",
       "type": "number",
       "format": "double"
     },
-    "NumSpeakers": {
-      "description": "Number of speakers in a recording.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
+    "HubCommitV2": {
+      "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ModelIdV2": {
+      "description": "A model identifier as BA3 names it: a hub repo id, a ModelScope repo id, a ggml file name, or a provider service name. Stamp-safe text, because provenance records it byte for byte.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
     },
     "PreparedAudioInputV2": {
       "description": "Request-time reference to a prepared audio artifact.",
@@ -152,23 +317,183 @@
         "audio_ref_id"
       ]
     },
+    "ProviderDiarizationV2": {
+      "description": "Whether a provider is being asked to separate speakers, and into how many.\n\nThis replaces a bare `num_speakers`, which could not say the one thing the\nbridge needs to know when a provider returns a monologue with no speaker:\nwhether separation was ASKED FOR. Without that, an absent label had to be\ngiven a number, and the number given was zero.\n\nThe count lives inside `Integrated` because it is meaningless without it,\nand it is at least two because [`SeparatedSpeakersV2`] cannot hold less.",
+      "oneOf": [
+        {
+          "description": "One track is expected, and the provider must not separate speakers.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "not_requested"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The provider separates speakers itself, into this many.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "integrated"
+            },
+            "speakers": {
+              "description": "How many speakers the provider is asked to find, at least two.",
+              "$ref": "#/$defs/SeparatedSpeakersV2"
+            }
+          },
+          "required": [
+            "kind",
+            "speakers"
+          ]
+        }
+      ]
+    },
     "ProviderMediaInputV2": {
       "description": "Temporary cloud-provider media input retained during migration.",
       "type": "object",
       "properties": {
+        "diarization": {
+          "description": "Whether this provider must separate speakers, and into how many.",
+          "$ref": "#/$defs/ProviderDiarizationV2"
+        },
         "media_path": {
           "description": "Media file path readable by the worker host.",
           "$ref": "#/$defs/WorkerArtifactPathV2"
-        },
-        "num_speakers": {
-          "description": "Expected number of speakers for diarization-aware providers.",
-          "$ref": "#/$defs/NumSpeakers"
         }
       },
       "required": [
         "media_path",
-        "num_speakers"
+        "diarization"
       ]
+    },
+    "ProviderParameterV2": {
+      "description": "A provider's own model-selection parameter (Tencent's EngineModelType, Aliyun's service identity, Rev.AI's constant). Never a credential.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "RequestedModelV2": {
+      "description": "One model the plan pinned, before anything loaded it.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Which model.",
+          "$ref": "#/$defs/ModelIdV2"
+        },
+        "revision": {
+          "description": "Which revision of it.",
+          "$ref": "#/$defs/RequestedRevisionV2"
+        }
+      },
+      "required": [
+        "id",
+        "revision"
+      ]
+    },
+    "RequestedRevisionV2": {
+      "description": "What the plan asked a worker to load.\n\n[`Self::Unpinned`] is a real state, not a placeholder: a user may name an\narbitrary hub model this build has no pin for, and if plan-time resolution\ncannot reach the hub the honest answer is \"load the default and tell me\nwhat you got\". It has its own admission rule (the worker MUST report a\ncommit) and it can never build a cache key.",
+      "oneOf": [
+        {
+          "description": "Load exactly this hub commit.",
+          "type": "object",
+          "properties": {
+            "commit": {
+              "description": "The pinned commit.",
+              "$ref": "#/$defs/HubCommitV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "commit"
+            }
+          },
+          "required": [
+            "kind",
+            "commit"
+          ]
+        },
+        {
+          "description": "Load exactly this published tag. Recorded as a tag, never as a commit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tag"
+            },
+            "tag": {
+              "description": "The pinned tag.",
+              "$ref": "#/$defs/RevisionTagV2"
+            }
+          },
+          "required": [
+            "kind",
+            "tag"
+          ]
+        },
+        {
+          "description": "Load the file with exactly these contents.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "description": "The pinned digest.",
+              "$ref": "#/$defs/ContentDigestV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "content_digest"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ]
+        },
+        {
+          "description": "Select the provider's model with this parameter.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "provider_parameter"
+            },
+            "parameter": {
+              "description": "The parameter sent to the provider.",
+              "$ref": "#/$defs/ProviderParameterV2"
+            }
+          },
+          "required": [
+            "kind",
+            "parameter"
+          ]
+        },
+        {
+          "description": "The plan could not pin this model, so the worker loads the hub default\nand must report the commit it observed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unpinned"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "RevisionTagV2": {
+      "description": "A release tag as a hub publishes it (for example ModelScope's `v2.0.4`). A tag is never recorded as a commit.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "SeparatedSpeakersV2": {
+      "description": "How many speakers a provider is asked to separate a recording into: at least two, because one is not a separation request and zero names nobody.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 2
     },
     "SubmittedJobInputV2": {
       "description": "Previously submitted provider job id.",

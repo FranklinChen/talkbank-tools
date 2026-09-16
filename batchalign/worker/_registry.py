@@ -43,6 +43,13 @@ class WorkerRegistryEntry:
     port: TcpPort
     profile: str
     lang: LanguageCode
+    # The build identity of the server that spawned this daemon, from
+    # `BATCHALIGN_BUILD_IDENTITY`; None when the daemon was started without
+    # one (by hand, or by a build before the field existed). Required, not
+    # defaulted: every construction states it, and `_entry_from_json` is the
+    # one place an absent key is read as None. The Rust server refuses to
+    # adopt a daemon whose build identity is not its own.
+    build_identity: str | None
     engine_overrides: str = ""
     ownership: str = "external"
     owner_server_instance_id: str = ""
@@ -98,6 +105,22 @@ def _unlock_file(f: IO[str]) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _entry_from_json(item: dict[str, object]) -> WorkerRegistryEntry:
+    """Rebuild one registry entry from its JSON object.
+
+    `build_identity` is the one key an entry may lack: entries written by a
+    build before the field existed. Their build is unknown, which is exactly
+    what None records. Any other missing or unexpected key still raises
+    `TypeError`, which every caller handles as an unreadable entry.
+
+    The single construction route from JSON; the four read paths each used to
+    spell `WorkerRegistryEntry(**item)` themselves.
+    """
+    fields = dict(item)
+    fields.setdefault("build_identity", None)
+    return WorkerRegistryEntry(**fields)  # type: ignore[arg-type]
+
+
 def _read_entries(registry_path: Path) -> list[WorkerRegistryEntry]:
     """Read all entries from the registry file (no locking)."""
     if not registry_path.exists():
@@ -113,7 +136,7 @@ def _read_entries(registry_path: Path) -> list[WorkerRegistryEntry]:
     for item in raw:
         if isinstance(item, dict):
             try:
-                entries.append(WorkerRegistryEntry(**item))
+                entries.append(_entry_from_json(item))
             except TypeError:
                 continue
     return entries
@@ -156,9 +179,7 @@ def register_worker(
                 try:
                     raw = json.loads(content)
                     entries = [
-                        WorkerRegistryEntry(**item)
-                        for item in raw
-                        if isinstance(item, dict)
+                        _entry_from_json(item) for item in raw if isinstance(item, dict)
                     ]
                 except (json.JSONDecodeError, TypeError):
                     entries = []
@@ -209,9 +230,7 @@ def unregister_worker(
             try:
                 raw = json.loads(content)
                 entries = [
-                    WorkerRegistryEntry(**item)
-                    for item in raw
-                    if isinstance(item, dict)
+                    _entry_from_json(item) for item in raw if isinstance(item, dict)
                 ]
             except (json.JSONDecodeError, TypeError):
                 return False
@@ -258,9 +277,7 @@ def remove_stale_entry(
             try:
                 raw = json.loads(content)
                 entries = [
-                    WorkerRegistryEntry(**item)
-                    for item in raw
-                    if isinstance(item, dict)
+                    _entry_from_json(item) for item in raw if isinstance(item, dict)
                 ]
             except (json.JSONDecodeError, TypeError):
                 return False

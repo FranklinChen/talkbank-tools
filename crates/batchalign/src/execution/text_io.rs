@@ -84,6 +84,9 @@ pub(crate) async fn write_text_results(
             .find(|file| file.filename == file_result.filename)
             .map(|file| file.file_index)
             .unwrap_or(0);
+        // What the command decided about stamping this file, recorded on the
+        // file's own status so the job detail can report it.
+        let stamp = file_result.stamp;
         match file_result.result {
             Ok(output_chat) => {
                 // The abbreviation merge is a step INSIDE the gate, so the
@@ -162,10 +165,11 @@ pub(crate) async fn write_text_results(
                         continue;
                     }
                     lifecycle
-                        .complete_with_result(
+                        .complete_with_stamped_result(
                             artifact.display_path.clone(),
                             artifact.content_type,
                             unix_now(),
+                            stamp.clone(),
                         )
                         .await;
                 }

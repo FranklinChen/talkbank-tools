@@ -30,7 +30,7 @@ mod utterances;
 use talkbank_model::model::{ChatFile, Header, Line};
 
 pub use bridge::{
-    AsrTranscript, LanguageInvalidWord, TranscriptBuildError, build_chat_from_json,
+    AsrDiagnosticError, AsrTranscript, LanguageInvalidWord, NamedAsrUtterances, TranscriptBuildError, build_chat_from_json,
     transcript_from_asr_utterances,
 };
 pub use schema::{ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc};
@@ -79,6 +79,34 @@ pub enum BuildChatError {
     /// read back unchanged.
     #[error("invalid @Media filename: {0}")]
     MediaFilename(#[from] talkbank_model::model::MediaFilenameError),
+
+    /// The description carried no utterances at all.
+    ///
+    /// A CHAT document of headers and nothing else is not a transcript of
+    /// anything, and it is indistinguishable from a transcript of a silent
+    /// recording. Whatever produced no utterances has to say so; assembling
+    /// the empty sequence into a plausible-looking file is how a run that
+    /// recognized nothing was delivered as a success.
+    #[error("a transcript needs at least one utterance, and this description carried none")]
+    NoUtterances,
+
+    /// Every described utterance reduced to no CHAT content.
+    ///
+    /// Distinct from [`NoUtterances`] because the emptiness was produced
+    /// HERE rather than upstream: words arrived and none of them was content.
+    /// The shape that does this is a transcript whose every token is a
+    /// terminator or a separator, which is what a Cantonese engine returns
+    /// when it recognizes only punctuation.
+    ///
+    /// [`NoUtterances`]: BuildChatError::NoUtterances
+    #[error(
+        "none of the {described} described utterance(s) produced any CHAT content: \
+         every one held only terminators, separators or empty text"
+    )]
+    NoUtteranceSurvivedBuild {
+        /// How many utterances the description carried.
+        described: usize,
+    },
 }
 
 /// Build a CHAT file from a typed transcript description.
@@ -88,13 +116,28 @@ pub fn build_chat(desc: &TranscriptDescription) -> Result<ChatFile, BuildChatErr
     }
 
     let context = BuildChatContext::new(desc)?;
+    // Headers first, so a document with a bad language code is still refused
+    // for its language code rather than for the emptiness below.
     let mut lines = build_header_lines(desc, context.langs())?;
-    lines.extend(build_utterance_lines(
+    let utterances = build_utterance_lines(
         desc,
         context.parser(),
         context.langs(),
         context.primary_lang(),
-    )?);
+    )?;
+    // The built LINES are what decides, not the described utterances: a
+    // description can carry words that all reduce to nothing, and it is the
+    // absence of an utterance line that makes the output an empty transcript.
+    if utterances.is_empty() {
+        return Err(if desc.utterances.is_empty() {
+            BuildChatError::NoUtterances
+        } else {
+            BuildChatError::NoUtteranceSurvivedBuild {
+                described: desc.utterances.len(),
+            }
+        });
+    }
+    lines.extend(utterances);
     lines.push(Line::header(Header::End));
 
     // Programmatically assembled CHAT carries the same typed participant

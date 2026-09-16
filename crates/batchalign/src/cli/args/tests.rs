@@ -164,6 +164,81 @@ fn parse_utr_alignment_replay() {
 }
 
 #[test]
+fn parse_utseg_replay_post_chat() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "eval",
+        "utseg-replay",
+        "post-chat",
+        "--input-chat",
+        "input.cha",
+        "--evidence",
+        "input_post_chat_utseg_evidence.json",
+        "--output-chat",
+        "output.cha",
+    ]);
+    let Commands::Eval(eval) = cli.command else {
+        panic!("expected eval command")
+    };
+    let EvalAction::UtsegReplay(replay) = eval.action else {
+        panic!("expected utseg replay")
+    };
+    let UtsegReplayAction::PostChat(args) = replay.action else {
+        panic!("expected the post-CHAT pass")
+    };
+    assert_eq!(args.input_chat, PathBuf::from("input.cha"));
+    assert_eq!(
+        args.evidence,
+        PathBuf::from("input_post_chat_utseg_evidence.json")
+    );
+    assert_eq!(args.output_chat, PathBuf::from("output.cha"));
+}
+
+/// The two passes are separate typed inputs: the pre-ASR pass takes artifacts
+/// the post-CHAT pass has no field for, so neither can be invoked with the
+/// other's evidence by miscounting arguments.
+#[test]
+fn parse_utseg_replay_pre_asr() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "eval",
+        "utseg-replay",
+        "pre-asr",
+        "--asr-response",
+        "recording_asr_response.json",
+        "--evidence",
+        "recording_pre_chat_utseg_evidence.json",
+        "--output-chat",
+        "recording.cha",
+        "--media-name",
+        "recording",
+        "--wor",
+    ]);
+    let Commands::Eval(eval) = cli.command else {
+        panic!("expected eval command")
+    };
+    let EvalAction::UtsegReplay(replay) = eval.action else {
+        panic!("expected utseg replay")
+    };
+    let UtsegReplayAction::PreAsr(args) = replay.action else {
+        panic!("expected the pre-ASR pass")
+    };
+    assert_eq!(
+        args.asr_response,
+        PathBuf::from("recording_asr_response.json")
+    );
+    assert_eq!(args.media_name.as_deref(), Some("recording"));
+    assert!(args.wor);
+}
+
+#[test]
+fn utseg_replay_requires_a_pass() {
+    let error = Cli::try_parse_from(["batchalign3", "eval", "utseg-replay"])
+        .expect_err("a replay with no pass must never reach the command state");
+    assert!(error.to_string().contains("post-chat"));
+}
+
+#[test]
 fn reject_out_of_domain_utr_fuzzy_threshold_at_cli_boundary() {
     let error = Cli::try_parse_from([
         "batchalign3",
@@ -581,6 +656,20 @@ fn parse_translate_with_file_list_and_output() {
     } else {
         panic!("expected Translate");
     }
+}
+
+#[test]
+fn file_list_conflicts_with_positional_paths() {
+    // The list is the whole input set; positional paths beside it used to be
+    // dropped without a word.
+    let result = Cli::try_parse_from([
+        "batchalign3",
+        "translate",
+        "--file-list",
+        "inputs.txt",
+        "extra.cha",
+    ]);
+    assert!(result.is_err(), "--file-list with positional paths must be rejected");
 }
 
 #[test]
@@ -2047,16 +2136,36 @@ fn parse_engine_overrides_global_flag() {
         "morphotag",
         "corpus/",
     ]);
-    assert_eq!(
-        cli.global.engine_overrides.as_deref(),
-        Some(r#"{"asr": "tencent", "fa": "cantonese_fa"}"#)
-    );
+    // The global option holds the PARSED overrides: clap's value parser is the
+    // only parse there is, so there is no string here left to compare.
+    let overrides = cli
+        .global
+        .engine_overrides
+        .expect("the flag was passed, so it parsed");
+    assert_eq!(overrides.asr, Some(AsrEngineName::HkTencent));
+    assert_eq!(overrides.fa, Some(FaEngineName::Wav2vecCanto));
 }
 
 #[test]
 fn parse_engine_overrides_absent() {
     let cli = Cli::parse_from(["batchalign3", "morphotag", "corpus/"]);
     assert!(cli.global.engine_overrides.is_none());
+}
+
+/// A bare engine name at this flag is a wrong-flag mistake, and the parse
+/// error names the flag the user wanted instead of reporting broken JSON.
+#[test]
+fn engine_overrides_bare_engine_name_names_the_engine_flag() {
+    assert_parse_error_contains(
+        &[
+            "batchalign3",
+            "--engine-overrides",
+            "whisper",
+            "transcribe",
+            "audio/",
+        ],
+        &["--asr-engine"],
+    );
 }
 
 #[test]

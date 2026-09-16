@@ -53,7 +53,6 @@ pub struct AsrResponse {
     /// Raw tokens with timestamps and speaker labels.
     pub tokens: Vec<AsrToken>,
     /// Language code.
-    #[serde(default = "default_lang")]
     pub lang: LanguageCode3,
     /// Optional provider-shaped monologues preserved from the ASR boundary.
     ///
@@ -61,10 +60,19 @@ pub struct AsrResponse {
     /// same-speaker monologue breaks before Rust post-processing runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_monologues: Option<Vec<AsrMonologue>>,
-}
-
-fn default_lang() -> LanguageCode3 {
-    LanguageCode3::eng()
+    /// The models that produced this response, as the runtime observed them.
+    ///
+    /// `None` only for a replayed LEGACY projection, which predates model
+    /// identity and genuinely has none to report; `AsrIdentity::of_replay`
+    /// records the same absence for the same reason. Every live path fills it,
+    /// and the transcript's provenance stamp renders it as `asr_model=`.
+    ///
+    /// Recording the OBSERVED identity rather than the requested plan matters
+    /// for exactly one case, and it is the case worth having: a floating model
+    /// has no requested revision to name, while the worker still reports the
+    /// commit it actually loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::types::worker_v2::AsrModelIdentityV2>,
 }
 
 /// Which runtime boundary owns raw ASR inference for one command execution.
@@ -112,7 +120,13 @@ pub(crate) enum AsrWorkerMode {
 
 impl AsrWorkerMode {
     /// Return the corresponding live V2 backend.
-    pub(super) fn as_v2_backend(self) -> AsrBackendV2 {
+    ///
+    /// Visible to the whole crate because the UTR cache namespace resolves the
+    /// pinned plan for its engine and must reach the SAME mapping the request
+    /// builder uses. A second copy next to the cache could disagree, and a
+    /// namespace derived from a backend the run did not use is precisely the
+    /// stale-reuse this pinning exists to prevent.
+    pub(crate) fn as_v2_backend(self) -> AsrBackendV2 {
         match self {
             Self::LocalWhisperV2 => AsrBackendV2::LocalWhisper,
             Self::WhisperHubV2 => AsrBackendV2::WhisperHub,
@@ -123,15 +137,17 @@ impl AsrWorkerMode {
         }
     }
 
-    /// Stable engine name written into transcript provenance.
-    fn provenance_name(self) -> &'static str {
+    /// Stable engine name written into transcript provenance, checked as
+    /// stamp-safe text at compile time.
+    fn provenance_name(self) -> crate::api::StampSafeText {
+        use crate::api::StampSafeText;
         match self {
-            Self::LocalWhisperV2 => "whisper",
-            Self::WhisperHubV2 => "whisper_hub",
-            Self::HkTencentV2 => "tencent",
-            Self::HkAliyunV2 => "aliyun",
-            Self::HkFunaudioV2 => "funaudio",
-            Self::HkQwenV2 => "qwen",
+            Self::LocalWhisperV2 => const { StampSafeText::from_static("whisper") },
+            Self::WhisperHubV2 => const { StampSafeText::from_static("whisper_hub") },
+            Self::HkTencentV2 => const { StampSafeText::from_static("tencent") },
+            Self::HkAliyunV2 => const { StampSafeText::from_static("aliyun") },
+            Self::HkFunaudioV2 => const { StampSafeText::from_static("funaudio") },
+            Self::HkQwenV2 => const { StampSafeText::from_static("qwen") },
         }
     }
 }
@@ -206,22 +222,262 @@ impl AsrBackend {
     }
 
     /// Stable engine name written into transcript provenance and warnings.
-    pub(crate) fn provenance_name(self) -> &'static str {
+    pub(crate) fn provenance_name(self) -> crate::api::StampSafeText {
+        use crate::api::StampSafeText;
         match self {
-            Self::RustRevAi => "rev",
-            Self::RustWhisperRs => "whisper_rs",
+            Self::RustRevAi => const { StampSafeText::from_static("rev") },
+            Self::RustWhisperRs => const { StampSafeText::from_static("whisper_rs") },
             Self::Worker(mode) => mode.provenance_name(),
+        }
+    }
+
+    /// The checkpoint this backend reads from its override key, admitted as
+    /// stamp-safe text because provenance records it byte for byte.
+    ///
+    /// Only FunAudio reads one: `funaudio` spans materially different models
+    /// (SenseVoice by default, Paraformer when selected). The match is
+    /// exhaustive, so a new worker mode must decide. Called where options are
+    /// parsed (submission validation) and where the transcribe plan is
+    /// admitted, so a checkpoint provenance could not record is refused before
+    /// any work runs.
+    pub(crate) fn admit_checkpoint(
+        self,
+        engine_extras: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Option<crate::api::StampSafeText>, TranscribeAsrPlanError> {
+        let key = match self {
+            Self::Worker(AsrWorkerMode::HkFunaudioV2) => {
+                crate::types::engines::FUNAUDIO_MODEL_OVERRIDE_KEY
+            }
+            Self::RustRevAi
+            | Self::RustWhisperRs
+            | Self::Worker(
+                AsrWorkerMode::LocalWhisperV2
+                | AsrWorkerMode::WhisperHubV2
+                | AsrWorkerMode::HkTencentV2
+                | AsrWorkerMode::HkAliyunV2
+                | AsrWorkerMode::HkQwenV2,
+            ) => return Ok(None),
+        };
+        engine_extras
+            .get(key)
+            .map(|checkpoint| {
+                crate::api::StampSafeText::try_from(checkpoint.as_str())
+                    .map_err(|reason| TranscribeAsrPlanError::InvalidCheckpoint { key, reason })
+            })
+            .transpose()
+    }
+}
+
+/// The ASR identity a transcript's provenance records: the engine, and the
+/// models it loaded.
+///
+/// The fields are private and the only constructors are
+/// [`TranscribeAsrPlan::identity`] and [`AsrIdentity::of_replay`], neither of
+/// which can name a model: a plan knows what it ASKED for, and a replayed
+/// legacy projection predates model identity entirely. Only
+/// [`AsrIdentity::with_loaded_models`] attaches models, and only a run that
+/// reported them has one to pass.
+///
+/// The checkpoint a request selected is deliberately NOT carried here. It used
+/// to be, and it fed both the stamp and the warning; a value describing what
+/// was asked for, travelling beside one describing what ran, is the pair this
+/// workstream exists to stop. The override is still admitted, and still
+/// refused when it is not stamp-safe, by [`AsrBackend::admit_checkpoint`] at
+/// submission and at plan admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AsrIdentity {
+    engine: crate::api::StampSafeText,
+    /// The models the run actually loaded, once one has reported them.
+    ///
+    /// Absent on a plan-built identity, because a plan knows what it ASKED for
+    /// and not what came back, and absent for a replayed legacy projection,
+    /// which predates model identity entirely.
+    model: Option<crate::types::worker_v2::AsrModelIdentityV2>,
+}
+
+impl AsrIdentity {
+    /// Identity of a replayed legacy projection, which records no checkpoint.
+    pub(crate) fn of_replay(producer: super::replay::LegacyProjectedAsrProducer) -> Self {
+        Self {
+            engine: producer.provenance_name(),
+            model: None,
+        }
+    }
+
+    /// Attach the models a run reported loading.
+    ///
+    /// Consuming, so the plan-built identity is REPLACED by the one that knows
+    /// what actually ran, rather than both staying in circulation where a
+    /// caller could stamp the weaker of the two.
+    pub(crate) fn with_loaded_models(
+        mut self,
+        model: crate::types::worker_v2::AsrModelIdentityV2,
+    ) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// Engine name recorded as `asr=`.
+    pub(crate) fn engine(&self) -> &crate::api::StampSafeText {
+        &self.engine
+    }
+
+    /// The models this run loaded, each at the revision it was observed at,
+    /// auxiliaries included.
+    ///
+    /// ONE accessor feeding BOTH lines a transcript carries about its ASR: the
+    /// `asr_model=` stamp field and the human unchecked-ASR warning. Two lines
+    /// describing one run that can drift apart is the defect this workstream
+    /// removes, so they are not allowed to have separate sources.
+    ///
+    /// There is deliberately no fallback to the checkpoint the request
+    /// selected. Where nothing reported its models, as when legacy evidence is
+    /// replayed, this is `None` and both lines simply say less. Printing a
+    /// requested checkpoint here would record what was ASKED FOR as though it
+    /// had been seen, which is the exact substitution the bridge refuses.
+    pub(crate) fn asr_model(&self) -> Option<crate::api::StampSafeText> {
+        self.model.as_ref().map(|model| model.stamp_value())
+    }
+}
+
+impl std::fmt::Display for AsrIdentity {
+    /// `<engine> (<models>)`, the shape readers already parse, with the
+    /// parenthetical naming what RAN rather than what was requested.
+    ///
+    /// Delegates to [`AsrIdentity::asr_model`] rather than formatting a second
+    /// time, so the warning and the `asr_model=` stamp beside it cannot
+    /// disagree. When no run reported its models the parenthetical is omitted
+    /// entirely; it is never filled from the request.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.asr_model() {
+            Some(model) => write!(f, "{} ({model})", self.engine),
+            None => write!(f, "{}", self.engine),
         }
     }
 }
 
-/// Options controlling the transcribe pipeline.
+/// Speaker-count policy accepted by the Rev.AI backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RevSpeakerCount {
+    Automatic,
+    Fixed(std::num::NonZeroU32),
+}
+
+/// Backend and speaker policy admitted together. Non-Rev inference cannot
+/// carry automatic counts, and fixed counts cannot be zero or truncated.
+///
+/// The checkpoint a request selected is admitted here too, by
+/// [`AsrBackend::admit_checkpoint`], but it is not STORED. Admission is a
+/// refusal: an override that could not be written into a stamp fails the job
+/// before any work runs. The value is not carried onward because provenance
+/// records the models a run loaded, and a requested checkpoint travelling
+/// beside an observed identity is the disagreeing pair this workstream removes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TranscribeAsrPlan {
+    RevAi(RevSpeakerCount),
+    NonRev {
+        backend: NonRevAsrBackend,
+        speakers: std::num::NonZeroU32,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+/// Refusal to admit a backend, speaker-count and checkpoint request as one
+/// executable plan.
+pub enum TranscribeAsrPlanError {
+    /// Automatic counts are not implemented by this backend.
+    #[error("automatic speaker counts require the Rev.AI ASR engine")]
+    UnsupportedAutomaticCount,
+    /// A fixed count cannot be represented as a positive provider count.
+    #[error("fixed speaker count must be in 1..=4294967295, got {0}")]
+    InvalidFixedCount(usize),
+    /// The checkpoint selected through the backend's override key cannot be
+    /// recorded in provenance.
+    #[error("ASR checkpoint override `{key}` cannot be recorded in provenance: {reason}")]
+    InvalidCheckpoint {
+        /// The override key the backend reads its checkpoint from.
+        key: &'static str,
+        /// Why the value is not stamp-safe text.
+        reason: crate::api::InvalidStampSafeText,
+    },
+}
+
+impl TranscribeAsrPlan {
+    pub(crate) fn from_request(
+        backend: AsrBackend,
+        automatic: bool,
+        count: usize,
+        engine_extras: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, TranscribeAsrPlanError> {
+        // Called for its REFUSAL, not for its value. A checkpoint override that
+        // could not be written into a stamp fails the job here, before any work
+        // runs, which is the whole point of admitting it at plan time. The
+        // value itself is discarded: provenance names the models the run
+        // loaded, never the one the request asked for.
+        let _ = backend.admit_checkpoint(engine_extras)?;
+        match (backend.as_non_rev(), automatic) {
+            (None, true) => Ok(Self::RevAi(RevSpeakerCount::Automatic)),
+            (Some(_), true) => Err(TranscribeAsrPlanError::UnsupportedAutomaticCount),
+            (non_rev, false) => {
+                let raw = u32::try_from(count)
+                    .map_err(|_| TranscribeAsrPlanError::InvalidFixedCount(count))?;
+                let count = std::num::NonZeroU32::new(raw)
+                    .ok_or(TranscribeAsrPlanError::InvalidFixedCount(count))?;
+                Ok(match non_rev {
+                    None => Self::RevAi(RevSpeakerCount::Fixed(count)),
+                    Some(backend) => Self::NonRev {
+                        backend,
+                        speakers: count,
+                    },
+                })
+            }
+        }
+    }
+
+    pub(crate) fn backend(&self) -> AsrBackend {
+        match self {
+            Self::RevAi(_) => AsrBackend::RustRevAi,
+            Self::NonRev {
+                backend: NonRevAsrBackend::RustWhisperRs,
+                ..
+            } => AsrBackend::RustWhisperRs,
+            Self::NonRev {
+                backend: NonRevAsrBackend::Worker(mode),
+                ..
+            } => AsrBackend::Worker(*mode),
+        }
+    }
+
+    pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
+        match self {
+            Self::RevAi(RevSpeakerCount::Automatic) => None,
+            Self::RevAi(RevSpeakerCount::Fixed(count))
+            | Self::NonRev {
+                speakers: count, ..
+            } => Some(crate::api::NumSpeakers(count.get())),
+        }
+    }
+
+    /// The ASR identity transcript provenance records for this plan: the
+    /// backend's engine name and the checkpoint admitted with the plan.
+    pub(crate) fn identity(&self) -> AsrIdentity {
+        match self {
+            Self::RevAi(_) => AsrIdentity {
+                engine: AsrBackend::RustRevAi.provenance_name(),
+                model: None,
+            },
+            Self::NonRev { .. } => AsrIdentity {
+                engine: self.backend().provenance_name(),
+                model: None,
+            },
+        }
+    }
+}
+
+/// Options controlling the transcribe pipeline after ASR-policy admission.
 #[derive(Clone)]
 pub struct TranscribeOptions {
-    /// Infer speaker count rather than imposing the job's numeric default.
-    pub auto_speakers: bool,
-    /// Which runtime boundary owns raw ASR inference.
-    pub(crate) backend: AsrBackend,
+    pub(crate) asr: TranscribeAsrPlan,
     /// Whether the command requested diarized speaker attribution.
     pub diarize: bool,
     /// Concrete speaker backend selected by Rust when dedicated diarization is needed.
@@ -231,8 +487,6 @@ pub struct TranscribeOptions {
     /// The type system enforces that post-ASR stages (utseg, morphotag) must
     /// resolve `Auto` to a concrete language before calling NLP workers.
     pub lang: LanguageSpec,
-    /// Expected number of speakers for diarization.
-    pub num_speakers: usize,
     /// Whether to run the production utterance-segmentation topology. When
     /// enabled for supported languages this includes both the pre-CHAT word
     /// boundary pass and the post-CHAT refinement pass.
@@ -263,7 +517,109 @@ pub struct TranscribeOptions {
 impl TranscribeOptions {
     /// Provider/diarizer count hint; automatic mode never uses a numeric sentinel.
     pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
-        (!self.auto_speakers).then_some(crate::api::NumSpeakers(self.num_speakers as u32))
+        self.asr.expected_speakers()
+    }
+}
+
+#[cfg(test)]
+mod speaker_plan_tests {
+    use super::*;
+
+    #[test]
+    fn asr_response_requires_declared_language_instead_of_inventing_english() {
+        let missing = serde_json::json!({"tokens": []});
+        assert!(serde_json::from_value::<AsrResponse>(missing).is_err());
+        let declared = serde_json::json!({"tokens": [], "lang": "eng"});
+        assert_eq!(
+            serde_json::from_value::<AsrResponse>(declared)
+                .unwrap()
+                .lang,
+            LanguageCode3::eng()
+        );
+    }
+
+    #[test]
+    fn backend_count_admission_preserves_automatic_and_fixed_policies() {
+        let none = std::collections::BTreeMap::new();
+        let automatic =
+            TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, true, 2, &none).unwrap();
+        assert_eq!(
+            automatic,
+            TranscribeAsrPlan::RevAi(RevSpeakerCount::Automatic)
+        );
+        assert_eq!(automatic.expected_speakers(), None);
+        for backend in [
+            AsrBackend::RustRevAi,
+            AsrBackend::RustWhisperRs,
+            AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2),
+        ] {
+            let fixed = TranscribeAsrPlan::from_request(backend, false, 3, &none).unwrap();
+            assert_eq!(fixed.backend(), backend);
+            assert_eq!(fixed.expected_speakers(), Some(crate::api::NumSpeakers(3)));
+            assert!(matches!(
+                TranscribeAsrPlan::from_request(backend, false, 0, &none),
+                Err(TranscribeAsrPlanError::InvalidFixedCount(0))
+            ));
+            if backend != AsrBackend::RustRevAi {
+                assert!(matches!(
+                    TranscribeAsrPlan::from_request(backend, true, 3, &none),
+                    Err(TranscribeAsrPlanError::UnsupportedAutomaticCount)
+                ));
+            }
+        }
+        if usize::BITS > 32 {
+            assert!(matches!(
+                TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, false, usize::MAX, &none),
+                Err(TranscribeAsrPlanError::InvalidFixedCount(_))
+            ));
+        }
+    }
+
+    /// Only the backend that reads a checkpoint admits one, and only as
+    /// stamp-safe text; the same override on another backend is not attached.
+    #[test]
+    fn a_checkpoint_is_admitted_only_by_the_backend_that_reads_it() {
+        let funaudio = AsrBackend::Worker(AsrWorkerMode::HkFunaudioV2);
+        let paraformer = std::collections::BTreeMap::from([(
+            crate::types::engines::FUNAUDIO_MODEL_OVERRIDE_KEY.to_owned(),
+            "paraformer-zh".to_owned(),
+        )]);
+        // Asserted on the admission itself rather than through the identity's
+        // `Display`. Provenance now names the models a run LOADED, so a
+        // plan-built identity carries no parenthetical at all, and testing
+        // this behaviour through `Display` would prove only that. The subject
+        // here is which backend READS the override key, which is exactly what
+        // `admit_checkpoint` decides.
+        assert!(
+            matches!(
+                funaudio.admit_checkpoint(&paraformer),
+                Ok(Some(ref checkpoint)) if checkpoint.as_str() == "paraformer-zh"
+            ),
+            "the backend that reads this override key must admit its value"
+        );
+        let whisper = AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2);
+        assert!(
+            matches!(whisper.admit_checkpoint(&paraformer), Ok(None)),
+            "the same override must not attach to a backend that reads no checkpoint"
+        );
+        // Both are still admissible plans; the override simply does not attach.
+        TranscribeAsrPlan::from_request(funaudio, false, 1, &paraformer).unwrap();
+        TranscribeAsrPlan::from_request(whisper, false, 1, &paraformer).unwrap();
+
+        let padded = std::collections::BTreeMap::from([(
+            crate::types::engines::FUNAUDIO_MODEL_OVERRIDE_KEY.to_owned(),
+            "paraformer-zh ".to_owned(),
+        )]);
+        assert!(matches!(
+            TranscribeAsrPlan::from_request(funaudio, false, 1, &padded),
+            Err(TranscribeAsrPlanError::InvalidCheckpoint { .. })
+        ));
+    }
+
+    #[test]
+    fn replay_policy_refusal_has_a_typed_usage_exit() {
+        let error = crate::cli::error::CliError::from(TranscribeAsrPlanError::InvalidFixedCount(0));
+        assert_eq!(error.exit_code(), crate::cli::error::CliError::EXIT_USAGE);
     }
 }
 

@@ -63,7 +63,7 @@ impl Drop for ProcessGuard {
     }
 }
 
-pub use config::WhisperNativeConfig;
+pub use config::{WhisperModelSource, WhisperNativeConfig};
 pub use error::WhisperNativeError;
 
 use batchalign_types::api::LanguageCode3;

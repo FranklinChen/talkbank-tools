@@ -15,7 +15,7 @@ use std::path::Path;
 use tracing::info;
 
 use crate::api::{ChatText, LanguageCode3, LanguageSpec, NumSpeakers, WorkerLanguage};
-use crate::error::ServerError;
+use crate::error::{EmptyTranscription, ServerError};
 use crate::params::{MorphosyntaxParams, UtsegFallbackPolicy};
 use crate::pipeline::PipelineServices;
 use crate::pipeline::plan::{PipelinePlan, StageFuture, StageId, StageSpec, run_plan};
@@ -30,8 +30,7 @@ use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 use crate::transcribe::replay::AdmittedLegacyTranscribeReplay;
 use crate::transcribe::{
     AsrInferParams, AsrResponse, SpeakerEvidenceRunParams, SpeakerEvidenceSource,
-    TranscribeOptions, build_empty_chat_text, convert_asr_response, generate_participant_ids,
-    infer_asr, resolve_speaker_evidence_for_audio,
+    TranscribeOptions, convert_asr_response, infer_asr, resolve_speaker_evidence_for_audio,
 };
 use crate::types::worker_v2::{SpeakerBackendV2, SpeakerSegmentV2};
 use crate::utseg::TranscribeUtsegExecution;
@@ -79,9 +78,9 @@ pub(crate) struct TranscribePipelineContext<'a> {
     utseg_execution: TranscribeUtsegExecution,
     /// Typed causal receipt for the Rev projection used by this run.
     rev_evidence: Option<RevAsrEvidenceTrace>,
-    /// Language resolved after ASR detection. When `opts.lang` is `Auto`,
-    /// this is set by `stage_build_chat` to the ASR-detected language.
-    /// Post-ASR stages (utseg, morphotag) use this for concrete dispatch.
+    /// Language resolved after ASR, by whichever post-ASR stage reaches
+    /// [`TranscribePipelineContext::resolve_lang`] first. Every later stage,
+    /// `lang_for_nlp` included, reads what that one recorded.
     pub resolved_lang: Option<LanguageCode3>,
     /// Per-stage ASR pipeline snapshot. Populated when
     /// `BA3_DUMP_ASR_PIPELINE` is set, otherwise `None`. Captures the
@@ -168,11 +167,52 @@ impl<'a> TranscribePipelineContext<'a> {
         }
     }
 
-    fn asr_provenance_name(&self) -> &'static str {
-        if let TranscribeEvidenceInput::LegacyReplay { replay, .. } = &self.evidence_input {
-            return replay.producer().provenance_name();
+    /// The post-ASR language, resolved ONCE per file.
+    ///
+    /// Three stages need it (post-processing, dedicated diarization, CHAT
+    /// assembly) and each used to resolve it for itself, two of them writing
+    /// the answer back into this context separately. Under `--lang auto` with
+    /// an engine that reported no language, resolving joins every token in the
+    /// transcript into one string and runs offline detection over the join, so
+    /// a file paid for that up to three times and could in principle record
+    /// three different answers. The first caller resolves and records; the rest
+    /// read the record.
+    fn resolve_lang(&mut self) -> Result<LanguageCode3, ServerError> {
+        if let Some(resolved) = &self.resolved_lang {
+            return Ok(resolved.clone());
         }
-        self.opts.backend.provenance_name()
+        let resolved = {
+            let response = self.asr_response.as_ref().ok_or_else(|| {
+                ServerError::Validation(
+                    "ASR response missing before the transcript language could be resolved"
+                        .to_string(),
+                )
+            })?;
+            resolved_asr_language(self.opts, response)?
+        };
+        self.resolved_lang = Some(resolved.clone());
+        Ok(resolved)
+    }
+
+    /// The ASR identity transcript provenance records: the engine, plus the
+    /// checkpoint when the request selected one through the engine's override
+    /// key, so a Paraformer run no longer reads as plain `funaudio`.
+    fn asr_identity(&self) -> crate::transcribe::types::AsrIdentity {
+        match &self.evidence_input {
+            TranscribeEvidenceInput::LegacyReplay { replay, .. } => {
+                crate::transcribe::types::AsrIdentity::of_replay(replay.producer())
+            }
+            TranscribeEvidenceInput::Live { .. } => {
+                let planned = self.opts.asr.identity();
+                // The response is the only witness to what actually loaded, and
+                // it is populated well before CHAT is built, so the stamp names
+                // the models that ran rather than the ones the plan hoped for.
+                match self.asr_response.as_ref().and_then(|r| r.model.clone()) {
+                    Some(model) => planned.with_loaded_models(model),
+                    None => planned,
+                }
+            }
+        }
     }
 }
 
@@ -464,7 +504,7 @@ fn stage_asr_infer<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> St
         info!(
             audio_path = %ctx.audio_path.display(),
             lang = %ctx.opts.lang,
-            num_speakers = ctx.opts.num_speakers,
+            expected_speakers = ?ctx.opts.expected_speakers(),
             "Starting ASR inference"
         );
 
@@ -495,65 +535,66 @@ fn stage_asr_infer<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> St
                 ));
             }
         };
-        let num_speakers = NumSpeakers(ctx.opts.num_speakers as u32);
-        let response = if let Some(backend) = ctx.opts.backend.as_non_rev() {
-            if ctx.opts.auto_speakers {
-                return Err(ServerError::Validation("automatic speaker counts currently require the Rev.AI ASR engine".into()));
+        let response = match ctx.opts.asr {
+            crate::transcribe::TranscribeAsrPlan::NonRev {
+                backend, speakers, ..
+            } => {
+                infer_asr(
+                    ctx.services.pool,
+                    &AsrInferParams {
+                        backend,
+                        audio_path: ctx.audio_path,
+                        lang: &ctx.opts.lang,
+                        num_speakers: NumSpeakers(speakers.get()),
+                        extras: &ctx.opts.engine_extras,
+                    },
+                )
+                .await?
             }
-            infer_asr(
-                ctx.services.pool,
-                &AsrInferParams {
-                    backend,
-                    audio_path: ctx.audio_path,
-                    lang: &ctx.opts.lang,
-                    num_speakers,
-                    extras: &ctx.opts.engine_extras,
-                },
-            )
-            .await?
-        } else {
-            let provider_media = PreparedRevProviderMedia::from_source(ctx.audio_path)
-                .await
-                .map_err(|error| ServerError::Persistence(error.to_string()))?;
-            let request = RevAsrEvidenceRequest::new(
-                provider_media,
-                &ctx.opts.lang,
-                ctx.opts.expected_speakers(),
-                &RevAsrModelRevision::current(),
-            )
-            .map_err(|error| ServerError::Persistence(error.to_string()))?;
-            let resolution = resolve_rev_asr_evidence(
-                &request,
-                ctx.services.cache,
-                ctx.opts.cache_policies.rev_asr,
-                rev_inference,
-            )
-            .await
-            .map_err(rev_asr_resolution_error_to_server_error)?;
-            let trace = resolution.trace(RevAsrProjectionRevision::AsrResponseV1);
-            if ctx.dumper.is_enabled() {
-                ctx.dumper
-                    .dump_rev_evidence(ctx.audio_path.to_string_lossy().as_ref(), &trace)
+            crate::transcribe::TranscribeAsrPlan::RevAi(_) => {
+                let provider_media = PreparedRevProviderMedia::from_source(ctx.audio_path)
+                    .await
                     .map_err(|error| ServerError::Persistence(error.to_string()))?;
-            }
-            ctx.rev_evidence = Some(trace);
-            match resolution.source() {
-                RevAsrEvidenceSource::Replayed => {
-                    info!(
-                        cache_key = %request.cache_key(),
-                        "Replaying validated raw Rev.AI transcript evidence"
-                    );
+                let request = RevAsrEvidenceRequest::new(
+                    provider_media,
+                    &ctx.opts.lang,
+                    ctx.opts.expected_speakers(),
+                    &RevAsrModelRevision::current(),
+                )
+                .map_err(|error| ServerError::Persistence(error.to_string()))?;
+                let resolution = resolve_rev_asr_evidence(
+                    &request,
+                    ctx.services.cache,
+                    ctx.opts.cache_policies.rev_asr,
+                    rev_inference,
+                )
+                .await
+                .map_err(rev_asr_resolution_error_to_server_error)?;
+                let trace = resolution.trace(RevAsrProjectionRevision::AsrResponseV1);
+                if ctx.dumper.is_enabled() {
+                    ctx.dumper
+                        .dump_rev_evidence(ctx.audio_path.to_string_lossy().as_ref(), &trace)
+                        .map_err(|error| ServerError::Persistence(error.to_string()))?;
                 }
-                RevAsrEvidenceSource::Inferred(reason) => {
-                    info!(
-                        cache_key = %request.cache_key(),
-                        reason = ?reason,
-                        "Committed fresh raw Rev.AI transcript evidence"
-                    );
+                ctx.rev_evidence = Some(trace);
+                match resolution.source() {
+                    RevAsrEvidenceSource::Replayed => {
+                        info!(
+                            cache_key = %request.cache_key(),
+                            "Replaying validated raw Rev.AI transcript evidence"
+                        );
+                    }
+                    RevAsrEvidenceSource::Inferred(reason) => {
+                        info!(
+                            cache_key = %request.cache_key(),
+                            reason = ?reason,
+                            "Committed fresh raw Rev.AI transcript evidence"
+                        );
+                    }
                 }
+                let evidence = resolution.into_evidence();
+                rev_evidence_to_asr_response(&evidence)
             }
-            let evidence = resolution.into_evidence();
-            rev_evidence_to_asr_response(&evidence)
         };
         let filename = ctx
             .audio_path
@@ -574,8 +615,14 @@ fn stage_asr_postprocess<'a, 'ctx>(
             ServerError::Validation("ASR response missing before post-processing".to_string())
         })?;
 
+        // Nothing to post-process means nothing to transcribe. This returned
+        // `Ok(())` until 2026-09-16, and `stage_build_chat` then wrote a
+        // headers-only CHAT file, so a run that recognized not one word
+        // finished as a completed job carrying an empty transcript. Silence
+        // reported as success is the defect; the job now says which stage came
+        // up empty.
         if response.tokens.is_empty() {
-            return Ok(());
+            return Err(ServerError::EmptyTranscription(EmptyTranscription::Asr));
         }
 
         let asr_output = convert_asr_response(response);
@@ -585,10 +632,17 @@ fn stage_asr_postprocess<'a, 'ctx>(
             "ASR response received, starting post-processing"
         );
 
-        let resolved_lang = resolved_asr_language(ctx.opts, response)?;
-        ctx.resolved_lang = Some(resolved_lang.clone());
+        let resolved_lang = ctx.resolve_lang()?;
         let utterances =
             process_asr_with_prechat_segmentation(ctx, &asr_output, &resolved_lang).await?;
+        // The engine returned words and post-processing kept no utterance from
+        // them. Its own empty-chunk path returns an empty Vec here, so without
+        // this the emptiness travelled on to CHAT assembly unremarked.
+        if utterances.is_empty() {
+            return Err(ServerError::EmptyTranscription(
+                EmptyTranscription::Postprocess,
+            ));
+        }
         info!(
             num_utterances = utterances.len(),
             "Post-processing complete, building CHAT"
@@ -681,11 +735,29 @@ fn resolved_asr_language(
     }
 }
 
-fn uses_prechat_utterance_model(lang: &LanguageCode3) -> bool {
-    matches!(lang.as_ref(), "eng" | "cmn" | "zho" | "yue")
+/// How this run will segment utterances, decided from the resolved language.
+///
+/// This replaces a bare `matches!(lang.as_ref(), "eng" | "cmn" | "zho" | "yue")`
+/// that was one of two copies of the boundary-model language set, the other
+/// being the Python resolver's key set. The route now comes from the one table
+/// in [`crate::utseg_route`].
+///
+/// Fallible because a language with no boundary model and no authorized
+/// fallback has no segmenter at all. For an explicit `--lang` that case was
+/// already refused at plan time, before ASR; reaching it here means `--lang
+/// auto` detected such a language, which cannot be known any earlier.
+fn resolve_utseg_route(
+    opts: &TranscribeOptions,
+    lang: &LanguageCode3,
+) -> Result<crate::utseg_route::UtsegRoute, ServerError> {
+    crate::utseg_route::UtsegRoute::resolve(
+        lang,
+        crate::params::UtsegFallbackPolicy::from(opts.allow_stanza_fallback_utseg),
+    )
+    .map_err(|unavailable| ServerError::Validation(unavailable.to_string()))
 }
 
-fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Vec<UtsegBatchItem> {
+pub(crate) fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Vec<UtsegBatchItem> {
     chunks
         .iter()
         .map(|chunk| {
@@ -702,7 +774,7 @@ fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Vec<UtsegBatc
         .collect()
 }
 
-fn apply_prechat_assignments(
+pub(crate) fn apply_prechat_assignments(
     chunks: &[PreparedMonologueChunk],
     predictions: &[crate::utseg::AdmittedUtsegPrediction],
 ) -> Vec<PreparedMonologueChunk> {
@@ -750,7 +822,7 @@ async fn process_asr_with_prechat_segmentation(
             asr_output,
             &lang_str,
             ctx.asr_pipeline_snapshot.as_mut(),
-        ));
+        )?);
         let mut utterances = asr_postprocess::utterances_from_prepared_chunks(chunks);
         asr_postprocess::finalize_utterances(&mut utterances, &lang_str);
         if let Some(s) = ctx.asr_pipeline_snapshot.as_mut() {
@@ -759,12 +831,19 @@ async fn process_asr_with_prechat_segmentation(
         return Ok(utterances);
     };
 
-    if !uses_prechat_utterance_model(resolved_lang) {
+    // The pre-CHAT pass runs the boundary model or nothing: there is no
+    // pre-CHAT Stanza path, so an authorized Stanza fallback segments only
+    // after CHAT is built, and this pass hands its chunks to punctuation
+    // retokenization exactly as it always did for a language with no model.
+    if !matches!(
+        resolve_utseg_route(ctx.opts, resolved_lang)?,
+        crate::utseg_route::UtsegRoute::BoundaryModel
+    ) {
         let chunks = project_speakers(prepare_asr_chunks_with_snapshot(
             asr_output,
             &lang_str,
             ctx.asr_pipeline_snapshot.as_mut(),
-        ));
+        )?);
         let mut utterances = asr_postprocess::utterances_from_prepared_chunks(chunks);
         asr_postprocess::finalize_utterances(&mut utterances, &lang_str);
         if let Some(s) = ctx.asr_pipeline_snapshot.as_mut() {
@@ -777,7 +856,7 @@ async fn process_asr_with_prechat_segmentation(
         asr_output,
         &lang_str,
         ctx.asr_pipeline_snapshot.as_mut(),
-    ));
+    )?);
     if prepared_chunks.is_empty() {
         return Ok(Vec::new());
     }
@@ -802,7 +881,6 @@ async fn process_asr_with_prechat_segmentation(
     let evidence = UtsegEvidenceTrace::from_predictions(
         UtsegEvidencePhase::PreChat,
         resolved_lang.as_ref(),
-        ctx.services.engine_version.as_ref(),
         &indexed_items,
         &predictions,
     )
@@ -825,17 +903,34 @@ async fn process_asr_with_prechat_segmentation(
 
 /// Prepare ASR chunks fully in Rust.
 ///
-/// Stages 1-3 (compound merge, timed-word extraction, multi-word split) run per
-/// monologue. Number expansion is then applied per word via
-/// `asr_postprocess::expand_number`. After expansion a whitespace-split pass
-/// widens multi-word expansions into separate tokens. Stages 4b-5b (Cantonese
-/// normalization, long-turn / pause splitting) finalize per monologue.
-#[allow(dead_code)]
-fn prepare_asr_chunks(
+/// Stages 1-3 (compound merge, timed-word extraction, Cantonese normalization,
+/// multi-word split) run per monologue. Number expansion is then applied per
+/// word via `asr_postprocess::expand_number`. After expansion a whitespace-split
+/// pass widens multi-word expansions into separate tokens. Stages 5-5b
+/// (long-turn and pause splitting) finalize per monologue.
+///
+/// The entry point for any caller that wants what transcribe produces without
+/// a per-stage trace, including the offline `eval utseg-replay` pre-ASR pass.
+/// A replay that prepared its chunks some other way would be comparing two
+/// implementations rather than replaying one.
+pub(crate) fn prepare_asr_chunks(
     asr_output: &batchalign_transform::asr_postprocess::AsrOutput,
     lang: &str,
-) -> Vec<PreparedMonologueChunk> {
+) -> Result<Vec<PreparedMonologueChunk>, ServerError> {
     prepare_asr_chunks_with_snapshot(asr_output, lang, None)
+}
+
+/// A Cantonese normalization that changed a monologue's character count refuses
+/// the file.
+///
+/// The alternative would be re-cutting the words around the new characters,
+/// after which each word's timing would belong to characters it no longer
+/// holds. A transcript mistimed that way looks right and reads wrong, which is
+/// worse than a named failure.
+fn cantonese_normalization_refused(
+    refusal: batchalign_transform::asr_postprocess::NormalizationChangedLength,
+) -> ServerError {
+    ServerError::Validation(format!("ASR post-processing refused this file: {refusal}"))
 }
 
 /// Snapshot-aware variant of [`prepare_asr_chunks`].
@@ -853,29 +948,46 @@ fn prepare_asr_chunks_with_snapshot(
     asr_output: &batchalign_transform::asr_postprocess::AsrOutput,
     lang: &str,
     mut snapshot: Option<&mut AsrPipelineSnapshot>,
-) -> Vec<PreparedMonologueChunk> {
+) -> Result<Vec<PreparedMonologueChunk>, ServerError> {
+    let Some(_) = snapshot.as_ref() else {
+        // One implementation of this step, not two. Without a trace to fill in
+        // there is nothing this function adds over the transform's own
+        // preparation, and keeping a second copy here is exactly the drift
+        // `eval utseg-replay` exists to catch. The traced path below stays
+        // separate only because it must record each stage as it goes;
+        // `snapshot_and_plain_preparation_agree` holds the two to one answer.
+        return asr_postprocess::prepare_asr_chunks(asr_output, lang)
+            .map_err(cantonese_normalization_refused);
+    };
+
     if let Some(ref mut s) = snapshot {
         for m in &asr_output.monologues {
             s.raw_elements.extend_from_slice(&m.elements);
         }
     }
 
-    let mut monologue_words: Vec<(asr_postprocess::SpeakerIndex, Vec<AsrWord>)> = asr_output
-        .monologues
-        .iter()
-        .map(|m| {
-            let mut sub = AsrPipelineSnapshot::default();
-            let cap = snapshot.is_some().then_some(&mut sub);
-            let words =
-                asr_postprocess::prepare_words_pre_expansion_with_snapshot(&m.elements, lang, cap);
-            if let Some(ref mut s) = snapshot {
-                s.after_compound_merge.extend(sub.after_compound_merge);
-                s.after_timing_extract.extend(sub.after_timing_extract);
-                s.after_multiword_split.extend(sub.after_multiword_split);
+    let mut monologue_words: Vec<(asr_postprocess::SpeakerIndex, Vec<AsrWord>)> =
+        Vec::with_capacity(asr_output.monologues.len());
+    for m in &asr_output.monologues {
+        let mut sub = AsrPipelineSnapshot::default();
+        let cap = snapshot.is_some().then_some(&mut sub);
+        let words =
+            asr_postprocess::prepare_words_pre_expansion_with_snapshot(&m.elements, lang, cap)
+                .map_err(cantonese_normalization_refused)?;
+        if let Some(ref mut s) = snapshot {
+            s.after_compound_merge.extend(sub.after_compound_merge);
+            s.after_timing_extract.extend(sub.after_timing_extract);
+            // Cantonese normalization is captured here now: it runs inside
+            // preparation, before the multi-word split, not after expansion.
+            if let Some(yue) = sub.after_cantonese_norm {
+                s.after_cantonese_norm
+                    .get_or_insert_with(Vec::new)
+                    .extend(yue);
             }
-            (m.speaker, words)
-        })
-        .collect();
+            s.after_multiword_split.extend(sub.after_multiword_split);
+        }
+        monologue_words.push((m.speaker, words));
+    }
 
     for (_speaker, words) in &mut monologue_words {
         for word in words.iter_mut() {
@@ -908,15 +1020,10 @@ fn prepare_asr_chunks_with_snapshot(
             words, speaker, lang, cap,
         ));
         if let Some(ref mut s) = snapshot {
-            if let Some(yue) = sub.after_cantonese_norm {
-                s.after_cantonese_norm
-                    .get_or_insert_with(Vec::new)
-                    .extend(yue);
-            }
             s.after_long_turn_split.extend(sub.after_long_turn_split);
         }
     }
-    prepared
+    Ok(prepared)
 }
 
 fn stage_speaker_diarization<'a, 'ctx>(
@@ -950,14 +1057,14 @@ fn stage_speaker_diarization<'a, 'ctx>(
             .expect("speaker backend presence checked above");
 
         // Speaker workers require a concrete routing language. `opts.lang`
-        // remains `Auto` even after ASR, so derive a resolved value from the
-        // response here rather than relying on a pipeline-order comment that
-        // the type did not enforce.
-        let speaker_worker_lang = WorkerLanguage::from(resolved_asr_language(ctx.opts, response)?);
+        // remains `Auto` even after ASR, so the value comes from the response,
+        // through the context's one resolution rather than a pipeline-order
+        // comment the type did not enforce.
+        let speaker_worker_lang = WorkerLanguage::from(ctx.resolve_lang()?);
         info!(
             audio_path = %ctx.audio_path.display(),
             speaker_backend = ?speaker_backend,
-            num_speakers = ctx.opts.num_speakers,
+            expected_speakers = ?ctx.opts.expected_speakers(),
             "Running dedicated speaker diarization"
         );
         let expected_speakers = ctx.opts.expected_speakers();
@@ -1027,26 +1134,15 @@ fn stage_speaker_diarization<'a, 'ctx>(
 
 fn stage_build_chat<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> StageFuture<'a> {
     Box::pin(async move {
-        let response = ctx.asr_response.as_ref().ok_or_else(|| {
-            ServerError::Validation("ASR response missing before CHAT build".to_string())
-        })?;
+        // Auto becomes the ASR-detected language for CHAT headers and NLP.
+        // Resolved once per file and recorded on the context, so utseg and
+        // morphotag dispatch on the real language rather than on Auto.
+        let resolved_lang = ctx.resolve_lang()?;
 
-        // Resolve Auto → ASR-detected language for CHAT headers and NLP.
-        // When the user passed --lang auto, opts.lang is Auto. The ASR
-        // response carries the engine's detected language code (e.g. "spa").
-        // Store the resolved language so post-ASR stages (utseg, morphotag)
-        // use the real language, not Auto.
-        let resolved_lang = resolved_asr_language(ctx.opts, response)?;
-        ctx.resolved_lang = Some(resolved_lang.clone());
-
-        if response.tokens.is_empty() {
-            // Build empty CHAT with resolved language.
-            let mut opts_resolved = ctx.opts.clone();
-            opts_resolved.lang = LanguageSpec::Resolved(resolved_lang.clone());
-            ctx.chat_text = Some(build_empty_chat_text(&opts_resolved)?);
-            return Ok(());
-        }
-
+        // No empty-transcript branch here any more: `stage_asr_postprocess`
+        // refuses a response with no tokens before this stage runs, so there is
+        // no longer a shape this stage could answer by writing a file with no
+        // utterances in it.
         let utterances = ctx.utterances.as_mut().ok_or_else(|| {
             ServerError::Validation("Utterances missing before CHAT build".to_string())
         })?;
@@ -1081,32 +1177,11 @@ fn stage_build_chat<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> S
             vec![resolved_lang.to_string()]
         };
 
-        let diarization_speaker_count = ctx
-            .speaker_segments
-            .as_deref()
-            .map(unique_diarization_speaker_count)
-            .unwrap_or(0);
-        let participant_ids = generate_participant_ids(
-            utterances,
-            if ctx.opts.auto_speakers {
-                diarization_speaker_count
-            } else {
-                ctx.opts.num_speakers.max(diarization_speaker_count)
-            },
-        );
-        let transcript = build_chat::transcript_from_asr_utterances(
-            utterances,
-            &participant_ids,
+        let transcript = build_chat::NamedAsrUtterances::numbered(utterances).into_transcript(
             &langs,
             ctx.opts.media_name.as_deref(),
             ctx.opts.write_wor,
-        )
-        .map_err(|e| {
-            ServerError::Validation(format!(
-                "Failed to build transcript description \
-                 (ASR token failed CHAT-legality): {e}"
-            ))
-        })?;
+        )?;
 
         // The gate hands back every token it refused and we emitted anyway.
         // Saying so here is the point: an operator reading this run now learns
@@ -1118,20 +1193,32 @@ fn stage_build_chat<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> S
         report_language_invalid_words(ctx, &transcript.language_invalid);
         let desc = transcript.description;
 
-        let mut chat_file = build_chat::build_chat(&desc)
-            .map_err(|e| ServerError::Validation(format!("Failed to build CHAT: {e}")))?;
+        let mut chat_file = build_chat::build_chat(&desc).map_err(|error| match error {
+            // Neither malformed input nor an internal fault: words reached CHAT
+            // assembly and none of them was content, which is what a Cantonese
+            // engine that recognized only punctuation produces. Carried as the
+            // typed emptiness so the failure names the stage, rather than being
+            // flattened into a validation message.
+            build_chat::BuildChatError::NoUtterances => {
+                ServerError::EmptyTranscription(EmptyTranscription::ChatBuild { described: 0 })
+            }
+            build_chat::BuildChatError::NoUtteranceSurvivedBuild { described } => {
+                ServerError::EmptyTranscription(EmptyTranscription::ChatBuild { described })
+            }
+            other => ServerError::Validation(format!("Failed to build CHAT: {other}")),
+        })?;
         // Inject processing provenance comment.
-        let asr_engine = ctx.asr_provenance_name();
+        let asr = ctx.asr_identity();
         let provenance = crate::provenance::transcribe_provenance(
-            resolved_lang.as_ref(),
-            asr_engine,
+            &resolved_lang,
+            &asr,
             ctx.opts.diarize,
             ctx.opts.write_wor,
         );
         crate::provenance::inject_provenance(&mut chat_file, &provenance);
 
         // Inject human-readable "unchecked ASR" warning (a user's workflow depends on this).
-        crate::provenance::inject_unchecked_warning(&mut chat_file, asr_engine);
+        crate::provenance::inject_unchecked_warning(&mut chat_file, &asr);
 
         let chat_text = to_chat_string(&chat_file);
         let filename = ctx
@@ -1215,16 +1302,6 @@ fn report_language_invalid_words(
          surfaces kept verbatim for human review"
     );
     ctx.dumper.dump_language_invalid_words(filename, &records);
-}
-
-fn unique_diarization_speaker_count(segments: &[SpeakerSegmentV2]) -> usize {
-    let mut seen: Vec<&str> = Vec::new();
-    for segment in segments {
-        if !seen.contains(&segment.speaker.as_str()) {
-            seen.push(segment.speaker.as_str());
-        }
-    }
-    seen.len()
 }
 
 fn stage_run_utseg<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> StageFuture<'a> {
@@ -1335,7 +1412,7 @@ fn stage_serialize<'a, 'ctx>(ctx: &'a mut TranscribePipelineContext<'ctx>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{DurationSeconds, EngineVersion};
+    use crate::api::DurationSeconds;
     use crate::cache::UtteranceCache;
     use crate::revai::{
         AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RevAsrEvidenceCacheOutcome,
@@ -1382,23 +1459,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prechat_utterance_models_cover_documented_supported_codes() {
-        assert!(uses_prechat_utterance_model(&LanguageCode3::eng()));
-        let cmn = LanguageCode3::try_new("cmn").expect("cmn should be a valid ISO-639-3 code");
-        assert!(uses_prechat_utterance_model(&cmn));
-        assert!(uses_prechat_utterance_model(&LanguageCode3::zho()));
-        assert!(uses_prechat_utterance_model(&LanguageCode3::yue()));
-    }
-
     fn test_transcribe_options(speaker_backend: Option<SpeakerBackendV2>) -> TranscribeOptions {
         TranscribeOptions {
-            auto_speakers: false,
-            backend: AsrBackend::RustRevAi,
+            asr: crate::transcribe::TranscribeAsrPlan::from_request(
+                AsrBackend::RustRevAi,
+                false,
+                2,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap(),
             diarize: true,
             speaker_backend,
             lang: LanguageCode3::eng().into(),
-            num_speakers: 2,
             with_utseg: false,
             with_morphosyntax: false,
             cache_policies: crate::transcribe::TranscribeCachePolicies::uniform(
@@ -1450,8 +1522,10 @@ mod tests {
     /// Assert that two transcribe outputs differ, if at all, only in the
     /// execution timestamp of an otherwise identical provenance receipt.
     fn assert_same_transcribe_semantics(left: &str, right: &str) {
-        let left_provenance = crate::provenance::extract_provenance(left);
-        let right_provenance = crate::provenance::extract_provenance(right);
+        let left_provenance =
+            crate::provenance::extract_provenance(left).expect("left stamps parse");
+        let right_provenance =
+            crate::provenance::extract_provenance(right).expect("right stamps parse");
         assert_eq!(
             left_provenance.len(),
             1,
@@ -1491,7 +1565,6 @@ mod tests {
         let cold_debug = tempdir.path().join("cold-debug");
         let replay_debug = tempdir.path().join("replay-debug");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-asr");
         let inference = CountingRevInference {
             calls: AtomicUsize::new(0),
         };
@@ -1503,7 +1576,7 @@ mod tests {
             .expect("cold cache");
         let cold = run_transcribe_pipeline_with_rev_inference(
             &audio_path,
-            PipelineServices::new(&pool, &cache, &engine_version),
+            PipelineServices::new(&pool, &cache),
             &opts,
             None,
             Some(&cold_debug),
@@ -1518,7 +1591,7 @@ mod tests {
             .expect("reopened cache");
         let replayed = run_transcribe_pipeline_with_rev_inference(
             &audio_path,
-            PipelineServices::new(&pool, &reopened, &engine_version),
+            PipelineServices::new(&pool, &reopened),
             &opts,
             None,
             Some(&replay_debug),
@@ -1607,6 +1680,7 @@ mod tests {
                     },
                 ],
                 lang: LanguageCode3::fra(),
+                model: None,
                 source_monologues: None,
             })
             .expect("ASR JSON"),
@@ -1634,13 +1708,12 @@ mod tests {
             .await
             .expect("cache");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-replay");
         let mut opts = test_transcribe_options(Some(SpeakerBackendV2::PyannoteAi));
         opts.lang = LanguageCode3::fra().into();
         let chat = run_transcribe_pipeline_with_legacy_replay(
             replay,
             TranscribeUtsegExecution::production(opts.with_utseg),
-            PipelineServices::new(&pool, &cache, &engine_version),
+            PipelineServices::new(&pool, &cache),
             &opts,
             None,
             None,
@@ -1664,6 +1737,7 @@ mod tests {
                 confidence: None,
             }],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         };
 
@@ -1678,6 +1752,7 @@ mod tests {
         let response = AsrResponse {
             tokens: vec![],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         };
 
@@ -1694,8 +1769,7 @@ mod tests {
             .await
             .expect("cache");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-asr");
-        let services = PipelineServices::new(&pool, &cache, &engine_version);
+        let services = PipelineServices::new(&pool, &cache);
         let audio_path = tempdir.path().join("sample.wav");
         let opts = test_transcribe_options(None);
         let mut ctx = TranscribePipelineContext::new_with_rev_inference(
@@ -1715,6 +1789,7 @@ mod tests {
                 confidence: None,
             }],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         });
 
@@ -1739,8 +1814,7 @@ mod tests {
             .await
             .expect("cache");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-asr");
-        let services = PipelineServices::new(&pool, &cache, &engine_version);
+        let services = PipelineServices::new(&pool, &cache);
         let audio_path = tempdir.path().join("sample.wav");
         let mut opts = test_transcribe_options(None);
         opts.diarize = false;
@@ -1771,6 +1845,7 @@ mod tests {
                 },
             ],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         });
 
@@ -1792,8 +1867,7 @@ mod tests {
             .await
             .expect("cache");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-asr");
-        let services = PipelineServices::new(&pool, &cache, &engine_version);
+        let services = PipelineServices::new(&pool, &cache);
         let audio_path = tempdir.path().join("sample.wav");
         let mut opts = test_transcribe_options(Some(SpeakerBackendV2::Pyannote));
         opts.lang = LanguageCode3::fra().into();
@@ -1831,6 +1905,7 @@ mod tests {
                 },
             ],
             lang: LanguageCode3::fra(),
+            model: None,
             source_monologues: None,
         });
         ctx.speaker_segments = Some(vec![
@@ -1855,6 +1930,53 @@ mod tests {
         assert_eq!(chat.lines().filter(|line| line.starts_with('*')).count(), 2);
     }
 
+    /// Both preparation entry points give one answer.
+    ///
+    /// The untraced path IS the transform's function now, so this holds the
+    /// traced path to it. Number expansion is where the two could drift: the
+    /// traced path skips `expand_number` for tokens carrying no ASCII digit, so
+    /// a token that expanded without one would diverge silently.
+    #[test]
+    fn snapshot_and_plain_preparation_agree() {
+        use batchalign_transform::asr_postprocess::{
+            AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
+            SpeakerIndex,
+        };
+
+        let element = |value: &str, ts: f64, end_ts: f64| AsrElement {
+            value: AsrRawText::new(value),
+            ts: AsrTimestampSecs::from(Some(ts)),
+            end_ts: AsrTimestampSecs::from(Some(end_ts)),
+            kind: AsrElementKind::Text,
+        };
+        let output = AsrOutput {
+            monologues: vec![AsrMonologue {
+                speaker: SpeakerIndex(0),
+                elements: vec![
+                    element("I", 0.0, 0.2),
+                    element("counted", 0.2, 0.6),
+                    element("100", 0.6, 1.0),
+                    element("sheep", 1.0, 1.4),
+                    element("in", 1.4, 1.6),
+                    element("2001", 1.6, 2.2),
+                    element(".", 2.2, 2.3),
+                ],
+            }],
+        };
+
+        let plain = prepare_asr_chunks(&output, "eng").expect("test: ASR post-processing must not refuse this input");
+        let mut snapshot = AsrPipelineSnapshot::default();
+        let traced = prepare_asr_chunks_with_snapshot(&output, "eng", Some(&mut snapshot)).expect("test: ASR post-processing must not refuse this input");
+
+        assert!(
+            plain
+                .iter()
+                .any(|chunk| chunk.words.iter().any(|word| word.text.as_str() == "hundred")),
+            "the fixture must actually expand a number, or it proves nothing: {plain:?}"
+        );
+        assert_eq!(plain, traced, "one preparation step, two entry points");
+    }
+
     /// When opts.lang is "auto", stage_build_chat must resolve to the
     /// ASR-detected language for CHAT headers (regression test for job
     /// 696870c7-02b where `@Languages: auto` leaked into output).
@@ -1865,8 +1987,7 @@ mod tests {
             .await
             .expect("cache");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-asr");
-        let services = PipelineServices::new(&pool, &cache, &engine_version);
+        let services = PipelineServices::new(&pool, &cache);
         let audio_path = tempdir.path().join("sample.wav");
 
         // Opts with lang="auto": simulates --lang auto from CLI
@@ -1893,6 +2014,7 @@ mod tests {
                 confidence: None,
             }],
             lang: LanguageCode3::spa(),
+            model: None,
             source_monologues: None,
         });
 
@@ -1926,8 +2048,7 @@ mod tests {
             .await
             .expect("cache");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-asr");
-        let services = PipelineServices::new(&pool, &cache, &engine_version);
+        let services = PipelineServices::new(&pool, &cache);
         let audio_path = tempdir.path().join("sample.wav");
 
         let mut opts = test_transcribe_options(None);
@@ -1951,6 +2072,7 @@ mod tests {
                 confidence: None,
             }],
             lang: LanguageCode3::spa(),
+            model: None,
             source_monologues: None,
         });
 
@@ -1958,17 +2080,27 @@ mod tests {
         assert_eq!(ctx.resolved_lang, Some(LanguageCode3::spa()));
     }
 
-    /// When opts.lang is "auto" and ASR returns empty tokens,
-    /// build_chat should still resolve to the ASR response language.
+    /// RED FIRST (2026-09-16): an ASR response with no tokens refuses the job,
+    /// naming the stage that produced nothing.
+    ///
+    /// This used to return `Ok(())`, and `stage_build_chat` then wrote a
+    /// headers-only CHAT file, so a run that recognized not one word finished
+    /// as a completed job carrying an empty transcript.
+    ///
+    /// It replaces `build_chat_stage_resolves_auto_for_empty_response`, which
+    /// asserted that the empty file carried the resolved language rather than
+    /// `auto`. There is no empty file to make that assertion about any more.
+    /// The property that test guarded, that `auto` is never stamped into
+    /// `@Languages`, is held on the path that still writes a file by
+    /// `build_chat_stage_resolves_auto_to_detected_language`.
     #[tokio::test]
-    async fn build_chat_stage_resolves_auto_for_empty_response() {
+    async fn an_asr_response_with_no_tokens_is_refused_naming_the_asr_stage() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
             .await
             .expect("cache");
         let pool = WorkerPool::new(PoolConfig::default());
-        let engine_version = EngineVersion::from("test-asr");
-        let services = PipelineServices::new(&pool, &cache, &engine_version);
+        let services = PipelineServices::new(&pool, &cache);
         let audio_path = tempdir.path().join("sample.wav");
 
         let mut opts = test_transcribe_options(None);
@@ -1985,23 +2117,23 @@ mod tests {
         ctx.asr_response = Some(AsrResponse {
             tokens: vec![],
             lang: LanguageCode3::fra(),
+            model: None,
             source_monologues: None,
         });
 
-        stage_build_chat(&mut ctx).await.expect("build_chat");
-
-        let chat_text = ctx.chat_text.as_deref().expect("CHAT text should be set");
-        let languages_line = chat_text
-            .lines()
-            .find(|l| l.starts_with("@Languages:"))
-            .expect("@Languages header missing");
+        let refusal = stage_asr_postprocess(&mut ctx)
+            .await
+            .expect_err("an ASR response with no tokens must refuse the job");
         assert!(
-            languages_line.contains("fra"),
-            "empty-response @Languages should contain 'fra', got: {languages_line}"
+            matches!(
+                refusal,
+                ServerError::EmptyTranscription(EmptyTranscription::Asr)
+            ),
+            "the refusal must name the ASR stage, got: {refusal:?}"
         );
         assert!(
-            !languages_line.contains("auto"),
-            "empty-response @Languages must NOT contain 'auto', got: {languages_line}"
+            ctx.chat_text.is_none(),
+            "nothing may be written for a recording with no recognized words"
         );
     }
 }

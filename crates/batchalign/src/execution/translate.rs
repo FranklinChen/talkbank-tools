@@ -13,10 +13,13 @@ use super::worker_gateway::WorkerGateway;
 /// **BA2 parity (2026-05-03 fix).** BA2's translate reads each file's
 /// `doc.langs[0]` as the source language for inference
 /// (`~/batchalign2-master/batchalign/pipelines/translate/seamless.py:40`).
-/// Earlier BA3 used `dispatch_simple_batched_text_job` which pulled one
+/// Earlier BA3 used a shared batched-text dispatch which pulled one
 /// job-level lang and pooled all files into a single inference call
 /// the same shape that caused the 2026-05-03 morphotag incident
-/// (English Stanza silently applied to non-English files).
+/// (English Stanza silently applied to non-English files). That shared
+/// path has since been deleted outright: coref was its last caller, and
+/// the resolved job-level language it demanded is one a per-file command
+/// can never carry, so every coref job was refused before dispatch.
 ///
 /// This dispatch parses each file's `@Languages:` header and resolves the
 /// per-file source language via `resolve_per_file_lang`. Files whose
@@ -143,7 +146,8 @@ mod tests {
             _lang: &LanguageCode3,
             _mwt: &MwtDict,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
             unreachable!()
         }
 
@@ -197,7 +201,6 @@ mod tests {
         async fn coref_batch(
             &self,
             _files: &[TextBatchFileInput],
-            _lang: &LanguageCode3,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             unreachable!()

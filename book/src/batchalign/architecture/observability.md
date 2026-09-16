@@ -1,7 +1,7 @@
 # Observability Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-01 06:40 EDT
+**Last updated:** 2026-09-15 18:27 EDT
 
 ## Release boundary
 
@@ -80,6 +80,19 @@ before the selected worker reports the version used for cache identity. Shared
 stdio and TCP workers serialize control operations across the entire
 request/response round trip, so an `ensure_task` response cannot be delivered
 to a concurrent capability request.
+
+The pinned ASR composition is NOT part of `WorkerKey`. It is injected at the
+single spawn-argv site instead, and the reason is the key's own contract: the
+composition is a pure function of the target, the language and the engine
+overrides, which are exactly the three things the key already carries. Adding
+it to the key would fragment the key without distinguishing anything, because
+two keys that agreed on those three fields could never disagree on the
+composition. Deriving it separately for the capability probe and for execute
+would be worse still: those two derivations could drift, and the invariant that
+the capability key equals the execute key would hold only by coincidence.
+Injecting once at spawn keeps that equality a consequence of where the value is
+computed rather than a property somebody has to remember, and the worker then
+loads the composition once per process rather than re-reading it per request.
 
 ```mermaid
 flowchart LR
@@ -470,6 +483,39 @@ second orchestration system.
 When the server restarts mid-job, persisted rows can move through
 `Running → Interrupted → Queued` during recovery. That state machine is the
 observable source of truth for whether work should resume.
+
+### Worker capability admissions
+
+`GET /health.worker_capability_admissions` lists, per worker key that has
+reported, the latest outcome of admitting its capability report
+(`WorkerPool::record_capabilities`): `admitted` with the infer tasks the worker
+supports, or `refused` with a typed reason naming the task:
+`missing_engine_report` (an advertised task with no entry),
+`unadvertised_engine_report` (an entry for a task that was not advertised) or
+`engine_named_for_non_fa_task` (an engine name for a task other than forced
+alignment, whose entries must be `null`). A refused worker is not used for
+dispatch until it reports again and is admitted, and this list is where an
+operator sees why, rather than only in a log line.
+
+### Refused registry daemons
+
+`GET /health.refused_registry_workers` lists the registry daemons the latest
+discovery sweep found alive and refused to adopt because their registry entry
+names another build, or no build (`worker/registry.rs`). Each entry gives the
+daemon's worker key as its registry entry names it, its pid, and a typed
+reason:
+
+```json
+{"worker_key": "profile:stanza:eng", "pid": 4242,
+ "reason": {"kind": "foreign_build", "reported_build": "<their build>", "server_build": "<this build>"}}
+{"worker_key": "profile:gpu:eng", "pid": 4343,
+ "reason": {"kind": "unreported_build", "server_build": "<this build>"}}
+```
+
+A refused daemon is neither reaped nor removed from the registry, because it
+may belong to a server of its own build. The remedy is to restart it with this
+server's build: `batchalign3 worker stop`, then `batchalign3 worker start` for
+its profile and language. Each sweep replaces the list.
 
 ### Content-addressed Python worker identity
 

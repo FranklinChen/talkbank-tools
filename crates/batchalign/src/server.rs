@@ -124,7 +124,7 @@ pub async fn create_app_with_prepared_workers(
             .map_err(|e| error::ServerError::Validation(format!("cache init failed: {e}")))?,
     );
     let db = Arc::new(db);
-    let execution_runtime = workers.resolve_execution_runtime(cache.clone())?;
+    let execution_runtime = workers.resolve_execution_runtime(cache.clone());
     info!("Backend: local");
     let backend_bootstrap: ServerBackendBootstrap = bootstrap_local_server_backend(
         config.clone(),
@@ -139,9 +139,7 @@ pub async fn create_app_with_prepared_workers(
             "Jobs loaded from DB"
         );
     }
-    let capability_snapshot = execution_runtime.capability_snapshot;
-    let capabilities = capability_snapshot.capabilities;
-    let infer_tasks = capability_snapshot.infer_tasks;
+    let capabilities = execution_runtime.capability_snapshot;
     let pool = workers.pool().clone();
 
     if backend_bootstrap.queued_jobs > 0 {
@@ -161,11 +159,7 @@ pub async fn create_app_with_prepared_workers(
         control: AppControlPlane {
             backend: backend_bootstrap.backend,
         },
-        workers: WorkerSubsystem {
-            pool,
-            capabilities,
-            infer_tasks,
-        },
+        workers: WorkerSubsystem { pool, capabilities },
         environment: AppEnvironment {
             config,
             media: MediaResolver::new(),
@@ -218,7 +212,7 @@ pub async fn create_test_app_with_prepared_workers(
             .map_err(|e| error::ServerError::Validation(format!("cache init failed: {e}")))?,
     );
     let db = Arc::new(db);
-    let execution_runtime = workers.resolve_execution_runtime(cache.clone())?;
+    let execution_runtime = workers.resolve_execution_runtime(cache.clone());
     let backend_bootstrap: ServerBackendBootstrap = bootstrap_local_server_backend(
         config.clone(),
         db,
@@ -233,9 +227,7 @@ pub async fn create_test_app_with_prepared_workers(
             "Jobs loaded from DB (local backend)"
         );
     }
-    let capability_snapshot = execution_runtime.capability_snapshot;
-    let capabilities = capability_snapshot.capabilities;
-    let infer_tasks = capability_snapshot.infer_tasks;
+    let capabilities = execution_runtime.capability_snapshot;
     let pool = workers.pool().clone();
 
     let bug_reports_dir = layout.bug_reports_dir().to_string_lossy().into_owned();
@@ -248,11 +240,7 @@ pub async fn create_test_app_with_prepared_workers(
         control: AppControlPlane {
             backend: backend_bootstrap.backend,
         },
-        workers: WorkerSubsystem {
-            pool,
-            capabilities,
-            infer_tasks,
-        },
+        workers: WorkerSubsystem { pool, capabilities },
         environment: AppEnvironment {
             config,
             media: MediaResolver::new(),

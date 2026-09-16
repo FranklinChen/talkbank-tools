@@ -7,9 +7,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from batchalign.inference.morphosyntax import (
+    RepairedSentence,
     _is_bogus_lemma,
     batch_infer_morphosyntax,
-    validate_ud_words,
 )
 from batchalign.providers import BatchInferRequest
 from batchalign.worker._pipeline_cache import (
@@ -69,11 +69,22 @@ class _RecordingNlp:
         return _FakeDoc(self.rows)
 
 
+def _model(lang: str) -> dict[str, Any]:
+    """The model identity the producer attaches to every successful item."""
+    from batchalign.worker._types import _state
+
+    return {
+        "stanza_version": _state.stanza_version(),
+        "lang": lang,
+        "pipeline": "standard",
+    }
+
+
 def _raw_sentence(words: list[str]) -> list[dict[str, Any]]:
     """Build one raw-Stanza-like sentence AS IT LEAVES THE PIPELINE.
 
     Includes the optional fields as explicit ``None``. Stanza itself omits
-    them, but every sentence now passes through ``validate_ud_words``, whose
+    them, but every sentence now passes through ``RepairedSentence``, whose
     ``UdWord.model_dump()`` materializes the full model. Rust's ``UdWord``
     declares ``xpos``/``feats``/``deps``/``misc`` as ``Option``, so explicit
     nulls deserialize identically to absent keys.
@@ -103,6 +114,21 @@ def _raw_sentence(words: list[str]) -> list[dict[str, Any]]:
     return rows
 
 
+def _analyzed(words: list[str], lang: str) -> dict[str, Any]:
+    """The analyzed item the producer builds for one utterance of *words*.
+
+    One builder rather than the literal repeated at each assertion: every
+    field the wire gains lands here once, and an item that forgot one could
+    not be asserted equal to anything.
+    """
+    return {
+        "kind": "analyzed",
+        "raw_sentences": [_raw_sentence(words)],
+        "model": _model(lang),
+        "repairs": [],
+    }
+
+
 def test_is_bogus_lemma_flags_punctuation_only_lemmas() -> None:
     """Bogus-lemma detection should ignore surface matches and real empty lemmas."""
 
@@ -112,10 +138,10 @@ def test_is_bogus_lemma_flags_punctuation_only_lemmas() -> None:
     assert _is_bogus_lemma("?!", "?!") is False
 
 
-def test_validate_ud_words_falls_back_from_bogus_punctuation_lemma() -> None:
+def test_repaired_sentence_falls_back_from_bogus_punctuation_lemma() -> None:
     """Punctuation-only lemmas for lexical words should fall back to the surface form."""
 
-    sentences = [
+    repaired = RepairedSentence(
         [
             {
                 "id": 1,
@@ -126,29 +152,31 @@ def test_validate_ud_words_falls_back_from_bogus_punctuation_lemma() -> None:
                 "deprel": "root",
             }
         ]
-    ]
+    )
 
-    validate_ud_words(sentences)
+    assert repaired.words[0]["lemma"] == "bonjour"
+    assert repaired.words[0]["deprel"] == "root"
+    assert repaired.repairs == ()
 
-    assert sentences[0][0]["lemma"] == "bonjour"
-    assert sentences[0][0]["deprel"] == "root"
 
+def test_repaired_sentence_coerces_tuple_ids_without_touching_the_input() -> None:
+    """Tuple IDs from Stanza are normalized, and the caller's rows are left alone."""
 
-def test_validate_ud_words_coerces_tuple_ids_inside_sentence_rows() -> None:
-    """Tuple IDs from Stanza should be normalized before row validation."""
+    rows: list[dict[str, Any]] = [{"id": (2, 3), "text": "au"}]
 
-    sentences = [[{"id": (2, 3), "text": "au"}]]
+    repaired = RepairedSentence(rows)
 
-    validate_ud_words(sentences)
-
-    assert sentences[0][0]["id"] == [2, 3]
-    assert sentences[0][0]["lemma"] == ""
+    assert repaired.words[0]["id"] == [2, 3]
+    assert repaired.words[0]["lemma"] == ""
+    assert rows[0]["id"] == (2, 3), "the document handed in is not ours to rewrite"
 
 
 def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) -> None:
     """Batch morphosyntax should group by language, set tokenizer context, and lock."""
 
-    monotonic = iter([10.0, 13.5])
+    # t0, then a start/end pair for each of the three analyzed items, then the
+    # batch total for the log line. Each item reports its own pair.
+    monotonic = iter([10.0, 10.0, 10.5, 10.5, 11.25, 11.25, 12.0, 13.5])
     monkeypatch.setattr(
         "batchalign.inference.morphosyntax.time.monotonic",
         lambda: next(monotonic),
@@ -213,18 +241,26 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
     assert fra_nlp.calls == [("salut .", [["salut", "."]])]
     assert eng_ctx.original_words == []
     assert fra_ctx.original_words == []
-    assert response.results[0].result == {
-        "raw_sentences": [_raw_sentence(["hello", "world"])]
-    }
-    assert response.results[0].elapsed_s == 3.5
-    assert response.results[1].result == {
-        "raw_sentences": [_raw_sentence(["goodbye", "moon"])]
-    }
-    assert response.results[2].result == {"raw_sentences": [_raw_sentence(["salut"])]}
+    assert response.results[0].result == _analyzed(["hello", "world"], "eng")
+    assert response.results[1].result == _analyzed(["goodbye", "moon"], "eng")
+    # Each item names the language whose pipeline analyzed it.
+    assert response.results[2].result == _analyzed(["salut"], "fra")
     # Each of the three above asserts the CHAT words only: the terminator the
-    # fakes returned is gone, which is the contract.
-    assert response.results[3].result == {"sentences": []}
+    # fakes returned is gone, which is the contract. A wordless utterance
+    # names no model: none ran on it.
+    assert response.results[3].result == {"kind": "no_words"}
     assert response.results[4].error == "Invalid batch item"
+    # Every item reports the time of ITS OWN work. The batch total, 3.5, is a
+    # fact about the batch and is written onto no item: stamping it on the
+    # first position inflated that item by every other item's work and left
+    # the rest at 0.0, where neither was distinguishable from an item that
+    # genuinely took no measurable time. An item with no attributable work
+    # still reports 0.0, and means it.
+    assert response.results[0].elapsed_s == 0.5
+    assert response.results[1].elapsed_s == 0.75
+    assert response.results[2].elapsed_s == 0.75
+    assert response.results[3].elapsed_s == 0.0
+    assert response.results[4].elapsed_s == 0.0
 
 
 def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure(
@@ -285,7 +321,10 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
         response.results[0].error
         == "Stanza pipeline raised for language fra: stanza exploded"
     )
-    assert response.results[0].elapsed_s == 1.0
+    # The group raised before any per-item work ran, so no duration is
+    # attributable to this item. 0.0 is the honest report, where the batch's
+    # own second used to be stamped onto the first position.
+    assert response.results[0].elapsed_s == 0.0
 
 
 def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
@@ -304,7 +343,10 @@ def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
     is scoped to its own group.
     """
 
-    monotonic = iter([1.0, 2.0])
+    # t0, then the surviving English item's own start/end pair, then the batch
+    # total. The French group raises before any per-item work, so it consumes
+    # none of these.
+    monotonic = iter([1.0, 2.0, 2.5, 3.0])
     monkeypatch.setattr(
         "batchalign.inference.morphosyntax.time.monotonic",
         lambda: next(monotonic),
@@ -361,7 +403,13 @@ def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
 
     survivor = response.results[1]
     assert survivor.error is None
-    assert survivor.result == {"raw_sentences": [_raw_sentence(["hello", "world"])]}
+    assert survivor.result == _analyzed(["hello", "world"], "eng")
+    # Timing is scoped the same way the failure is: the survivor reports the
+    # work it did, and the failed group's items report 0.0 because none of
+    # their work ran.
+    assert survivor.elapsed_s == 0.5
+    assert response.results[0].elapsed_s == 0.0
+    assert response.results[2].elapsed_s == 0.0
 
 
 def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
@@ -376,7 +424,8 @@ def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
     would fail, which is a worse outcome than the memory ceiling buys.
     """
 
-    monotonic = iter([40.0, 41.0])
+    # t0, the reloaded item's own start/end pair, then the batch total.
+    monotonic = iter([40.0, 41.0, 41.5, 42.0])
     monkeypatch.setattr(
         "batchalign.inference.morphosyntax.time.monotonic",
         lambda: next(monotonic),
@@ -416,7 +465,10 @@ def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
 
     assert loaded == ["fra"], "the loader must be asked exactly once"
     assert response.results[0].error is None
-    assert response.results[0].result == {"raw_sentences": [_raw_sentence(["salut"])]}
+    assert response.results[0].result == _analyzed(["salut"], "fra")
+    # The reload costs the group, not the item: this item reports only the
+    # work that ran for it.
+    assert response.results[0].elapsed_s == 0.5
 
 
 def test_batch_infer_morphosyntax_reports_why_a_reload_failed(monkeypatch) -> None:
@@ -566,7 +618,8 @@ def test_batch_infer_morphosyntax_returns_early_when_no_nonempty_items(
         free_threaded=False,
     )
 
-    assert response.results[0].result == {"sentences": []}
+    # A wordless utterance is its own outcome and names no model.
+    assert response.results[0].result == {"kind": "no_words"}
     assert response.results[0].elapsed_s == 0.0
     assert response.results[1].error == "Invalid batch item"
 
@@ -574,8 +627,8 @@ def test_batch_infer_morphosyntax_returns_early_when_no_nonempty_items(
 def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() -> None:
     """The PRODUCTION path must validate Stanza's output, not just the tests.
 
-    `validate_ud_words` and its `<PAD>` sanitizer existed and were unit-tested
-    for months, yet `PAD` and `IOB` both reached the published corpora. The
+    The relation validators and the `<PAD>` sanitizer existed and were
+    unit-tested for months, yet `PAD` and `IOB` both reached the corpora. The
     reason: nothing on the live path ever called them. `batch_infer_morphosyntax`
     took `doc.to_dict()` straight into the response, so every validator in this
     module was dead code the moment real data flowed.
@@ -645,6 +698,18 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
         "the production path is not validating Stanza output"
     )
     assert deprels[1] == "iobj", f"expected iob normalized to iobj, got {deprels!r}"
+    # And the rewrite is REPORTED, not merely made. Until this field existed
+    # the only evidence a transcript had been repaired was a log line, so
+    # nothing downstream could count the repairs, attribute them, or say in
+    # the file itself that any had happened.
+    assert resp.results[0].result["repairs"] == [
+        {
+            "kind": "relation_alias",
+            "word": "ne",
+            "from_relation": "iob",
+            "to_relation": "iobj",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -727,3 +792,64 @@ def test_terminator_word_is_stripped_by_position_not_by_recognition() -> None:
     assert [w["text"] for w in returned] == ["hello"], (
         "the terminator must not survive into the payload Rust maps to %mor"
     )
+
+
+def test_pipeline_variant_names_the_procedure_that_runs() -> None:
+    """The reported variant is the same decision that selects the procedure."""
+    from batchalign.inference.morphosyntax import _pipeline_variant
+    from batchalign.worker._types_v2 import MorphosyntaxPipelineV2
+
+    assert (
+        _pipeline_variant(lang_code="cmn", mandarin_retokenize=True)
+        is MorphosyntaxPipelineV2.MANDARIN_RETOKENIZE
+    )
+    assert (
+        _pipeline_variant(lang_code="yue", mandarin_retokenize=False)
+        is MorphosyntaxPipelineV2.CANTONESE_PYCANTONESE_POS
+    )
+    # A Mandarin group whose retokenize pipeline did not load ran standard.
+    assert (
+        _pipeline_variant(lang_code="cmn", mandarin_retokenize=False)
+        is MorphosyntaxPipelineV2.STANDARD
+    )
+
+
+def test_batch_infer_morphosyntax_names_the_cantonese_variant(monkeypatch) -> None:
+    """A Cantonese analysis reports the PyCantonese POS variant it ran."""
+    overridden: list[object] = []
+
+    def _record_override(sentence):
+        overridden.append(sentence)
+        return sentence
+
+    monkeypatch.setattr(
+        "batchalign.inference.morphosyntax._override_pos_with_pycantonese",
+        _record_override,
+    )
+    yue_ctx = SimpleNamespace(original_words=[])
+    yue_nlp = _RecordingNlp(yue_ctx, [_raw_sentence(["食", "."])])
+
+    response = batch_infer_morphosyntax(
+        BatchInferRequest(
+            task="morphosyntax",
+            lang="yue",
+            items=[
+                {
+                    "words": ["食"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "lang": "yue",
+                }
+            ],
+        ),
+        static_pipelines({"yue": yue_nlp}, {"yue": yue_ctx}),
+        _RecordingLock(),
+        free_threaded=True,
+    )
+
+    result = response.results[0].result
+    assert response.results[0].error is None
+    assert isinstance(result, dict)
+    assert result["kind"] == "analyzed"
+    assert result["model"]["pipeline"] == "cantonese_pycantonese_pos"
+    assert len(overridden) == 1, "the override runs exactly when the variant says so"

@@ -35,6 +35,7 @@
 //!   cross the Rust/Python boundary.
 
 mod batch;
+pub(crate) mod identity;
 mod worker;
 
 use crate::chat_ops::LanguageCode;
@@ -333,6 +334,11 @@ pub(crate) async fn process_morphosyntax_incremental(
 
     // Step 4: Infer for the filtered payloads.
     //
+    // The stamp is written only on this path, where a model actually ran. The
+    // two earlier exits reanalyzed nothing, so they leave whatever stamp the
+    // document already carries (it names the models behind the tiers they
+    // preserved) instead of replacing it with one that names no engine.
+    let mut applied = identity::AppliedAnalyses::none();
     if !filtered_payloads.is_empty() {
         let pos_hint_evidence = params
             .policy
@@ -351,7 +357,12 @@ pub(crate) async fn process_morphosyntax_incremental(
         )
         .await
         {
-            Ok(responses) => {
+            Ok(admitted) => {
+                // The models behind the reanalyzed utterances (and the L2
+                // models below) are what this run's stamp names, and the
+                // relations they repaired are what it counts.
+                let (responses, reanalyzed) = identity::AppliedAnalyses::take_applied(admitted);
+                applied.extend(reanalyzed);
                 // Extract L2 deferred positions before inject_results
                 // takes ownership of misses/responses.
                 let l2_deferred = if params.policy.l2.should_analyze() {
@@ -374,13 +385,15 @@ pub(crate) async fn process_morphosyntax_incremental(
                     Ok(injection_result) => {
                         // Secondary L2 dispatch for @s words.
                         if !l2_deferred.is_empty() {
-                            dispatch_secondary_l2(
-                                &mut after_file,
-                                &l2_deferred,
-                                services,
-                                "incremental",
-                            )
-                            .await;
+                            applied.extend(
+                                dispatch_secondary_l2(
+                                    &mut after_file,
+                                    &l2_deferred,
+                                    services,
+                                    "incremental",
+                                )
+                                .await,
+                            );
                         }
                         if let Some(evidence) = pos_hint_evidence {
                             let outcome = apply_pos_hint_evidence(
@@ -409,6 +422,18 @@ pub(crate) async fn process_morphosyntax_incremental(
         }
     }
 
+    // A run whose reanalysis ran no model (every changed utterance was
+    // wordless or in an unsupported language) leaves the stamp the document
+    // already carries. One that did names the models behind the tiers kept
+    // from `before_file` together with the ones that ran now.
+    if let Some(provenance) = crate::provenance::incremental_morphotag_provenance(
+        &before_file,
+        params.lang,
+        &applied,
+        retokenize,
+    )? {
+        crate::provenance::inject_provenance(&mut after_file, &provenance);
+    }
     gate_incremental_output(after_file)
 }
 

@@ -25,9 +25,9 @@ pub(crate) enum LegacyProjectedAsrProducer {
 }
 
 impl LegacyProjectedAsrProducer {
-    pub(crate) const fn provenance_name(self) -> &'static str {
+    pub(crate) const fn provenance_name(self) -> crate::api::StampSafeText {
         match self {
-            Self::RevAi => "rev",
+            Self::RevAi => const { crate::api::StampSafeText::from_static("rev") },
         }
     }
 }
@@ -473,6 +473,7 @@ mod tests {
                 confidence: Some(0.9),
             }],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         }
     }
@@ -525,7 +526,7 @@ mod tests {
         );
         assert_eq!(admitted.asr_response().tokens[0].text, "hello");
         assert_eq!(admitted.speaker_segments().map(<[_]>::len), Some(1));
-        assert_eq!(admitted.producer().provenance_name(), "rev");
+        assert_eq!(admitted.producer().provenance_name().as_str(), "rev");
         assert_eq!(admitted.manifest_blake3().len(), 64);
     }
 

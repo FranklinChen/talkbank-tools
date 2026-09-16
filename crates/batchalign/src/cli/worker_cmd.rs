@@ -43,6 +43,13 @@ fn start(args: &WorkerStartArgs, verbose: u8) -> Result<(), CliError> {
     }
 
     let mut cmd = Command::new(&python_path);
+    // The daemon records this build in its registry entry; a server of a
+    // different build refuses to adopt it rather than trust its engine
+    // identities and wire contract.
+    cmd.env(
+        crate::worker::registry::BUILD_IDENTITY_ENV,
+        crate::build_hash(),
+    );
     cmd.arg("-c")
         .arg("import sys; sys.argv = ['batchalign-worker'] + sys.argv[1:]; from batchalign.worker import main; main()")
         .arg("--transport")

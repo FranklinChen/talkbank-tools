@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 from pydantic import BaseModel, Field, FiniteFloat, StringConstraints, model_validator
 
 from batchalign.inference._domain_types import LanguageCode, NumSpeakers, SpeakerId
-from batchalign.worker._types import WorkerJSONValue
+from batchalign.worker._types import ReportedEngineName, WorkerJSONValue
 
 WorkerRequestIdV2: TypeAlias = Annotated[str, StringConstraints(min_length=1)]
 """Stable identifier for one V2 protocol request/response pair."""
@@ -181,28 +181,6 @@ class HelloResponseV2(BaseModel):
     runtime: WorkerRuntimeInfoV2
 
 
-class CapabilitiesRequestV2(BaseModel):
-    """Request for task capability metadata."""
-
-    request_id: WorkerRequestIdV2
-
-
-class TaskCapabilityV2(BaseModel):
-    """One task capability advertised by a V2 worker."""
-
-    task: InferenceTaskV2
-    accepted_inputs: list[WorkerAttachmentKindV2]
-    supports_progress_events: bool
-
-
-class CapabilitiesResponseV2(BaseModel):
-    """Response describing task capabilities for the worker."""
-
-    request_id: WorkerRequestIdV2
-    tasks: list[TaskCapabilityV2]
-    engine_versions: dict[str, str]
-
-
 class PreparedAudioRefV2(BaseModel):
     """File-backed prepared audio artifact."""
 
@@ -250,12 +228,38 @@ class PreparedAudioInputV2(BaseModel):
     audio_ref_id: WorkerArtifactIdV2
 
 
+class NotRequestedDiarizationV2(BaseModel):
+    """One track expected; the provider must not separate speakers."""
+
+    kind: Literal["not_requested"] = "not_requested"
+
+
+class IntegratedDiarizationV2(BaseModel):
+    """The provider separates speakers itself, into this many."""
+
+    kind: Literal["integrated"] = "integrated"
+    speakers: NumSpeakers
+
+
+ProviderDiarizationV2: TypeAlias = Annotated[
+    NotRequestedDiarizationV2 | IntegratedDiarizationV2,
+    Field(discriminator="kind"),
+]
+"""Whether a provider is asked to separate speakers, and into how many.
+
+Replaces a bare ``num_speakers``, which could not say the one thing the bridge
+needs when a provider returns a monologue with no speaker: whether separation
+was ASKED FOR. Without that, an absent label had to be given a number, and the
+number given was zero.
+"""
+
+
 class ProviderMediaInputV2(BaseModel):
     """Temporary cloud-provider media input (internally tagged)."""
 
     kind: Literal["provider_media"] = "provider_media"
     media_path: WorkerArtifactPathV2
-    num_speakers: NumSpeakers
+    diarization: ProviderDiarizationV2
 
 
 class SubmittedJobInputV2(BaseModel):
@@ -284,6 +288,12 @@ class AsrRequestV2(BaseModel):
     lang: LanguageCode
     backend: AsrBackendV2
     input: AsrInputV2
+    # The models this request pins, chosen by the Rust control plane. The
+    # worker loads exactly these and reports back what it observed; the bridge
+    # refuses a disagreement. Annotated as a forward reference because the
+    # identity mirror is defined further down this module, next to the loaded
+    # half it pairs with.
+    models: AsrRequestedModelsV2
     # Per-engine configuration extras (qwen_model, funaudio_model, ...),
     # carried verbatim from --engine-overrides. Rust omits the field from
     # the wire when empty (serde skip_serializing_if), so None here means
@@ -446,6 +456,280 @@ class ExecuteRequestV2(BaseModel):
     attachments: list[ArtifactRefV2]
 
 
+# ---------------------------------------------------------------------------
+# Pinned ASR model identity
+#
+# The Python mirror of `crates/batchalign-types/src/worker_v2/asr_model.rs`.
+# Rust resolves which models a worker must load and sends them with the spawn;
+# the worker loads exactly those revisions and reports back what it loaded, and
+# the bridge refuses a disagreement. Two hand-written parsers only agree while
+# something pins the bytes: the Rust side pins them in
+# `model_manifest::tests::the_pinned_composition_serializes_in_the_shape_python_parses`.
+# ---------------------------------------------------------------------------
+
+HubCommitV2: TypeAlias = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+"""An exact hub commit: 40 lowercase hexadecimal characters."""
+
+ContentDigestV2: TypeAlias = Annotated[
+    str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+]
+"""A SHA-256 content digest: 64 lowercase hexadecimal characters."""
+
+
+class RequestedCommitV2(BaseModel):
+    """Load exactly this hub commit."""
+
+    kind: Literal["commit"] = "commit"
+    commit: HubCommitV2
+
+
+class RequestedTagV2(BaseModel):
+    """Load exactly this published tag. Never recorded as a commit."""
+
+    kind: Literal["tag"] = "tag"
+    tag: str
+
+
+class RequestedContentDigestV2(BaseModel):
+    """Load the file with exactly these contents."""
+
+    kind: Literal["content_digest"] = "content_digest"
+    digest: ContentDigestV2
+
+
+class RequestedProviderParameterV2(BaseModel):
+    """Select the provider's model with this parameter."""
+
+    kind: Literal["provider_parameter"] = "provider_parameter"
+    parameter: str
+
+
+class RequestedUnpinnedV2(BaseModel):
+    """The plan could not pin this model.
+
+    The worker loads the hub default and MUST report the commit it observed;
+    it may never substitute a name for a revision.
+    """
+
+    kind: Literal["unpinned"] = "unpinned"
+
+
+RequestedRevisionV2: TypeAlias = Annotated[
+    RequestedCommitV2
+    | RequestedTagV2
+    | RequestedContentDigestV2
+    | RequestedProviderParameterV2
+    | RequestedUnpinnedV2,
+    Field(discriminator="kind"),
+]
+"""What the plan asked a worker to load."""
+
+
+class ObservedCommitV2(BaseModel):
+    """The runtime reported the hub commit it loaded."""
+
+    kind: Literal["commit"] = "commit"
+    commit: HubCommitV2
+
+
+class ObservedContentDigestV2(BaseModel):
+    """The runtime loaded a file with these contents."""
+
+    kind: Literal["content_digest"] = "content_digest"
+    digest: ContentDigestV2
+
+
+class ObservedNotExposedV2(BaseModel):
+    """The runtime exposes no revision at all.
+
+    True of every ModelScope loader and every cloud provider. Provider-side
+    drift is invisible, and this variant says so rather than inventing a value.
+    """
+
+    kind: Literal["not_exposed"] = "not_exposed"
+
+
+ObservedRevisionV2: TypeAlias = Annotated[
+    ObservedCommitV2 | ObservedContentDigestV2 | ObservedNotExposedV2,
+    Field(discriminator="kind"),
+]
+"""What the runtime actually loaded, as the worker observed it."""
+
+
+class RequestedModelV2(BaseModel):
+    """One model the plan pinned, before anything loaded it."""
+
+    id: str
+    revision: RequestedRevisionV2
+
+
+class LoadedModelV2(BaseModel):
+    """One model a worker loaded: what was asked for, and what was seen."""
+
+    id: str
+    requested: RequestedRevisionV2
+    observed: ObservedRevisionV2
+
+
+class WhisperModelsV2(BaseModel):
+    """Hugging Face Whisper, stock or fine-tune."""
+
+    engine: Literal["whisper"] = "whisper"
+    asr: RequestedModelV2
+
+
+class QwenModelsV2(BaseModel):
+    """Qwen3-ASR and the forced aligner it needs for word timings."""
+
+    engine: Literal["qwen"] = "qwen"
+    asr: RequestedModelV2
+    aligner: RequestedModelV2
+
+
+class ParaformerModelsV2(BaseModel):
+    """FunASR Paraformer, with its voice-activity and punctuation models."""
+
+    engine: Literal["paraformer"] = "paraformer"
+    asr: RequestedModelV2
+    vad: RequestedModelV2
+    punc: RequestedModelV2
+
+
+class SenseVoiceModelsV2(BaseModel):
+    """FunASR SenseVoice, with its voice-activity model."""
+
+    engine: Literal["sense_voice"] = "sense_voice"
+    asr: RequestedModelV2
+    vad: RequestedModelV2
+
+
+# No requested composition for in-process whisper.cpp. It is not a worker
+# backend, so no request can select it and nothing ever built one; it appears
+# on the LOADED side alone, as ``NativeWhisperModelIdentityV2``, which the
+# in-process path reports for the ggml file it read.
+
+
+class TencentModelsV2(BaseModel):
+    """Tencent cloud ASR."""
+
+    engine: Literal["tencent"] = "tencent"
+    engine_model_type: RequestedModelV2
+
+
+class AliyunModelsV2(BaseModel):
+    """Aliyun cloud ASR."""
+
+    engine: Literal["aliyun"] = "aliyun"
+    service: RequestedModelV2
+
+
+class RevModelsV2(BaseModel):
+    """Rev.AI cloud ASR."""
+
+    engine: Literal["rev"] = "rev"
+    provider: RequestedModelV2
+
+
+AsrRequestedModelsV2: TypeAlias = Annotated[
+    WhisperModelsV2
+    | QwenModelsV2
+    | ParaformerModelsV2
+    | SenseVoiceModelsV2
+    | TencentModelsV2
+    | AliyunModelsV2
+    | RevModelsV2,
+    Field(discriminator="engine"),
+]
+"""Every model of one engine's composition, as the plan requested them."""
+
+
+class WhisperModelIdentityV2(BaseModel):
+    """What a Whisper worker loaded."""
+
+    engine: Literal["whisper"] = "whisper"
+    asr: LoadedModelV2
+
+
+class QwenModelIdentityV2(BaseModel):
+    """What a Qwen3-ASR worker loaded, aligner included."""
+
+    engine: Literal["qwen"] = "qwen"
+    asr: LoadedModelV2
+    aligner: LoadedModelV2
+
+
+class ParaformerModelIdentityV2(BaseModel):
+    """What a Paraformer worker loaded."""
+
+    engine: Literal["paraformer"] = "paraformer"
+    asr: LoadedModelV2
+    vad: LoadedModelV2
+    punc: LoadedModelV2
+
+
+class SenseVoiceModelIdentityV2(BaseModel):
+    """What a SenseVoice worker loaded."""
+
+    engine: Literal["sense_voice"] = "sense_voice"
+    asr: LoadedModelV2
+    vad: LoadedModelV2
+
+
+class NativeWhisperModelIdentityV2(BaseModel):
+    """What the in-process whisper.cpp path loaded."""
+
+    engine: Literal["native_whisper"] = "native_whisper"
+    ggml: LoadedModelV2
+
+
+class TencentModelIdentityV2(BaseModel):
+    """The Tencent engine-model type the request named."""
+
+    engine: Literal["tencent"] = "tencent"
+    engine_model_type: LoadedModelV2
+
+
+class AliyunModelIdentityV2(BaseModel):
+    """The Aliyun service identity."""
+
+    engine: Literal["aliyun"] = "aliyun"
+    service: LoadedModelV2
+
+
+class RevModelIdentityV2(BaseModel):
+    """The Rev.AI provider constant."""
+
+    engine: Literal["rev"] = "rev"
+    provider: LoadedModelV2
+
+
+AsrModelIdentityV2: TypeAlias = Annotated[
+    WhisperModelIdentityV2
+    | QwenModelIdentityV2
+    | ParaformerModelIdentityV2
+    | SenseVoiceModelIdentityV2
+    | NativeWhisperModelIdentityV2
+    | TencentModelIdentityV2
+    | AliyunModelIdentityV2
+    | RevModelIdentityV2,
+    Field(discriminator="engine"),
+]
+"""Every model a worker loaded for one ASR response."""
+
+
+# `AsrRequestV2`, and `ExecuteRequestV2` which embeds it, are defined ABOVE this
+# mirror, so their annotation of `AsrRequestedModelsV2` was still an unresolved
+# forward reference when those classes were built. Pydantic would rebuild them
+# lazily on first validation, which happens to work, but until something
+# triggers it `__pydantic_complete__` stays False: schema generation on an
+# incomplete model then fails for a reason that has nothing to do with the
+# caller who asked. Resolving them HERE, at the first point where the name
+# exists, makes completeness a property of importing this module rather than of
+# whatever the program happens to do first.
+AsrRequestV2.model_rebuild()
+ExecuteRequestV2.model_rebuild()
+
+
 class WhisperChunkSpanV2(BaseModel):
     """One raw Whisper chunk span returned by Python."""
 
@@ -467,6 +751,10 @@ class WhisperChunkResultPayloadV2(BaseModel):
     lang: LanguageCode
     text: str
     chunks: list[WhisperChunkSpanV2]
+    # Which models produced this text, as the runtime observed them. Required,
+    # matching Rust: a result that cannot name its models cannot be stamped or
+    # cached honestly, and an optional field would let a producer forget.
+    model: AsrModelIdentityV2
 
 
 class AsrElementKindV2(str, Enum):
@@ -496,10 +784,37 @@ class AsrElementV2(BaseModel):
         return self
 
 
+class AttributedSpeakerV2(BaseModel):
+    """The provider named a speaker; this is its own label for them."""
+
+    kind: Literal["attributed"] = "attributed"
+    label: Annotated[str, StringConstraints(min_length=1)]
+
+
+class UndiarizedSpeakerV2(BaseModel):
+    """The provider separates no speakers and named none."""
+
+    kind: Literal["undiarized"] = "undiarized"
+
+
+SpeakerAttributionV2: TypeAlias = Annotated[
+    AttributedSpeakerV2 | UndiarizedSpeakerV2,
+    Field(discriminator="kind"),
+]
+"""Who a provider attributed one monologue to.
+
+Two states, because there are two facts, and the wire used to have a spelling
+for only one. ``speaker`` was a bare string, so an engine that separates no
+speakers at all had to write something, and what it wrote was ``"0"``:
+indistinguishable from a provider's real first speaker, and downstream that
+became a ``PAR0`` tier either way.
+"""
+
+
 class AsrMonologueV2(BaseModel):
     """One speaker-attributed monologue returned by a provider backend."""
 
-    speaker: SpeakerId
+    speaker: SpeakerAttributionV2
     elements: list[AsrElementV2]
 
 
@@ -509,6 +824,10 @@ class MonologueAsrResultPayloadV2(BaseModel):
     kind: Literal["monologue_asr_result"] = "monologue_asr_result"
     lang: LanguageCode
     monologues: list[AsrMonologueV2]
+    # Required for the same reason as on the Whisper payload. For a cloud
+    # provider this names the service and the parameter it was called with,
+    # never an account credential.
+    model: AsrModelIdentityV2
 
 
 class WhisperTokenTimingV2(BaseModel):
@@ -546,11 +865,98 @@ class IndexedWordTimingResultPayloadV2(BaseModel):
     indexed_timings: list[IndexedWordTimingV2 | None]
 
 
-class MorphosyntaxItemResultV2(BaseModel):
-    """One morphosyntax item result returned by Python."""
+class MorphosyntaxPipelineV2(str, Enum):
+    """Which morphosyntax pipeline variant analyzed an item.
 
-    raw_sentences: list[WorkerJSONValue] | None = None
-    error: str | None = None
+    The same Stanza version and language can run three different procedures,
+    and their output differs, so provenance names the variant.
+    """
+
+    STANDARD = "standard"
+    """Stanza over the words Rust sent, as sent."""
+    MANDARIN_RETOKENIZE = "mandarin_retokenize"
+    """Stanza's neural tokenizer re-segmented a Mandarin utterance."""
+    CANTONESE_PYCANTONESE_POS = "cantonese_pycantonese_pos"
+    """Stanza's parse with PyCantonese part-of-speech tags for Cantonese."""
+
+
+class MorphosyntaxModelIdentityV2(BaseModel):
+    """The Stanza model that analyzed one morphosyntax item."""
+
+    stanza_version: ReportedEngineName
+    lang: LanguageCode
+    pipeline: MorphosyntaxPipelineV2
+
+
+class UdRelationRepairKindV2(str, Enum):
+    """Why a relation a worker received from Stanza is not the one it applied.
+
+    Closed on both sides of the boundary: a rewrite must be named here before
+    a worker can report it, so no rewrite reaches a transcript under a name
+    the reader does not know.
+    """
+
+    PAD_RELATION = "pad_relation"
+    """A padding label (``<PAD>``, ``<UNK>``), which is no relation at all."""
+    RELATION_CASE = "relation_case"
+    """A UD relation in the wrong case (``NSUBJ``), lowercased."""
+    RELATION_ALIAS = "relation_alias"
+    """A known non-UD spelling of a UD relation (``iob`` for ``iobj``)."""
+    UNKNOWN_RELATION = "unknown_relation"
+    """No UD relation and no known equivalent, degraded to ``dep``."""
+
+
+class UdRelationRepairV2(BaseModel):
+    """One relation rewrite a worker made inside an analysis it returned."""
+
+    kind: UdRelationRepairKindV2
+    word: str
+    from_relation: str
+    to_relation: str
+
+
+class MorphosyntaxAnalyzedItemV2(BaseModel):
+    """An item Stanza analyzed, with the model that analyzed it.
+
+    ``repairs`` is required, with no default, for the reason ``model`` is: a
+    default would make "this worker repaired nothing" and "this worker does
+    not report repairs" the same value, which is the shape that let a rewrite
+    live only in a log line.
+    """
+
+    kind: Literal["analyzed"] = "analyzed"
+    raw_sentences: list[WorkerJSONValue]
+    model: MorphosyntaxModelIdentityV2
+    repairs: list[UdRelationRepairV2]
+
+
+class MorphosyntaxNoWordsItemV2(BaseModel):
+    """An utterance with no words: it has no morphology, and no model ran.
+
+    Carries no identity on purpose. The producer used to attach one, naming a
+    model that never saw the item.
+    """
+
+    kind: Literal["no_words"] = "no_words"
+
+
+class MorphosyntaxFailedItemV2(BaseModel):
+    """An item that could not be analyzed, with the reason."""
+
+    kind: Literal["failed"] = "failed"
+    error: str
+
+
+MorphosyntaxItemResultV2: TypeAlias = Annotated[
+    MorphosyntaxAnalyzedItemV2 | MorphosyntaxNoWordsItemV2 | MorphosyntaxFailedItemV2,
+    Field(discriminator="kind"),
+]
+"""One morphosyntax item outcome (internally tagged on ``kind``).
+
+A union rather than three optional fields: an analysis without its model, or
+a result that is both an analysis and an error, is no longer a value this
+type can hold, so neither the bridge nor the server checks for it.
+"""
 
 
 class MorphosyntaxResultPayloadV2(BaseModel):
@@ -624,7 +1030,10 @@ class UtsegBoundaryModelEvidenceV2(BaseModel):
     """Model provenance plus per-input-word boundary evidence."""
 
     model_id: Annotated[str, StringConstraints(min_length=1)]
-    model_revision: Annotated[str, StringConstraints(min_length=1)] | None = None
+    # Required, and commit-shaped. The boundary model is loaded from a pinned
+    # snapshot whose commit is read off the directory on disk, so there is no
+    # boundary result without an exact revision behind it.
+    model_revision: HubCommitV2
     normalization_revision: UtsegNormalizationRevisionV2
     adjacency_policy_revision: UtsegAdjacencyPolicyRevisionV2
     word_evidence: list[UtsegWordBoundaryEvidenceV2]
@@ -646,11 +1055,32 @@ class UtsegResultPayloadV2(BaseModel):
     items: list[UtsegItemResultV2]
 
 
-class TranslationItemResultV2(BaseModel):
-    """One translation item result returned by Python."""
+class TranslationTranslatedItemV2(BaseModel):
+    """An item the engine translated, naming that engine."""
 
-    raw_translation: str | None = None
-    error: str | None = None
+    kind: Literal["translated"] = "translated"
+    raw_translation: str
+    engine: ReportedEngineName
+
+
+class TranslationBlankInputItemV2(BaseModel):
+    """Whitespace-only input: never sent to an engine, so it names none."""
+
+    kind: Literal["blank_input"] = "blank_input"
+
+
+class TranslationFailedItemV2(BaseModel):
+    """An item that could not be translated, with the reason."""
+
+    kind: Literal["failed"] = "failed"
+    error: str
+
+
+TranslationItemResultV2: TypeAlias = Annotated[
+    TranslationTranslatedItemV2 | TranslationBlankInputItemV2 | TranslationFailedItemV2,
+    Field(discriminator="kind"),
+]
+"""One translation item outcome (internally tagged on ``kind``)."""
 
 
 class TranslationResultPayloadV2(BaseModel):
@@ -675,11 +1105,35 @@ class CorefAnnotationV2(BaseModel):
     words: list[list[CorefChainRefV2]]
 
 
-class CorefItemResultV2(BaseModel):
-    """One coreference item result returned by Python."""
+class CorefResolvedItemV2(BaseModel):
+    """A document the engine resolved, naming that engine.
 
-    annotations: list[CorefAnnotationV2] | None = None
-    error: str | None = None
+    ``annotations`` may be empty: a resolved document with no chains.
+    """
+
+    kind: Literal["resolved"] = "resolved"
+    annotations: list[CorefAnnotationV2]
+    engine: ReportedEngineName
+
+
+class CorefNoSentencesItemV2(BaseModel):
+    """A document with no sentences: never sent to an engine, so it names none."""
+
+    kind: Literal["no_sentences"] = "no_sentences"
+
+
+class CorefFailedItemV2(BaseModel):
+    """A document that could not be resolved, with the reason."""
+
+    kind: Literal["failed"] = "failed"
+    error: str
+
+
+CorefItemResultV2: TypeAlias = Annotated[
+    CorefResolvedItemV2 | CorefNoSentencesItemV2 | CorefFailedItemV2,
+    Field(discriminator="kind"),
+]
+"""One coreference item outcome (internally tagged on ``kind``)."""
 
 
 class CorefResultPayloadV2(BaseModel):

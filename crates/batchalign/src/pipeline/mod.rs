@@ -4,7 +4,6 @@
 //! general executor; it is a small sequential stage runner used to make
 //! per-command orchestration explicit.
 
-use crate::api::EngineVersion;
 use crate::cache::UtteranceCache;
 use crate::worker::pool::WorkerPool;
 
@@ -16,6 +15,17 @@ pub(crate) mod transcribe;
 
 /// Shared services used by pipeline helpers.
 ///
+/// Deliberately carries no engine identity. It used to carry one engine
+/// version for the whole pipeline, which inside a multi-engine command (the
+/// ASR, utseg and morphotag stages of `transcribe`) could only be right for one
+/// stage and was stamped onto the others. Each stage now names its own engine:
+/// morphotag, utseg, translate and coref from the engine each applied result
+/// names (never from a capability report); transcribe from the ASR identity
+/// admitted with its plan; forced alignment from the `FaCacheNamespace` read
+/// out of the selected worker's report after FA loaded, which
+/// `crate::fa::FaServices` carries; and UTR ASR through its engine's own cache
+/// namespace.
+///
 /// `TreeSitterParser` is `!Send + !Sync` (uses `RefCell` internally), so it
 /// cannot be stored here, `PipelineServices` is carried across async task
 /// boundaries. Callers that need a parser create one locally via
@@ -26,21 +36,11 @@ pub(crate) struct PipelineServices<'a> {
     pub pool: &'a WorkerPool,
     /// Shared utterance cache.
     pub cache: &'a UtteranceCache,
-    /// Current engine version for cache keying.
-    pub engine_version: &'a EngineVersion,
 }
 
 impl<'a> PipelineServices<'a> {
     /// Create services.
-    pub fn new(
-        pool: &'a WorkerPool,
-        cache: &'a UtteranceCache,
-        engine_version: &'a EngineVersion,
-    ) -> Self {
-        Self {
-            pool,
-            cache,
-            engine_version,
-        }
+    pub fn new(pool: &'a WorkerPool, cache: &'a UtteranceCache) -> Self {
+        Self { pool, cache }
     }
 }

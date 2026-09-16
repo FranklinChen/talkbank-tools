@@ -3,12 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::api::{DisplayPath, DurationMs, EngineVersion, LanguageCode3, NumWorkers};
+use crate::api::{DisplayPath, DurationMs, LanguageCode3, NumWorkers};
 use crate::cache::UtteranceCache;
-use crate::fa::AdmittedFaResult;
+use crate::engine_reports::FaCacheNamespace;
+use crate::fa::{AdmittedFaResult, FaServices};
 use crate::options::{CommandOptions, EngineBackend as _};
 use crate::params::{AudioContext, CachePolicy, FaParams};
 use crate::pipeline::PipelineServices;
+use crate::provenance::UtrContribution;
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
@@ -100,8 +102,9 @@ pub(crate) struct FaDispatchRuntime {
     pub pool: Arc<WorkerPool>,
     /// Cache used by FA group reuse and worker result persistence.
     pub cache: Arc<UtteranceCache>,
-    /// Current engine version string for cache partitioning.
-    pub engine_version: EngineVersion,
+    /// The FA engine the selected worker reported, which namespaces every FA
+    /// cache row and evidence envelope.
+    pub cache_namespace: FaCacheNamespace,
     /// Maximum number of file tasks to run concurrently for this job.
     pub num_workers: NumWorkers,
 }
@@ -118,8 +121,8 @@ struct FaFileContext<'a> {
     host: DispatchHostContext,
     /// File/job lifecycle sink for runner-side status updates.
     sink: Arc<dyn RunnerEventSink>,
-    /// Shared worker/cache services for FA and UTR.
-    services: PipelineServices<'a>,
+    /// FA services; UTR uses only their shared pool and cache.
+    services: FaServices<'a>,
     /// Typed FA parameter bundle.
     fa_params: FaParams,
     /// Independently resolved policy for UTR ASR evidence.
@@ -177,7 +180,7 @@ struct AlignAudioTask<'a> {
     job_id: crate::api::JobId,
     file_index: usize,
     filename: String,
-    services: PipelineServices<'a>,
+    services: FaServices<'a>,
     /// The run's FA parameters and the languages they were admitted against.
     ///
     /// One proof rather than a `FaParams` beside a `LanguageCode3`: the pair
@@ -205,6 +208,9 @@ struct AlignAudioTask<'a> {
     parse_errors: Vec<crate::chat_ops::ParseError>,
     had_unrecovered_untimed: bool,
     utr_fallback_attempted: bool,
+    /// Whether a timing-recovery pass ran for this file, and with which
+    /// engine: what the `utr=` provenance field records.
+    utr_contribution: UtrContribution,
     utr_engine: Option<crate::options::UtrEngine>,
     utr_strategy: super::options::ResolvedUtrStrategy,
     dumper: &'a DebugDumper,
@@ -224,7 +230,7 @@ struct AlignAudioTask<'a> {
 #[derive(Debug, Clone)]
 struct AlignOutputPolicy {
     /// Language stamped into the provenance comment.
-    provenance_lang: String,
+    provenance_lang: LanguageCode3,
     /// Whether this run had a `--before` baseline.
     incremental_enabled: bool,
     /// Whether to merge abbreviations before writing.
@@ -336,8 +342,8 @@ impl AudioFileTask for AlignAudioTask<'_> {
         }
         let provenance = crate::provenance::align_provenance(
             &self.output.provenance_lang,
-            self.services.engine_version.as_ref(),
-            None,
+            self.services.cache_namespace,
+            &self.utr_contribution,
             false,
             self.output.incremental_enabled,
         );
@@ -376,7 +382,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
                 UtrPassContext {
                     audio_path: self.audio_path.as_path(),
                     lang: self.admitted.primary_language(),
-                    services: self.services,
+                    services: self.services.pipeline,
                     audio_identity: &self.audio_identity,
                     cache_policy: self.utr_cache_policy,
                     total_audio_ms: self.total_audio_ms.map(DurationMs),
@@ -390,20 +396,25 @@ impl AudioFileTask for AlignAudioTask<'_> {
             )
             .await
             {
-                Ok(utr_result) if utr_result.injected() > 0 => {
-                    self.had_unrecovered_untimed = false;
-                    info!(
-                        filename = %self.filename,
-                        injected = utr_result.injected(),
-                        "Fallback UTR recovered timing"
-                    );
-                }
                 Ok(utr_result) => {
-                    warn!(
-                        filename = %self.filename,
-                        injected = utr_result.injected(),
-                        "Fallback UTR ran but injected no timing; proceeding to FA retry without additional anchors"
-                    );
+                    // Every completed pass is recorded once, with the engine
+                    // the plan ran it with, before anything is decided from
+                    // how much it injected.
+                    self.utr_contribution.record_pass(utr_engine, &utr_result);
+                    if utr_result.injected() > 0 {
+                        self.had_unrecovered_untimed = false;
+                        info!(
+                            filename = %self.filename,
+                            injected = utr_result.injected(),
+                            "Fallback UTR recovered timing"
+                        );
+                    } else {
+                        warn!(
+                            filename = %self.filename,
+                            injected = utr_result.injected(),
+                            "Fallback UTR ran but injected no timing; proceeding to FA retry without additional anchors"
+                        );
+                    }
                 }
                 Err(error) => {
                     warn!(
@@ -472,7 +483,7 @@ pub(crate) async fn dispatch_fa_infer(
         let pool = runtime.pool.clone();
         let cache = runtime.cache.clone();
         let job = job.clone();
-        let engine_version = runtime.engine_version.clone();
+        let cache_namespace = runtime.cache_namespace.clone();
         let file = file.clone();
         let file_index = file.file_index;
         let before_path = if !before_paths.is_empty() && file_index < before_paths.len() {
@@ -490,7 +501,10 @@ pub(crate) async fn dispatch_fa_infer(
             "align file task",
             async move {
                 let _permit = permit;
-                let services = PipelineServices::new(&pool, &cache, &engine_version);
+                let services = FaServices {
+                    pipeline: PipelineServices::new(&pool, &cache),
+                    cache_namespace: &cache_namespace,
+                };
                 let dumper = DebugDumper::new(job.dispatch.options.common().debug_dir.as_deref());
                 let media_dir_str;
                 let media_dir_ref = if let CommandOptions::Align(ref opts) = job.dispatch.options {
@@ -717,6 +731,7 @@ async fn process_one_fa_file(
 
     // UTR pre-pass: if untimed utterances exist and a UTR engine is configured,
     // run ASR to recover utterance-level timing before FA grouping.
+    let mut utr_contribution = UtrContribution::NotRun;
     let had_unrecovered_untimed = {
         let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(&chat_file);
 
@@ -736,7 +751,7 @@ async fn process_one_fa_file(
                     UtrPassContext {
                         audio_path: utr_audio_path,
                         lang: &file_lang,
-                        services,
+                        services: services.pipeline,
                         audio_identity: &audio_identity,
                         cache_policy: utr_cache_policy,
                         total_audio_ms: total_audio_ms.map(DurationMs),
@@ -750,7 +765,10 @@ async fn process_one_fa_file(
                 )
                 .await
                 {
-                    Ok(utr_result) => utr_result.unmatched() > 0,
+                    Ok(utr_result) => {
+                        utr_contribution.record_pass(utr_engine, &utr_result);
+                        utr_result.unmatched() > 0
+                    }
                     Err(_) => true,
                 }
             }
@@ -776,7 +794,7 @@ async fn process_one_fa_file(
     // job-level placeholder. This matches what gets stamped into
     // `@Languages:` and avoids the silent eng substitution that the
     // 2026-05-03 incident punished.
-    let provenance_lang = file_lang.as_ref().to_string();
+    let provenance_lang = file_lang.clone();
     let mut task = AlignAudioTask {
         host,
         job_id: job_id.clone(),
@@ -794,6 +812,7 @@ async fn process_one_fa_file(
         parse_errors,
         had_unrecovered_untimed,
         utr_fallback_attempted: false,
+        utr_contribution,
         utr_engine: utr_engine.cloned(),
         utr_strategy: context.utr_strategy.clone(),
         dumper,

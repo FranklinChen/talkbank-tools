@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-09-02 07:45 EDT
+**Last updated:** 2026-09-16 09:47 EDT
 
 This page documents the current public `batchalign3` CLI surface. For anything
 you are scripting against, confirm with `batchalign3 <command> --help`.
@@ -33,7 +33,7 @@ Global options go before the command name.
 | `--timeout SECONDS` | Operator override for the audio-task transport timeout. For ASR, the default is DERIVED per request from the audio's own duration (`DecodeBudgetSeconds`, `crates/batchalign-types/src/worker_v2/requests.rs`) plus a fixed margin, not a flat number; `--timeout` can only RAISE that derived ceiling, never lower it below what the request's own decode budget needs. Forced alignment and speaker diarization still use a flat default (1800 = 30 min) unless overridden. |
 | `--tui` / `--no-tui` | Toggle full-screen TUI for server-backed jobs (`DirectHost` local runs stay on terminal progress bars) |
 | `--open-dashboard` / `--no-open-dashboard` | Toggle browser auto-open for submitted server job pages (macOS only, interactive TTY only) |
-| `--engine-overrides JSON` | Per-engine PARAMETERS, as a `{string:string}` JSON object, e.g. `{"qwen_model":"Qwen/Qwen3-ASR-0.6B-hf","qwen_device":"cpu"}`. Forwarded to the worker as opaque knobs. The `asr` / `fa` / `utr` / `translate` keys additionally select an engine and beat the per-command flags; see "Engine selection" below. Invalid JSON is rejected. |
+| `--engine-overrides JSON` | Per-engine PARAMETERS, as a `{string:string}` JSON object, e.g. `{"qwen_model":"Qwen/Qwen3-ASR-0.6B-hf","qwen_device":"cpu"}`. Forwarded to the worker as opaque knobs. The `asr` / `fa` / `utr` / `translate` keys additionally select an engine and beat the per-command flags; see "Engine selection" below. The payload is parsed once, while the command line is parsed, so an invalid one is rejected before anything runs. A bare engine name (`--engine-overrides whisper`) is reported as the wrong-flag mistake it is, naming `--asr-engine` and its siblings, rather than as malformed JSON. |
 | `--sequential` | Process files one at a time with a single worker. No memory gate, no server. Ideal for small jobs on laptops |
 | `--no-server` | Skip auto-detection of a local server; force direct in-process execution |
 
@@ -139,32 +139,48 @@ legacy input/output directory form. For new scripts, prefer `-o/--output`.
 
 ### `--file-list` format
 
-`--file-list FILE` reads input paths from a plain-text file, one path per
-line. Blank lines and lines beginning with `#` are ignored. All paths must
-exist at the time the command runs; a missing path is a hard error.
+`--file-list FILE` reads input paths from a plain-text UTF-8 file, one path
+per line:
+
+- Blank lines and lines beginning with `#` are ignored; whitespace around
+  each path is trimmed.
+- A **relative path resolves against the directory containing the list
+  file**, not the directory you run the command from. Absolute paths are
+  used as written.
+- A path naming a **directory** is expanded exactly like a positional
+  directory argument: matching files are discovered recursively beneath it.
+- The input set is **de-duplicated, keeping the first occurrence**. A file
+  listed twice, spelled two ways (`a.cha`, `./a.cha`, an absolute path), or
+  reached both directly and through a listed directory is processed once.
+- Every entry must exist when the command runs. A missing entry is a usage
+  error (exit code 2) naming the list file and line, for example
+  `lists/rerun.txt:3: input path does not exist: lists/corpus/missing.cha`.
 
 ```text
-# My align re-run list
-/data/aphasia/Cantonese/Protocol/HKU/A023.cha
-/data/aphasia/Cantonese/Protocol/HKU/A024.cha
+# lists/rerun.txt: entries are relative to lists/
+corpus/session-01.cha
+corpus/session-02.cha
 
-# these two need re-running too
-/data/ca/CallHome/English/4092.cha
-/data/ca/CallHome/English/4093.cha
+# a whole directory, and an absolute path
+corpus/follow-up/
+/data/project/extra/session-09.cha
 ```
 
 ```bash
-# Run align on every file in the list (in-place, against a remote server)
-batchalign3 --server http://your-server:8001 align --file-list my-list.txt
+# Run align on every listed input (in place, against a remote server)
+batchalign3 --server http://your-server:8001 align --file-list lists/rerun.txt
 ```
 
-To process a large list in smaller batches, split the list into
-chunked files (e.g. with `split -l 10 my-list.txt batch-`) and run
+To process a large list in smaller batches, split it into chunk files in
+the same directory as the original list (for example, run
+`split -l 10 rerun.txt batch-` inside that directory) so relative entries
+keep resolving against the same place, then run
 `batchalign3 align --file-list <chunk>` on each chunk sequentially.
 
-`--file-list` is mutually exclusive with positional `PATHS` arguments. It
-does not accept a separate `-o/--output` directory, each path in the list
-is processed in-place (output overwrites input).
+`--file-list` cannot be combined with positional `PATHS` arguments; the CLI
+rejects the combination. Without `-o/--output`, every listed input is
+processed in place (output overwrites input); with `-o DIR`, results are
+written under `DIR` exactly as for positional inputs.
 
 For batched text-NLP commands (`morphotag`, `utseg`, `translate`, `coref`),
 large `--file-list` runs may not show file-by-file on-disk rewrites while the
@@ -381,6 +397,8 @@ failures locally.
 ```bash
 batchalign3 eval l2-morphotag <ARGS>
 batchalign3 eval utr-alignment --chat <CHAT> --tokens <JSON> --output <JSON>
+batchalign3 eval utseg-replay post-chat --input-chat <CHAT> --evidence <JSON> --output-chat <CHAT>
+batchalign3 eval utseg-replay pre-asr --asr-response <JSON> --evidence <JSON> --output-chat <CHAT> [--media-name <NAME>] [--wor]
 ```
 
 Evaluation subcommands. Currently:
@@ -389,6 +407,7 @@ Evaluation subcommands. Currently:
 | --- | --- |
 | `eval l2-morphotag` | L2 morphotag evaluation: pair `@s` words with `%mor` / `%gra` items via typed AST walk (supersedes `scripts/l2-eval/analyze.py`) |
 | `eval utr-alignment` | Offline global UTR word-to-token replay with fingerprinted typed evidence and no inference or CHAT mutation |
+| `eval utseg-replay` | Reapply retained utterance-boundary evidence and report whether it still reproduces the document the run wrote; exits 1 on a difference, 2 on a refused input |
 
 ### `version`
 
@@ -411,3 +430,7 @@ Prints version and build information.
 | `6` | Local runtime error |
 
 Exit code `1` is reserved for unexpected failures outside the typed categories.
+
+A server that reports another build than the CLI's, or no build, is refused
+before anything is submitted, with exit code `5`; see
+[Server Mode: build identity check](server-mode.md#build-identity-check).

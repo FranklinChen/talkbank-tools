@@ -2,7 +2,31 @@
 
 **Status:** Current
 **Last verified:** 2026-08-31 07:13 EDT
-**Last updated:** 2026-09-02 20:58 EDT
+**Last updated:** 2026-09-16 04:34 EDT
+
+**Speaker attribution (2026-09-16).** `AsrMonologueV2.speaker` is a tagged
+`SpeakerAttribution` rather than a bare string, and `ProviderMediaInput`
+carries a typed `ProviderDiarization` rather than a bare `num_speakers`. The
+pair exists so the bridge can tell two absences apart: a provider that named no
+speaker because its engine separates nobody (admitted as `undiarized`) from one
+that named none although the request asked it to separate (refused by name).
+A bare string could express neither, so every undiarized engine wrote `"0"`,
+which downstream became a `PAR0` tier indistinguishable from a real first
+speaker. A diarization count of one has no representation anywhere in this
+protocol, and that is now a property of the types rather than of one caller's
+discipline: `ProviderDiarization::Integrated` holds a `SeparatedSpeakers`, which
+is at least two by construction and refuses less both through its only
+constructor and on deserialization, so such a count can be neither built nor
+received. Submission still refuses it first, with the message that explains the
+contradiction to an operator.
+
+**The same tagged value crosses into Python.** The bridge builds the provider's
+`AsrBatchItem` with a `diarization` field carrying `ProviderDiarization`
+verbatim, serialized by the derive this document's schema is generated from and
+parsed once by the Pydantic model. Until 2026-09-16 it flattened to an integer
+kwarg whose ZERO meant "do not separate", while the Python field defaulted to 1,
+so one closed union had two representations and absence had two spellings, one
+of them the contradiction above.
 
 This document is the implementation spec for the live typed worker boundary
 currently named `worker_v2`.
@@ -67,8 +91,9 @@ commands preserve cross-file batching by freezing one prepared-text artifact per
 miss batch and sending one batched `execute_v2` request per task.
 
 Utseg item results may carry `boundary_model_evidence`. Its model ID is
-nonempty, its optional revision is nonempty when present, and its
-`word_evidence` vector is parallel to the request words. Each word is a
+nonempty, its model revision is REQUIRED and is a hub commit rather than free
+text, so a worker that cannot say which revision it loaded refuses instead of
+reporting one, and its `word_evidence` vector is parallel to the request words. Each word is a
 discriminated classified, normalization-omission, or model-short-circuit
 state. Classified words carry closed raw/applied action enums and a validated
 integer probability in the inclusive range 0 through 1,000,000. Rust
@@ -226,23 +251,13 @@ MessagePack framing later without losing the shared logical contract.
 }
 ```
 
-`CapabilitiesRequest`
-
-```text
-{
-  request_id: string
-}
-```
-
-`CapabilitiesResponse`
-
-```text
-{
-  request_id: string,
-  tasks: [TaskCapability],
-  engine_versions: map<string, string>
-}
-```
+There is no V2 capabilities exchange. A worker's capability report
+(`infer_tasks`, and `engine_versions`, which names only the FA engine) travels
+over the older `capabilities` control op (see "Control channel" below, and
+[Capability Discovery](../../architecture/python-rust-boundary/python-rust-boundary.md#capability-discovery)).
+V2 capabilities request, response and per-task types were once staged here,
+but nothing used them beyond the schema generator and the compatibility tests,
+so they were deleted from Rust, Python, the shared fixtures and `ipc-schema`.
 
 ### Execution
 
@@ -418,9 +433,27 @@ AsrRequest {
   lang: iso639_3,
   backend: AsrBackend,
   input: AsrInput,
+  models: AsrRequestedModels,
   decode_budget_seconds: f64 | null
 }
 ```
+
+`models` is the composition the control plane pinned for this request: one
+required entry per role the engine needs, so a Qwen request cannot omit its
+forced aligner and a Paraformer request cannot omit its voice-activity and
+punctuation models. Each entry is an id plus a requested revision, which is an
+exact commit, a published tag (ModelScope exposes no commit behind one), a
+provider parameter, or explicitly `unpinned` for a checkpoint this build does
+not pin. `unpinned` is a real state rather than a gap: the worker must then
+report the commit it loaded, and such a composition can never build a cache
+key.
+
+The worker loads exactly these and reports back what it observed. The pinned
+composition also reaches the worker on the spawn argv, not only here, because
+loading happens once per worker while requests arrive many times; the argv
+carries it because it is a pure function of the worker key's own target,
+language and engine overrides, so injecting it there keeps the capability key
+and the execute key equal by construction instead of by coincidence.
 
 `decode_budget_seconds`, added 2026-09-02, is the request's own wall-clock
 decode budget, derived once by Rust from the audio's duration and a named
@@ -448,7 +481,16 @@ AsrBackend =
 ```text
 AsrInput =
   PreparedAudioInput { audio_ref_id: string }
-  ProviderMediaInput { media_path: string, num_speakers: u16 }
+  ProviderMediaInput { media_path: string, diarization: ProviderDiarization }
+
+  ProviderDiarization =
+    | { kind: "not_requested" }                  // one track; do not separate
+    | { kind: "integrated", speakers: u32 >= 2 } // separate into exactly this many
+
+  // One monologue's speaker, on the result side:
+  SpeakerAttribution =
+    | { kind: "attributed", label: string }     // the provider's OWN label
+    | { kind: "undiarized" }                    // this engine separates nobody
   SubmittedJobInput { provider_job_id: string }
 ```
 
@@ -470,6 +512,24 @@ AsrResult =
   HkMonologueResult
   ProviderTranscriptResult
 ```
+
+Every ASR result carries a required `model`: the composition the worker
+actually loaded, each member with the revision it was observed at. It is
+required rather than optional because a transcript whose models are unknown
+cannot be stamped honestly or cached safely, and an optional field would let a
+producer forget while still compiling.
+
+Requested and observed are kept apart on purpose. An exact commit must come
+back as that same commit; a tag may come back unexposed, because ModelScope
+publishes no commit behind one; a provider parameter can only come back
+unexposed, because a cloud service reports nothing about what it ran; and an
+unpinned model must come back with a commit, which is the entire point of
+leaving it unpinned rather than refusing the job. The bridge admits the
+reported composition against the request's pin and refuses a disagreement by
+name, and for provider backends it does so before calling the provider, so a
+mismatch costs no paid request. A worker that recorded no identity at all is
+refused per engine; an identity is never inferred from the request, because
+that would record what was asked for as though it had been seen.
 
 Rust remains responsible for:
 
@@ -555,9 +615,29 @@ These tasks now share one batched text-V2 pattern:
 - Rust normalizes the whole cross-file miss set into one `PreparedTextRef`
 - the request payload carries `payload_ref_id` plus `item_count`
 - Python reads the artifact, runs the model batch, and returns one typed batched
-  result with per-item success/error slots
+  result whose morphosyntax, translate and coref items are tagged outcomes
+  (`kind`), each carrying only what that outcome needs (table below)
+- the PyO3 bridge (`worker_text_results.rs::normalize_item`) parses each host
+  item through the Rust wire type. A host error wins, and an item that does not
+  parse becomes that item's `failed` outcome, so one bad item never fails the
+  rest of the batch; a count mismatch still refuses the whole batch
 - Rust keeps preprocessing, postprocessing, caching, repartitioning, and CHAT
-  mutation
+  mutation. Provenance names the identities on the results a file applied. The
+  identity travels per item, not in a capability snapshot, because the process
+  that ran the item is the only honest witness
+
+| Task | Outcomes |
+|---|---|
+| morphosyntax | `analyzed` (`raw_sentences`, the `model` that produced them, and the `repairs` it made to their UD relations), `no_words` (no identity, nothing repaired), `failed` (`error`) |
+| translate | `translated` (`raw_translation` plus `engine`), `blank_input` (no identity), `failed` (`error`) |
+| coref | `resolved` (`annotations` plus `engine`), `no_sentences` (no identity), `failed` (`error`) |
+
+`model` (`MorphosyntaxModelIdentityV2`) names the Stanza version, the language
+and the pipeline variant that ran: `standard`, `mandarin_retokenize`, or
+`cantonese_pycantonese_pos`. `engine` and `stanza_version` are
+`ReportedEngineName` values (non-blank, no surrounding whitespace, none of `|`,
+`;`, `]` or a line break). An item where no model ran carries no identity
+rather than an invented one.
 
 `InlineJsonRef` still exists for small metadata payloads, but the live text NLP
 tasks no longer use inline JSON as their primary boundary.

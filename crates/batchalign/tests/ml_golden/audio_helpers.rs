@@ -2,7 +2,6 @@ use crate::common::{
     LiveDirectJobClient, prepare_named_audio, require_live_direct, require_revai_key,
 };
 use batchalign::api::{JobStatus, ReleasedCommand};
-use batchalign::chat_ops::TierDomain;
 use batchalign::options::{
     AlignOptions, AsrEngineName, CommandOptions, CommonOptions, TranscribeOptions, WorTierPolicy,
 };
@@ -78,7 +77,21 @@ pub(crate) fn assert_first_utterance_max_words(chat: &str, label: &str, max_word
     );
 }
 
-pub(crate) async fn transcribe_audio_clip(audio_name: &str, lang: &str, label: &str) {
+/// Transcribe one fixture clip, stating which segmenter the language has.
+///
+/// `allow_stanza_fallback` is not boilerplate. Utterance segmentation runs by
+/// default, and a language with no TalkBank boundary model has no segmenter
+/// unless the Stanza fallback is authorized; that is now refused when the job
+/// is planned, before any ASR runs. A clip in such a language (spa, fra, jpn,
+/// cat) must therefore ask for the fallback, while one whose language has a
+/// model (eng, yue) must not, so that it exercises the model rather than
+/// silently accepting a substitute.
+pub(crate) async fn transcribe_audio_clip(
+    audio_name: &str,
+    lang: &str,
+    label: &str,
+    allow_stanza_fallback: bool,
+) {
     let Some(session) =
         require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
     else {
@@ -105,7 +118,7 @@ pub(crate) async fn transcribe_audio_clip(audio_name: &str, lang: &str, label: &
         wor: WorTierPolicy::Omit,
         merge_abbrev: false.into(),
         batch_size: 8,
-        utseg_fallback: false.into(),
+        utseg_fallback: allow_stanza_fallback.into(),
     });
 
     let (info, outputs) = jobs

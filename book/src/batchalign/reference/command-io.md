@@ -1,7 +1,7 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-09-07 19:45 EDT
+**Last updated:** 2026-09-15 09:28 EDT
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
@@ -28,6 +28,9 @@ batchalign3 <command> PATH [PATH ...] [-o OUTPUT_DIR] [--file-list FILE] [--in-p
 - Inputs can be files and/or directories.
 - `-o/--output` omitted means direct-write behavior for mutating commands.
 - `--file-list` is its own input mode: the file's contents become the input path set.
+  Relative entries resolve against the list file's directory, directory entries
+  expand like positional directories, duplicates collapse to their first
+  occurrence, and it cannot be combined with positional paths.
 - `--in-place` is available on commands that use `CommonOpts`.
 
 Exceptions:
@@ -209,7 +212,8 @@ may be retokenized if `--retokenize` is set. Special `%mor` notation
 
 ### 5. utseg
 
-**Purpose:** Segment a transcript into utterances using Stanza.
+**Purpose:** Segment a transcript into utterances using the TalkBank
+utterance-boundary model pinned for the language.
 
 | Aspect | Local CLI | Server (`--server`) |
 |--------|-----------|---------------------|
@@ -217,11 +221,18 @@ may be retokenized if `--retokenize` is set. Special `%mor` notation
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with utterance boundaries recomputed | Same |
 | **Mutation** | If `OUT_DIR = IN_DIR`: **overwrites original `.cha` in place**. | Same |
-| **Key options** | `--lang`, `--num-speakers`, `--merge-abbrev` | All passed |
+| **Key options** | `--lang`, `--num-speakers`, `--merge-abbrev`, `--utseg-fallback-stanza` | All passed |
 
 **What changes in the `.cha`:** Utterance boundaries (`*SPK:` lines) are
 recomputed. Existing `%mor`/`%gra` tiers may be invalidated (would need
 re-running morphotag afterwards).
+
+**The segmenter is decided from the language alone, before any work is
+dispatched.** A language the manifest pins a boundary model for takes that
+model. Stanza constituency parsing is the legacy fallback and is opt-in:
+`--utseg-fallback-stanza` authorizes it, and without it a language with no
+boundary model is refused at planning, naming the language, rather than being
+segmented by a substitute nobody asked for.
 
 **No media involved.**
 

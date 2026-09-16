@@ -16,6 +16,29 @@ expression: health
     "morphotag:eng:1"
   ],
   "worker_runtime_identities": [],
+  "worker_capability_admissions": [
+    {
+      "worker_key": "profile:gpu:eng",
+      "outcome": {
+        "kind": "refused",
+        "reason": {
+          "kind": "missing_engine_report",
+          "task": "fa"
+        }
+      }
+    }
+  ],
+  "refused_registry_workers": [
+    {
+      "worker_key": "profile:stanza:eng",
+      "pid": 4242,
+      "reason": {
+        "kind": "foreign_build",
+        "reported_build": "0.8.4",
+        "server_build": "0.8.5"
+      }
+    }
+  ],
   "media_roots": [
     "/data/media"
   ],

@@ -1,21 +1,29 @@
+use super::cantonese::{AlignedNormalization, NormalizationChangedLength};
 use super::{
     AsrElement, AsrNormalizedText, AsrPipelineSnapshot, AsrWord, cleanup, merge_compounds, num2text,
 };
 
 /// Stages 1-3: compound merging, timed word extraction with separator strip,
-/// and multi-word token splitting.
+/// Cantonese normalization, and multi-word token splitting.
 ///
 /// Returns words ready for number expansion. The caller is responsible for
 /// expanding numbers (either via the Rust fallback tables or Python IPC)
 /// before passing the words to [`super::finalize_words_to_chunks`].
-pub fn prepare_words_pre_expansion(elements: &[AsrElement], lang: &str) -> Vec<AsrWord> {
+///
+/// Fallible for one reason: Cantonese normalization hands each word back its
+/// own characters, and a conversion that changed the character count is refused
+/// rather than re-cut (see [`AlignedNormalization`]).
+pub fn prepare_words_pre_expansion(
+    elements: &[AsrElement],
+    lang: &str,
+) -> Result<Vec<AsrWord>, NormalizationChangedLength> {
     prepare_words_pre_expansion_with_snapshot(elements, lang, None)
 }
 
 /// Snapshot-aware variant of [`prepare_words_pre_expansion`].
 ///
 /// When `snapshot` is `Some`, intermediate stage outputs
-/// (`after_compound_merge`, `after_timing_extract`,
+/// (`after_compound_merge`, `after_timing_extract`, `after_cantonese_norm`,
 /// `after_multiword_split`) are populated for downstream trace
 /// rendering. When `None`, behavior is identical to the bare variant
 /// at zero capture cost.
@@ -26,7 +34,7 @@ pub fn prepare_words_pre_expansion_with_snapshot(
     elements: &[AsrElement],
     lang: &str,
     mut snapshot: Option<&mut AsrPipelineSnapshot>,
-) -> Vec<AsrWord> {
+) -> Result<Vec<AsrWord>, NormalizationChangedLength> {
     // Stage 1: compound merging
     let merged = merge_compounds(elements);
     if let Some(ref mut s) = snapshot {
@@ -60,6 +68,23 @@ pub fn prepare_words_pre_expansion_with_snapshot(
     // annotation: pure orthographic noise, no information lost.
     words = cleanup::strip_boundary_quotes(words);
 
+    // Stage 2d: Cantonese normalization, once over the whole monologue.
+    // CANTONESE-SPECIFIC BOUNDARY: only applied when lang == "yue".
+    //
+    // It runs HERE, before stage 3, for two reasons. The split interpolates
+    // timestamps across a token's characters, so it must see final text; and
+    // running after the split would normalize one character at a time, which
+    // is what used to lose every multi-character replacement.
+    let words = if lang == "yue" {
+        let normalized = normalize_cantonese_words(words)?;
+        if let Some(ref mut s) = snapshot {
+            s.after_cantonese_norm = Some(normalized.clone());
+        }
+        normalized
+    } else {
+        words
+    };
+
     // Stage 3: split multi-word tokens with timestamp interpolation
     let words = split_multiword_tokens(words, lang);
 
@@ -87,7 +112,31 @@ pub fn prepare_words_pre_expansion_with_snapshot(
     if let Some(ref mut s) = snapshot {
         s.after_multiword_split = result.clone();
     }
-    result
+    Ok(result)
+}
+
+/// Stage 2d: normalize one monologue's words as a single Cantonese run.
+///
+/// One conversion per monologue, not one per word. The providers hand us one
+/// word per Han character, and a two-character replacement (`真系` to `真係`)
+/// cannot match inside a single character; normalizing the run and handing each
+/// word back its own characters keeps both the replacement and the per-word
+/// timing. [`AlignedNormalization`] owns that proof, so the only thing left
+/// here is to put the characters back on the words they came from.
+fn normalize_cantonese_words(
+    words: Vec<AsrWord>,
+) -> Result<Vec<AsrWord>, NormalizationChangedLength> {
+    let aligned = AlignedNormalization::admit(words.iter().map(|word| word.text.as_str()))?;
+    // Total: `admit` returns exactly one surface per unit it was given, in the
+    // same order, so this zip drops nothing.
+    Ok(words
+        .into_iter()
+        .zip(aligned.into_units())
+        .map(|(word, text)| AsrWord {
+            text: AsrNormalizedText::new(text),
+            ..word
+        })
+        .collect())
 }
 
 /// Extract timed words from ASR elements, converting seconds to milliseconds.
@@ -190,18 +239,21 @@ pub(super) fn split_multiword_tokens(words: Vec<AsrWord>, lang: &str) -> Vec<Asr
     result
 }
 
-fn normalized_timing_range(start_s: f64, end_s: f64) -> (Option<i64>, Option<i64>) {
-    if !start_s.is_finite() || !end_s.is_finite() {
-        return (None, None);
-    }
-
-    let start_ms = (start_s * 1000.0).round() as i64;
-    let end_ms = (end_s * 1000.0).round() as i64;
-    if end_ms <= start_ms {
-        (None, None)
-    } else {
-        (Some(start_ms), Some(end_ms))
-    }
+/// Convert one element's provider seconds into the pipeline's millisecond
+/// pair, through the one owner of rounding and range admission.
+///
+/// This function used to do the conversion itself, with `(seconds *
+/// 1000.0).round() as i64`. The rounding is unchanged (half away from zero), so
+/// every input the old expression handled correctly produces the same numbers.
+/// What changed is the inputs it handled INCORRECTLY: a negative bound with a
+/// later end used to reach a word as a negative millisecond time, and a value
+/// beyond `i64` saturated into a plausible one. Both are now refused by
+/// [`WordTiming`], and because this stage sits inside a total transform with no
+/// error channel, the refusal is recorded as a named untimed cause rather than
+/// a fabricated number. Absent, zero-width and inverted spans behave exactly as
+/// before: the word carries no timing.
+fn normalized_timing_range(start_s: Option<f64>, end_s: Option<f64>) -> (Option<i64>, Option<i64>) {
+    super::WordTiming::admit_seconds_or_untimed(start_s, end_s).into_optional_millis()
 }
 
 fn split_chunk_word(word: AsrWord, lang: &str) -> Vec<AsrWord> {
@@ -214,7 +266,23 @@ fn split_chunk_word(word: AsrWord, lang: &str) -> Vec<AsrWord> {
         }
     };
 
-    for ch in word.text.as_str().chars() {
+    // Walk the token by string slices rather than bare chars, so a
+    // multi-character unit can be taken whole. A Portuguese indicator ordinal
+    // (`54.ª`) owns its abbreviation period: at a token start it is recognized
+    // before the generic separator split below, which would otherwise turn
+    // that period into a sentence terminator. A period after the ordinal
+    // (`54.ª.`) is not part of it and still splits off as a terminator.
+    let mut rest = word.text.as_str();
+    while let Some(ch) = rest.chars().next() {
+        if current.is_empty()
+            && let Some(ordinal) = super::ordinal_por::protected_ordinal_prefix(rest, lang)
+        {
+            parts.push((ordinal.to_owned(), false));
+            rest = &rest[ordinal.len()..];
+            continue;
+        }
+        rest = &rest[ch.len_utf8()..];
+
         if ch.is_whitespace() {
             flush_current(&mut parts, &mut current);
             continue;
@@ -309,7 +377,12 @@ fn should_split_cantonese_chars(text: &str) -> bool {
     has_cjk
 }
 
-fn is_cjk_ideograph(ch: char) -> bool {
+/// Whether `ch` is a CJK unified ideograph (base block, extensions A through
+/// E, and both compatibility blocks).
+///
+/// The one owner of this range set; FunASR unit admission in batchalign-pyo3
+/// uses it to split display text one Han character per unit.
+pub fn is_cjk_ideograph(ch: char) -> bool {
     matches!(
         ch as u32,
         0x3400..=0x4DBF
@@ -323,7 +396,13 @@ fn is_cjk_ideograph(ch: char) -> bool {
     )
 }
 
-fn normalized_split_separator(ch: char) -> Option<Option<&'static str>> {
+/// The separator a character splits a token on, if any: `Some(Some(text))`
+/// emits a separator token, `Some(None)` drops the character (inverted
+/// Spanish marks), `None` means the character is word content.
+///
+/// Also the token-boundary test for `ordinal_por`, so an ordinal is only
+/// protected when the tokenizer would really end the token after it.
+pub(super) fn normalized_split_separator(ch: char) -> Option<Option<&'static str>> {
     match ch {
         '.' => Some(Some(".")),
         '?' | '？' | '؟' => Some(Some("?")),

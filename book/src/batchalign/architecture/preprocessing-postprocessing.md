@@ -97,9 +97,9 @@ ASR preprocessing is the most complex because raw ASR output needs extensive nor
 |-------|--------|-------------|
 | 1. Compound merging | `compounds.rs` | Join split compounds: `ice` + `cream` → `ice+cream` (3,584 pairs, O(1) HashSet) |
 | 2. Timed word extraction | `mod.rs` | Convert seconds → milliseconds, extract ASR tokens, strip MOR_PUNCT, lowercase |
+| 2d. Cantonese normalization | `cantonese.rs` | Simplified → traditional + domain replacements (31 entries, Aho-Corasick), applied once to the whole monologue through `AlignedNormalization`, which proves the character count did not change |
 | 3. Multi-word splitting | `mod.rs` | Split space-separated tokens with timestamp interpolation |
 | 4. **Number expansion** | `num2text.rs` + `ordinal_year_eng.rs` | Single Rust per-word pass: cardinals via per-language `NUM2LANG` (47 langs), CJK via `num2chinese`, currency via `try_expand_currency`, English ordinals/years/decades via `ordinal_year_eng`. No Python `num2words` IPC. See [Number Expansion](../reference/number-expansion.md). |
-| 4b. Cantonese normalization | `cantonese.rs` | Simplified → traditional + domain replacements (31 entries, Aho-Corasick) |
 | 5. Long turn splitting | `mod.rs` | Break turns > 300 words into separate utterances |
 | 5b. Pause-based splitting | `mod.rs` | Long pauses in unpunctuated runs create utterance boundaries |
 | 6. Retokenization | `mod.rs` | Split into utterances by punctuation boundaries |
@@ -123,13 +123,13 @@ flowchart TD
     Raw["AsrOutput\n(raw provider tokens)"]
     TPS["strip_english_title_periods_on_elements\n(talkbank-transform/asr_postprocess/cleanup.rs)\n⚠ BEFORE stage 3 split"]
     S3["stage 3: split_multiword_tokens\n(. treated as separator)"]
-    S4b["stages 4b-5b:\ncompound merge, number expansion,\nCJK norm, long-turn/pause splits"]
+    S4["stages 4-5b:\nnumber expansion,\nlong-turn/pause splits"]
     ICap["apply_english_transcribe_rules_pre_retokenize\n(I-cap on words)"]
     S6["stage 6: retokenize by punctuation\n→ Vec&lt;Utterance&gt;"]
     UCap["apply_english_transcribe_rules_post_retokenize\n(utterance-initial cap, skips retrace/markers)"]
     Out["Vec&lt;Utterance&gt;\nready for CHAT assembly"]
 
-    Raw --> TPS --> S3 --> S4b --> ICap --> S6 --> UCap --> Out
+    Raw --> TPS --> S3 --> S4 --> ICap --> S6 --> UCap --> Out
 ```
 
 Why each hook lives where it does:

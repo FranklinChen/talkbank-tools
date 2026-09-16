@@ -1,3 +1,4 @@
+use super::cantonese::NormalizationChangedLength;
 use super::{
     AsrNormalizedText, AsrOutput, AsrWord, ENDING_PUNCT, MOR_PUNCT, RTL_PUNCT, SpeakerIndex,
     Utterance, cleanup, expand_numbers_in_words, finalize_words_to_chunks,
@@ -6,14 +7,21 @@ use super::{
 
 /// Run the full ASR post-processing pipeline on raw ASR output.
 ///
-/// Applies compound merging, timing conversion, multi-word splitting,
-/// number expansion, long turn splitting, punctuation-based retokenization,
-/// disfluency replacement, and n-gram retrace detection. Returns
-/// speaker-attributed utterances ready for CHAT assembly via `build_chat()`.
-pub fn process_raw_asr(output: &AsrOutput, lang: &str) -> Vec<Utterance> {
-    let mut all_utterances = utterances_from_prepared_chunks(prepare_asr_chunks(output, lang));
+/// Applies compound merging, timing conversion, Cantonese normalization,
+/// multi-word splitting, number expansion, long turn splitting,
+/// punctuation-based retokenization, disfluency replacement, and n-gram retrace
+/// detection. Returns speaker-attributed utterances ready for CHAT assembly via
+/// `build_chat()`.
+///
+/// Fails only when Cantonese normalization changed a monologue's character
+/// count; see [`super::AlignedNormalization`].
+pub fn process_raw_asr(
+    output: &AsrOutput,
+    lang: &str,
+) -> Result<Vec<Utterance>, NormalizationChangedLength> {
+    let mut all_utterances = utterances_from_prepared_chunks(prepare_asr_chunks(output, lang)?);
     finalize_utterances(&mut all_utterances, lang);
-    all_utterances
+    Ok(all_utterances)
 }
 
 /// Normalize raw ASR monologues into pre-CHAT chunks while preserving speaker
@@ -23,17 +31,20 @@ pub fn process_raw_asr(output: &AsrOutput, lang: &str) -> Vec<Utterance> {
 /// For pipelines that need to intercept the number expansion step (e.g. to
 /// route through Python IPC), use [`super::prepare_words_pre_expansion`] and
 /// [`super::finalize_words_to_chunks`] separately.
-pub fn prepare_asr_chunks(output: &AsrOutput, lang: &str) -> Vec<super::PreparedMonologueChunk> {
+pub fn prepare_asr_chunks(
+    output: &AsrOutput,
+    lang: &str,
+) -> Result<Vec<super::PreparedMonologueChunk>, NormalizationChangedLength> {
     let mut prepared = Vec::new();
 
     for monologue in &output.monologues {
-        let words = prepare_words_pre_expansion(&monologue.elements, lang);
+        let words = prepare_words_pre_expansion(&monologue.elements, lang)?;
         // Stage 4: number expansion (Rust fallback tables + CJK + currency)
         let words = expand_numbers_in_words(words, lang);
         prepared.extend(finalize_words_to_chunks(words, monologue.speaker, lang));
     }
 
-    prepared
+    Ok(prepared)
 }
 
 /// Retokenize prepared chunks into utterances using punctuation boundaries.

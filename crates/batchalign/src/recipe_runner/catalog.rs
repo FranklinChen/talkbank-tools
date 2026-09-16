@@ -9,7 +9,7 @@ use crate::worker::InferTask;
 
 use super::command_spec::{
     CapabilityPlan, CapabilitySurface, CatalogEntry, CommandCapabilityKind, CommandFamily,
-    CommandIoProfile, PlannerKind, RunnerDispatchKind,
+    CommandIoProfile, CommandSourceKind, PlannerKind, RunnerDispatchKind,
 };
 use super::materialize::{FileNamingPolicy, OutputPolicy, SidecarPolicy, StemRewrite};
 use super::recipes::{
@@ -37,12 +37,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Morphotag,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
+        source_kind: CommandSourceKind::Chat,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Morphosyntax,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -56,12 +56,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Utseg,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
+        source_kind: CommandSourceKind::Chat,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Utseg,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -75,12 +75,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Translate,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
+        source_kind: CommandSourceKind::Chat,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Translate,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -94,12 +94,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Coref,
         family: CommandFamily::BatchedText,
         planner: PlannerKind::TextInputs,
+        source_kind: CommandSourceKind::Chat,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Coref,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -113,12 +113,14 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Align,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
+        // CHAT, despite the audio planner and audio I/O profile: align is
+        // handed a transcript and resolves the recording beside it.
+        source_kind: CommandSourceKind::Chat,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::ForcedAlignment,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Fa,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -132,12 +134,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Transcribe,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
+        source_kind: CommandSourceKind::Media,
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Asr,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -151,12 +153,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::TranscribeS,
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
+        source_kind: CommandSourceKind::Media,
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Asr,
-            additional_infer_tasks: &[InferTask::Speaker],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -170,12 +172,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Compare,
         family: CommandFamily::ReferenceProjection,
         planner: PlannerKind::ComparePairs,
+        source_kind: CommandSourceKind::Chat,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeText,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Morphosyntax,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -189,12 +191,14 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Benchmark,
         family: CommandFamily::Composite,
         planner: PlannerKind::BenchmarkPairs,
+        // Recordings only. Each one's gold transcript is DERIVED beside it by
+        // replacing the extension, so the gold is never a submitted source.
+        source_kind: CommandSourceKind::Media,
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::BenchmarkAudioInfer,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Asr,
-            additional_infer_tasks: &[InferTask::Morphosyntax],
             surface: CapabilitySurface::Composite,
         },
         output_policy: OutputPolicy {
@@ -208,12 +212,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Opensmile,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
+        source_kind: CommandSourceKind::Media,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Opensmile,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -231,12 +235,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Avqi,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
+        source_kind: CommandSourceKind::Media,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Avqi,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -254,12 +258,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         command: ReleasedCommand::Diarize,
         family: CommandFamily::MediaAnalysis,
         planner: PlannerKind::MediaAnalysisInputs,
+        source_kind: CommandSourceKind::Media,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Speaker,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -283,12 +287,13 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         // and would never see the transcript.
         family: CommandFamily::AudioSequential,
         planner: PlannerKind::AudioInputs,
+        // CHAT, for the reason stated above: the input is the transcript.
+        source_kind: CommandSourceKind::Chat,
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::PathsModeAudio,
         runner_dispatch_kind: RunnerDispatchKind::SpeakerIdentity,
         capabilities: CapabilityPlan {
             primary_infer_task: InferTask::Speaker,
-            additional_infer_tasks: &[],
             surface: CapabilitySurface::RecipeOwned,
         },
         output_policy: OutputPolicy {
@@ -346,6 +351,45 @@ mod tests {
             ReleasedCommand::ALL.len(),
             "COMMAND_SPECS holds an entry for something that is not a released command"
         );
+    }
+
+    /// Every command declares what kind of source it consumes, and the answer
+    /// is pinned rather than merely declared.
+    ///
+    /// Matched on the enum with no catch-all, so a new released command cannot
+    /// compile until it states which it is. The declared field is pinned here
+    /// for the reason the other pin tests in this crate give: an unpinned
+    /// declared field reads as authoritative data while nothing would notice it
+    /// going wrong.
+    ///
+    /// The values are NOT derivable from `planner` or `io_profile`, which is
+    /// why the field exists: `align` and `speaker_identify` are both
+    /// `PlannerKind::AudioInputs` and `CommandIoProfile::PathsModeAudio`, and
+    /// both consume CHAT.
+    #[test]
+    fn every_command_declares_its_source_kind() {
+        for command in ReleasedCommand::ALL {
+            let expected = match command {
+                ReleasedCommand::Morphotag
+                | ReleasedCommand::Utseg
+                | ReleasedCommand::Translate
+                | ReleasedCommand::Coref
+                | ReleasedCommand::Compare
+                | ReleasedCommand::Align
+                | ReleasedCommand::SpeakerIdentify => CommandSourceKind::Chat,
+                ReleasedCommand::Transcribe
+                | ReleasedCommand::TranscribeS
+                | ReleasedCommand::Benchmark
+                | ReleasedCommand::Opensmile
+                | ReleasedCommand::Avqi
+                | ReleasedCommand::Diarize => CommandSourceKind::Media,
+            };
+            assert_eq!(
+                command_spec(command).source_kind,
+                expected,
+                "declared source kind for {command}"
+            );
+        }
     }
 
     /// Every shipped recipe declares its stages in an order that respects its

@@ -27,9 +27,9 @@ fn test_params<'a>(
         },
     }
 }
-use crate::api::EngineVersion;
 use crate::cache::UtteranceCache;
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, TokenizationMode};
+use crate::morphosyntax::identity::AdmittedMorphosyntaxResponse;
 use crate::pipeline::PipelineServices;
 use crate::worker::pool::{PoolConfig, WorkerPool};
 use batchalign_transform::parse::parse_lenient;
@@ -217,8 +217,7 @@ async fn unsupported_primary_language_returns_typed_validation_error() {
         .await
         .expect("cache");
     let pool = WorkerPool::new(PoolConfig::default());
-    let engine_version = EngineVersion::from("test-morphotag");
-    let services = PipelineServices::new(&pool, &cache, &engine_version);
+    let services = PipelineServices::new(&pool, &cache);
 
     let lang = crate::api::LanguageCode3::eng();
     let mwt = MwtDict::default();
@@ -256,8 +255,7 @@ async fn noalign_files_get_morphotagged_with_provenance() {
         .await
         .expect("cache");
     let pool = WorkerPool::new(PoolConfig::default());
-    let engine_version = EngineVersion::from("test-morphotag");
-    let services = PipelineServices::new(&pool, &cache, &engine_version);
+    let services = PipelineServices::new(&pool, &cache);
 
     let lang = crate::api::LanguageCode3::eng();
     let mwt = MwtDict::default();
@@ -268,7 +266,7 @@ async fn noalign_files_get_morphotagged_with_provenance() {
         .into_text();
 
     assert!(
-        output.contains("[ba3 morphotag |"),
+        output.contains("[fc-ba3 morphotag |"),
         "NoAlign file must receive morphotag provenance, the \
          pipeline is no longer pass-through for NoAlign. Output: {output}"
     );
@@ -278,6 +276,73 @@ async fn noalign_files_get_morphotagged_with_provenance() {
     assert!(
         output.contains("@Options:\tNoAlign"),
         "NoAlign directive must be preserved verbatim",
+    );
+}
+
+/// The morphotag stamp names the model the worker reported for the responses
+/// the file applied. Nothing on the pipeline's services can reach it: they
+/// carry no engine version, which is how `transcribe` (which runs this same
+/// pipeline through `process_morphosyntax`) used to stamp its ASR engine here.
+#[tokio::test]
+async fn morphotag_provenance_names_the_worker_reported_model() {
+    let chat = "@UTF8\n\
+                @PID:\t11312/c-test\n\
+                @Begin\n\
+                @Languages:\teng\n\
+                @Participants:\tCHI Target_Child\n\
+                @ID:\teng|test|CHI||female|||Target_Child|||\n\
+                *CHI:\thello .\n\
+                @End\n";
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
+        .await
+        .expect("cache");
+    let pool = WorkerPool::new(PoolConfig::default());
+    let services = PipelineServices::new(&pool, &cache);
+
+    let lang = crate::api::LanguageCode3::eng();
+    let mwt = MwtDict::default();
+    let params = test_params(&lang, &mwt);
+    let options = RunOptions::new(services, &params);
+    let ParsedFile::Analyze(parsed) =
+        ParsedFile::parse(chat, params.policy.ca_policy).expect("parse stage")
+    else {
+        panic!("expected analysis");
+    };
+    let collected = parsed
+        .admit()
+        .expect("prevalidate stage")
+        .clear()
+        .collect(&options);
+    let responses: Vec<crate::chat_ops::nlp::UdResponse> = vec![
+        serde_json::from_str(
+            r#"{"sentences":[{"words":[
+            {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":0,"deprel":"root"},
+            {"id":2,"text":".","lemma":".","upos":"PUNCT","head":1,"deprel":"punct"}
+        ]}]}"#,
+        )
+        .expect("synthetic Stanza response"),
+    ];
+    let output = collected
+        .with_responses(
+            responses
+                .into_iter()
+                .map(|response| AdmittedMorphosyntaxResponse::for_test(response, "9.9.9", "eng"))
+                .collect(),
+        )
+        .expect("response cardinality")
+        .apply(&options)
+        .await
+        .expect("result application stage")
+        .postcheck(&options)
+        .expect("post-validation stage")
+        .serialize()
+        .into_text();
+    assert!(
+        output.contains(
+            "[fc-ba3 morphotag | engine=stanza-9.9.9:eng:standard ; lang=eng ; retokenize=true | "
+        ),
+        "{output}"
     );
 }
 
@@ -299,8 +364,7 @@ async fn ca_pass_through_strips_legacy_decision_tiers() {
         .await
         .expect("cache");
     let pool = WorkerPool::new(PoolConfig::default());
-    let engine_version = EngineVersion::from("test-morphotag");
-    let services = PipelineServices::new(&pool, &cache, &engine_version);
+    let services = PipelineServices::new(&pool, &cache);
 
     let lang = crate::api::LanguageCode3::eng();
     let mwt = MwtDict::default();
@@ -332,8 +396,7 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
         .await
         .expect("cache");
     let pool = WorkerPool::new(PoolConfig::default());
-    let engine_version = EngineVersion::from("test-morphotag");
-    let services = PipelineServices::new(&pool, &cache, &engine_version);
+    let services = PipelineServices::new(&pool, &cache);
 
     let lang = crate::api::LanguageCode3::eng();
     let mwt = MwtDict::default();
@@ -375,7 +438,12 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
         .expect("synthetic Stanza response"),
     ];
     let applied = collected
-        .with_responses(responses)
+        .with_responses(
+            responses
+                .into_iter()
+                .map(|response| AdmittedMorphosyntaxResponse::for_test(response, "9.9.9", "eng"))
+                .collect(),
+        )
         .expect("response cardinality")
         .apply(&options)
         .await
@@ -406,8 +474,7 @@ async fn pos_hint_evidence_survives_retokenization() {
         .await
         .expect("cache");
     let pool = WorkerPool::new(PoolConfig::default());
-    let engine_version = EngineVersion::from("test-morphotag");
-    let services = PipelineServices::new(&pool, &cache, &engine_version);
+    let services = PipelineServices::new(&pool, &cache);
 
     let lang = crate::api::LanguageCode3::eng();
     let mwt = MwtDict::default();
@@ -436,7 +503,12 @@ async fn pos_hint_evidence_survives_retokenization() {
         .expect("synthetic Stanza response"),
     ];
     let applied = collected
-        .with_responses(responses)
+        .with_responses(
+            responses
+                .into_iter()
+                .map(|response| AdmittedMorphosyntaxResponse::for_test(response, "9.9.9", "eng"))
+                .collect(),
+        )
         .expect("response cardinality")
         .apply(&options)
         .await

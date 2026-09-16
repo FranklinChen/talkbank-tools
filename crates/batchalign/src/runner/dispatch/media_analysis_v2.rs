@@ -474,7 +474,7 @@ async fn dispatch_avqi_attempt(
 
     Ok((
         avqi_result_filename(filename),
-        format_avqi_report(result, &pool_key.0),
+        format_avqi_report(result, pool_key.as_ref()),
         ContentType::Text,
     ))
 }

@@ -24,6 +24,35 @@ pub(crate) fn command_specs() -> &'static [CatalogEntry] {
     recipe_command_catalog()
 }
 
+/// Every command whose provenance stamp a `command` job can write: its own,
+/// and the stamp of each stage its recipe composes, following a composite
+/// stage into the recipe it runs.
+///
+/// Derived from each stage's [`RecipeStageId::provenance`], so a recipe that
+/// gains a stamping stage is covered with no second list. The no-op write gate
+/// sets aside exactly these stamps (and still compares their fields). Small
+/// and duplicate-free, in first-seen order.
+///
+/// [`RecipeStageId::provenance`]: crate::recipe_runner::recipe::RecipeStageId::provenance
+pub(crate) fn commands_stamped_by(command: ReleasedCommand) -> Vec<ReleasedCommand> {
+    use crate::recipe_runner::recipe::StageProvenance;
+
+    let mut stamped = vec![command];
+    for stage in command_spec(command).recipe.stages {
+        let found = match stage.id.provenance() {
+            StageProvenance::None => continue,
+            StageProvenance::Stamps(stage_command) => vec![stage_command],
+            StageProvenance::RunsRecipeOf(recipe_command) => commands_stamped_by(recipe_command),
+        };
+        for stage_command in found {
+            if !stamped.contains(&stage_command) {
+                stamped.push(stage_command);
+            }
+        }
+    }
+    stamped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,11 +144,6 @@ mod tests {
         io_profile: CommandIoProfile,
         runner_dispatch_kind: RunnerDispatchKind,
         primary_infer_task: InferTask,
-        /// Pinned like every other declared field. Nothing READS this one yet,
-        /// which is exactly why it needs pinning: without it the field looks
-        /// like authoritative declared data while no test would notice it going
-        /// wrong.
-        additional_infer_tasks: &'static [InferTask],
     }
 
     /// The pinned metadata for every released command.
@@ -144,7 +168,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeText,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
                     primary_infer_task: InferTask::Morphosyntax,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Benchmark => CommandMetadataPin {
                     command,
@@ -153,7 +176,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::BenchmarkAudioInfer,
                     primary_infer_task: InferTask::Asr,
-                    additional_infer_tasks: &[InferTask::Morphosyntax],
                 },
                 ReleasedCommand::Transcribe => CommandMetadataPin {
                     command,
@@ -162,7 +184,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
                     primary_infer_task: InferTask::Asr,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::TranscribeS => CommandMetadataPin {
                     command,
@@ -171,7 +192,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
                     primary_infer_task: InferTask::Asr,
-                    additional_infer_tasks: &[InferTask::Speaker],
                 },
                 ReleasedCommand::Align => CommandMetadataPin {
                     command,
@@ -180,7 +200,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::ForcedAlignment,
                     primary_infer_task: InferTask::Fa,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Morphotag => CommandMetadataPin {
                     command,
@@ -189,7 +208,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeText,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
                     primary_infer_task: InferTask::Morphosyntax,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Utseg => CommandMetadataPin {
                     command,
@@ -198,7 +216,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeText,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
                     primary_infer_task: InferTask::Utseg,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Translate => CommandMetadataPin {
                     command,
@@ -207,7 +224,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeText,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
                     primary_infer_task: InferTask::Translate,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Coref => CommandMetadataPin {
                     command,
@@ -216,7 +232,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeText,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
                     primary_infer_task: InferTask::Coref,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Opensmile => CommandMetadataPin {
                     command,
@@ -225,7 +240,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
                     primary_infer_task: InferTask::Opensmile,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Avqi => CommandMetadataPin {
                     command,
@@ -234,7 +248,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
                     primary_infer_task: InferTask::Avqi,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::Diarize => CommandMetadataPin {
                     command,
@@ -243,7 +256,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
                     primary_infer_task: InferTask::Speaker,
-                    additional_infer_tasks: &[],
                 },
                 ReleasedCommand::SpeakerIdentify => CommandMetadataPin {
                     command,
@@ -252,7 +264,6 @@ mod tests {
                     io_profile: CommandIoProfile::PathsModeAudio,
                     runner_dispatch_kind: RunnerDispatchKind::SpeakerIdentity,
                     primary_infer_task: InferTask::Speaker,
-                    additional_infer_tasks: &[],
                 },
             })
             .collect()
@@ -275,7 +286,6 @@ mod tests {
                 io_profile: spec.io_profile,
                 runner_dispatch_kind: spec.runner_dispatch_kind,
                 primary_infer_task: spec.capabilities.primary_infer_task,
-                additional_infer_tasks: spec.capabilities.additional_infer_tasks,
             };
             assert_eq!(actual, pin, "declared metadata for {}", pin.command);
         }
@@ -369,6 +379,39 @@ mod tests {
     }
 
     #[test]
+    fn command_specs_are_unique_and_stamped_commands_follow_the_recipes() {
+        use super::commands_stamped_by;
+
+        // Composition is read from the recipes: transcribe stamps its utseg
+        // and morphotag stages too, and benchmark stamps whatever the
+        // transcribe and compare recipes it runs stamp.
+        let sorted = |command| {
+            let mut names: Vec<&str> = commands_stamped_by(command)
+                .into_iter()
+                .map(ReleasedCommand::as_str)
+                .collect();
+            names.sort_unstable();
+            names
+        };
+        assert_eq!(
+            sorted(ReleasedCommand::Transcribe),
+            ["morphotag", "transcribe", "utseg"]
+        );
+        assert_eq!(
+            sorted(ReleasedCommand::TranscribeS),
+            ["morphotag", "transcribe", "transcribe_s", "utseg"]
+        );
+        assert_eq!(
+            sorted(ReleasedCommand::Benchmark),
+            ["benchmark", "compare", "morphotag", "transcribe", "utseg"]
+        );
+        assert_eq!(sorted(ReleasedCommand::Align), ["align"]);
+        assert_eq!(sorted(ReleasedCommand::Morphotag), ["morphotag"]);
+        assert_eq!(sorted(ReleasedCommand::Translate), ["translate"]);
+
+        command_specs_are_unique();
+    }
+
     fn command_specs_are_unique() {
         let mut names: Vec<_> = command_specs().iter().map(|spec| spec.command).collect();
         let original_len = names.len();

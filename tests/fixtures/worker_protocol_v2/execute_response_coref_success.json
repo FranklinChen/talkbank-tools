@@ -7,6 +7,7 @@
     "kind": "coref_result",
     "items": [
       {
+        "kind": "resolved",
         "annotations": [
           {
             "sentence_idx": 0,
@@ -21,9 +22,14 @@
               []
             ]
           }
-        ]
+        ],
+        "engine": "stanza-1.10.1/ontonotes-singletons_roberta-large-lora"
       },
       {
+        "kind": "no_sentences"
+      },
+      {
+        "kind": "failed",
         "error": "Invalid CorefBatchItem"
       }
     ]

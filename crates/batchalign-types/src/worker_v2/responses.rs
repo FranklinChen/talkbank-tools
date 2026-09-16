@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationMs, DurationSeconds, LanguageCode3};
+use crate::api::{DurationMs, DurationSeconds, LanguageCode3, ReportedEngineName};
 
+use super::asr_model::AsrModelIdentityV2;
 use super::requests::{
     FrameCountV2, ProtocolErrorCodeV2, SpeakerEmbeddingSpanIdV2, WhisperChunkSpanV2,
     WorkerRequestIdV2,
@@ -19,6 +20,15 @@ pub struct WhisperChunkResultV2 {
     pub text: String,
     /// Raw chunk spans.
     pub chunks: Vec<WhisperChunkSpanV2>,
+    /// The models that produced this result, as the runtime observed them.
+    ///
+    /// Required, and deliberately not defaulted: a transcript whose models are
+    /// unknown cannot be stamped honestly or cached safely, and an optional
+    /// field would let every producer forget to fill it while still
+    /// compiling. The only route to a value is a loader that actually loaded
+    /// something, so "which models produced this text" is answered by
+    /// construction rather than by a downstream lookup that can miss.
+    pub model: AsrModelIdentityV2,
 }
 
 /// Stable vocabulary for one monologue element returned by an ASR provider.
@@ -51,11 +61,108 @@ pub struct AsrElementV2 {
     pub confidence: Option<f64>,
 }
 
+/// A provider's OWN label for one speaker, admitted as text that names
+/// somebody.
+///
+/// Non-empty and free of surrounding whitespace, because a label is used to
+/// tell one voice from another: an empty or blank one distinguishes nothing
+/// while looking like an answer.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ProviderSpeakerLabelV2(String);
+
+impl ProviderSpeakerLabelV2 {
+    /// The label, byte for byte as the provider spelled it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ProviderSpeakerLabelV2 {
+    type Error = InvalidProviderSpeakerLabel;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty() || value.trim() != value {
+            return Err(InvalidProviderSpeakerLabel { value });
+        }
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<&str> for ProviderSpeakerLabelV2 {
+    type Error = InvalidProviderSpeakerLabel;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_from(value.to_owned())
+    }
+}
+
+impl std::fmt::Display for ProviderSpeakerLabelV2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderSpeakerLabelV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl schemars::JsonSchema for ProviderSpeakerLabelV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ProviderSpeakerLabelV2".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "description": "A provider's own label for one speaker: non-empty, with no surrounding whitespace.",
+        })
+    }
+}
+
+/// A speaker label that names nobody.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a provider speaker label must be non-empty and unpadded, and {value:?} is not")]
+pub struct InvalidProviderSpeakerLabel {
+    /// The label as the provider sent it.
+    pub value: String,
+}
+
+/// Who a provider attributed one monologue to.
+///
+/// Two states, because there are two facts, and the wire used to have a
+/// spelling for only one of them. `speaker` was a bare string, so an engine
+/// that separates no speakers at all (Aliyun, FunASR, Whisper, Qwen) had to
+/// write SOMETHING, and what it wrote was `"0"`: a label indistinguishable
+/// from a provider's real first speaker. Downstream that became
+/// `SpeakerIndex(0)` and a `PAR0` tier, so "nobody was diarized" and "the
+/// provider said speaker zero" produced identical CHAT.
+///
+/// `Undiarized` is now a state of its own, and an ABSENT label where
+/// separation WAS requested is a refusal rather than a track number.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpeakerAttributionV2 {
+    /// The provider named a speaker; this is its own label for them.
+    Attributed {
+        /// The provider's label, exactly as it spelled it.
+        label: ProviderSpeakerLabelV2,
+    },
+    /// The provider separates no speakers and named none. This is a claim
+    /// about the ENGINE, not a guess about the recording.
+    Undiarized,
+}
+
 /// One speaker-attributed monologue returned by a provider ASR backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct AsrMonologueV2 {
-    /// Stable speaker label chosen by the worker adapter.
-    pub speaker: String,
+    /// Who the provider attributed this span to, if anyone.
+    pub speaker: SpeakerAttributionV2,
     /// Ordered elements inside the monologue.
     pub elements: Vec<AsrElementV2>,
 }
@@ -67,6 +174,13 @@ pub struct MonologueAsrResultV2 {
     pub lang: LanguageCode3,
     /// Speaker-grouped ASR output.
     pub monologues: Vec<AsrMonologueV2>,
+    /// The models that produced this result, as the runtime observed them.
+    ///
+    /// Required for the same reason as on [`WhisperChunkResultV2`]. For a
+    /// cloud provider the composition names the service and the parameter it
+    /// was called with, never an account credential: an appkey identifies who
+    /// paid, not what ran.
+    pub model: AsrModelIdentityV2,
 }
 
 /// One raw Whisper forced-alignment token span returned by Python.
@@ -109,15 +223,238 @@ pub struct IndexedWordTimingResultV2 {
     pub indexed_timings: Vec<Option<IndexedWordTimingV2>>,
 }
 
+/// The Stanza model that analyzed one morphosyntax item, as reported by the
+/// worker that ran it.
+///
+/// Carried per item rather than once per worker because one batch can span
+/// language groups, and because the process that ran the item is the only
+/// honest witness: a capability snapshot taken from another process (inside
+/// `transcribe`, the ASR worker) describes a different runtime.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, schemars::JsonSchema,
+)]
+pub struct MorphosyntaxModelIdentityV2 {
+    /// Installed Stanza package version (`stanza.__version__`).
+    pub stanza_version: ReportedEngineName,
+    /// Language whose Stanza pipeline analyzed the item.
+    pub lang: LanguageCode3,
+    /// Which pipeline variant ran, so provenance does not hide a
+    /// retokenizing or POS-overriding path behind the plain Stanza name.
+    pub pipeline: MorphosyntaxPipelineV2,
+}
+
+/// The morphosyntax pipeline variant that analyzed an item. Closed: a new
+/// variant must be named here before a worker can report it.
+///
+/// Each variant has ONE name, [`Self::wire_name`]. The serde form, the JSON
+/// Schema constants and the name a provenance stamp writes
+/// ([`Self::stamp_name`]) are all read from it, so they cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MorphosyntaxPipelineV2 {
+    /// Stanza on the transcript's own tokens.
+    Standard,
+    /// Stanza's neural tokenizer re-segmenting Mandarin text.
+    MandarinRetokenize,
+    /// Stanza with PyCantonese part-of-speech tags replacing Stanza's.
+    CantonesePycantonesePos,
+}
+
+impl MorphosyntaxPipelineV2 {
+    /// Every variant, in declaration order.
+    pub const ALL: [Self; 3] = [
+        Self::Standard,
+        Self::MandarinRetokenize,
+        Self::CantonesePycantonesePos,
+    ];
+
+    /// The variant's one name: its wire form, its schema constant, and the
+    /// text a provenance stamp writes for it.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::MandarinRetokenize => "mandarin_retokenize",
+            Self::CantonesePycantonesePos => "cantonese_pycantonese_pos",
+        }
+    }
+
+    /// The name as stamp-safe text. Each arm is checked at compile time.
+    pub fn stamp_name(self) -> crate::domain::StampSafeText {
+        use crate::domain::StampSafeText;
+        match self {
+            Self::Standard => const { StampSafeText::from_static(Self::Standard.wire_name()) },
+            Self::MandarinRetokenize => {
+                const { StampSafeText::from_static(Self::MandarinRetokenize.wire_name()) }
+            }
+            Self::CantonesePycantonesePos => {
+                const { StampSafeText::from_static(Self::CantonesePycantonesePos.wire_name()) }
+            }
+        }
+    }
+}
+
+impl serde::Serialize for MorphosyntaxPipelineV2 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.wire_name())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MorphosyntaxPipelineV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|pipeline| pipeline.wire_name() == name)
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!("unknown morphosyntax pipeline {name:?}"))
+            })
+    }
+}
+
+impl schemars::JsonSchema for MorphosyntaxPipelineV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "MorphosyntaxPipelineV2".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let variants: Vec<serde_json::Value> = Self::ALL
+            .iter()
+            .map(|pipeline| serde_json::json!({"type": "string", "const": pipeline.wire_name()}))
+            .collect();
+        schemars::json_schema!({
+            "description": "The morphosyntax pipeline variant that analyzed an item. Closed: a new variant must be named here before a worker can report it.",
+            "oneOf": variants,
+        })
+    }
+}
+
+/// Why one Universal Dependencies relation a worker received from Stanza is
+/// not the relation it applied.
+///
+/// Closed: a rewrite a worker can make must be named here before it can be
+/// reported, so a new one cannot reach a transcript under a name nothing
+/// downstream knows. Each variant has ONE name, [`Self::wire_name`], which the
+/// serde form and the JSON Schema constants are both read from, so they cannot
+/// drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UdRelationRepairKindV2 {
+    /// The model emitted a padding label (`<PAD>`, `<UNK>`), which is not a
+    /// relation at all. Replaced by `dep`.
+    PadRelation,
+    /// A UD relation in the wrong case (`NSUBJ`). Lowercased.
+    RelationCase,
+    /// A known non-UD spelling of a UD relation (`iob`). Replaced by the UD
+    /// relation it means (`iobj`).
+    RelationAlias,
+    /// A label that is no UD relation and has no known equivalent. Replaced by
+    /// `dep`, which is a real UD relation.
+    UnknownRelation,
+}
+
+impl UdRelationRepairKindV2 {
+    /// Every variant, in declaration order.
+    pub const ALL: [Self; 4] = [
+        Self::PadRelation,
+        Self::RelationCase,
+        Self::RelationAlias,
+        Self::UnknownRelation,
+    ];
+
+    /// The variant's one name: its wire form and its schema constant.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::PadRelation => "pad_relation",
+            Self::RelationCase => "relation_case",
+            Self::RelationAlias => "relation_alias",
+            Self::UnknownRelation => "unknown_relation",
+        }
+    }
+}
+
+impl serde::Serialize for UdRelationRepairKindV2 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.wire_name())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UdRelationRepairKindV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.wire_name() == name)
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!("unknown UD relation repair {name:?}"))
+            })
+    }
+}
+
+impl schemars::JsonSchema for UdRelationRepairKindV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "UdRelationRepairKindV2".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let variants: Vec<serde_json::Value> = Self::ALL
+            .iter()
+            .map(|kind| serde_json::json!({"type": "string", "const": kind.wire_name()}))
+            .collect();
+        schemars::json_schema!({
+            "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
+            "oneOf": variants,
+        })
+    }
+}
+
+/// One relation rewrite a worker made inside an analysis it returned.
+///
+/// Carries what it takes to attribute the rewrite as well as count it: the
+/// word it was made on, and both relations. The worker is the only witness,
+/// because the relation Stanza produced does not survive into the analysis it
+/// sends: by the time the server sees the item, the repaired relation is the
+/// only one there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct UdRelationRepairV2 {
+    /// Which rewrite this is.
+    pub kind: UdRelationRepairKindV2,
+    /// Surface form of the word whose relation was rewritten, so a reader can
+    /// find it in the transcript.
+    pub word: String,
+    /// The relation the model produced, verbatim.
+    pub from_relation: String,
+    /// The relation applied in its place, which the worker admits is a UD
+    /// relation before it builds this value.
+    pub to_relation: String,
+}
+
 /// One morphosyntax item result returned by Python.
+///
+/// A tagged union, so an analysis cannot exist without the model that
+/// produced it and an item cannot be both an analysis and an error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
-pub struct MorphosyntaxItemResultV2 {
-    /// Raw Stanza `doc.to_dict()` sentence arrays when inference succeeded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_sentences: Option<Vec<serde_json::Value>>,
-    /// Optional per-item runtime error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MorphosyntaxItemResultV2 {
+    /// Stanza analyzed the item.
+    Analyzed {
+        /// Raw Stanza `doc.to_dict()` sentence arrays.
+        raw_sentences: Vec<serde_json::Value>,
+        /// The model that produced them.
+        model: MorphosyntaxModelIdentityV2,
+        /// Every relation the worker rewrote inside `raw_sentences`, in the
+        /// order it made them. Empty means it rewrote nothing.
+        ///
+        /// Required, with no serde default, for the reason the model is:
+        /// a default would make "this worker reports no repairs" and "this
+        /// worker does not report repairs" the same value on the wire, which
+        /// is the shape that let a rewrite live only in a log line.
+        repairs: Vec<UdRelationRepairV2>,
+    },
+    /// The item had no words, so no model ran and there is nothing to apply.
+    NoWords,
+    /// The item failed; the file it belongs to fails with this message.
+    Failed {
+        /// Operator-facing failure message.
+        error: String,
+    },
 }
 
 /// Batched morphosyntax response payload.
@@ -152,14 +489,25 @@ pub struct UtsegResultV2 {
 }
 
 /// One translation item result returned by Python.
+///
+/// A tagged union: a translation always names the engine that produced it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct TranslationItemResultV2 {
-    /// Raw model translation when inference succeeded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_translation: Option<String>,
-    /// Optional per-item runtime error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TranslationItemResultV2 {
+    /// The engine translated the item.
+    Translated {
+        /// Raw model translation.
+        raw_translation: String,
+        /// The translation engine that produced it.
+        engine: ReportedEngineName,
+    },
+    /// The item's text was blank, so no engine ran.
+    BlankInput,
+    /// The item failed; the file it belongs to fails with this message.
+    Failed {
+        /// Operator-facing failure message.
+        error: String,
+    },
 }
 
 /// Batched translation response payload.
@@ -191,13 +539,22 @@ pub struct CorefAnnotationV2 {
 
 /// One coreference item result returned by Python.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct CorefItemResultV2 {
-    /// Structured sparse annotations when inference succeeded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<Vec<CorefAnnotationV2>>,
-    /// Optional per-item runtime error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CorefItemResultV2 {
+    /// The engine resolved the document.
+    Resolved {
+        /// Structured sparse annotations (empty when no chains were found).
+        annotations: Vec<CorefAnnotationV2>,
+        /// The coreference engine that produced them.
+        engine: ReportedEngineName,
+    },
+    /// The document had no sentences, so no engine ran.
+    NoSentences,
+    /// The item failed; the file it belongs to fails with this message.
+    Failed {
+        /// Operator-facing failure message.
+        error: String,
+    },
 }
 
 /// Batched coreference response payload.
@@ -648,6 +1005,18 @@ impl ExecuteResponseV2 {
                 code: *code,
                 message,
             },
+        }
+    }
+
+    /// Take the payload out of a success, or the failure's code and message.
+    ///
+    /// The owned counterpart of [`Self::read`], for a consumer that moves the
+    /// payload's parts into its own types instead of cloning them.
+    #[must_use]
+    pub fn into_outcome(self) -> Result<TaskResultV2, (ProtocolErrorCodeV2, String)> {
+        match self.body {
+            ExecuteResponseBodyV2::Success(result) => Ok(result),
+            ExecuteResponseBodyV2::Failure { code, message } => Err((code, message)),
         }
     }
 }

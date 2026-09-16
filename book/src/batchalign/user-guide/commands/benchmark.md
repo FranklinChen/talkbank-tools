@@ -74,6 +74,25 @@ For each audio file `FILE.mp3`, the gold companion must be `FILE.cha` in the
 **same directory**. If the gold file is missing, the audio file is reported as
 failed.
 
+**Pass only the audio.** The gold transcript is found for you, by taking each
+recording's own path and replacing the extension, so it is not an input you
+submit. Handing a `.cha` file to `benchmark` as a source is refused when the
+job is submitted, with a message naming the file:
+
+```text
+command 'benchmark' takes media recordings as its sources, but "session.cha" is a CHAT transcript. Submit only the recording; benchmark finds each recording's gold transcript beside it by replacing the extension, so the gold must not be passed as an input.
+```
+
+This refusal is specific to `benchmark`, because benchmark is the command that
+derives a gold companion from each source. It does not apply to `transcribe`,
+`opensmile`, `avqi` or `diarize`.
+
+This used to be accepted. Every submitted source became a recording to
+transcribe, so the transcript became a work unit whose "audio" was the
+transcript and whose gold was itself, and it was passed to ffmpeg to be decoded
+as a recording. Pointing `benchmark` at a directory is unaffected: directory
+expansion selects media by extension and never picks up the golds.
+
 ---
 
 ## What gets created

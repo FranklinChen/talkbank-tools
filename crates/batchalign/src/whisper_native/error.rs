@@ -78,6 +78,17 @@ pub enum WhisperNativeError {
         reason: String,
     },
 
+    /// The loaded weights file could not be recorded as a model identity, so
+    /// the result would have to name its model dishonestly or not at all.
+    /// Refused instead: an ASR result carries the models behind it by
+    /// construction, and a transcript nobody can attribute is worse than a
+    /// failed job.
+    #[error("native Whisper could not record which weights it loaded: {reason}")]
+    ModelIdentity {
+        /// Why the weights file could not be named.
+        reason: String,
+    },
+
     /// Token segment text was not valid UTF-8; should be impossible in
     /// practice with Whisper's vocab but kept as a strict guard.
     #[error("segment text was not valid UTF-8: {reason}")]

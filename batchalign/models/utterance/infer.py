@@ -9,7 +9,6 @@ import torch
 from transformers import AutoTokenizer, BertForTokenClassification
 
 from batchalign.inference._domain_types import LanguageCode
-from batchalign.models.resolve import resolve
 from batchalign.models.utterance.dataset import BOUNDARIES
 from batchalign.models.utterance.evidence import (
     BoundaryAction,
@@ -92,11 +91,6 @@ def _split_yue_at_particles(words: list[str]) -> list[tuple[int, int]]:
     return chunks
 
 
-def resolve_utterance_model(lang: LanguageCode) -> str | None:
-    """Resolve the BA2 utterance model id for one language."""
-    return resolve("utterance", lang)
-
-
 def _normalize_utterance_word_mapping(
     words: Sequence[str],
 ) -> tuple[list[str], list[int]]:
@@ -128,31 +122,33 @@ class BertUtteranceModel:
     reconstruction remains a Rust concern.
     """
 
-    def __init__(self, model_name: str, lang: LanguageCode | None = None) -> None:
-        self.model_name = model_name
+    def __init__(
+        self,
+        *,
+        model_id: str,
+        model_path: str,
+        model_revision: str,
+        lang: LanguageCode | None = None,
+    ) -> None:
+        # The id is what provenance records; the path is only where the bytes
+        # happen to live on this machine and must never be reported, or a
+        # stamp would carry a local directory layout.
+        self.model_id = model_id
+        # The revision the plan pinned and the snapshot resolver verified on
+        # disk. It is NOT read back from ``config._commit_hash``: that is a
+        # library internal which can be absent, and its absence is exactly why
+        # a boundary model's revision used to be optional.
+        self.model_revision = model_revision
         # `lang` is optional for backward compatibility with any caller
         # that constructs a model without one. yue-specific particle
         # pre-chunking only fires when `lang == "yue"`.
         self.lang: LanguageCode | None = lang
 
-        from batchalign.worker._progress import (
-            HF_ARTIFACTS_BERT_TOKEN_CLASSIFICATION,
-            emit_hf_download_if_missing,
-        )
-
-        emit_hf_download_if_missing(
-            model_name,
-            kind="utterance boundary detection",
-            artifacts=HF_ARTIFACTS_BERT_TOKEN_CLASSIFICATION,
-        )
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = BertForTokenClassification.from_pretrained(model_name).to(DEVICE)
+        # Loaded from the resolved local snapshot, never by name: a load by
+        # name is the floating load this pin exists to remove.
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model = BertForTokenClassification.from_pretrained(model_path).to(DEVICE)
         self.model.eval()
-        raw_revision = getattr(self.model.config, "_commit_hash", None)
-        self.model_revision = (
-            raw_revision if isinstance(raw_revision, str) and raw_revision else None
-        )
 
     def predict_actions(self, words: Sequence[str]) -> list[int]:
         """Predict BA2-style token actions for one pretokenized word sequence.
@@ -176,7 +172,7 @@ class BertUtteranceModel:
         if len(normalized_words) <= 1:
             normalized_index_set = set(original_indices)
             return UtteranceBoundaryPrediction(
-                model_id=self.model_name,
+                model_id=self.model_id,
                 model_revision=self.model_revision,
                 word_evidence=tuple(
                     ModelShortCircuit()
@@ -207,7 +203,7 @@ class BertUtteranceModel:
             for normalized_index, original_index in enumerate(original_indices)
         }
         return UtteranceBoundaryPrediction(
-            model_id=self.model_name,
+            model_id=self.model_id,
             model_revision=self.model_revision,
             word_evidence=tuple(
                 normalized_by_original_index.get(
@@ -374,5 +370,4 @@ __all__ = [
     "NormalizationOmission",
     "UtteranceBoundaryPrediction",
     "normalize_utterance_words",
-    "resolve_utterance_model",
 ]

@@ -3,108 +3,106 @@
 //! Owns the full CHAT lifecycle for translate jobs:
 //! parse → collect payloads → infer → inject %xtra → serialize.
 //!
-//! Python workers receive only `(text) → TranslateResponse` via the infer protocol
-//! pure Google Translate / Seamless inference with zero CHAT awareness.
+//! Python workers receive only the rendered source text of each item and
+//! return the engine's raw translation: pure inference, with zero CHAT
+//! awareness.
+//!
+//! # What is sent
+//!
+//! What was spoken: a [`TranslationSource`] per utterance, rendered once at
+//! the worker boundary (see `batchalign_transform::translate`). Every word the
+//! speaker produced travels, retraced words and filled pauses included, and so
+//! does the terminator, so a question reaches the engine as a question.
+//!
+//! # Engine identity
+//!
+//! Every translated item names the engine that translated it, and the
+//! provenance comment names the engines behind the translations that were
+//! applied. Nothing is read from the worker's capability report, so a
+//! translate job never fails for want of a pre-dispatch identity.
+//!
+//! # Empty translations
+//!
+//! A translation with nothing to apply is refused where it is admitted, as a
+//! typed per-item failure that names the engine, so the file fails visibly
+//! instead of being written with a `%xtra` tier silently missing. The verdict
+//! is terminal: the same request gets the same answer from the same engine, so
+//! the remedy is a different engine or different options, not a retry.
 
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-
-use crate::api::{ChatText, EngineVersion, LanguageCode3};
+use crate::api::{InvalidStampSafeText, LanguageCode3, ReportedEngineName};
 use crate::chat_ops::{ChatFile, LanguageCode};
+use crate::provenance::{ResultNamedCommand, TextStamp};
+use crate::types::worker_v2::TranslationItemResultV2;
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_translate_request_v2};
 use crate::worker::text_result_v2::parse_translate_result_v2;
 use batchalign_transform::translate::{
-    TranslateBatchItem, TranslateResponse, apply_translate_results, chat_punct_chars,
-    collect_translate_payloads, postprocess_translation, preprocess_for_translate,
+    EmptyTranslation, TranslateBatchItem, TranslationSource, TranslationText, WritingSystem,
+    apply_translate_results, chat_punct_chars, collect_translate_payloads, postprocess_translation,
 };
 use batchalign_transform::validate::ValidityLevel;
 use tracing::info;
 
 use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
-use crate::pipeline::PipelineServices;
-use crate::pipeline::text_infer::{
-    TextBatchHooks, TextPipelineHooks, run_text_batch_pipeline, run_text_pipeline,
-};
-use crate::text_batch::{
-    TextBatchFileInput, TextBatchFileResults, TextBatchOperation, TextBatchWorkflow,
-    TextBatchWorkflowRequest, TextPerFileWorkflowRequest,
-};
+use crate::pipeline::text_infer::{TextBatchHooks, run_text_batch_pipeline};
+use crate::text_batch::{ItemFailure, TextBatchFileInput, TextBatchFileResults};
 
-/// Command-specific parameters for the translate workflow family.
+/// The translate-specific per-item failure: the engine answered, with nothing
+/// that can be written.
 ///
-/// Retained as a zero-field struct so the `TextBatchOperation` shape stays
-/// Typed workflow operation for translate.
-pub(crate) struct TranslateOperation;
+/// Translate's own type, so utseg, coref and morphotag cannot represent it:
+/// their per-item failure is [`crate::text_batch::EngineItemFailure`], whose
+/// command-specific variant is uninhabited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EmptyTranslationFailure {
+    /// The engine that produced the empty translation.
+    engine: ReportedEngineName,
+}
 
-/// Trait-oriented workflow wrapper for translate.
-pub(crate) type TranslateWorkflow = TextBatchWorkflow<TranslateOperation>;
-
-#[async_trait]
-impl TextBatchOperation for TranslateOperation {
-    type Shared<'a>
-        = PipelineServices<'a>
-    where
-        Self: 'a;
-
-    type Params<'a>
-        = Cancellation<'a>
-    where
-        Self: 'a;
-
-    async fn run_single(
-        chat_text: ChatText<'_>,
-        lang: &LanguageCode3,
-        shared: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> Result<String, ServerError> {
-        run_translate_impl(
-            chat_text.as_ref(),
-            lang,
-            shared.pool,
-            shared.cache,
-            shared.engine_version,
-            params,
+impl std::fmt::Display for EmptyTranslationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} returned an empty translation; try a different --translate-engine \
+             or options and run the file again",
+            self.engine
         )
-        .await
-    }
-
-    async fn run_batch(
-        files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
-        shared: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> TextBatchFileResults {
-        run_translate_batch_impl(files, lang, shared.pool, params).await
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-file translate processing
-// ---------------------------------------------------------------------------
+/// What one translate item can fail with.
+pub(crate) type TranslateItemFailure = ItemFailure<EmptyTranslationFailure>;
 
-/// Process a single CHAT file through the translation pipeline.
+/// One translation item admitted at the worker boundary.
 ///
-/// Returns the serialized CHAT text with `%xtra` tiers injected.
-pub async fn process_translate(
-    chat_text: &str,
-    lang: &LanguageCode3,
-    pool: &WorkerPool,
-    cache: &crate::cache::UtteranceCache,
-    engine_version: &EngineVersion,
-    cancellation: Cancellation<'_>,
-) -> Result<String, ServerError> {
-    TranslateWorkflow::new()
-        .run_per_file(TextPerFileWorkflowRequest {
-            chat_text: ChatText::from(chat_text),
-            lang,
-            shared: PipelineServices::new(pool, cache, engine_version),
-            params: cancellation,
-        })
-        .await
+/// A translated item holds a [`TranslationText`], which exists only when there
+/// is something to apply, so no later stage has to ask whether a translation
+/// is usable.
+#[derive(Debug, Clone)]
+pub(crate) enum AdmittedTranslation {
+    /// Translated, by the engine the worker named on the result.
+    Translated {
+        /// The postprocessed translation.
+        text: TranslationText,
+        /// The engine that produced it.
+        engine: ReportedEngineName,
+    },
+    /// The input was blank, so nothing was translated and no engine ran.
+    BlankInput,
+}
+
+impl AdmittedTranslation {
+    /// The translation to apply, if there is one.
+    fn translation(&self) -> Option<&TranslationText> {
+        match self {
+            Self::Translated { text, .. } => Some(text),
+            Self::BlankInput => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,53 +117,6 @@ pub(crate) async fn process_translate_batch(
     files: &[TextBatchFileInput],
     lang: &LanguageCode3,
     pool: &WorkerPool,
-    cache: &crate::cache::UtteranceCache,
-    engine_version: &EngineVersion,
-    cancellation: Cancellation<'_>,
-) -> TextBatchFileResults {
-    TranslateWorkflow::new()
-        .run_batch_files(TextBatchWorkflowRequest {
-            files,
-            lang,
-            shared: PipelineServices::new(pool, cache, engine_version),
-            params: cancellation,
-        })
-        .await
-}
-
-async fn run_translate_impl(
-    chat_text: &str,
-    lang: &LanguageCode3,
-    pool: &WorkerPool,
-    cache: &crate::cache::UtteranceCache,
-    engine_version: &EngineVersion,
-    cancellation: Cancellation<'_>,
-) -> Result<String, ServerError> {
-    run_text_pipeline(
-        chat_text,
-        lang,
-        PipelineServices::new(pool, cache, engine_version),
-        TextPipelineHooks {
-            command: crate::api::ReleasedCommand::Translate,
-            validity: ValidityLevel::StructurallyComplete,
-            collect: collect_translate_payloads,
-            integrate: integrate_translations,
-            apply: apply_translate_results,
-        },
-        async move |pool, items, lang| infer_batch(pool, items, lang, cancellation).await,
-        |_, _| Ok(()),
-    )
-    .await
-    // The proof stops here: the single-file entry point is the library/CLI
-    // surface and returns text. The gate itself still ran inside
-    // `run_text_pipeline`, so a refusal is already a `ServerError`.
-    .map(crate::pipeline::post_validate::PostValidated::into_text)
-}
-
-async fn run_translate_batch_impl(
-    files: &[TextBatchFileInput],
-    lang: &LanguageCode3,
-    pool: &WorkerPool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
     run_text_batch_pipeline(
@@ -177,25 +128,47 @@ async fn run_translate_batch_impl(
             validity: ValidityLevel::StructurallyComplete,
             collect: collect_translate_payloads,
             apply: apply_translate_file,
+            provenance: translation_provenance,
         },
         async move |pool, items, lang| infer_batch(pool, items, lang, cancellation).await,
     )
     .await
 }
 
-/// Apply translate responses for one file, skipping items with an
-/// empty translation.
+/// The translate stamp, named by the engines of the translations applied.
+/// Never `Err`: each engine is a reported engine name, already stamp-safe; the
+/// `Result` is the shape every text command's provenance hook shares.
+fn translation_provenance(
+    lang: &LanguageCode3,
+    responses: &[AdmittedTranslation],
+) -> Result<TextStamp, InvalidStampSafeText> {
+    Ok(crate::provenance::result_named_provenance(
+        ResultNamedCommand::Translate,
+        lang,
+        responses.iter().filter_map(|response| match response {
+            AdmittedTranslation::Translated { engine, .. } => Some(engine),
+            AdmittedTranslation::BlankInput => None,
+        }),
+    ))
+}
+
+/// Apply translate responses for one file. A blank input has nothing to apply;
+/// a translation that had nothing to apply never reached this point, because
+/// admission refused it.
 fn apply_translate_file(
     chat_file: &mut ChatFile,
-    items: &[(usize, TranslateBatchItem)],
-    responses: &[TranslateResponse],
+    items: &[(usize, TranslationSource)],
+    responses: &[AdmittedTranslation],
 ) {
-    let mut translation_map: HashMap<usize, String> = HashMap::new();
-    for ((line_idx, _item), resp) in items.iter().zip(responses.iter()) {
-        if !resp.translation.is_empty() {
-            translation_map.insert(*line_idx, resp.translation.clone());
-        }
-    }
+    let translation_map: HashMap<usize, TranslationText> = items
+        .iter()
+        .zip(responses)
+        .filter_map(|((line_idx, _item), response)| {
+            response
+                .translation()
+                .map(|translation| (*line_idx, translation.clone()))
+        })
+        .collect();
     if !translation_map.is_empty() {
         apply_translate_results(chat_file, &translation_map);
     }
@@ -208,14 +181,15 @@ fn apply_translate_file(
 /// Send batch items to a worker for translation inference via batched
 /// `execute_v2`.
 ///
-/// Applies pre-processing (Chinese space removal) before sending to Python
-/// and post-processing (punct spacing, quote normalization) on the raw response.
+/// Renders each [`TranslationSource`] for the source language's script (the
+/// one place source text is built), and post-processes the raw response (punct
+/// spacing, quote normalization) before admitting it.
 async fn infer_batch(
     pool: &WorkerPool,
-    items: &[(usize, TranslateBatchItem)],
+    items: &[(usize, TranslationSource)],
     lang: &LanguageCode3,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<TranslateResponse, String>>, ServerError> {
+) -> Result<Vec<Result<AdmittedTranslation, TranslateItemFailure>>, ServerError> {
     // Fallible in chatter 0.3.0; stringified error (`LanguageCodeError` not
     // re-exported upstream).
     let src_lang_code = LanguageCode::new(lang.as_ref()).map_err(|e| {
@@ -225,12 +199,11 @@ async fn infer_batch(
         ))
     })?;
 
-    // Pre-process text before sending to Python
+    // Render what was spoken, in the writing system this language uses.
+    let script = WritingSystem::of_language(&src_lang_code);
     let preprocessed_items: Vec<TranslateBatchItem> = items
         .iter()
-        .map(|(_, item)| TranslateBatchItem {
-            text: preprocess_for_translate(&item.text, &src_lang_code),
-        })
+        .map(|(_, source)| source.render(script))
         .collect();
     let artifacts = PreparedArtifactRuntimeV2::new("translate_v2").map_err(|error| {
         ServerError::Validation(format!(
@@ -259,30 +232,28 @@ async fn infer_batch(
     );
 
     let response = dispatch_execute_v2_with_retry(pool, lang, &request, cancellation).await?;
-    let result = parse_translate_result_v2(&response).map_err(|error| {
+    let result = parse_translate_result_v2(response).map_err(|error| {
         ServerError::Validation(format!("invalid translate V2 result: {error}"))
     })?;
 
     let punct_strings = chat_punct_chars();
     let punct_refs: Vec<&str> = punct_strings.iter().map(|s| s.as_str()).collect();
-    parse_translate_item_results(&result.items, items.len(), &punct_refs)
+    parse_translate_item_results(result.items, items.len(), &punct_refs)
 }
 
-/// Convert one batch of `TranslationItemResultV2` into per-item
-/// `Result<TranslateResponse, String>`.
+/// Admit one batch of `TranslationItemResultV2` into per-item results.
 ///
-/// Per-item engine failures (network error, rate-limit, model error)
-/// and protocol violations (worker returned neither error nor raw
-/// translation) are propagated as the inner `Err(String)` so the
-/// driver can attribute them back to the source file and mark only
-/// that file as failed. Length mismatches are surfaced as the outer
-/// `Err(ServerError)` because they're a batch-level protocol bug,
-/// not a per-item failure.
+/// A per-item failure is the inner `Err(TranslateItemFailure)`, so the driver
+/// can attribute it to the source file and mark only that file as failed: an
+/// engine's own failure (network error, rate-limit, model error), or a
+/// translation with nothing to apply, which is refused here rather than
+/// dropped at injection. A length mismatch is the outer `Err(ServerError)`,
+/// because it is a batch-level protocol bug, not a per-item failure.
 fn parse_translate_item_results(
-    items: &[crate::types::worker_v2::TranslationItemResultV2],
+    items: Vec<TranslationItemResultV2>,
     request_count: usize,
     punct_refs: &[&str],
-) -> Result<Vec<Result<TranslateResponse, String>>, ServerError> {
+) -> Result<Vec<Result<AdmittedTranslation, TranslateItemFailure>>, ServerError> {
     if items.len() != request_count {
         return Err(ServerError::Validation(format!(
             "translate V2 returned {} items for {request_count} requests",
@@ -290,51 +261,33 @@ fn parse_translate_item_results(
         )));
     }
 
-    let mut translate_responses = Vec::with_capacity(items.len());
-    for item_result in items.iter() {
-        if let Some(error) = &item_result.error {
-            translate_responses.push(Err(error.clone()));
-            continue;
-        }
-
-        if let Some(raw_translation) = &item_result.raw_translation {
-            let processed = postprocess_translation(raw_translation, punct_refs);
-            translate_responses.push(Ok(TranslateResponse {
-                translation: processed,
-            }));
-            continue;
-        }
-
-        // Protocol violation: Python worker returned neither error nor
-        // raw_translation. Treat as a per-item failure so the affected
-        // file fails rather than silently producing missing %xtra tiers.
-        translate_responses.push(Err(
-            "translate V2 returned neither error nor raw_translation".to_owned(),
-        ));
-    }
-
-    Ok(translate_responses)
-}
-
-fn integrate_translations(
-    translation_map: &mut HashMap<usize, String>,
-    misses: &[(usize, TranslateBatchItem)],
-    responses: &[TranslateResponse],
-) {
-    // ``infer_batch`` only emits successful translations now (per-item
-    // engine failures are propagated up the call chain as typed errors,
-    // not silently dropped as empty strings). Any caller that reaches
-    // this point with an empty translation indicates a programmer error
-    // in the success-path construction, so we simply insert as-is.
-    for ((line_idx, _item), resp) in misses.iter().zip(responses.iter()) {
-        translation_map.insert(*line_idx, resp.translation.clone());
-    }
+    Ok(items
+        .into_iter()
+        .map(|item| match item {
+            TranslationItemResultV2::Translated {
+                raw_translation,
+                engine,
+            } => {
+                let postprocessed = postprocess_translation(&raw_translation, punct_refs);
+                match TranslationText::admit(&postprocessed) {
+                    Ok(text) => Ok(AdmittedTranslation::Translated { text, engine }),
+                    // The engine answered with nothing to write. This used to
+                    // be skipped at injection, so the file was written with
+                    // the `%xtra` tier missing and nothing said so.
+                    Err(EmptyTranslation) => {
+                        Err(ItemFailure::Command(EmptyTranslationFailure { engine }))
+                    }
+                }
+            }
+            TranslationItemResultV2::BlankInput => Ok(AdmittedTranslation::BlankInput),
+            TranslationItemResultV2::Failed { error } => Err(ItemFailure::EngineReported(error)),
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::worker_v2::TranslationItemResultV2;
 
     fn punct_strings() -> Vec<String> {
         chat_punct_chars()
@@ -344,113 +297,163 @@ mod tests {
         strs.iter().map(|s| s.as_str()).collect()
     }
 
+    fn engine() -> ReportedEngineName {
+        ReportedEngineName::try_from("googletrans-v1").expect("valid engine name")
+    }
+
+    fn translated(text: &str) -> TranslationItemResultV2 {
+        TranslationItemResultV2::Translated {
+            raw_translation: text.into(),
+            engine: engine(),
+        }
+    }
+
     /// Helper to keep the test signature concise.
     fn parse_items(
-        items: &[TranslationItemResultV2],
+        items: Vec<TranslationItemResultV2>,
         request_count: usize,
-    ) -> Result<Vec<Result<TranslateResponse, String>>, ServerError> {
+    ) -> Result<Vec<Result<AdmittedTranslation, TranslateItemFailure>>, ServerError> {
         let strs = punct_strings();
         let refs = punct_refs(&strs);
         parse_translate_item_results(items, request_count, &refs)
     }
 
+    fn translation_of(result: &Result<AdmittedTranslation, TranslateItemFailure>) -> Option<&str> {
+        result
+            .as_ref()
+            .ok()
+            .and_then(AdmittedTranslation::translation)
+            .map(TranslationText::as_str)
+    }
+
     #[test]
-    fn parse_items_all_success_returns_one_ok_per_item() {
+    fn parse_items_all_success_returns_one_translation_per_item() {
         // Note: CHAT punctuation-spacing postprocessing inserts a
-        // space before terminator punctuation; see chat_punct_chars
-        // and the parse_items_applies_postprocessing test below.
-        let items = vec![
-            TranslationItemResultV2 {
-                raw_translation: Some("Hello world.".into()),
-                error: None,
-            },
-            TranslationItemResultV2 {
-                raw_translation: Some("How are you?".into()),
-                error: None,
-            },
-        ];
-        let parsed = parse_items(&items, 2).unwrap();
+        // space before terminator punctuation; see chat_punct_chars.
+        let parsed = parse_items(
+            vec![translated("Hello world."), translated("How are you?")],
+            2,
+        )
+        .expect("matching count");
         assert_eq!(parsed.len(), 2);
-        assert!(parsed[0].is_ok());
-        assert!(parsed[1].is_ok());
-        assert_eq!(parsed[0].as_ref().unwrap().translation, "Hello world .");
-        assert_eq!(parsed[1].as_ref().unwrap().translation, "How are you ?");
+        assert_eq!(translation_of(&parsed[0]), Some("Hello world ."));
+        assert_eq!(translation_of(&parsed[1]), Some("How are you ?"));
     }
 
     #[test]
     fn parse_items_per_item_error_propagates_as_inner_err() {
-        // The bug the whole Option-C fix targets: Google fails for one
-        // utterance, the worker reports it via item_result.error, and
-        // the Rust side must NOT silently emit an empty translation.
-        // It must surface the failure as an inner Err so the driver
-        // can attribute it to the source file and mark that file
-        // failed.
-        let items = vec![
-            TranslationItemResultV2 {
-                raw_translation: Some("Hello world.".into()),
-                error: None,
-            },
-            TranslationItemResultV2 {
-                raw_translation: None,
-                error: Some("Translation failed: ConnectionResetError".into()),
-            },
-        ];
-        let parsed = parse_items(&items, 2).unwrap();
+        // Google fails for one utterance and the worker reports it as that
+        // item's failure: the Rust side must NOT silently emit an empty
+        // translation, but surface an inner Err the driver attributes to the
+        // source file.
+        let parsed = parse_items(
+            vec![
+                translated("Hello world."),
+                TranslationItemResultV2::Failed {
+                    error: "Translation failed: ConnectionResetError".into(),
+                },
+            ],
+            2,
+        )
+        .expect("matching count");
         assert!(parsed[0].is_ok());
         match &parsed[1] {
-            Err(message) => assert!(
-                message.contains("ConnectionResetError"),
-                "expected error string to carry the engine reason, got: {message}"
+            Err(failure) => assert!(
+                failure.to_string().contains("ConnectionResetError"),
+                "expected the failure to carry the engine reason, got: {failure}"
             ),
             Ok(_) => panic!("per-item engine failure must propagate as inner Err"),
         }
     }
 
+    /// RED FIRST (W2): an engine result with nothing to apply is refused as a
+    /// typed per-item failure. Both paths used to accept it, the batch one by
+    /// skipping the utterance and the single-file one by writing an empty
+    /// `%xtra` tier, and neither said anything had gone wrong. The refusal
+    /// covers the punctuation the renderer itself sends, so an engine echoing
+    /// a terminator cannot produce a tier either.
     #[test]
-    fn parse_items_protocol_violation_propagates_as_inner_err() {
-        // Worker returned neither error NOR raw_translation. That is
-        // a protocol bug, not user input, but the orchestrator still
-        // must surface it as a failure rather than emit an empty
-        // translation that quietly drops out of the output.
-        let items = vec![TranslationItemResultV2 {
-            raw_translation: None,
-            error: None,
-        }];
-        let parsed = parse_items(&items, 1).unwrap();
-        match &parsed[0] {
-            Err(message) => assert!(
-                message.contains("neither")
-                    || message.contains("no raw_translation")
-                    || message.contains("protocol"),
-                "expected protocol-violation error message, got: {message}"
-            ),
-            Ok(_) => panic!("protocol violation must propagate as inner Err"),
+    fn parse_items_refuses_a_translation_with_nothing_to_apply() {
+        for empty in ["", "   ", ".", "?", "。"] {
+            let parsed = parse_items(vec![translated(empty)], 1).expect("matching count");
+            let failure = parsed[0]
+                .as_ref()
+                .expect_err("an empty translation must not be admitted");
+            assert_eq!(
+                failure,
+                &ItemFailure::Command(EmptyTranslationFailure { engine: engine() }),
+                "{empty:?} must be refused as an empty translation"
+            );
+            let rendered = failure.to_string();
+            assert!(
+                rendered.contains("googletrans-v1"),
+                "the failure must name the engine, got: {rendered}"
+            );
+            assert!(
+                rendered.contains("--translate-engine"),
+                "the failure must name the remedy, got: {rendered}"
+            );
         }
+    }
+
+    /// The file's verdict for an empty translation is terminal: the same
+    /// request gets the same answer, so the control plane must not be told to
+    /// expect a different one.
+    #[test]
+    fn an_empty_translation_fails_the_file_terminally() {
+        let failure = crate::text_batch::TextWorkflowFileError::item_errors(
+            "translate",
+            crate::text_batch::ItemFailures::of_one(crate::text_batch::ItemError {
+                item_index: 0,
+                failure: ItemFailure::Command(EmptyTranslationFailure { engine: engine() }),
+            }),
+        );
+        assert_eq!(
+            failure.category(),
+            crate::scheduling::FailureCategory::ProviderTerminal
+        );
+    }
+
+    /// A blank input is admitted as its own outcome: nothing to apply, and no
+    /// engine to name.
+    #[test]
+    fn parse_items_blank_input_translates_nothing_and_names_no_engine() {
+        let parsed =
+            parse_items(vec![TranslationItemResultV2::BlankInput], 1).expect("matching count");
+        assert!(matches!(parsed[0], Ok(AdmittedTranslation::BlankInput)));
+        let applied: Vec<AdmittedTranslation> = parsed
+            .into_iter()
+            .map(|item| item.expect("admitted"))
+            .collect();
+        assert!(matches!(
+            translation_provenance(&LanguageCode3::eng(), &applied).expect("valid fields"),
+            TextStamp::NotStamped(crate::provenance::NoStampReason::NothingApplied)
+        ));
     }
 
     #[test]
     fn parse_items_count_mismatch_is_outer_err() {
-        let items = vec![TranslationItemResultV2 {
-            raw_translation: Some("Hello.".into()),
-            error: None,
-        }];
-        let err = parse_items(&items, 2).unwrap_err();
+        let err = parse_items(vec![translated("Hello.")], 2).unwrap_err();
         assert!(format!("{err}").contains("returned 1 items for 2 requests"));
     }
 
+    /// The translate stamp names the engine the translations named.
     #[test]
-    fn parse_items_applies_postprocessing_to_successful_translations() {
-        let items = vec![TranslationItemResultV2 {
-            raw_translation: Some("Hello world.".into()),
-            error: None,
-        }];
-        let parsed = parse_items(&items, 1).unwrap();
-        let translation = &parsed[0].as_ref().unwrap().translation;
-        // Postprocessing inserts a space before the period (CHAT
-        // punctuation-spacing convention).
+    fn translation_provenance_names_the_engine_of_the_applied_results() {
+        let applied: Vec<AdmittedTranslation> = parse_items(vec![translated("Hello.")], 1)
+            .expect("matching count")
+            .into_iter()
+            .map(|item| item.expect("admitted"))
+            .collect();
+        let TextStamp::Stamped(comment) =
+            translation_provenance(&LanguageCode3::eng(), &applied).expect("valid fields")
+        else {
+            panic!("a translation names its engine");
+        };
+        let stamp = comment.format();
         assert!(
-            translation.ends_with(" ."),
-            "expected postprocessed punctuation spacing, got: {translation:?}"
+            stamp.starts_with("[fc-ba3 translate | engine=googletrans-v1 ; lang=eng | "),
+            "{stamp}"
         );
     }
 }

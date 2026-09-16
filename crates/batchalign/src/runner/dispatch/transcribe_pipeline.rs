@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::api::{EngineVersion, NumWorkers};
+use crate::api::NumWorkers;
 use crate::cache::UtteranceCache;
 use crate::pipeline::PipelineServices;
 use crate::runner::DispatchHostContext;
@@ -38,8 +38,6 @@ pub(crate) struct TranscribeDispatchRuntime {
     pub pool: Arc<WorkerPool>,
     /// Shared utterance cache used by post-ASR server-side stages.
     pub cache: Arc<UtteranceCache>,
-    /// Current engine version string for cache partitioning.
-    pub engine_version: EngineVersion,
     /// Maximum number of file tasks to run concurrently for this job.
     pub num_workers: NumWorkers,
 }
@@ -149,7 +147,6 @@ pub(crate) async fn dispatch_transcribe_infer(
         let pool = runtime.pool.clone();
         let cache = runtime.cache.clone();
         let job = job.clone();
-        let engine_version = runtime.engine_version.clone();
         let mut opts = base_options.clone();
         let file = file.clone();
         let filename = file.filename.clone();
@@ -159,7 +156,7 @@ pub(crate) async fn dispatch_transcribe_infer(
             "transcribe file task",
             async move {
                 let _permit = permit;
-                let services = PipelineServices::new(&pool, &cache, &engine_version);
+                let services = PipelineServices::new(&pool, &cache);
                 process_one_transcribe_file(
                     &job,
                     sink.clone(),
@@ -340,8 +337,7 @@ mod tests {
 
     use super::*;
     use crate::api::{
-        DisplayPath, EngineVersion, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand,
-        UnixTimestamp,
+        DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand, UnixTimestamp,
     };
     use crate::api::{LanguageCode3, LanguageSpec};
     use crate::cache::UtteranceCache;
@@ -476,16 +472,19 @@ mod tests {
         let cache = UtteranceCache::sqlite(Some(cache_dir))
             .await
             .expect("open cache");
-        let engine_version = EngineVersion::from("test-asr");
-        let services = PipelineServices::new(&pool, &cache, &engine_version);
+        let services = PipelineServices::new(&pool, &cache);
         let sink = StoreRunnerEventSink::wrap(store.clone());
         let mut opts = crate::transcribe::TranscribeOptions {
-            auto_speakers: false,
-            backend: AsrBackend::Worker(crate::transcribe::AsrWorkerMode::LocalWhisperV2),
+            asr: crate::transcribe::TranscribeAsrPlan::from_request(
+                AsrBackend::Worker(crate::transcribe::AsrWorkerMode::LocalWhisperV2),
+                false,
+                1,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap(),
             diarize: false,
             speaker_backend: None,
             lang: LanguageSpec::Resolved(LanguageCode3::eng()),
-            num_speakers: 1,
             with_utseg: true,
             with_morphosyntax: false,
             cache_policies: crate::transcribe::TranscribeCachePolicies::uniform(

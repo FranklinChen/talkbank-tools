@@ -9,13 +9,23 @@ from pathlib import Path
 
 import numpy as np
 
-from batchalign.inference.asr import AsrElement, AsrMonologue, MonologueAsrResponse
+from batchalign.inference.asr import (
+    AsrElement,
+    AsrMonologue,
+    AttributedSpeaker,
+    MonologueAsrResponse,
+)
 from batchalign.inference.avqi import AvqiResponse
 from batchalign.inference.opensmile import OpenSmileResponse
 from batchalign.inference.speaker import (
     LocalPyannoteSpeakerEvidence,
     SpeakerResponse,
     SpeakerSegment,
+)
+from batchalign.tests._asr_model_pins import (
+    loaded_identity,
+    request_models,
+    worker_loaded,
 )
 from batchalign.worker._asr_v2 import AsrExecutionHostV2
 from batchalign.worker._avqi_v2 import AvqiExecutionHostV2
@@ -33,18 +43,23 @@ from batchalign.worker._types import (
 from batchalign.worker._types_v2 import (
     AsrBackendV2,
     AsrRequestV2,
+    AttributedSpeakerV2,
     AvqiRequestV2,
     AvqiResultV2,
     CorefRequestV2,
+    CorefResolvedItemV2,
     CorefResultV2,
     ExecuteErrorV2,
     ExecuteRequestV2,
+    ExecuteResponseV2,
     ExecuteSuccessV2,
     FaBackendV2,
     FaTextModeV2,
     ForcedAlignmentRequestV2,
     InferenceTaskV2,
+    IntegratedDiarizationV2,
     MonologueAsrResultV2,
+    MorphosyntaxAnalyzedItemV2,
     MorphosyntaxRequestV2,
     MorphosyntaxResultV2,
     OpenSmileRequestV2,
@@ -125,8 +140,9 @@ def test_test_echo_rejects_mismatched_task_payload_boundary() -> None:
                     backend=AsrBackendV2.HK_TENCENT,
                     input=ProviderMediaInputV2(
                         media_path="/tmp/provider.wav",
-                        num_speakers=2,
+                        diarization=IntegratedDiarizationV2(speakers=2),
                     ),
+                    models=request_models(AsrBackendV2.HK_TENCENT),
                 ),
                 attachments=[],
             )
@@ -261,6 +277,7 @@ def test_routes_asr_execute_v2_request(tmp_path: Path) -> None:
                 lang="eng",
                 backend=AsrBackendV2.LOCAL_WHISPER,
                 input=PreparedAudioInputV2(audio_ref_id="audio-ref-1"),
+                models=request_models(AsrBackendV2.LOCAL_WHISPER),
             ),
             attachments=[audio_attachment],
         ),
@@ -276,6 +293,7 @@ def test_routes_asr_execute_v2_request(tmp_path: Path) -> None:
                             end_s=0.5,
                         )
                     ],
+                    model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
                 )
             ),
             forced_alignment=ForcedAlignmentExecutionHostV2(),
@@ -288,6 +306,7 @@ def test_routes_asr_execute_v2_request(tmp_path: Path) -> None:
     assert response.result.text == "hello"
 
 
+@worker_loaded(AsrBackendV2.HK_TENCENT)
 def test_routes_provider_media_asr_execute_v2_request() -> None:
     """The live V2 router should hand provider-media ASR requests to ASR hosts."""
 
@@ -300,8 +319,9 @@ def test_routes_provider_media_asr_execute_v2_request() -> None:
                 backend=AsrBackendV2.HK_TENCENT,
                 input=ProviderMediaInputV2(
                     media_path="/tmp/provider.wav",
-                    num_speakers=2,
+                    diarization=IntegratedDiarizationV2(speakers=2),
                 ),
+                models=request_models(AsrBackendV2.HK_TENCENT),
             ),
             attachments=[],
         ),
@@ -311,7 +331,7 @@ def test_routes_provider_media_asr_execute_v2_request() -> None:
                     lang=item.lang,
                     monologues=[
                         AsrMonologue(
-                            speaker=item.num_speakers - 1,
+                            speaker=AttributedSpeaker(label="1"),
                             elements=[AsrElement(value=item.audio_path, type="text")],
                         )
                     ],
@@ -324,7 +344,7 @@ def test_routes_provider_media_asr_execute_v2_request() -> None:
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, MonologueAsrResultV2)
-    assert response.result.monologues[0].speaker == "1"
+    assert response.result.monologues[0].speaker == AttributedSpeakerV2(label="1")
     assert response.result.monologues[0].elements[0].value == "/tmp/provider.wav"
 
 
@@ -654,6 +674,7 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
                     results=[
                         InferResponse(
                             result={
+                                "kind": "analyzed",
                                 "raw_sentences": [
                                     [
                                         {
@@ -681,7 +702,13 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
                                             "deprel": "obj",
                                         },
                                     ]
-                                ]
+                                ],
+                                "model": {
+                                    "stanza_version": "1.99.0",
+                                    "lang": "eng",
+                                    "pipeline": "standard",
+                                },
+                                "repairs": [],
                             },
                             elapsed_s=0.0,
                         )
@@ -693,7 +720,7 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, MorphosyntaxResultV2)
-    assert response.result.items[0].raw_sentences is not None
+    assert isinstance(response.result.items[0], MorphosyntaxAnalyzedItemV2)
     assert response.result.items[0].raw_sentences[0][1]["lemma"] == "see"
 
 
@@ -733,6 +760,7 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
             results=[
                 InferResponse(
                     result={
+                        "kind": "analyzed",
                         "raw_sentences": [
                             [
                                 {
@@ -760,7 +788,13 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
                                     "deprel": "obj",
                                 },
                             ]
-                        ]
+                        ],
+                        "model": {
+                            "stanza_version": "1.99.0",
+                            "lang": "yue",
+                            "pipeline": "cantonese_pycantonese_pos",
+                        },
+                        "repairs": [],
                     },
                     elapsed_s=0.0,
                 )
@@ -799,10 +833,10 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
     assert captured["mwt"] == {"食緊": ["食", "緊"]}
 
 
-def test_invalid_morphosyntax_host_output_becomes_runtime_failure(
+def test_invalid_morphosyntax_host_item_fails_only_that_item(
     tmp_path: Path,
 ) -> None:
-    """Malformed morphosyntax host output should be classified as runtime failure."""
+    """A morphosyntax host item that does not parse fails that item alone."""
 
     payload_path = tmp_path / "morphosyntax-invalid-batch.json"
     _write_json_payload(
@@ -850,7 +884,7 @@ def test_invalid_morphosyntax_host_output_becomes_runtime_failure(
         ),
     )
 
-    _assert_runtime_failure_response(response, "invalid morphosyntax host output")
+    _assert_item_failure(response, "invalid morphosyntax host item")
 
 
 def test_morphosyntax_item_count_mismatch_is_invalid_payload(tmp_path: Path) -> None:
@@ -1135,7 +1169,7 @@ def test_routes_utseg_execute_v2_request_with_boundary_evidence(tmp_path: Path) 
     )
     evidence = {
         "model_id": "talkbank/CHATUtterance-en",
-        "model_revision": "0123456789abcdef",
+        "model_revision": "0123456789abcdef0123456789abcdef01234567",
         "normalization_revision": "lower-strip-ascii-punctuation-v1",
         "adjacency_policy_revision": "suppress-earlier-adjacent-nonordinary-v1",
         "word_evidence": [
@@ -1313,7 +1347,14 @@ def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
             text=TextExecutionHostV2(
                 translate_runner=lambda req: BatchInferResponse(
                     results=[
-                        InferResponse(result={"raw_translation": "hola"}, elapsed_s=0.0)
+                        InferResponse(
+                            result={
+                                "kind": "translated",
+                                "raw_translation": "hola",
+                                "engine": "googletrans-v1",
+                            },
+                            elapsed_s=0.0,
+                        )
                     ]
                 )
             ),
@@ -1325,8 +1366,8 @@ def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
     assert response.result.items[0].raw_translation == "hola"
 
 
-def test_invalid_translate_host_output_becomes_runtime_failure(tmp_path: Path) -> None:
-    """Malformed translate host output should be classified as runtime failure."""
+def test_invalid_translate_host_item_fails_only_that_item(tmp_path: Path) -> None:
+    """A translate host item that does not parse fails that item alone."""
 
     payload_path = tmp_path / "translate-invalid-batch.json"
     _write_json_payload(payload_path, {"items": [{"text": "hello there"}]})
@@ -1364,7 +1405,7 @@ def test_invalid_translate_host_output_becomes_runtime_failure(tmp_path: Path) -
         ),
     )
 
-    _assert_runtime_failure_response(response, "invalid translate host output")
+    _assert_item_failure(response, "invalid translate host item")
 
 
 def test_routes_coref_execute_v2_request(tmp_path: Path) -> None:
@@ -1401,6 +1442,8 @@ def test_routes_coref_execute_v2_request(tmp_path: Path) -> None:
                     results=[
                         InferResponse(
                             result={
+                                "kind": "resolved",
+                                "engine": "stanza-1.99.0",
                                 "annotations": [
                                     {
                                         "sentence_idx": 0,
@@ -1414,7 +1457,7 @@ def test_routes_coref_execute_v2_request(tmp_path: Path) -> None:
                                             ]
                                         ],
                                     }
-                                ]
+                                ],
                             },
                             elapsed_s=0.0,
                         )
@@ -1426,12 +1469,12 @@ def test_routes_coref_execute_v2_request(tmp_path: Path) -> None:
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, CorefResultV2)
-    assert response.result.items[0].annotations is not None
+    assert isinstance(response.result.items[0], CorefResolvedItemV2)
     assert response.result.items[0].annotations[0].words[0][0].chain_id == 0
 
 
-def test_invalid_coref_host_output_becomes_runtime_failure(tmp_path: Path) -> None:
-    """Malformed coref host output should be classified as runtime failure."""
+def test_invalid_coref_host_item_fails_only_that_item(tmp_path: Path) -> None:
+    """A coref host item that does not parse fails that item alone."""
 
     payload_path = tmp_path / "coref-invalid-batch.json"
     _write_json_payload(payload_path, {"items": [{"sentences": [["she"]]}]})
@@ -1466,7 +1509,7 @@ def test_invalid_coref_host_output_becomes_runtime_failure(tmp_path: Path) -> No
         ),
     )
 
-    _assert_runtime_failure_response(response, "invalid coref host output")
+    _assert_item_failure(response, "invalid coref host item")
 
 
 def test_returns_typed_error_for_missing_text_v2_host(tmp_path: Path) -> None:
@@ -1507,3 +1550,17 @@ def test_returns_typed_error_for_missing_text_v2_host(tmp_path: Path) -> None:
     assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
     assert response.result is None
     assert "no translate host loaded" in response.outcome.message
+
+
+def _assert_item_failure(response: ExecuteResponseV2, message_fragment: str) -> None:
+    """Assert the batch succeeded and its one item carries a parse failure.
+
+    The bridge parses each host item into its tagged V2 type and turns one
+    that does not parse into THAT item's ``failed`` outcome, the same
+    per-item attribution the server applies, instead of failing the batch.
+    """
+    assert isinstance(response.outcome, ExecuteSuccessV2)
+    assert response.result is not None
+    item = response.result.items[0]
+    assert item.kind == "failed"
+    assert message_fragment in item.error

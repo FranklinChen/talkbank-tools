@@ -24,6 +24,15 @@ pub fn build_chat_from_json(json: &str) -> Result<ChatFile, String> {
 /// class without re-parsing a string.
 #[derive(Debug, thiserror::Error)]
 pub enum TranscriptBuildError {
+    /// Explicitly requested diagnostic evidence could not be persisted.
+    #[error(transparent)]
+    Diagnostic(#[from] AsrDiagnosticError),
+    /// Explicit participant names do not cover an observed speaker.
+    #[error("no participant code supplied for ASR speaker {0:?}")]
+    MissingParticipantCode(asr_postprocess::SpeakerIndex),
+    /// No primary language was supplied for word admission.
+    #[error("ASR transcript requires a declared primary language")]
+    MissingPrimaryLanguage,
     /// A word failed CHAT-legality validation under its utterance's
     /// language. Normalization upstream in `process_raw_asr` should
     /// have rewritten reporter-class tokens (`%`, digit-hyphen compounds)
@@ -67,6 +76,50 @@ pub enum TranscriptBuildError {
         #[source]
         source: talkbank_model::model::LanguageCodeError,
     },
+}
+
+/// Failure to persist explicitly requested ASR diagnostic evidence.
+#[derive(Debug, thiserror::Error)]
+pub enum AsrDiagnosticError {
+    /// The source utterances could not be encoded.
+    #[error("could not encode ASR utterance diagnostics: {0}")]
+    Encode(#[from] serde_json::Error),
+    /// The requested destination could not be written.
+    #[error("could not write ASR utterance diagnostics to {path:?}: {source}")]
+    Write {
+        /// Requested destination, preserved without lossy path conversion.
+        path: std::path::PathBuf,
+        /// Original filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn write_utterance_dump(path: &std::path::Path, utterances: &[asr_postprocess::Utterance]) -> Result<(), AsrDiagnosticError> {
+    let json = serde_json::to_vec_pretty(utterances)?;
+    std::fs::write(path, json).map_err(|source| AsrDiagnosticError::Write {
+        path: path.to_owned(), source,
+    })?;
+    tracing::warn!(path = %path.display(), "BA3_DUMP_UTTERANCES wrote post-processed utterances");
+    Ok(())
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_write_reports_real_filesystem_failure() {
+        let path = std::path::Path::new("");
+        assert!(matches!(write_utterance_dump(path, &[]), Err(AsrDiagnosticError::Write { path: failed, .. }) if failed == path));
+    }
+
+    #[test]
+    fn diagnostic_write_success_has_readable_bytes() {
+        let destination = tempfile::NamedTempFile::new().unwrap();
+        write_utterance_dump(destination.path(), &[]).unwrap();
+        assert_eq!(std::fs::read(destination.path()).unwrap(), b"[]");
+    }
 }
 
 /// A word the language gate refused, emitted anyway for human review.
@@ -113,12 +166,53 @@ pub struct AsrTranscript {
     pub language_invalid: Vec<LanguageInvalidWord>,
 }
 
+struct NamedAsrUtterance<'a> {
+    utterance: &'a asr_postprocess::Utterance,
+    speaker_id: String,
+}
+
+/// Speaker names bound to their immutable source utterances. Numbered naming
+/// allocates only for observed utterances, never for a requested count or the
+/// largest numeric speaker label. Explicit names must cover every speaker.
+pub struct NamedAsrUtterances<'a> {
+    source: &'a [asr_postprocess::Utterance],
+    named: Vec<NamedAsrUtterance<'a>>,
+}
+
+impl<'a> NamedAsrUtterances<'a> {
+    /// Assign neutral PAR codes while preserving provider speaker indices.
+    pub fn numbered(source: &'a [asr_postprocess::Utterance]) -> Self {
+        Self {
+            source,
+            named: source.iter().map(|utterance| NamedAsrUtterance {
+                utterance,
+                speaker_id: format!("PAR{}", utterance.speaker.as_usize()),
+            }).collect(),
+        }
+    }
+
+    /// Admit explicit codes for this source; missing codes are not invented.
+    pub fn with_participant_ids(source: &'a [asr_postprocess::Utterance], ids: &[String]) -> Result<Self, TranscriptBuildError> {
+        let named = source.iter().map(|utterance| {
+            let speaker_id = ids.get(utterance.speaker.as_usize())
+                .ok_or(TranscriptBuildError::MissingParticipantCode(utterance.speaker))?.clone();
+            Ok(NamedAsrUtterance { utterance, speaker_id })
+        }).collect::<Result<_, TranscriptBuildError>>()?;
+        Ok(Self { source, named })
+    }
+
+    /// Build from the exact utterances admitted with these names.
+    pub fn into_transcript(self, langs: &[String], media_name: Option<&str>, write_wor: bool) -> Result<AsrTranscript, TranscriptBuildError> {
+        build_named_asr_transcript(self, langs, media_name, write_wor)
+    }
+}
+
 /// Convert post-processed ASR utterances into a pre-serialization
 /// `TranscriptDescription`.
 ///
 /// Each word's text is validated at construction via
 /// [`ChatWordText::try_from_lang`][try_lang] under the utterance's declared
-/// language (falling back to the primary `langs[0]` or `"eng"`). Fails
+/// language (or the required primary `langs[0]`). Fails
 /// with [`TranscriptBuildError`] at the first offending word. This is
 /// the "loud guard" half of strategy 4c: normalization runs upstream
 /// in `process_raw_asr`'s stages; this gate is the belt after the
@@ -136,15 +230,23 @@ pub fn transcript_from_asr_utterances(
     media_name: Option<&str>,
     write_wor: bool,
 ) -> Result<AsrTranscript, TranscriptBuildError> {
-    if let Ok(path) = std::env::var("BA3_DUMP_UTTERANCES")
-        && let Ok(json) = serde_json::to_string_pretty(utterances)
-    {
-        let _ = std::fs::write(&path, json);
-        tracing::warn!(path = %path, "BA3_DUMP_UTTERANCES wrote post-processed utterances");
+    NamedAsrUtterances::with_participant_ids(utterances, participant_ids)?
+        .into_transcript(langs, media_name, write_wor)
+}
+
+fn build_named_asr_transcript(
+    input: NamedAsrUtterances<'_>,
+    langs: &[String],
+    media_name: Option<&str>,
+    write_wor: bool,
+) -> Result<AsrTranscript, TranscriptBuildError> {
+    let utterances = input.source;
+    if let Some(path) = std::env::var_os("BA3_DUMP_UTTERANCES") {
+        write_utterance_dump(std::path::Path::new(&path), utterances)?;
     }
 
-    let participants = build_asr_participants(utterances, participant_ids);
-    let primary_lang_raw = langs.first().map(String::as_str).unwrap_or("eng");
+    let participants = build_asr_participants(&input.named);
+    let primary_lang_raw = langs.first().ok_or(TranscriptBuildError::MissingPrimaryLanguage)?;
     let primary_lang_code = LanguageCode::new(primary_lang_raw).map_err(|source| {
         TranscriptBuildError::InvalidLanguageCode {
             lang: primary_lang_raw.to_string(),
@@ -154,8 +256,9 @@ pub fn transcript_from_asr_utterances(
 
     let mut utterance_descs = Vec::with_capacity(utterances.len());
     let mut language_invalid: Vec<LanguageInvalidWord> = Vec::new();
-    for (utt_idx, utterance) in utterances.iter().enumerate() {
-        let speaker_id = resolve_speaker_id(utterance.speaker, participant_ids);
+    for (utt_idx, named) in input.named.into_iter().enumerate() {
+        let utterance = named.utterance;
+        let speaker_id = named.speaker_id;
         let utterance_lang = match utterance.lang.as_deref() {
             Some(raw) => LanguageCode::new(raw).map_err(|source| {
                 TranscriptBuildError::InvalidLanguageCode {
@@ -210,42 +313,25 @@ pub fn transcript_from_asr_utterances(
 }
 
 fn build_asr_participants(
-    utterances: &[asr_postprocess::Utterance],
-    participant_ids: &[String],
+    utterances: &[NamedAsrUtterance<'_>],
 ) -> Vec<ParticipantDesc> {
-    let mut seen_speakers: Vec<asr_postprocess::SpeakerIndex> = Vec::new();
-    for utterance in utterances {
-        if !seen_speakers.contains(&utterance.speaker) {
-            seen_speakers.push(utterance.speaker);
-        }
+    let mut seen_speakers = std::collections::BTreeMap::new();
+    for named in utterances {
+        seen_speakers.entry(named.utterance.speaker).or_insert(&named.speaker_id);
     }
-    seen_speakers.sort_unstable();
 
     seen_speakers
-        .iter()
-        .map(|&speaker| {
-            let id = resolve_speaker_id(speaker, participant_ids);
+        .into_values()
+        .map(|id| {
             let (_name, role) = role_for_speaker_code(&id);
             ParticipantDesc {
-                id,
+                id: id.clone(),
                 name: None,
                 role,
                 corpus: String::new(),
             }
         })
         .collect()
-}
-
-fn resolve_speaker_id(
-    speaker: asr_postprocess::SpeakerIndex,
-    participant_ids: &[String],
-) -> String {
-    let index = speaker.as_usize();
-    if index < participant_ids.len() {
-        participant_ids[index].clone()
-    } else {
-        format!("SP{index}")
-    }
 }
 
 /// How much proof one ASR token carries into the transcript.

@@ -22,7 +22,7 @@ use crate::worker::pool::PoolConfig;
 use crate::{DirectHost, RegistryDiscovery, ReleasedCommand, prepare_workers};
 use crate::{api::JobInfo, api::JobStatus, config::ServerConfig};
 
-use crate::cli::client::{self, BatchalignClient, server_label};
+use crate::cli::client::{self, BatchalignClient};
 use crate::cli::daemon;
 use crate::cli::error::CliError;
 use crate::cli::progress::BatchProgress;
@@ -517,27 +517,39 @@ pub(crate) fn build_direct_pool_config(
     }
 }
 
+/// Whether the server advertises `command`. The server's list holds released
+/// command names only (a test-echo worker advertises the commands it echoes,
+/// not a name of its own), so the command's own name is the only match.
 fn server_supports_command(capabilities: &[String], command: ReleasedCommand) -> bool {
-    capabilities.is_empty()
-        || capabilities
-            .iter()
-            .any(|c| c == command.as_str() || c == "test-echo")
+    capabilities.is_empty() || capabilities.iter().any(|c| c == command.as_str())
 }
 
-/// Warn (but don't block) if the server's build hash differs from the CLI's.
+/// Refuse a server whose build identity is not this CLI's, before any job is
+/// submitted and so before any compute runs.
 ///
-/// This warning only applies to explicit `--server` connections.
-fn warn_stale_server(server_url: &str, health: &crate::api::HealthResponse) {
-    if !health.build_hash.is_empty() && health.build_hash != crate::cli::build_hash() {
-        eprintln!(
-            "warning: server {} has a different build ({}) than this CLI ({}).\n\
-             Results may differ from what the current binary expects.\n\
-             Restart the server to pick up the new binary.",
-            server_label(server_url),
-            health.build_hash,
-            crate::cli::build_hash(),
-        );
-    }
+/// A server left running across an upgrade produces results with the older
+/// build's engines and fixes, and the CLI writes them as if the current build
+/// ran. That used to be a warning printed above output that was produced
+/// anyway. A server that reports no build identity is refused too: nothing
+/// then shows it is this build. The remedy is in the error: restart the
+/// server with this build.
+fn refuse_foreign_server_build(
+    server_url: &str,
+    health: &crate::api::HealthResponse,
+) -> Result<(), CliError> {
+    let client_build = crate::build_hash();
+    let server_build = match health.build_hash.as_str() {
+        "" => crate::cli::error::ServerBuild::Unreported,
+        reported if reported == client_build => return Ok(()),
+        reported => crate::cli::error::ServerBuild::Reported(reported.to_owned()),
+    };
+    Err(CliError::ServerBuildMismatch {
+        // The full URL, not the short label: the operator has to find and
+        // restart exactly this server.
+        server: server_url.to_owned(),
+        server_build,
+        client_build: client_build.to_owned(),
+    })
 }
 
 /// Probe the local server with a short timeout.

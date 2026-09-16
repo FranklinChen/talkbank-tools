@@ -654,6 +654,73 @@ fn compare_attributes_gold_pos_to_matches() {
     );
 }
 
+/// The ORDINARY compare run: a morphotagged main transcript against a gold
+/// companion read off disk, which carries no `%mor` at all.
+///
+/// RED FIRST (2026-09-16): every matched word used to report the literal `?`,
+/// because the rule read the gold form's tag and an untagged gold side has
+/// none. The `%xsmor` tier came out as a row of question marks and the entire
+/// per-POS breakdown was one `?` bucket, so every metric derived from it said
+/// nothing at all. This is compare's normal case, not a corner of it: nothing
+/// on the released path morphotags the gold companion.
+///
+/// batchalign2 does the same thing and is deliberately not matched here: its
+/// `_get_pos` returns `"?"` for a form carrying no morphology and it has no
+/// file-level notion of a tagged side (`d8bb0cd0`, compare.py:544-588).
+#[test]
+fn compare_reports_the_main_tag_for_matches_when_the_gold_side_is_untagged() {
+    let parser = TreeSitterParser::new().unwrap();
+    let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";
+    // No `%mor`: exactly what a gold companion looks like.
+    let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n@End\n";
+    let (main_file, _) = parse_lenient(&parser, main);
+    let (gold_file, _) = parse_lenient(&parser, gold);
+
+    let result = compare(&main_file, &gold_file, GoldCoverage::Complete);
+
+    assert_eq!(result.metrics.matches, 2);
+    assert_eq!(
+        XsmorTierContent::try_from(&result.main_utterances[0])
+            .expect("xsmor tier")
+            .to_chat_string(),
+        "INTJ NOUN",
+        "an untagged gold side must not turn every matched word into `?`",
+    );
+    assert_eq!(result.metrics.pos_counts["INTJ"].matches, 1);
+    assert_eq!(result.metrics.pos_counts["NOUN"].matches, 1);
+    assert!(
+        !result.metrics.pos_counts.contains_key("?"),
+        "no matched word may land in the unknown bucket when a tag exists for it",
+    );
+}
+
+/// The other half of the same rule, and the reason it is one rule rather than
+/// "use the main tag whenever the gold has none".
+///
+/// A deletion is a gold word the main transcript does not contain, so there is
+/// no main word to have been tagged and no tag anywhere in either document. It
+/// still reports `?`, which is the honest answer. Asserted beside the test
+/// above because an implementation that borrowed the neighbouring main tag for
+/// deletions too would pass that one and fabricate here.
+#[test]
+fn compare_still_reports_an_unknown_tag_for_a_deletion_on_an_untagged_gold() {
+    let parser = TreeSitterParser::new().unwrap();
+    let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello .\n%mor:\tintj|hello .\n@End\n";
+    let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n@End\n";
+    let (main_file, _) = parse_lenient(&parser, main);
+    let (gold_file, _) = parse_lenient(&parser, gold);
+
+    let result = compare(&main_file, &gold_file, GoldCoverage::Complete);
+
+    assert_eq!(result.metrics.matches, 1);
+    assert_eq!(result.metrics.deletions, 1);
+    assert_eq!(result.metrics.pos_counts["INTJ"].matches, 1);
+    assert_eq!(
+        result.metrics.pos_counts["?"].deletions, 1,
+        "a word neither document tagged reports no tag",
+    );
+}
+
 #[test]
 fn compare_ignores_pos_punct_even_when_surface_is_not_punctuation() {
     let parser = TreeSitterParser::new().unwrap();
@@ -723,15 +790,23 @@ fn batchalign2_master_simple_gold_projection_shape() {
             .to_chat_string(),
         "hello +big world -today ."
     );
-    // Strict BA2 parity (compare.py:540-550 uses `_get_pos(gold_form)`):
-    // gold has no %mor here, so every Match and ExtraReference token gets
-    // None POS → "?" in xsmor. Only the ExtraPayload ("+big") keeps its
-    // POS, since insertions come from main and main has %mor.
+    // The gold companion carries no %mor, so a matched word reports the tag of
+    // the main word it matched, and only the deletion, which no document
+    // tagged, reports `?`.
+    //
+    // This read `"? +ADJ ? -? ."` until 2026-09-16, as strict parity with BA2's
+    // `_get_pos(gold_form)`. The parity expectation was the thing that was
+    // wrong: measured that day at `TalkBank/batchalign2` `master` `d8bb0cd0`,
+    // blob `37270401`, compare.py lines 355-359 and 544-588, `_get_pos` returns
+    // the literal `"?"` for a form carrying no morphology and the file has no
+    // notion of a tagged gold side anywhere. Reproducing it turned every
+    // matched word into `?` on compare's ordinary input, which is a tagged main
+    // transcript against an untagged gold companion. See `super::pos`.
     assert_eq!(
         XsmorTierContent::try_from(&result.gold_utterances[0])
             .expect("xsmor tier")
             .to_chat_string(),
-        "? +ADJ ? -? ."
+        "INTJ +ADJ NOUN -? ."
     );
     assert_eq!(result.metrics.matches, 2);
     assert_eq!(result.metrics.insertions, 1);
@@ -739,7 +814,8 @@ fn batchalign2_master_simple_gold_projection_shape() {
     assert!((result.metrics.wer - (2.0 / 3.0)).abs() < 0.001);
     assert_eq!(result.metrics.pos_counts["ADJ"].insertions, 1);
     assert_eq!(result.metrics.pos_counts["?"].deletions, 1);
-    assert_eq!(result.metrics.pos_counts["?"].matches, 2);
+    assert_eq!(result.metrics.pos_counts["INTJ"].matches, 1);
+    assert_eq!(result.metrics.pos_counts["NOUN"].matches, 1);
 }
 
 /// Repeated main tokens before the matched window are insertions.
@@ -772,14 +848,20 @@ fn windowed_alignment_counts_skipped_prefix_tokens_as_insertions() {
             .to_chat_string(),
         "+dog +dog the dog ."
     );
-    // Strict BA2 parity: gold has no %mor, so Match POS = gold's None = "?".
-    // BA3 pre-fix would have lifted DET/NOUN from main, but that's not what
-    // BA2 does (compare.py:540-550 reads `_get_pos(gold_form)`).
+    // The gold companion carries no %mor, so each matched word reports the tag
+    // of the main word it matched: `the` is DET and `dog` is NOUN.
+    //
+    // This read `"+NOUN +NOUN ? ? ."` until 2026-09-16, and its comment
+    // recorded that BA3 had once lifted DET/NOUN from main and was changed away
+    // from that to match BA2. The change went the wrong way: BA2 prints `?`
+    // because `_get_pos` has no file-level notion of a tagged gold side
+    // (`d8bb0cd0`, compare.py:544-588), not because `?` is a better answer for
+    // a word whose tag BA3 is holding.
     assert_eq!(
         XsmorTierContent::try_from(&result.gold_utterances[0])
             .expect("xsmor tier")
             .to_chat_string(),
-        "+NOUN +NOUN ? ? ."
+        "+NOUN +NOUN DET NOUN ."
     );
 }
 
@@ -798,14 +880,17 @@ fn batchalign2_master_multi_utterance_compare_metrics() {
             .to_chat_string(),
         "one fish +two fish ."
     );
-    // Strict BA2 parity: gold has no %mor on either utterance. Matches
-    // and gold-side deletions get "?" POS; only main-side insertions keep
-    // their main %mor POS.
+    // Neither gold utterance carries %mor, so matches report the tag of the
+    // main word they matched and only the deletion, which no document tagged,
+    // reports `?`. These two assertions read `"? ? +NUM ? ."` and
+    // `"? ? -? +ADJ ? ."` until 2026-09-16, as BA2 parity; see
+    // `batchalign2_master_simple_gold_projection_shape` for the measurement
+    // that retired that expectation.
     assert_eq!(
         XsmorTierContent::try_from(&result.gold_utterances[0])
             .expect("xsmor tier")
             .to_chat_string(),
-        "? ? +NUM ? ."
+        "NUM NOUN +NUM NOUN ."
     );
     assert_eq!(
         XsrepTierContent::try_from(&result.gold_utterances[1])
@@ -817,7 +902,7 @@ fn batchalign2_master_multi_utterance_compare_metrics() {
         XsmorTierContent::try_from(&result.gold_utterances[1])
             .expect("xsmor tier")
             .to_chat_string(),
-        "? ? -? +ADJ ? ."
+        "ADJ NOUN -? +ADJ NOUN ."
     );
     assert_eq!(result.metrics.matches, 6);
     assert_eq!(result.metrics.insertions, 2);

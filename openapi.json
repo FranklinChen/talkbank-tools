@@ -99,6 +99,54 @@
         },
         "type": "object"
       },
+      "CapabilityAdmissionOutcome": {
+        "description": "The outcome of admitting one worker key's capability report.",
+        "oneOf": [
+          {
+            "description": "Admitted; dispatch uses this worker for these infer tasks.",
+            "properties": {
+              "infer_tasks": {
+                "description": "The infer tasks the worker supports.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "admitted"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "infer_tasks",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Refused; the worker is not used until it reports again and is admitted.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "refused"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/EngineReportAdmissionError",
+                "description": "Why the report was refused."
+              }
+            },
+            "required": [
+              "reason",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ClientPath": {
         "description": "A path on the submitting client's filesystem.\n\nThe server MUST NOT do filesystem I/O on this directly, it's metadata\nonly.  The only way to convert it to a [`ServerPath`] for I/O is via\n[`assume_shared_filesystem`](Self::assume_shared_filesystem), which\nrequires the caller to verify that the server shares the client's\nfilesystem (paths_mode with a local daemon).\n\nDeliberately does NOT implement `AsRef<Path>` to prevent accidental\nfilesystem operations.",
         "type": "string"
@@ -125,6 +173,71 @@
         "description": "Duration measured in fractional seconds.",
         "format": "double",
         "type": "number"
+      },
+      "EngineReportAdmissionError": {
+        "description": "Why a worker's capability report was refused at admission.\n\nA blank or separator-bearing name and an unknown task key cannot reach this\npoint: [`ReportedEngineName`] and [`InferTask`] refuse them while the wire\nreport is deserialized.\n\nAlso a wire type: `/health` returns it for a worker key whose latest report\nwas refused, so an operator sees why that worker is not used.",
+        "oneOf": [
+          {
+            "description": "A task was advertised with no engine entry at all.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "missing_engine_report"
+                ],
+                "type": "string"
+              },
+              "task": {
+                "description": "The advertised task.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An engine entry names a task the worker did not advertise.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unadvertised_engine_report"
+                ],
+                "type": "string"
+              },
+              "task": {
+                "description": "The unmatched task.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An entry names an engine for a task other than forced alignment. Only\nFA's engine is read from a capability report; every other stage names\nits engine on the results it returns, so its entry is `null`.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "engine_named_for_non_fa_task"
+                ],
+                "type": "string"
+              },
+              "task": {
+                "description": "The task whose entry named an engine.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ErrorResponse": {
         "description": "Standard error response body, matching FastAPI's `HTTPException` format.\n\nAll non-2xx responses from the server use this shape so that clients\ncan parse errors uniformly. The one exception is\n[`ServerError::JobConflict`](crate::error::ServerError::JobConflict),\nwhich nests a `conflicts` array inside `detail`.",
@@ -260,6 +373,69 @@
         ],
         "type": "string"
       },
+      "FileProvenance": {
+        "description": "The provenance stamps read from one result file.\n\nA typed state rather than a list that an unreadable stamp would either\nsilently shorten or turn into a failure of the whole response: a stamp of\nours that does not parse is that file's state, and the rest of the job's\nresults are still served.",
+        "oneOf": [
+          {
+            "description": "Nothing was read: the output is not CHAT, or the file failed.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "not_read"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every stamp of ours parsed. Each entry records one batchalign3\ncommand that was applied (command name, fields, timestamp); empty when\nthe file carries no stamps.",
+            "properties": {
+              "entries": {
+                "description": "The stamps, in file order.",
+                "items": {
+                  "$ref": "#/components/schemas/ProvenanceEntry"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "parsed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "entries",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A comment opens as one of our stamps but does not parse.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unparseable"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "description": "Which stamp and what is wrong with it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "FileResult": {
         "description": "Result for a single processed file.",
         "properties": {
@@ -283,15 +459,13 @@
             "description": "Display path for this file: a bare basename (`\"sample.cha\"`) or a\nrelative forward-slash path (`\"PWA/TYO_a1.cha\"`) for directory input.\nBackslashes are normalized to forward slashes on construction."
           },
           "provenance": {
-            "description": "Processing provenance extracted from the output CHAT file.\nEach entry records one batchalign3 command that was applied\n(command name, engine version, timestamp). Empty for non-CHAT\noutput or files that failed processing.",
-            "items": {
-              "$ref": "#/components/schemas/ProvenanceEntry"
-            },
-            "type": "array"
+            "$ref": "#/components/schemas/FileProvenance",
+            "description": "Processing provenance read from the output file, as a typed state:\nthe parsed stamps, a stamp of ours that did not parse, or nothing read\n(non-CHAT output, or a file that failed)."
           }
         },
         "required": [
-          "filename"
+          "filename",
+          "provenance"
         ],
         "type": "object"
       },
@@ -569,6 +743,13 @@
             "$ref": "#/components/schemas/NodeId",
             "description": "Identifier of the current server node."
           },
+          "refused_registry_workers": {
+            "description": "Registry daemons the latest discovery sweep found alive and refused to\nadopt (another build, or no build named), with why, so an operator sees\nwhy a running daemon is unused.",
+            "items": {
+              "$ref": "#/components/schemas/RefusedRegistryWorker"
+            },
+            "type": "array"
+          },
           "status": {
             "$ref": "#/components/schemas/HealthStatus",
             "description": "Server health status.  Always `Ok` in the current implementation\n(the endpoint itself being reachable implies health), but future\nversions may report degraded states.\n\nREQUIRED, and that is what makes this type an identification rather\nthan a shape any JSON happens to fit. With `#[serde(default)]` here and\non every other field, `{\"error\":{\"message\":\"unknown endpoint\"}}`\ndeserialized into a perfectly healthy response, because `HealthStatus`\nhas a single `#[default] Ok` variant. On 2026-08-27 an unrelated local\nservice holding port 8000 was therefore accepted as a Batchalign\nserver and dispatched real jobs. Parse at the boundary into a type\nwhose existence proves what it claims: a body without these fields is\nnot a Batchalign health response and must fail to parse, not arrive\npre-filled with agreeable values."
@@ -588,6 +769,13 @@
           "version": {
             "description": "Server software version (e.g. `\"0.6.0\"`).  Used by the CLI to\ndetect stale daemons and auto-restart them.\n\nREQUIRED for the same reason as `status`. A server that could omit it\nwould already have broken the stale-daemon check this field exists for.",
             "type": "string"
+          },
+          "worker_capability_admissions": {
+            "description": "The latest capability admission outcome of every worker key that has\nreported: admitted with its infer tasks, or refused with the reason, so\nan operator sees why a worker is not used.",
+            "items": {
+              "$ref": "#/components/schemas/WorkerCapabilityAdmission"
+            },
+            "type": "array"
           },
           "worker_crashes": {
             "description": "Cumulative count of worker process crashes since server start.\nA high rate suggests resource exhaustion or buggy engine code.",
@@ -1213,6 +1401,81 @@
         ],
         "type": "object"
       },
+      "RefusedRegistryWorker": {
+        "description": "A registry daemon the server found alive and refused to adopt.",
+        "properties": {
+          "pid": {
+            "description": "The daemon's process id, from its registry entry.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/RegistryWorkerRefusal",
+            "description": "Why it was refused."
+          },
+          "worker_key": {
+            "description": "The daemon's worker key as its registry entry names it:\n`profile:<profile>:<lang>`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_key",
+          "pid",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RegistryWorkerRefusal": {
+        "description": "Why a registry daemon was not adopted. Either way the remedy is to restart\nthe daemon with this server's build (`batchalign3 worker stop`, then\n`batchalign3 worker start` for its profile and language).",
+        "oneOf": [
+          {
+            "description": "The registry entry names a different build than this server's.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "foreign_build"
+                ],
+                "type": "string"
+              },
+              "reported_build": {
+                "description": "The build the entry names.",
+                "type": "string"
+              },
+              "server_build": {
+                "description": "This server's build.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reported_build",
+              "server_build",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The registry entry names no build at all (written by a daemon from\nbefore build identity was recorded, or started without it).",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unreported_build"
+                ],
+                "type": "string"
+              },
+              "server_build": {
+                "description": "This server's build.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "server_build",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ReleasedCommand": {
         "description": "Closed released command vocabulary used at all Rust seams.\n\nThis is the single canonical command type. Unknown command strings are\nrejected at deserialization boundaries (HTTP 422, DB recovery skip).",
         "enum": [
@@ -1263,6 +1526,24 @@
         "format": "double",
         "type": "number"
       },
+      "WorkerCapabilityAdmission": {
+        "description": "What the server decided about one worker key's latest capability report.",
+        "properties": {
+          "outcome": {
+            "$ref": "#/components/schemas/CapabilityAdmissionOutcome",
+            "description": "Admitted or refused."
+          },
+          "worker_key": {
+            "description": "Worker key label: `target:lang`, plus the engine selection when set.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "worker_key",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "WorkerRuntimeIdentity": {
         "description": "Runtime identity proven by the current ready-handshake schema.",
         "properties": {
@@ -1306,7 +1587,7 @@
       "name": "BSD-3-Clause"
     },
     "title": "batchalign",
-    "version": "0.8.1"
+    "version": "0.8.5"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1726,7 +2007,7 @@
     },
     "/jobs/{job_id}/results/{*filename}": {
       "get": {
-        "description": "Waits for the individual file to reach a terminal status, not the whole job,\nso clients can fetch results incrementally as files finish. Supports\nstem-based matching (e.g., requesting `sample.wav` will find `sample.cha`)\nto handle the common case where the output extension differs from the input.",
+        "description": "Waits for the individual file to reach a terminal status, not the whole job,\nso clients can fetch results incrementally as files finish. Supports\ncommand-policy matching (e.g., requesting `sample.wav` finds `sample.cha`,\nand speaker identification maps `sample.cha` to its evidence JSON).",
         "operationId": "get_single_result",
         "parameters": [
           {

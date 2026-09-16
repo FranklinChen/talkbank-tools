@@ -38,12 +38,141 @@ pub struct FileResult {
     /// `None` for successfully processed files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Processing provenance extracted from the output CHAT file.
-    /// Each entry records one batchalign3 command that was applied
-    /// (command name, engine version, timestamp). Empty for non-CHAT
-    /// output or files that failed processing.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub provenance: Vec<crate::provenance::ProvenanceEntry>,
+    /// Processing provenance read from the output file, as a typed state:
+    /// the parsed stamps, a stamp of ours that did not parse, or nothing read
+    /// (non-CHAT output, or a file that failed).
+    pub provenance: FileProvenance,
+}
+
+/// The provenance stamps read from one result file.
+///
+/// A typed state rather than a list that an unreadable stamp would either
+/// silently shorten or turn into a failure of the whole response: a stamp of
+/// ours that does not parse is that file's state, and the rest of the job's
+/// results are still served.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FileProvenance {
+    /// Nothing was read: the output is not CHAT, or the file failed.
+    NotRead,
+    /// Every stamp of ours parsed. Each entry records one batchalign3
+    /// command that was applied (command name, fields, timestamp); empty when
+    /// the file carries no stamps.
+    Parsed {
+        /// The stamps, in file order.
+        entries: Vec<crate::provenance::ProvenanceEntry>,
+    },
+    /// A comment opens as one of our stamps but does not parse.
+    Unparseable {
+        /// Which stamp and what is wrong with it.
+        reason: String,
+    },
+}
+
+/// What a command decided about stamping one file with provenance.
+///
+/// Recorded when the file completes and reported with its per-file status, so
+/// "this file carries no stamp" is an answer with a reason rather than
+/// something an operator has to infer from an absent comment. Not persisted:
+/// a file whose status is rebuilt from the database after a restart reads
+/// `Unrecorded`, which is the honest answer for a record that never held it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FileStampOutcome {
+    /// No stamp decision was recorded for this file: a command that writes no
+    /// per-file provenance stamp, or a status restored from the database.
+    #[default]
+    Unrecorded,
+    /// The command stamped this file.
+    Stamped {
+        /// The command whose stamp was written.
+        command: String,
+    },
+    /// The command wrote no stamp on this file, for this reason.
+    NotStamped {
+        /// The command that ran.
+        command: String,
+        /// Why it wrote no stamp (for example, no engine produced anything
+        /// that was applied).
+        reason: String,
+    },
+}
+
+impl FileStampOutcome {
+    /// Whether no stamp decision was recorded for this file.
+    ///
+    /// Serialization omits the field in that case, so a per-file record grows
+    /// a `stamp` exactly when a command decided one and the existing wire
+    /// shape is unchanged for every command that stamps nothing.
+    #[must_use]
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+}
+
+/// What the server decided about one worker key's latest capability report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct WorkerCapabilityAdmission {
+    /// Worker key label: `target:lang`, plus the engine selection when set.
+    pub worker_key: String,
+    /// Admitted or refused.
+    pub outcome: CapabilityAdmissionOutcome,
+}
+
+/// The outcome of admitting one worker key's capability report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CapabilityAdmissionOutcome {
+    /// Admitted; dispatch uses this worker for these infer tasks.
+    Admitted {
+        /// The infer tasks the worker supports.
+        #[cfg_attr(feature = "server", schema(value_type = Vec<String>))]
+        infer_tasks: Vec<crate::worker::InferTask>,
+    },
+    /// Refused; the worker is not used until it reports again and is admitted.
+    Refused {
+        /// Why the report was refused.
+        reason: crate::engine_reports::EngineReportAdmissionError,
+    },
+}
+
+/// A registry daemon the server found alive and refused to adopt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct RefusedRegistryWorker {
+    /// The daemon's worker key as its registry entry names it:
+    /// `profile:<profile>:<lang>`.
+    pub worker_key: String,
+    /// The daemon's process id, from its registry entry.
+    pub pid: u32,
+    /// Why it was refused.
+    pub reason: RegistryWorkerRefusal,
+}
+
+/// Why a registry daemon was not adopted. Either way the remedy is to restart
+/// the daemon with this server's build (`batchalign3 worker stop`, then
+/// `batchalign3 worker start` for its profile and language).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RegistryWorkerRefusal {
+    /// The registry entry names a different build than this server's.
+    ForeignBuild {
+        /// The build the entry names.
+        reported_build: String,
+        /// This server's build.
+        server_build: String,
+    },
+    /// The registry entry names no build at all (written by a daemon from
+    /// before build identity was recorded, or started without it).
+    UnreportedBuild {
+        /// This server's build.
+        server_build: String,
+    },
 }
 
 /// Per-file status within a job.
@@ -79,6 +208,12 @@ pub struct FileStatusEntry {
     /// analysis).  Generated by the server when a file fails unexpectedly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bug_report_id: Option<String>,
+    /// What the command decided about stamping this file with provenance.
+    /// Absent when nothing was recorded, which is what `Unrecorded` means: a
+    /// command that writes no per-file stamp, or a status restored from the
+    /// job database.
+    #[serde(default, skip_serializing_if = "FileStampOutcome::is_unrecorded")]
+    pub stamp: FileStampOutcome,
     /// Unix timestamp (seconds since epoch) when the worker began processing
     /// this file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -390,6 +525,16 @@ pub struct HealthResponse {
     /// Batchalign package bytes, and the installed distribution inventory.
     #[serde(default)]
     pub worker_runtime_identities: Vec<crate::worker::runtime_identity::WorkerRuntimeIdentity>,
+    /// The latest capability admission outcome of every worker key that has
+    /// reported: admitted with its infer tasks, or refused with the reason, so
+    /// an operator sees why a worker is not used.
+    #[serde(default)]
+    pub worker_capability_admissions: Vec<WorkerCapabilityAdmission>,
+    /// Registry daemons the latest discovery sweep found alive and refused to
+    /// adopt (another build, or no build named), with why, so an operator sees
+    /// why a running daemon is unused.
+    #[serde(default)]
+    pub refused_registry_workers: Vec<RefusedRegistryWorker>,
     /// Filesystem directories the server searches for media files (audio/video).
     /// Configured via `server.yaml` `media_roots`.
     #[serde(default)]

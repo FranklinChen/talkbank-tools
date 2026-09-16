@@ -86,11 +86,12 @@ fn primary_display_path_for_work_unit(work_unit: &PlannedWorkUnit) -> &DisplayPa
         | PlannedWorkUnit::MediaAnalysis(
             crate::recipe_runner::work_unit::MediaAnalysisWorkUnit { source },
         ) => &source.display_path,
-        PlannedWorkUnit::Audio(crate::recipe_runner::work_unit::AudioWorkUnit { audio })
-        | PlannedWorkUnit::Benchmark(crate::recipe_runner::work_unit::BenchmarkWorkUnit {
-            audio,
-            ..
-        }) => &audio.display_path,
+        PlannedWorkUnit::Audio(crate::recipe_runner::work_unit::AudioWorkUnit { audio }) => {
+            &audio.display_path
+        }
+        // Read through the accessor: a benchmark unit's fields are private so
+        // that only its planner can pair an audio file with a gold transcript.
+        PlannedWorkUnit::Benchmark(benchmark) => &benchmark.audio().display_path,
         PlannedWorkUnit::Compare(crate::recipe_runner::work_unit::CompareWorkUnit {
             main, ..
         }) => &main.display_path,

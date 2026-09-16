@@ -33,7 +33,8 @@
 mod raw_evidence;
 mod transport;
 
-use crate::cache::CacheBackend;
+use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
+use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::{
     BulletRepairPolicy, WordTiming, apply_fa_results_with_projection_policy, cache_key,
     expand_bullets_for_edge_fillers, finalize_without_injection, find_reusable_utterance_indices,
@@ -41,7 +42,7 @@ use crate::chat_ops::fa::{
     refresh_reusable_alignment, refresh_reusable_utterances, rescue_narrow_bullets,
     strip_wor_from_monotonicity_stripped_utterances,
 };
-use crate::chat_ops::{CacheKey, CacheTaskName};
+use crate::engine_reports::FaCacheNamespace;
 use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::pipeline::post_validate::PostValidated;
@@ -56,6 +57,23 @@ use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 use crate::types::results::{FaGroupEvidence, FaOutput, FaResult};
 use crate::types::traces::{FaEvidenceSourceTrace, FaGroupTrace, TimingTrace};
 use transport::{FaInferencePlan, FaWorkerTransport, UncheckedFaWorkerBatch, plan_fa_inference};
+
+/// What forced alignment runs with: the shared pool and cache, plus the
+/// namespace every FA cache row and FA evidence envelope is written and
+/// admitted under.
+///
+/// The namespace is the FA engine the selected worker reported, byte for byte,
+/// so evidence cached by earlier runs stays admissible. It is a separate field
+/// rather than a version on [`PipelineServices`] because it belongs to this
+/// stage alone: the UTR pass that runs inside align shares the pool and cache
+/// but caches under its own engine's namespace.
+#[derive(Clone, Copy)]
+pub(crate) struct FaServices<'a> {
+    /// Worker pool and cache shared with every other stage.
+    pub(crate) pipeline: PipelineServices<'a>,
+    /// The FA engine the selected worker reported.
+    pub(crate) cache_namespace: &'a FaCacheNamespace,
+}
 
 /// The validity level forced alignment admits an input at.
 ///
@@ -160,7 +178,7 @@ impl FaAdmission {
         original_text: &str,
         gap_healing: crate::chat_ops::fa::WordGapHealing,
         engine: &str,
-        engine_version: &str,
+        cache_namespace: &FaCacheNamespace,
     ) -> AdmittedFaResult {
         let document =
             PostValidated::pass_through(original_text, crate::api::ReleasedCommand::Align);
@@ -172,7 +190,7 @@ impl FaAdmission {
                 output: FaOutput::PassThrough(chat_file),
                 group_evidence: Vec::new(),
                 engine: engine.to_owned(),
-                engine_version: engine_version.to_owned(),
+                cache_namespace: cache_namespace.clone(),
                 decisions: Vec::new(),
                 timing_decisions: Vec::new(),
                 gap_healing,
@@ -244,11 +262,6 @@ impl AdmittedFaResult {
     }
 }
 
-/// Cache task name for FA results.
-const CACHE_TASK: CacheTaskName = CacheTaskName::ForcedAlignment;
-/// Cache namespace for immutable worker responses before local reconciliation.
-const RAW_EVIDENCE_CACHE_TASK: CacheTaskName = CacheTaskName::ForcedAlignmentRawEvidence;
-
 pub(super) fn collect_final_timings(
     all_timings: Vec<Option<Vec<Option<WordTiming>>>>,
     context: &str,
@@ -298,7 +311,7 @@ const FA_DERIVED_EVIDENCE_SCHEMA_VERSION: u8 = 1;
 struct VersionedCachedFaTimings {
     schema_version: u8,
     requested_engine: crate::types::engines::FaEngineName,
-    request_engine_version: crate::api::EngineVersion,
+    request_engine_version: crate::api::ReportedEngineName,
     expected_words: usize,
     cache_key: CacheKey,
     timings: Vec<Option<WordTiming>>,
@@ -317,8 +330,8 @@ enum FaDerivedEvidenceError {
     },
     #[error("derived evidence worker version {cached} does not match current version {current}")]
     EngineVersionDrift {
-        cached: crate::api::EngineVersion,
-        current: crate::api::EngineVersion,
+        cached: crate::api::ReportedEngineName,
+        current: crate::api::ReportedEngineName,
     },
     #[error("derived evidence belongs to a different semantic cache key")]
     CacheKeyDrift,
@@ -347,7 +360,7 @@ impl AdmittedCachedFaTimings {
         Ok(serde_json::to_value(VersionedCachedFaTimings {
             schema_version: FA_DERIVED_EVIDENCE_SCHEMA_VERSION,
             requested_engine: raw.requested_engine(),
-            request_engine_version: raw.request_engine_version().clone(),
+            request_engine_version: raw.request_engine_version().name().clone(),
             expected_words,
             cache_key: raw.cache_key().clone(),
             timings,
@@ -357,7 +370,7 @@ impl AdmittedCachedFaTimings {
     fn decode(
         value: serde_json::Value,
         requested_engine: crate::types::engines::FaEngineName,
-        current_engine_version: &crate::api::EngineVersion,
+        cache_namespace: &FaCacheNamespace,
         expected_words: usize,
         cache_key: &CacheKey,
     ) -> Result<Self, FaDerivedEvidenceError> {
@@ -371,10 +384,10 @@ impl AdmittedCachedFaTimings {
                 current: requested_engine,
             });
         }
-        if &cached.request_engine_version != current_engine_version {
+        if &cached.request_engine_version != cache_namespace.name() {
             return Err(FaDerivedEvidenceError::EngineVersionDrift {
                 cached: cached.request_engine_version,
-                current: current_engine_version.clone(),
+                current: cache_namespace.name().clone(),
             });
         }
         if &cached.cache_key != cache_key {
@@ -405,14 +418,14 @@ fn replay_cached_raw_evidence(
     value: serde_json::Value,
     cache_key: &CacheKey,
     engine: crate::types::engines::FaEngineName,
-    engine_version: &crate::api::EngineVersion,
+    cache_namespace: &FaCacheNamespace,
     group_index: usize,
     group: &crate::chat_ops::fa::FaGroup,
 ) -> Result<transport::FaWorkerEvidenceResult, ServerError> {
     let evidence = raw_evidence::ReplayableFaRawEvidence::decode(
         value,
         engine,
-        engine_version,
+        cache_namespace,
         raw_evidence::ExpectedFaWords::new(group.words.len()),
         cache_key,
     )
@@ -460,7 +473,7 @@ struct FaCacheResolution {
 struct FaCacheGroupAdmission<'a> {
     cache_key: &'a CacheKey,
     engine: crate::types::engines::FaEngineName,
-    engine_version: &'a crate::api::EngineVersion,
+    cache_namespace: &'a FaCacheNamespace,
     group_index: usize,
     group: &'a crate::chat_ops::fa::FaGroup,
 }
@@ -469,14 +482,14 @@ impl<'a> FaCacheGroupAdmission<'a> {
     fn new(
         cache_key: &'a CacheKey,
         engine: crate::types::engines::FaEngineName,
-        engine_version: &'a crate::api::EngineVersion,
+        cache_namespace: &'a FaCacheNamespace,
         group_index: usize,
         group: &'a crate::chat_ops::fa::FaGroup,
     ) -> Self {
         Self {
             cache_key,
             engine,
-            engine_version,
+            cache_namespace,
             group_index,
             group,
         }
@@ -494,7 +507,7 @@ impl<'a> FaCacheGroupAdmission<'a> {
                 value.clone(),
                 self.cache_key,
                 self.engine,
-                self.engine_version,
+                self.cache_namespace,
                 self.group_index,
                 self.group,
             ) {
@@ -505,7 +518,7 @@ impl<'a> FaCacheGroupAdmission<'a> {
                     };
                 }
                 Err(error) => refusals.push(RefusedFaCacheLayer {
-                    layer: RAW_EVIDENCE_CACHE_TASK.as_str(),
+                    layer: FORCED_ALIGNMENT_RAW_EVIDENCE.name().as_str(),
                     error: error.to_string(),
                 }),
             }
@@ -515,7 +528,7 @@ impl<'a> FaCacheGroupAdmission<'a> {
             match AdmittedCachedFaTimings::decode(
                 value.clone(),
                 self.engine,
-                self.engine_version,
+                self.cache_namespace,
                 self.group.words.len(),
                 self.cache_key,
             ) {
@@ -526,7 +539,7 @@ impl<'a> FaCacheGroupAdmission<'a> {
                     };
                 }
                 Err(error) => refusals.push(RefusedFaCacheLayer {
-                    layer: CACHE_TASK.as_str(),
+                    layer: FORCED_ALIGNMENT.name().as_str(),
                     error: error.to_string(),
                 }),
             }
@@ -646,7 +659,7 @@ pub(crate) async fn run_fa_from_ast(
     document: FaInputDocument<'_>,
     audio: &AudioContext<'_>,
     worker_lang: &crate::api::LanguageCode3,
-    services: PipelineServices<'_>,
+    services: FaServices<'_>,
     fa_params: &FaParams,
     progress: Option<&ProgressSender>,
 ) -> Result<AdmittedFaResult, ServerError> {
@@ -673,7 +686,7 @@ pub(crate) async fn run_fa_from_ast(
             chat_text,
             fa_params.gap_healing,
             fa_params.engine.as_wire_name(),
-            services.engine_version.as_ref(),
+            services.cache_namespace,
         ));
     }
 
@@ -693,7 +706,7 @@ pub(crate) async fn run_fa_from_ast(
             chat_text,
             fa_params.gap_healing,
             fa_params.engine.as_wire_name(),
-            services.engine_version.as_ref(),
+            services.cache_namespace,
         ));
     }
 
@@ -746,7 +759,7 @@ pub(crate) async fn run_fa_from_ast(
                 chat_file,
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
-                services.engine_version.as_ref(),
+                services.cache_namespace,
             )?
             .with_written_decisions(written),
         );
@@ -855,7 +868,7 @@ pub(crate) async fn run_fa_from_ast(
                 chat_file,
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
-                services.engine_version.as_ref(),
+                services.cache_namespace,
             )?
             .with_written_decisions(written),
         );
@@ -906,8 +919,9 @@ pub(crate) async fn run_fa_from_ast(
         crate::params::CachePolicy::SkipCache => std::collections::HashMap::new(),
         crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
             match services
+                .pipeline
                 .cache
-                .get_batch(&key_strings, CACHE_TASK.as_str(), services.engine_version)
+                .get_batch(&key_strings, FORCED_ALIGNMENT, services.cache_namespace)
                 .await
             {
                 Ok(map) => map,
@@ -922,11 +936,12 @@ pub(crate) async fn run_fa_from_ast(
         crate::params::CachePolicy::SkipCache => std::collections::HashMap::new(),
         crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
             match services
+                .pipeline
                 .cache
                 .get_batch(
                     &key_strings,
-                    RAW_EVIDENCE_CACHE_TASK.as_str(),
-                    services.engine_version,
+                    FORCED_ALIGNMENT_RAW_EVIDENCE,
+                    services.cache_namespace,
                 )
                 .await
             {
@@ -969,7 +984,7 @@ pub(crate) async fn run_fa_from_ast(
         let resolution = FaCacheGroupAdmission::new(
             key,
             fa_params.engine,
-            services.engine_version,
+            services.cache_namespace,
             i,
             &groups[i],
         )
@@ -1060,17 +1075,16 @@ pub(crate) async fn run_fa_from_ast(
             // layer. Fallback and unaligned results remain valid for this run
             // but are deliberately recomputed later: the fallback model is
             // outside the primary request's version namespace.
-            let ba_version = env!("CARGO_PKG_VERSION");
             if let Some(raw_evidence) = raw_evidence {
                 match AdmittedCachedFaTimings::encode_from_raw(timings.clone(), &raw_evidence) {
                     Ok(cache_data) => {
                         if let Err(error) = services
+                            .pipeline
                             .cache
                             .put_batch(
                                 &[(cache_keys[miss_idx].as_str().to_string(), cache_data)],
-                                CACHE_TASK.as_str(),
-                                services.engine_version,
-                                ba_version,
+                                FORCED_ALIGNMENT,
+                                services.cache_namespace,
                             )
                             .await
                         {
@@ -1084,12 +1098,12 @@ pub(crate) async fn run_fa_from_ast(
                 match serde_json::to_value(raw_evidence) {
                     Ok(cache_data) => {
                         if let Err(error) = services
+                            .pipeline
                             .cache
                             .put_batch(
                                 &[(cache_keys[miss_idx].as_str().to_string(), cache_data)],
-                                RAW_EVIDENCE_CACHE_TASK.as_str(),
-                                services.engine_version,
-                                ba_version,
+                                FORCED_ALIGNMENT_RAW_EVIDENCE,
+                                services.cache_namespace,
                             )
                             .await
                         {
@@ -1210,7 +1224,7 @@ pub(crate) async fn run_fa_from_ast(
         output,
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
-        engine_version: services.engine_version.as_ref().to_owned(),
+        cache_namespace: services.cache_namespace.clone(),
         decisions: decision_traces,
         timing_decisions,
         gap_healing: fa_params.gap_healing,
@@ -1250,7 +1264,7 @@ mod tests {
             file,
             WordGapHealing::PreserveMeasured,
             "test_engine",
-            "test-build",
+            &FaCacheNamespace::for_test("test-build"),
         )
         .expect("the fixture has one usable @Media declaration")
     }
@@ -1287,7 +1301,7 @@ mod tests {
             DUMMY,
             WordGapHealing::PreserveMeasured,
             "test_engine",
-            "test-build",
+            &FaCacheNamespace::for_test("test-build"),
         );
 
         assert_eq!(
@@ -1375,9 +1389,9 @@ mod tests {
 
     #[test]
     fn cache_task_name_is_stable() {
-        assert_eq!(CACHE_TASK.as_str(), "forced_alignment");
+        assert_eq!(FORCED_ALIGNMENT.name().as_str(), "forced_alignment");
         assert_eq!(
-            RAW_EVIDENCE_CACHE_TASK.as_str(),
+            FORCED_ALIGNMENT_RAW_EVIDENCE.name().as_str(),
             "forced_alignment_raw_evidence"
         );
     }
@@ -1427,7 +1441,7 @@ mod tests {
         let error = AdmittedCachedFaTimings::decode(
             value,
             crate::types::engines::FaEngineName::Wave2Vec,
-            &crate::api::EngineVersion::from("test-fa-wave-v1"),
+            &FaCacheNamespace::for_test("test-fa-wave-v1"),
             1,
             &CacheKey::from_content("legacy-derived"),
         )
@@ -1445,7 +1459,7 @@ mod tests {
         };
 
         let key = CacheKey::from_content("derived-exact");
-        let engine_version = crate::api::EngineVersion::from("test-fa-wave-v1");
+        let engine_version = FaCacheNamespace::for_test("test-fa-wave-v1");
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("derived-exact"),
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
@@ -1486,7 +1500,8 @@ mod tests {
         let mut value = serde_json::to_value(VersionedCachedFaTimings {
             schema_version: FA_DERIVED_EVIDENCE_SCHEMA_VERSION,
             requested_engine: crate::types::engines::FaEngineName::Wave2Vec,
-            request_engine_version: crate::api::EngineVersion::from("test-fa-wave-v1"),
+            request_engine_version: crate::api::ReportedEngineName::try_from("test-fa-wave-v1")
+                .expect("valid engine name"),
             expected_words: 1,
             cache_key: key.clone(),
             timings: vec![None],
@@ -1497,7 +1512,7 @@ mod tests {
         let error = AdmittedCachedFaTimings::decode(
             value,
             crate::types::engines::FaEngineName::Wave2Vec,
-            &crate::api::EngineVersion::from("test-fa-wave-v1"),
+            &FaCacheNamespace::for_test("test-fa-wave-v1"),
             1,
             &key,
         )
@@ -1539,7 +1554,7 @@ mod tests {
         let raw = raw_evidence::FaRawEvidence::admit_requested(
             &response,
             FaEngineName::Wave2Vec,
-            &crate::api::EngineVersion::from("test-fa-wave-v1"),
+            &FaCacheNamespace::for_test("test-fa-wave-v1"),
             raw_evidence::ExpectedFaWords::new(1),
             &key,
             raw_evidence::FaEvidenceRoute::Direct,
@@ -1561,7 +1576,7 @@ mod tests {
         let resolution = FaCacheGroupAdmission::new(
             &key,
             FaEngineName::Wave2Vec,
-            &crate::api::EngineVersion::from("test-fa-wave-v1"),
+            &FaCacheNamespace::for_test("test-fa-wave-v1"),
             0,
             &group,
         )

@@ -335,11 +335,7 @@ impl SelectableEngine for UtrEngine {
     const CATEGORY: &'static str = "UTR";
 
     fn selection_name(&self) -> &'static str {
-        match self {
-            Self::RevAi => "rev",
-            Self::Whisper => "whisper",
-            Self::HkTencent => "tencent",
-        }
+        self.canonical_name()
     }
 
     fn accepted_names() -> &'static [(&'static str, Self)] {
@@ -389,6 +385,31 @@ impl UtrEngine {
     /// for partial-window UTR.
     pub fn supports_partial_windows(&self) -> bool {
         !self.is_rust_owned()
+    }
+
+    /// The canonical selection name, readable in `const` context so
+    /// [`Self::stamp_name`] can check it at compile time.
+    const fn canonical_name(&self) -> &'static str {
+        match self {
+            Self::RevAi => "rev",
+            Self::Whisper => "whisper",
+            Self::HkTencent => "tencent",
+        }
+    }
+
+    /// The name alignment provenance records as `utr=`: the canonical
+    /// selection name, as stamp-safe text checked at compile time.
+    pub(crate) const fn stamp_name(&self) -> crate::api::StampSafeText {
+        use crate::api::StampSafeText;
+        match self {
+            Self::RevAi => const { StampSafeText::from_static(UtrEngine::RevAi.canonical_name()) },
+            Self::Whisper => {
+                const { StampSafeText::from_static(UtrEngine::Whisper.canonical_name()) }
+            }
+            Self::HkTencent => {
+                const { StampSafeText::from_static(UtrEngine::HkTencent.canonical_name()) }
+            }
+        }
     }
 }
 

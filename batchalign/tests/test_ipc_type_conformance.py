@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -91,6 +92,75 @@ def _assert_fields_match(
     )
 
 
+def _schema_variants(schema: dict) -> list[dict]:
+    """The variant schemas of a generated tagged enum, with ``$ref`` resolved."""
+    variants = schema.get("oneOf") or schema.get("anyOf")
+    assert variants, f"{schema.get('title')} is not a tagged union in the Rust schema"
+    defs = schema.get("$defs", {})
+    resolved: list[dict] = []
+    for variant in variants:
+        if "$ref" in variant:
+            variant = defs[variant["$ref"].rsplit("/", 1)[-1]]
+        resolved.append(variant)
+    return resolved
+
+
+def _schema_enum_values(schema: dict) -> set[str]:
+    """The string values a generated enum admits, in any schemars spelling.
+
+    A single value is a bare ``const`` (how an internally tagged variant's
+    ``kind`` is written); several are an ``enum`` or a union of ``const``s.
+    """
+    if "const" in schema:
+        return {schema["const"]}
+    if "enum" in schema:
+        return set(schema["enum"])
+    return {
+        value
+        for variant in _schema_variants(schema)
+        for value in ([variant["const"]] if "const" in variant else variant["enum"])
+    }
+
+
+def _assert_tagged_union_matches(schema: dict, python_union: object) -> None:
+    """Assert a Rust internally tagged enum and a pydantic discriminated union agree.
+
+    Both directions: the same set of ``kind`` tags, and for each tag the same
+    fields and required-ness. The Python variants are read off the union
+    alias itself (``Annotated[A | B | C, Field(discriminator="kind")]``), so
+    there is no second hand-kept list of variants here to drift. ``kind`` is
+    compared as the tag, not as a field: Rust requires it on every variant,
+    while each pydantic variant defaults it to its own literal.
+    """
+    (union, *_metadata) = get_args(python_union)
+    python_by_tag = {
+        variant.model_fields["kind"].default: variant for variant in get_args(union)
+    }
+    schema_by_tag = {
+        _schema_enum_values(variant["properties"]["kind"]).pop(): variant
+        for variant in _schema_variants(schema)
+    }
+    assert python_by_tag.keys() == schema_by_tag.keys(), (
+        f"tag mismatch vs the Rust schema: only in Python="
+        f"{sorted(python_by_tag.keys() - schema_by_tag.keys())}, only in Rust="
+        f"{sorted(schema_by_tag.keys() - python_by_tag.keys())}"
+    )
+    for tag, variant_schema in schema_by_tag.items():
+        without_tag = {
+            "properties": {
+                name: field
+                for name, field in variant_schema.get("properties", {}).items()
+                if name != "kind"
+            },
+            "required": [
+                name for name in variant_schema.get("required", []) if name != "kind"
+            ],
+        }
+        _assert_fields_match(
+            without_tag, python_by_tag[tag], known_extra_python=frozenset({"kind"})
+        )
+
+
 class TestBatchItemConformance:
     """Verify batch item types match Rust schemas."""
 
@@ -144,7 +214,56 @@ class TestWorkerV2Conformance:
         from batchalign.worker._types_v2 import MorphosyntaxItemResultV2
 
         schema = _load_schema("worker_v2", "MorphosyntaxItemResultV2")
-        _assert_fields_match(schema, MorphosyntaxItemResultV2)
+        _assert_tagged_union_matches(schema, MorphosyntaxItemResultV2)
+
+    def test_translation_item_result(self) -> None:
+        from batchalign.worker._types_v2 import TranslationItemResultV2
+
+        schema = _load_schema("worker_v2", "TranslationItemResultV2")
+        _assert_tagged_union_matches(schema, TranslationItemResultV2)
+
+    def test_coref_item_result(self) -> None:
+        from batchalign.worker._types_v2 import CorefItemResultV2
+
+        schema = _load_schema("worker_v2", "CorefItemResultV2")
+        _assert_tagged_union_matches(schema, CorefItemResultV2)
+
+    def test_morphosyntax_model_identity(self) -> None:
+        from batchalign.worker._types_v2 import (
+            MorphosyntaxModelIdentityV2,
+            MorphosyntaxPipelineV2,
+        )
+
+        schema = _load_schema("worker_v2", "MorphosyntaxModelIdentityV2")
+        _assert_fields_match(schema, MorphosyntaxModelIdentityV2)
+        # The variant vocabulary is a closed set on both sides; a variant
+        # added to one language only would be refused by the other at runtime.
+        pipeline = schema.get("$defs", {}).get("MorphosyntaxPipelineV2")
+        assert pipeline is not None, "schema lost the MorphosyntaxPipelineV2 definition"
+        assert _schema_enum_values(pipeline) == {
+            variant.value for variant in MorphosyntaxPipelineV2
+        }
+
+    def test_ud_relation_repair(self) -> None:
+        """The repair an analyzed item carries must read the same on both sides.
+
+        The relation vocabulary is closed in Rust and in Python, so a kind
+        added to one language only would be refused by the other at runtime,
+        and a repair that could not be read is a repair the file's provenance
+        would never count.
+        """
+        from batchalign.worker._types_v2 import (
+            UdRelationRepairKindV2,
+            UdRelationRepairV2,
+        )
+
+        schema = _load_schema("worker_v2", "UdRelationRepairV2")
+        _assert_fields_match(schema, UdRelationRepairV2)
+        kind = schema.get("$defs", {}).get("UdRelationRepairKindV2")
+        assert kind is not None, "schema lost the UdRelationRepairKindV2 definition"
+        assert _schema_enum_values(kind) == {
+            variant.value for variant in UdRelationRepairKindV2
+        }
 
     def test_whisper_chunk_span(self) -> None:
         from batchalign.worker._types_v2 import WhisperChunkSpanV2
@@ -195,6 +314,19 @@ class TestWorkerV2Conformance:
         _assert_fields_match(
             schema, AsrRequestV2, known_extra_python=frozenset({"kind"})
         )
+
+    def test_provider_diarization(self) -> None:
+        """The two states of "separate speakers?" must agree across the wire.
+
+        This union is what the bridge hands a provider adapter, so a tag spelled
+        differently on one side would be a request the other cannot read. It was
+        unwitnessed here until 2026-09-16, when the same question stopped being
+        an integer on the Python half of the boundary.
+        """
+        from batchalign.worker._types_v2 import ProviderDiarizationV2
+
+        schema = _load_schema("worker_v2", "ProviderDiarizationV2")
+        _assert_tagged_union_matches(schema, ProviderDiarizationV2)
 
     def test_decode_budget_realtime_factor_matches_rust(self) -> None:
         """Pin Python's realtime factor to Rust's copy of the same constant.

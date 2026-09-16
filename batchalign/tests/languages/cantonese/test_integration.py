@@ -115,8 +115,14 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 def _make_asr_request(audio_path: str, lang: str = "yue") -> BatchInferRequest:
     """Build a BatchInferRequest with one AsrBatchItem."""
     from batchalign.inference.asr import AsrBatchItem
+    from batchalign.worker._types_v2 import NotRequestedDiarizationV2
 
-    item = AsrBatchItem(audio_path=audio_path, lang=lang, num_speakers=1)
+    # These engines separate no speakers, so the request says that, rather than
+    # asking for a count of one: that count is the contradiction submission
+    # refuses, and it has no spelling on this boundary any more.
+    item = AsrBatchItem(
+        audio_path=audio_path, lang=lang, diarization=NotRequestedDiarizationV2()
+    )
     return BatchInferRequest(
         task=InferTask.ASR,
         lang=lang,
@@ -247,7 +253,7 @@ class TestTencentASR:
             load_tencent_asr,
         )
 
-        load_tencent_asr("yue", None)
+        load_tencent_asr("yue", engine_model_type="16k_zh_large")
         self._infer = infer_tencent_asr
 
     def test_produces_tokens(self) -> None:
@@ -412,38 +418,7 @@ class TestCantoneseFAProvider:
         assert len(non_none) > 0
 
 
-# ---------------------------------------------------------------------------
-# Cantonese normalization (Rust-backed via batchalign_core)
-# ---------------------------------------------------------------------------
-
-
-class TestCantoneseNormalization:
-    """Normalization is now pure Rust (embedded OpenCC + Aho-Corasick)."""
-
-    def test_simplified_to_hk_traditional(self) -> None:
-        from batchalign.inference.languages.cantonese._common import (
-            normalize_cantonese_text,
-        )
-
-        assert normalize_cantonese_text("联系") == "聯繫"
-
-    def test_replacement_table(self) -> None:
-        from batchalign.inference.languages.cantonese._common import (
-            normalize_cantonese_text,
-        )
-
-        assert normalize_cantonese_text("松") == "鬆"
-
-    def test_idempotent_on_hk_text(self) -> None:
-        from batchalign.inference.languages.cantonese._common import (
-            normalize_cantonese_text,
-        )
-
-        assert normalize_cantonese_text("你好") == "你好"
-
-    def test_full_sentence_normalization(self) -> None:
-        from batchalign.inference.languages.cantonese._common import (
-            normalize_cantonese_text,
-        )
-
-        assert normalize_cantonese_text("你真系好吵呀") == "你真係好嘈啊"
+# Cantonese normalization has no Python surface to integrate against any more:
+# it runs in the Rust server, once per monologue, through
+# `AlignedNormalization`. Its behaviour is tested where it lives, in
+# `crates/batchalign-transform/src/asr_postprocess/cantonese.rs`.

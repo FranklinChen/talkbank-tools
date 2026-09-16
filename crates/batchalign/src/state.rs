@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::capability::WorkerCapabilitySnapshot;
 use crate::config::ServerConfig;
 use crate::media::MediaResolver;
 use crate::runtime_supervisor::{ShutdownError, ShutdownSummary};
@@ -28,14 +29,14 @@ pub(crate) struct AppControlPlane {
     pub backend: Arc<dyn ServerBackend>,
 }
 
-/// Worker-facing runtime dependencies and the capability profile discovered at startup.
+/// Worker-facing runtime dependencies and the capability view resolved when
+/// the app was built.
 pub(crate) struct WorkerSubsystem {
     /// Pool of Python worker processes for ML inference.
     pub pool: Arc<WorkerPool>,
-    /// Released command surface derived by Rust from infer-task support.
-    pub capabilities: Vec<String>,
-    /// Infer tasks advertised by the probe worker.
-    pub infer_tasks: Vec<InferTask>,
+    /// Released commands and the infer tasks behind them, derived together
+    /// from the pool's admitted report (one copy, read through accessors).
+    pub capabilities: WorkerCapabilitySnapshot,
 }
 
 /// Filesystem roots owned by the server process.
@@ -85,13 +86,13 @@ pub struct AppState {
 
 impl AppState {
     /// Return the command capability set advertised by the worker subsystem.
-    pub fn capabilities(&self) -> &[String] {
-        &self.workers.capabilities
+    pub fn capabilities(&self) -> &[crate::api::ReleasedCommand] {
+        self.workers.capabilities.commands()
     }
 
     /// Return the infer-task set advertised by the worker subsystem.
     pub fn infer_tasks(&self) -> &[InferTask] {
-        &self.workers.infer_tasks
+        self.workers.capabilities.infer_tasks()
     }
 
     /// Interrupt queued/running jobs and stop tracked background tasks for fixture reuse.

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, TokenizationMode};
 use async_trait::async_trait;
 
-use crate::api::{EngineVersion, LanguageCode3};
+use crate::api::LanguageCode3;
 use crate::cache::UtteranceCache;
 use crate::error::ServerError;
 use crate::infer_retry::Cancellation;
@@ -39,13 +39,21 @@ pub(crate) struct MorphotagRuntimeOptions {
 #[async_trait]
 pub(crate) trait WorkerGateway: Send + Sync {
     /// Run the compare command's morphosyntax stage on one CHAT input.
+    ///
+    /// Returns the PROOF, for the same reason [`Self::morphotag_single`] does,
+    /// and then one further reason. Comparison does not write these bytes: it
+    /// continues from this document, and taking the proof is what lets it
+    /// continue from the very model the gate judged. This returned a `String`
+    /// until 2026-09-16, and the document was parsed back out of it by a
+    /// LENIENT parser that admits what the validating one refuses, with the
+    /// parse errors warned about and dropped.
     async fn morphotag_for_compare(
         &self,
         chat_text: &str,
         lang: &LanguageCode3,
         mwt: &MwtDict,
         cancellation: Cancellation<'_>,
-    ) -> Result<String, ServerError>;
+    ) -> Result<PostValidated, ServerError>;
 
     /// Run morphotag on one CHAT file.
     ///
@@ -84,7 +92,8 @@ pub(crate) trait WorkerGateway: Send + Sync {
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults;
 
-    /// Run translation over one cross-file batch of CHAT inputs.
+    /// Run translation over one cross-file batch of CHAT inputs. Each result
+    /// names the engine that translated it.
     async fn translate_batch(
         &self,
         files: &[TextBatchFileInput],
@@ -93,34 +102,35 @@ pub(crate) trait WorkerGateway: Send + Sync {
     ) -> TextBatchFileResults;
 
     /// Run coreference resolution over one cross-file batch of CHAT inputs.
+    /// Each result names the engine that resolved it.
+    ///
+    /// Takes no language. Coref has no `--lang`, is English-only, and reads
+    /// per-file English-ness from each file's `@Languages:` header; the
+    /// inference language is the constant `eng` the command owns. The
+    /// parameter that used to sit here was passed the job's language, which
+    /// for a per-file command is never a resolved code, and was then discarded
+    /// unread by the implementation.
     async fn coref_batch(
         &self,
         files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults;
 }
 
 /// Worker gateway backed by the existing worker pool and cache.
+///
+/// Carries no engine identity: every text stage names its engines from the
+/// results it applies.
 #[derive(Clone)]
 pub(crate) struct PooledWorkerGateway {
     pool: Arc<WorkerPool>,
     cache: Arc<UtteranceCache>,
-    engine_version: EngineVersion,
 }
 
 impl PooledWorkerGateway {
     /// Build a pool-backed worker gateway for one execution attempt.
-    pub(crate) fn new(
-        pool: Arc<WorkerPool>,
-        cache: Arc<UtteranceCache>,
-        engine_version: EngineVersion,
-    ) -> Self {
-        Self {
-            pool,
-            cache,
-            engine_version,
-        }
+    pub(crate) fn new(pool: Arc<WorkerPool>, cache: Arc<UtteranceCache>) -> Self {
+        Self { pool, cache }
     }
 }
 
@@ -132,7 +142,7 @@ impl WorkerGateway for PooledWorkerGateway {
         lang: &LanguageCode3,
         mwt: &MwtDict,
         cancellation: Cancellation<'_>,
-    ) -> Result<String, ServerError> {
+    ) -> Result<PostValidated, ServerError> {
         let params = MorphosyntaxParams {
             lang,
             tokenization_mode: TokenizationMode::Preserve,
@@ -150,15 +160,17 @@ impl WorkerGateway for PooledWorkerGateway {
             progress: None,
             cancellation,
         };
-        // Compare consumes the text, not the proof: its output is a
-        // comparison artifact, never a written CHAT file.
+        // Compare consumes the DOCUMENT, not the bytes: its output is a
+        // comparison artifact, never a written CHAT file, and the artifact is
+        // built in the AST. The proof travels intact to
+        // `compare::process_compare_morphotagged_main`, which is the only
+        // consumer and takes nothing else.
         crate::morphosyntax::process_morphosyntax(
             chat_text,
-            PipelineServices::new(&self.pool, &self.cache, &self.engine_version),
+            PipelineServices::new(&self.pool, &self.cache),
             &params,
         )
         .await
-        .map(PostValidated::into_text)
     }
 
     async fn morphotag_single(
@@ -184,7 +196,7 @@ impl WorkerGateway for PooledWorkerGateway {
             progress,
             cancellation,
         };
-        let services = PipelineServices::new(&self.pool, &self.cache, &self.engine_version);
+        let services = PipelineServices::new(&self.pool, &self.cache);
         if let Some(before) = before_text {
             crate::morphosyntax::process_morphosyntax_incremental(
                 before, chat_text, services, &params,
@@ -206,8 +218,6 @@ impl WorkerGateway for PooledWorkerGateway {
             files,
             lang,
             &self.pool,
-            &self.cache,
-            &self.engine_version,
             allow_stanza_fallback,
             cancellation,
         )
@@ -220,23 +230,14 @@ impl WorkerGateway for PooledWorkerGateway {
         lang: &LanguageCode3,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults {
-        crate::translate::process_translate_batch(
-            files,
-            lang,
-            &self.pool,
-            &self.cache,
-            &self.engine_version,
-            cancellation,
-        )
-        .await
+        crate::translate::process_translate_batch(files, lang, &self.pool, cancellation).await
     }
 
     async fn coref_batch(
         &self,
         files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults {
-        crate::coref::process_coref_batch(files, lang, &self.pool, cancellation).await
+        crate::coref::process_coref_batch(files, &self.pool, cancellation).await
     }
 }

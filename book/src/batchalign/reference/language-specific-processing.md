@@ -26,8 +26,8 @@ flowchart TD
     morpho["Morphosyntax\n(Stanza + per-lang workarounds)"]
     fa["Forced Alignment\n(Whisper/Wave2Vec/Cantonese FA)"]
 
-    input --> resolve --> asr --> compound --> numexp
-    numexp --> cantonorm --> rtlpunct --> retok --> utseg --> morpho --> fa
+    input --> resolve --> asr --> compound --> cantonorm
+    cantonorm --> numexp --> rtlpunct --> retok --> utseg --> morpho --> fa
 
     style cantonorm fill:#f9e2b0
     style numexp fill:#d4edda
@@ -42,7 +42,8 @@ flowchart TD
 
 The default `--asr-engine whisper` loads `openai/whisper-large-v3`
 across every language (`batchalign/inference/asr.py:120`). UTR is
-engine-based: `--utr-engine whisper` loads `openai/whisper-large-v2`,
+engine-based: `--utr-engine whisper` loads `openai/whisper-large-v3` at the
+commit the manifest pins,
 `--utr-engine rev` uses Rev.AI's cloud API, and
 `--utr-engine tencent` routes to Tencent. There is no
 per-language fine-tune resolver wired into `--asr-engine whisper` or
@@ -55,7 +56,7 @@ only `mal → thennal/whisper-medium-ml`).
 |--------|-------|
 | `--asr-engine whisper` (default) | `openai/whisper-large-v3` for all languages |
 | `--asr-engine whisper_hub` | per-language HuggingFace fine-tune via `_RESOLVER` or explicit `--engine-overrides model_id` |
-| `--utr-engine whisper` | `openai/whisper-large-v2` for every language |
+| `--utr-engine whisper` | `openai/whisper-large-v3` for every language, pinned to an exact commit |
 
 See [Language Code Resolution](language-code-resolution.md) and
 [Whisper ASR](whisper-asr.md) for the full picture.
@@ -186,6 +187,13 @@ across every ASR path. Current `batchalign3` implements simplified-to-traditiona
 conversion plus the Cantonese replacement table once in Rust core and applies
 it as a shared ASR post-processing stage, so every ASR engine benefits from
 the same normalization contract.
+
+Since 2026-09-16 "once" is literal: `AlignedNormalization`
+(`crates/batchalign-transform/src/asr_postprocess/cantonese.rs`) is the only
+route to normalized Cantonese text, and the server applies it a single time per
+monologue, before any stage splits the words. The provider bridges and the
+character tokenizer used to normalize as well, which mattered because the
+transformation is not idempotent: `聯繫` normalized twice becomes `聯係`.
 
 ## Related Pages
 

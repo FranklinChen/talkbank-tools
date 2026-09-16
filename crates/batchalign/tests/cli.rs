@@ -27,6 +27,8 @@ use cli_common::{
 };
 use common::test_server_fixture::acquire_test_server_session;
 
+use crate::live_deadline::CliRunBudget;
+
 // ---------------------------------------------------------------------------
 // Version / help
 // ---------------------------------------------------------------------------
@@ -74,17 +76,21 @@ fn start_daemon_on_ephemeral_port(
         .cmd()
         .env("BATCHALIGN_PYTHON", python_path)
         .args(["serve", "start", "--test-echo"])
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(CliRunBudget::DaemonStart.as_duration())
         .output()
         .expect("start CLI test server");
     // The full evidence, because the parent's stderr ALONE cannot explain a
     // failure here. `serve start` redirects the CHILD daemon's stderr into
     // `server.log`, so a child that dies leaves the parent with nothing to
-    // print; and when this command hits the 60 s timeout above, assert_cmd
-    // kills it, leaving only whatever it had written before the wait. That is
-    // exactly what one intermittent failure on 2026-08-27 looked like: a bare
-    // media-roots warning, no `error:` line, and no way to tell a timeout from
-    // a crash. Print the exit status, both streams and the server log.
+    // print. That is what one intermittent failure on 2026-08-27 looked like: a
+    // bare media-roots warning, no `error:` line, and no way to tell a timeout
+    // from a crash. Print the exit status, both streams and the server log.
+    //
+    // The budget above is `DaemonStart`, which is `serve start`'s OWN startup
+    // budget plus the margin it needs to report a failure, so reaching the kill
+    // at all now means the CLI stopped answering rather than that the machine
+    // was busy. A `serve start` that cannot bring the daemon up still fails
+    // first, and says which phase it was in.
     assert!(
         start.status.success(),
         "serve start should succeed.\n  status: {:?}\n  stdout: {}\n  stderr: {}\n  server.log:\n{}",
@@ -138,7 +144,7 @@ fn serve_start_with_ephemeral_port_publishes_the_bound_port() {
         .cmd()
         .env("BATCHALIGN_PYTHON", &python_path)
         .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServeStop.as_duration())
         .output();
 }
 
@@ -682,7 +688,7 @@ async fn cli_align_real_server_live_fa_succeeds() {
                 "--whisper-fa",
                 "--no-utr",
             ])
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(CliRunBudget::LiveModelRun.as_duration())
             .output()
             .expect("spawn CLI")
     })
@@ -741,7 +747,7 @@ fn cli_transcribe_explicit_server_never_falls_back_to_local_daemon() {
             "--server",
             "http://127.0.0.1:59999",
         ])
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .output()
         .expect("spawn CLI");
 
@@ -749,7 +755,7 @@ fn cli_transcribe_explicit_server_never_falls_back_to_local_daemon() {
         .cmd()
         .env("BATCHALIGN_PYTHON", &python_path)
         .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServeStop.as_duration())
         .output();
 
     let stderr = String::from_utf8_lossy(&cli_result.stderr);
@@ -792,7 +798,7 @@ fn cli_transcribe_explicit_remote_server_refuses_unshippable_audio() {
             "--server",
             "https://worker.example.org",
         ])
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(CliRunBudget::ImmediateRefusal.as_duration())
         .output()
         .expect("spawn CLI");
 
@@ -845,7 +851,7 @@ fn cli_align_explicit_loopback_uses_shared_paths_mode() {
             "--server",
             &format!("http://127.0.0.1:{port}"),
         ])
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .output()
         .expect("spawn CLI");
 
@@ -853,7 +859,7 @@ fn cli_align_explicit_loopback_uses_shared_paths_mode() {
         .cmd()
         .env("BATCHALIGN_PYTHON", &python_path)
         .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServeStop.as_duration())
         .output();
 
     let stderr = String::from_utf8_lossy(&cli_result.stderr);
@@ -914,7 +920,7 @@ fn cli_transcribe_in_place_mp4_succeeds_via_local_daemon() {
             "--lang",
             "eng",
         ])
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .output()
         .expect("spawn CLI");
 
@@ -922,7 +928,7 @@ fn cli_transcribe_in_place_mp4_succeeds_via_local_daemon() {
         .cmd()
         .env("BATCHALIGN_PYTHON", &python_path)
         .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServeStop.as_duration())
         .output();
 
     let stderr = String::from_utf8_lossy(&cli_result.stderr);
@@ -989,7 +995,7 @@ fn cli_transcribe_in_place_mp4_populates_injected_media_cache_live() {
             "eng",
             "--whisper",
         ])
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(CliRunBudget::LiveModelRun.as_duration())
         .output()
         .expect("spawn CLI");
 
@@ -1002,7 +1008,7 @@ fn cli_transcribe_in_place_mp4_populates_injected_media_cache_live() {
         .cmd()
         .env("BATCHALIGN_PYTHON", &python_path)
         .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServeStop.as_duration())
         .output();
 
     let stderr = String::from_utf8_lossy(&cli_result.stderr);
@@ -1142,7 +1148,7 @@ fn cli_compare_failed_auto_daemon_job_returns_server_exit_code() {
         // `status.code() == None`, which reads as a baffling `None != Some(5)`
         // rather than "we ran out of time". Raising the net costs nothing;
         // the explicit None check below makes the distinction legible.
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(CliRunBudget::LiveModelRun.as_duration())
         .output()
         .expect("spawn CLI");
 
@@ -1150,7 +1156,7 @@ fn cli_compare_failed_auto_daemon_job_returns_server_exit_code() {
         .cmd()
         .env("BATCHALIGN_PYTHON", &python_path)
         .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServeStop.as_duration())
         .output();
 
     let stderr = String::from_utf8_lossy(&cli_result.stderr);
@@ -1194,7 +1200,7 @@ fn missing_input_path_error_names_the_path() {
         .cmd()
         .current_dir(tmp.path())
         .args(["align", "no-such-file.cha"])
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(CliRunBudget::ArgumentValidation.as_duration())
         .output()
         .unwrap();
 
@@ -1229,7 +1235,7 @@ fn bare_relative_input_does_not_fail_pathless() {
         .cmd()
         .current_dir(tmp.path())
         .args(["align", "session.cha"])
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .output()
         .unwrap();
 
@@ -1258,7 +1264,7 @@ fn diarize_help_describes_speaker_turns() {
     let result = harness
         .cmd()
         .args(["diarize", "--help"])
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(CliRunBudget::ArgumentValidation.as_duration())
         .output()
         .unwrap();
 
@@ -1288,7 +1294,7 @@ fn diarize_missing_media_error_names_the_path() {
     let result = harness
         .cmd()
         .args(["diarize", "/nonexistent/dir/absent.wav"])
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .output()
         .unwrap();
 
@@ -1315,7 +1321,7 @@ fn speaker_identify_help_describes_enrollment_and_evidence() {
     let result = harness
         .cmd()
         .args(["speaker-identify", "--help"])
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(CliRunBudget::ArgumentValidation.as_duration())
         .output()
         .unwrap();
 
@@ -1347,7 +1353,7 @@ fn speaker_identify_refuses_to_run_without_a_threshold() {
     let result = harness
         .cmd()
         .args(["speaker-identify", "corpus/", "--enroll", "1500-9000:INV"])
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(CliRunBudget::ArgumentValidation.as_duration())
         .output()
         .unwrap();
 
@@ -1386,7 +1392,7 @@ fn speaker_identify_refuses_overlapping_enrollments() {
             "--threshold",
             "0.5",
         ])
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .output()
         .unwrap();
 

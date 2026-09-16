@@ -7,9 +7,15 @@
     "kind": "translation_result",
     "items": [
       {
-        "raw_translation": "hola mundo"
+        "kind": "translated",
+        "raw_translation": "hola mundo",
+        "engine": "googletrans-v1"
       },
       {
+        "kind": "blank_input"
+      },
+      {
+        "kind": "failed",
         "error": "Translation failed: rate limited"
       }
     ]

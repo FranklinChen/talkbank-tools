@@ -18,12 +18,7 @@ from typing import NoReturn
 from pydantic import ValidationError
 
 from batchalign.inference._domain_types import LanguageCode
-from batchalign.inference.asr import (
-    AsrBatchItem,
-    AsrElement,
-    AsrMonologue,
-    MonologueAsrResponse,
-)
+from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
 from batchalign.worker._progress import emit_download_event
 from batchalign.worker._types import (
     BatchInferRequest,
@@ -31,6 +26,7 @@ from batchalign.worker._types import (
     InferResponse,
 )
 
+from ._asr_types import admit_provider_monologues
 from ._common import EngineOverrides
 from ._qwen_common import QwenRecognizer
 
@@ -90,7 +86,13 @@ _recognizer: QwenRecognizer | None = None
 # ---------------------------------------------------------------------------
 
 
-def load_qwen_asr(lang: LanguageCode, engine_overrides: EngineOverrides | None) -> None:
+def load_qwen_asr(
+    lang: LanguageCode,
+    engine_overrides: EngineOverrides | None,
+    *,
+    model_path: str | None = None,
+    aligner_path: str | None = None,
+) -> None:
     """Initialize the Qwen3-ASR recognizer (called once at worker startup).
 
     Recognized ``engine_overrides`` keys:
@@ -118,7 +120,17 @@ def load_qwen_asr(lang: LanguageCode, engine_overrides: EngineOverrides | None) 
         if "qwen_device" in engine_overrides:
             device = str(engine_overrides["qwen_device"])
 
-    recognizer = QwenRecognizer(lang=lang, model_id=model_id, device=device)
+    # ``model_path`` / ``aligner_path`` are snapshots the worker already
+    # materialized at the revisions the control plane pinned. The ids stay for
+    # the checkpoint check and the log line; the paths are what actually load,
+    # so a hub repository that moved cannot change what this worker runs.
+    recognizer = QwenRecognizer(
+        lang=lang,
+        model_id=model_id,
+        device=device,
+        model_path=model_path,
+        aligner_path=aligner_path,
+    )
 
     # Surface the model-load event to every UI channel per the
     # time-transparency rule in talkbank-tools/CLAUDE.md §11. The
@@ -217,25 +229,10 @@ def _transcribe_to_monologues(item: AsrBatchItem) -> MonologueAsrResponse:
         item.audio_path, decode_budget_seconds=item.decode_budget_seconds
     )
 
-    return MonologueAsrResponse(
-        lang=item.lang,
-        monologues=[
-            AsrMonologue(
-                speaker=monologue["speaker"],
-                elements=[
-                    AsrElement(
-                        value=element["value"],
-                        ts=element["ts"],
-                        end_ts=element["end_ts"],
-                        type=element["type"],
-                    )
-                    for element in monologue["elements"]
-                    if element["value"].strip()
-                ],
-            )
-            for monologue in payload["monologues"]
-        ],
-    )
+    # Qwen3-ASR performs no speaker separation, so its payload says so and the
+    # admission carries that through; the downstream diarization stage
+    # attributes speakers when one is requested.
+    return admit_provider_monologues(payload, item.lang)
 
 
 def infer_qwen_asr_v2(item: AsrBatchItem) -> MonologueAsrResponse:

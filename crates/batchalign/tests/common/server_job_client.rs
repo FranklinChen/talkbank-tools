@@ -133,6 +133,34 @@ impl<'a> LiveServerJobClient<'a> {
         .await
     }
 
+    /// Submit a paths-mode job whose speaker count the caller STATES.
+    ///
+    /// A test that asks for diarization has to say how many speakers its
+    /// fixture holds: a count of one asks a diarizer to separate speakers in a
+    /// recording asserted to have one, which submission refuses. The default
+    /// helper's single literal could not express that, so every diarized test
+    /// submitted the contradiction and then asserted on what came back.
+    pub async fn submit_paths_job_with_speakers(
+        &self,
+        command: ReleasedCommand,
+        lang: &str,
+        source_paths: Vec<String>,
+        output_paths: Vec<String>,
+        num_speakers: NumSpeakers,
+        options: CommandOptions,
+    ) -> (JobInfo, Vec<String>) {
+        self.submit_paths_job_inner(
+            command,
+            lang,
+            source_paths,
+            output_paths,
+            vec![],
+            num_speakers,
+            options,
+        )
+        .await
+    }
+
     pub async fn submit_paths_job_with_before(
         &self,
         command: ReleasedCommand,
@@ -140,6 +168,28 @@ impl<'a> LiveServerJobClient<'a> {
         source_paths: Vec<String>,
         output_paths: Vec<String>,
         before_paths: Vec<String>,
+        options: CommandOptions,
+    ) -> (JobInfo, Vec<String>) {
+        self.submit_paths_job_inner(
+            command,
+            lang,
+            source_paths,
+            output_paths,
+            before_paths,
+            NumSpeakers(1),
+            options,
+        )
+        .await
+    }
+
+    async fn submit_paths_job_inner(
+        &self,
+        command: ReleasedCommand,
+        lang: &str,
+        source_paths: Vec<String>,
+        output_paths: Vec<String>,
+        before_paths: Vec<String>,
+        num_speakers: NumSpeakers,
         options: CommandOptions,
     ) -> (JobInfo, Vec<String>) {
         assert_eq!(
@@ -155,7 +205,7 @@ impl<'a> LiveServerJobClient<'a> {
         let submission = JobSubmission {
             command,
             lang: submission_lang(command, lang),
-            num_speakers: NumSpeakers(1),
+            num_speakers,
             files: vec![],
             media_files: vec![],
             media_mapping: Default::default(),

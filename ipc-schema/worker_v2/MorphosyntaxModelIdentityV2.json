@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MorphosyntaxModelIdentityV2",
+  "description": "The Stanza model that analyzed one morphosyntax item, as reported by the\nworker that ran it.\n\nCarried per item rather than once per worker because one batch can span\nlanguage groups, and because the process that ran the item is the only\nhonest witness: a capability snapshot taken from another process (inside\n`transcribe`, the ASR worker) describes a different runtime.",
+  "type": "object",
+  "properties": {
+    "lang": {
+      "description": "Language whose Stanza pipeline analyzed the item.",
+      "$ref": "#/$defs/LanguageCode3"
+    },
+    "pipeline": {
+      "description": "Which pipeline variant ran, so provenance does not hide a\nretokenizing or POS-overriding path behind the plain Stanza name.",
+      "$ref": "#/$defs/MorphosyntaxPipelineV2"
+    },
+    "stanza_version": {
+      "description": "Installed Stanza package version (`stanza.__version__`).",
+      "$ref": "#/$defs/ReportedEngineName"
+    }
+  },
+  "required": [
+    "stanza_version",
+    "lang",
+    "pipeline"
+  ],
+  "$defs": {
+    "LanguageCode3": {
+      "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected, use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
+      "type": "string"
+    },
+    "MorphosyntaxPipelineV2": {
+      "description": "The morphosyntax pipeline variant that analyzed an item. Closed: a new variant must be named here before a worker can report it.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "type": "string",
+          "const": "mandarin_retokenize"
+        },
+        {
+          "type": "string",
+          "const": "cantonese_pycantonese_pos"
+        }
+      ]
+    },
+    "ReportedEngineName": {
+      "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    }
+  }
+}

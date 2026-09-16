@@ -31,6 +31,7 @@
 //! - Sequential requests after concurrent batches still work (no state corruption)
 
 mod common;
+mod live_deadline;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -45,6 +46,7 @@ use batchalign::worker::handle::WorkerRuntimeConfig;
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::resolve_python;
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use serde_json::json;
 
 macro_rules! require_python {
@@ -83,6 +85,14 @@ fn gpu_execute_request_for_lang(request_id: &str, lang: LanguageCode3) -> Execut
         payload: TaskRequestV2::Asr(AsrRequestV2 {
             lang: WorkerLanguage::from(lang),
             backend: AsrBackendV2::LocalWhisper,
+            models: batchalign::types::worker_v2::AsrRequestedModelsV2::Whisper {
+                asr: batchalign::types::worker_v2::RequestedModelV2 {
+                    id: batchalign::types::worker_v2::ModelIdV2::from_static(
+                        "openai/whisper-large-v3",
+                    ),
+                    revision: batchalign::types::worker_v2::RequestedRevisionV2::Unpinned,
+                },
+            },
             input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                 audio_ref_id: WorkerArtifactIdV2::from("audio-test"),
             }),
@@ -137,13 +147,19 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(unix)]
 async fn wait_for_process_exit(pid: u32) {
-    for _ in 0..50 {
-        if !process_alive(pid) {
+    let mut deadline = ServerTestDeadline::new(WaitSubject::worker_process_exit(pid));
+    loop {
+        let alive = process_alive(pid);
+        if !alive {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // A process that is still up is the ONLY thing observable here, so
+        // this wait never extends: it is the idle window that bounds it, which
+        // is the right shape for "the kill should already have landed".
+        deadline
+            .keep_waiting(ProgressSnapshot::process_alive(alive))
+            .await;
     }
-    panic!("worker pid {pid} was still alive after waiting for pool drop cleanup");
 }
 
 /// Dropping a pool must retire the TCP daemons it spawned, not just its stdio
@@ -465,8 +481,8 @@ async fn gpu_health_check_works_after_concurrent_dispatch() {
         .detected_capabilities()
         .expect("capabilities should have been detected from worker spawns");
     assert!(
-        caps.commands.contains(&"test-echo".to_string()),
-        "expected test-echo in capabilities after concurrent dispatch"
+        caps.tasks().next().is_some(),
+        "expected the admitted test-echo report to advertise infer tasks after concurrent dispatch"
     );
 
     pool.shutdown().await;
@@ -1062,8 +1078,7 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
     // tracker until we see at least one registered worker for this
     // job. This avoids the race where the kill fires before the
     // dispatch task has been polled by the tokio runtime.
-    let mut waited = Duration::ZERO;
-    let poll_step = Duration::from_millis(50);
+    let mut deadline = ServerTestDeadline::new(WaitSubject::worker_registered_for_job(&job_id));
     // Generous by design: this bound only distinguishes "wiring broken"
     // (never registers) from "registered slowly". Under full-suite load
     // on a busy machine the previous 3s bound flaked repeatedly
@@ -1111,12 +1126,20 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
     // and there is no spawn to wait on. The binary went green and got faster.
     // Cause (a) is now unreachable by construction here, so if this fails
     // again it is (b) or (c), and never the bound.
-    let max_wait = WARM_WORKER_APPEARS;
     loop {
         if !pool.workers_for_job(&job_id).is_empty() {
             break;
         }
-        if waited >= max_wait {
+        // What counts as progress here is the MACHINE's admission picture, not
+        // this job's: free spawn permits and live worker count. Cause (c)
+        // below, queued behind another binary's spawn, moves at least one of
+        // them, so waiting through it is not charged against the wait; a
+        // dispatch that never registers while admission stands still is.
+        let admission = ProgressSnapshot::spawn_admission(
+            batchalign::worker::memory_guard::available_spawn_permits(),
+            pool.metrics_snapshot().active_workers_total,
+        );
+        if let Err(expired) = deadline.observe_at(std::time::Instant::now(), admission) {
             let now_workers = pool.worker_summary_entries().await;
             let pids_before: Vec<u32> = pre_dispatch_workers.iter().map(|e| e.pid.0).collect();
             let pids_now: Vec<u32> = now_workers.iter().map(|e| e.pid.0).collect();
@@ -1128,7 +1151,7 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
             let dispatch_finished = dispatch_handle.is_finished();
             let free_spawn_permits = batchalign::worker::memory_guard::available_spawn_permits();
             panic!(
-                "dispatch did not register a worker for job {job_id} within {max_wait:?}.\n\
+                "dispatch did not register a worker for job {job_id}.\n{expired}\n\
                  EVIDENCE (read this before touching the bound):\n\
                  \x20 request task: {task:?}, bootstrap mode: {mode:?}\n\
                  \x20 pids before dispatch: {pids_before:?}\n\
@@ -1158,8 +1181,7 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
                 mode = bootstrap_mode,
             );
         }
-        tokio::time::sleep(poll_step).await;
-        waited += poll_step;
+        tokio::time::sleep(deadline.poll_interval()).await;
     }
 
     // Fire the cancel-driven worker kill.
@@ -1237,13 +1259,15 @@ const SLOW_INTERPRETER_HANG: Duration = Duration::from_secs(60);
 /// occupies the pool before failing.
 const SLOW_KEY_READY_TIMEOUT_S: u64 = 20;
 
-/// How long the pre-spawned warm worker may take to become visible.
-///
-/// Named for consistency with every other bound in this file. The panic it
-/// guards already enumerates its causes and says outright that (c) is "the
-/// machine is the bottleneck", so this one met the convention through its
-/// message before it had a name.
-const WARM_WORKER_APPEARS: Duration = Duration::from_secs(30);
+// `WARM_WORKER_APPEARS` used to live here: a fixed 30s for the pre-spawned
+// warm worker to become visible. It was raised once (3s to 30s, 2026-07-08),
+// failed again at 30s under full-suite load (2026-07-29), and its own comment
+// ended "DO NOT RAISE IT A THIRD TIME" while naming cause (c), the machine
+// being the bottleneck, as a legitimate outcome it could not distinguish. That
+// is the exact shape the deadline owner exists for, so the wait below now uses
+// `WaitSubject::worker_registered_for_job` and keys off the admission picture:
+// it extends while the spawn queue ahead of it is moving and refuses when it
+// stops. There is no third raise to make.
 
 /// How long to let the cold dispatch run before asserting it has reached the
 /// spawn and is holding the permit.

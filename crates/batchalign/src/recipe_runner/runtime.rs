@@ -213,8 +213,10 @@ pub(crate) async fn write_text_output_artifact(
 
 /// Write a CHAT result to the command's primary target and staged output,
 /// suppressing the write at any path where the only difference vs the
-/// existing on-disk text is inside the `[ba3 <command> | ...]` provenance
-/// comment for `command`.
+/// existing on-disk text is inside the provenance stamps the command's recipe
+/// writes (its own and those of every stage it composes, from the catalog),
+/// under either stamp name (`[fc-ba3 <command> | ...]` or the legacy
+/// `[ba3 <command> | ...]`), in name and timestamp only.
 ///
 /// This is the seam that touches disk, so it takes the [`PostValidated`]
 /// proof rather than the bytes: a caller cannot gate one document and write
@@ -232,11 +234,11 @@ pub(crate) async fn write_text_output_artifact(
 ///
 /// - Target file does not exist → write (first run).
 /// - Existing bytes are byte-equal to `content` → skip (already correct).
-/// - Existing bytes differ from `content` only inside the `[ba3 <command>]`
-///   provenance line → skip (the only would-be change is the timestamp /
-///   engine slot, which we deliberately do not propagate).
-/// - Existing bytes differ in any other content (`%mor`, `%gra`, `%wor`,
-///   another command's provenance, anything else) → write.
+/// - Existing bytes differ from `content` only in the stamps' names and
+///   timestamps (and our ASR warning's build identity) → skip.
+/// - Existing bytes differ in any other content (a stamp field such as an
+///   engine, `%mor`, `%gra`, `%wor`, the stamp of a command the recipe does
+///   not compose, anything else) → write.
 ///
 /// The primary write_path and the staged output path are evaluated
 /// independently. In the common paths_mode layout the staged copy lives
@@ -327,10 +329,12 @@ async fn write_chat_if_meaningful_diff(
 
 /// Bound on how much the candidate output's byte length may differ from
 /// the on-disk byte length while still being eligible for the
-/// provenance-only-diff gate. A typical
-/// `[ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-05-08T02:52:17-04:00]`
-/// line is ~95 bytes; we double that to absorb engine-string and
-/// timezone-offset drift comfortably.
+/// provenance-only-diff gate. The gate fires only when the stamps' fields are
+/// unchanged, so the length can drift only by stamp names (`ba3` to `fc-ba3`
+/// is 3 bytes per stamp), timezone offsets and the warning's build identity:
+/// a few tens of bytes even for a transcribe job's three stamps. A typical
+/// `[fc-ba3 morphotag | engine=stanza-1.11.1:eng:standard ; lang=eng | 2026-05-08T02:52:17-04:00]`
+/// line is ~100 bytes, so two lines' worth is a generous bound.
 const PROVENANCE_LINE_DIFF_BUDGET_BYTES: u64 = 200;
 
 #[cfg(test)]
@@ -393,6 +397,58 @@ mod tests {
             cancel_token: CancellationToken::new(),
             pending_files,
         }
+    }
+
+    /// A transcribe re-run on a new build over identical content changes only
+    /// the stamps its recipe writes (transcribe, utseg, morphotag) and the
+    /// warning's build identity, so the file on disk is not rewritten. A
+    /// changed engine in a composed stage's stamp is written.
+    #[tokio::test]
+    async fn a_transcribe_rerun_on_a_new_build_leaves_identical_content_unwritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.cha");
+        let on_disk = "\
+@UTF8
+@Begin
+@Comment:\t[ba3 transcribe | asr=rev ; lang=eng | 2026-03-29T18:30:00-04:00]
+@Comment:\t[ba3 utseg | engine=talkbank/utterance-boundary@revision-1 ; lang=eng | 2026-03-29T18:31:00-04:00]
+@Comment:\t[ba3 morphotag | engine=stanza-1.11.1:eng:standard ; lang=eng | 2026-03-29T18:32:00-04:00]
+@Comment:\tBatchalign 0.8.5, ASR Engine rev. Unchecked output of ASR model, DO NOT USE.
+*PAR:\thello .
+%mor:\tintj|hello .
+@End
+";
+        let rebuilt = "\
+@UTF8
+@Begin
+@Comment:\t[fc-ba3 transcribe | asr=rev ; lang=eng | 2026-09-15T18:30:00-04:00]
+@Comment:\t[fc-ba3 utseg | engine=talkbank/utterance-boundary@revision-1 ; lang=eng | 2026-09-15T18:31:00-04:00]
+@Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1:eng:standard ; lang=eng | 2026-09-15T18:32:00-04:00]
+@Comment:\tfc-ba3 new-build-2, ASR engine rev. Unchecked output of ASR model, DO NOT USE.
+*PAR:\thello .
+%mor:\tintj|hello .
+@End
+";
+        tokio::fs::write(&path, on_disk)
+            .await
+            .expect("write existing file");
+
+        write_chat_if_meaningful_diff(&path, rebuilt, ReleasedCommand::Transcribe)
+            .await
+            .expect("gate");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.expect("read back"),
+            on_disk
+        );
+
+        let new_model = rebuilt.replace("stanza-1.11.1:eng:standard", "stanza-1.12.0:eng:standard");
+        write_chat_if_meaningful_diff(&path, &new_model, ReleasedCommand::Transcribe)
+            .await
+            .expect("gate");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.expect("read back"),
+            new_model
+        );
     }
 
     #[test]
@@ -551,11 +607,13 @@ mod tests {
     }
 
     /// Re-running morphotag over an unchanged corpus must not modify the
-    /// on-disk file just to update the provenance comment's timestamp.
+    /// on-disk file just to update the provenance comment.
     /// Pre-condition: a CHAT file exists at the primary output path with
-    /// an old `[ba3 morphotag | ...]` provenance line. We then call the
-    /// gated writer with new text that differs only in that line's
-    /// timestamp. Post-condition: the file's bytes are unchanged.
+    /// an old, legacy-named `[ba3 morphotag | ...]` provenance line. We then
+    /// call the gated writer with new text that differs only in that line
+    /// (now written as `[fc-ba3 morphotag | ...]`, with a new timestamp and
+    /// engine slot). Post-condition: the file's bytes are unchanged, so the
+    /// stamp rename alone never rewrites a file.
     #[tokio::test]
     async fn write_chat_output_artifact_with_provenance_gate_skips_when_only_provenance_differs() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -596,16 +654,18 @@ mod tests {
             ),
         };
 
-        // Same content as `original` except for the provenance line's
-        // timestamp. This is the canonical pointless-rerun shape we want
-        // to suppress.
+        // Same content as `original` except for the stamp's name (legacy
+        // `ba3` to `fc-ba3`) and its timestamp: the fields are identical.
+        // This is the canonical pointless-rerun shape we want to suppress. A
+        // stamp whose fields differ (a new `engine=` spelling, say) is a
+        // meaningful difference and is written; see `provenance`.
         let candidate = "\
 @UTF8
 @Begin
 @Languages:\teng
 @Participants:\tPAR Participant
 @ID:\teng|test|PAR|||||Participant|||
-@Comment:\t[ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-05-08T02:52:17-04:00]
+@Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-05-08T02:52:17-04:00]
 *PAR:\thello .
 %mor:\tco|hello .
 @End
@@ -666,7 +726,7 @@ mod tests {
 
         // Different `%mor` content: a legitimate result update.
         let candidate = "\
-@Comment:\t[ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-05-08T02:52:17-04:00]
+@Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1:eng ; lang=eng | 2026-05-08T02:52:17-04:00]
 *PAR:\thello .
 %mor:\tco|hi .
 ";
@@ -717,7 +777,7 @@ mod tests {
         };
 
         let candidate = "\
-@Comment:\t[ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-05-08T02:52:17-04:00]
+@Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1:eng ; lang=eng | 2026-05-08T02:52:17-04:00]
 *PAR:\thello .
 %mor:\tco|hello .
 ";

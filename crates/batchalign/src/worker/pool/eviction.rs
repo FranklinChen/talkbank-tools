@@ -104,9 +104,13 @@ impl WorkerPool {
         // Detach the handle drop (WorkerHandle::Drop sends SIGTERM+SIGKILL).
         // At runtime-shutdown the reaper in lifecycle.rs cleans up any
         // process this task would have killed.
-        tokio::spawn(async move {
-            drop(handle);
-        });
+        //
+        // On the POOL's runtime, not the caller's: the drop signals the child
+        // process, so it has to run where that child's reactor lives. An
+        // eviction is triggered by whichever checkout happens to be saturated,
+        // which in the harness is an arbitrary test's runtime. The owner also
+        // decides what to do when the pool has no runtime at all.
+        self.spawn_runtime.retire_worker_handle(handle);
 
         EvictionOutcome::Evicted
     }

@@ -175,7 +175,7 @@ pub async fn start(
             pool_config,
             layout,
             args.handshake_slot,
-            Some(crate::cli::build_hash().to_string()),
+            Some(crate::build_hash().to_string()),
         )
         .await?;
     } else {

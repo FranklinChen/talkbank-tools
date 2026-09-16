@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use crate::api::JobId;
 use crate::chat_ops::CacheKey;
 use crate::media::window::EmptySegment;
+pub use crate::revai::RetainedRevLanguageRejection;
 
 /// Non-empty forced-alignment cache misses behind `--require-media-cache`.
 ///
@@ -177,6 +178,11 @@ impl std::fmt::Display for AsrProviderDisposition {
 /// a structured `conflicts` array.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    /// The provider response was retained but its language was not admitted.
+    /// The payload can only be issued after successful evidence persistence.
+    /// HTTP 502: provider evidence was unusable, not malformed client input.
+    #[error(transparent)]
+    UnresolvedAsrLanguage(RetainedRevLanguageRejection),
     /// A database operation failed (schema migration, insert, query, etc.).
     ///
     /// **HTTP 500.** Callers should retry or report the error. Typically
@@ -196,6 +202,10 @@ pub enum ServerError {
     /// stored JSON payload in SQLite.
     #[error("persistence error: {0}")]
     Persistence(String),
+
+    /// Typed ASR-to-CHAT assembly failure, including requested diagnostics.
+    #[error(transparent)]
+    TranscriptBuild(#[from] batchalign_transform::build_chat::TranscriptBuildError),
 
     /// A timing-producing CHAT transform could not reconcile its output with
     /// the document's typed media declaration.
@@ -218,6 +228,15 @@ pub enum ServerError {
     /// persistence and not an internal system failure.
     #[error("{0}")]
     RequiredEvidenceUnavailable(MissingRequiredEvidence),
+
+    /// Transcription produced no words, so there is no transcript to write.
+    ///
+    /// Neither a malformed request nor an internal fault: the run reached the
+    /// end and had nothing in it. Reported rather than written, because the
+    /// headers-only CHAT file this used to produce is indistinguishable from a
+    /// transcript of a silent recording and was delivered as a success.
+    #[error(transparent)]
+    EmptyTranscription(#[from] EmptyTranscription),
 
     /// The requested `job_id` does not exist in the [`JobStore`](crate::store::JobStore).
     ///
@@ -434,14 +453,65 @@ pub enum ServerError {
     Cancelled,
 }
 
+/// Which transcription stage produced nothing.
+///
+/// Three stages can each end with no words, and they mean different things to
+/// whoever reads the failure, so the variant names the one that came up empty
+/// rather than leaving a reader to guess from a message. A silence reported as
+/// a completed job is the defect this type exists to prevent: before
+/// 2026-09-16 the first of these wrote a headers-only transcript and the job
+/// finished successfully.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EmptyTranscription {
+    /// The ASR engine returned no words at all.
+    #[error(
+        "the ASR engine recognized no words in this recording, so there is no transcript to \
+         write. If the recording contains speech, the engine or the language selected for it \
+         is at fault; if it does not, there is nothing here to transcribe."
+    )]
+    Asr,
+
+    /// ASR post-processing kept no utterance from the engine's words.
+    #[error(
+        "ASR post-processing kept no utterance from the words the engine returned, so there \
+         is no transcript to write."
+    )]
+    Postprocess,
+
+    /// CHAT assembly produced no utterance line.
+    #[error(
+        "none of the {described} utterance(s) that reached CHAT assembly held any content, \
+         so there is no transcript to write. Every token was a terminator, a separator or \
+         empty text."
+    )]
+    ChatBuild {
+        /// How many utterances reached CHAT assembly.
+        described: usize,
+    },
+}
+
 #[cfg(feature = "server")]
 impl ServerError {
     fn status_code(&self) -> StatusCode {
         match self {
+            Self::TranscriptBuild(error) => {
+                use batchalign_transform::build_chat::TranscriptBuildError;
+                match error {
+                    TranscriptBuildError::Diagnostic(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                    TranscriptBuildError::MissingParticipantCode(_)
+                    | TranscriptBuildError::MissingPrimaryLanguage
+                    | TranscriptBuildError::InvalidLanguageCode { .. }
+                    | TranscriptBuildError::WordFailedValidation { .. } => StatusCode::BAD_REQUEST,
+                }
+            }
             Self::Database(_) | Self::Migration(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::MediaTiming(_) | Self::OutputParse(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::RequiredEvidenceUnavailable(_) => StatusCode::PRECONDITION_FAILED,
+            // The request was fine and the server worked; the submitted media
+            // yielded no words. Neither a 400 (nothing wrong with the payload)
+            // nor a 500 (nothing broke).
+            Self::EmptyTranscription(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::JobNotFound(_) => StatusCode::NOT_FOUND,
             Self::JobConflict { .. } => StatusCode::CONFLICT,
             Self::JobNotTerminal(_) => StatusCode::CONFLICT,
@@ -449,6 +519,7 @@ impl ServerError {
             Self::FileNotReady(_) => StatusCode::CONFLICT,
             Self::UnknownCommand(_) => StatusCode::BAD_REQUEST,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
+            Self::UnresolvedAsrLanguage(_) => StatusCode::BAD_GATEWAY,
             Self::Worker(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::WhisperEngine(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -484,6 +555,11 @@ impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         let status = self.status_code();
         let body = match &self {
+            Self::UnresolvedAsrLanguage(retained) => serde_json::json!({
+                "detail": self.to_string(),
+                "diagnostic_key": retained.diagnostic_key(),
+                "admission": "rejected_unresolved_language",
+            }),
             Self::JobConflict { message, conflicts } => {
                 serde_json::json!({
                     "detail": {
@@ -500,6 +576,21 @@ impl IntoResponse for ServerError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn asr_diagnostic_failure_is_system_not_bad_transcript() {
+        use batchalign_transform::build_chat::{AsrDiagnosticError, TranscriptBuildError};
+        let error = super::ServerError::from(TranscriptBuildError::Diagnostic(AsrDiagnosticError::Write {
+            path: std::path::PathBuf::from("diagnostic.json"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }));
+        assert_eq!(error.status_code(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(crate::runner::util::classify_server_error(&error), crate::scheduling::FailureCategory::System);
+        assert!(matches!(error, super::ServerError::TranscriptBuild(TranscriptBuildError::Diagnostic(AsrDiagnosticError::Write { source, .. })) if source.kind() == std::io::ErrorKind::PermissionDenied));
+        let invalid = super::ServerError::from(TranscriptBuildError::MissingPrimaryLanguage);
+        assert_eq!(invalid.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(crate::runner::util::classify_server_error(&invalid), crate::scheduling::FailureCategory::Validation);
+    }
+
     use super::*;
 
     #[test]

@@ -34,6 +34,9 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
             FailureCategory::WorkerTimeout
         }
         WorkerError::Protocol(_) => FailureCategory::WorkerProtocol,
+        // A report that breaks the capability contract is a protocol
+        // disagreement between the server and the worker build.
+        WorkerError::CapabilitiesRefused(_) => FailureCategory::WorkerProtocol,
         WorkerError::Io(_) => FailureCategory::WorkerCrash,
         WorkerError::WorkerResponse(_) => FailureCategory::ProviderTransient,
         // Bootstrap-class worker errors are deterministic across retries:
@@ -65,12 +68,25 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
 /// Classify server-side orchestration errors into control-plane failure categories.
 pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
     match error {
+        ServerError::TranscriptBuild(error) => {
+            use batchalign_transform::build_chat::TranscriptBuildError;
+            match error {
+                TranscriptBuildError::Diagnostic(_) => FailureCategory::System,
+                TranscriptBuildError::MissingParticipantCode(_)
+                | TranscriptBuildError::MissingPrimaryLanguage
+                | TranscriptBuildError::InvalidLanguageCode { .. }
+                | TranscriptBuildError::WordFailedValidation { .. } => FailureCategory::Validation,
+            }
+        }
         ServerError::Worker(worker_error) => classify_worker_error(worker_error),
         // Native-engine failures (model resolution, build config, internal
         // invariants) are infrastructure: deterministic per attempt, so the
         // orchestrator must not retry them as if transient.
         ServerError::WhisperEngine(_) => FailureCategory::System,
         ServerError::Validation(_) => FailureCategory::Validation,
+        // A retained provider response needs an explicit language decision,
+        // not another automatic attempt or a claim of malformed client input.
+        ServerError::UnresolvedAsrLanguage(_) => FailureCategory::ProviderTerminal,
         // The producing workflow already classified this one; its verdict is
         // carried, never re-derived. Re-deriving is what turned a per-item
         // PROVIDER failure into `Validation` (and so killed its retry) when
@@ -78,6 +94,16 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         ServerError::ClassifiedFailure { category, .. } => *category,
         ServerError::MemoryPressure(_) => FailureCategory::MemoryPressure,
         ServerError::RequiredEvidenceUnavailable(_) => FailureCategory::EvidenceUnavailable,
+        // Deterministic across retries: the same recording yields the same
+        // silence, so this must never be retried. `Validation` is chosen for
+        // what it RENDERS as rather than as a claim that the request was
+        // malformed. `user_facing_error` passes a validation message through
+        // with light framing, so the typed text reaches the operator verbatim,
+        // naming which stage came up empty and what to check. The two
+        // alternatives both destroy that: `ProviderTerminal` replaces it with
+        // boilerplate about API keys, and `System` with "contact your
+        // administrator".
+        ServerError::EmptyTranscription(_) => FailureCategory::Validation,
         ServerError::Io(_) => FailureCategory::System,
         ServerError::Database(_)
         | ServerError::Migration(_)
@@ -252,6 +278,32 @@ mod tests {
         assert!(!is_retryable_worker_failure(
             FailureCategory::ModelAccessDenied
         ));
+    }
+
+    /// A recording that produced no words is never retried, and the operator
+    /// sees WHICH stage came up empty.
+    ///
+    /// Retrying cannot change what a recording contains, and the message is
+    /// the whole value of the failure: it distinguishes "the engine returned
+    /// nothing" from "post-processing kept nothing" from "every token was
+    /// punctuation". `ProviderTerminal` would have replaced all of it with
+    /// boilerplate about API keys, which is why the category is chosen for its
+    /// rendering and asserted here rather than left to a reader.
+    #[test]
+    fn an_empty_transcription_is_not_retryable_and_keeps_its_own_message() {
+        let error = ServerError::EmptyTranscription(crate::error::EmptyTranscription::Asr);
+        let category = classify_server_error(&error);
+
+        assert!(
+            !is_retryable_worker_failure(category),
+            "a recording with no speech in it says the same thing on every attempt"
+        );
+
+        let message = user_facing_error(category, "Transcription", "clip.wav", &error.to_string());
+        assert!(
+            message.contains("recognized no words"),
+            "the typed message must reach the operator, got: {message}"
+        );
     }
 
     /// The user-facing message must surface the worker's own actionable text

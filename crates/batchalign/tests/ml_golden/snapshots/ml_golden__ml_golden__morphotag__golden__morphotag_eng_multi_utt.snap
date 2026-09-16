@@ -1,12 +1,13 @@
 ---
-source: crates/batchalign-app/tests/ml_golden/morphotag/golden.rs
-expression: "&results[0].content"
+source: crates/batchalign/tests/ml_golden/morphotag/golden.rs
+expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(&results[0].content)"
 ---
 @UTF8
 @Begin
 @Languages:	eng
 @Participants:	PAR Participant
 @ID:	eng|test|PAR|||||Participant|||
+@Comment:	[fc-ba3 morphotag | engine=stanza-1.14.0:eng:standard ; lang=eng | <timestamp>]
 *PAR:	the dog is running .
 %mor:	det|the-Def-Art noun|dog aux|be-Fin-Ind-Pres-S3 verb|run-Part-Pres-S .
 %gra:	1|2|DET 2|4|NSUBJ 3|4|AUX 4|0|ROOT 5|4|PUNCT

@@ -8,7 +8,10 @@
     "lang": "yue",
     "monologues": [
       {
-        "speaker": "0",
+        "speaker": {
+          "kind": "attributed",
+          "label": "0"
+        },
         "elements": [
           {
             "value": "nei5",
@@ -26,7 +29,20 @@
           }
         ]
       }
-    ]
+    ],
+    "model": {
+      "engine": "tencent",
+      "engine_model_type": {
+        "id": "tencent-asr",
+        "requested": {
+          "kind": "provider_parameter",
+          "parameter": "16k_zh_large"
+        },
+        "observed": {
+          "kind": "not_exposed"
+        }
+      }
+    }
   },
   "elapsed_s": 1.24
 }

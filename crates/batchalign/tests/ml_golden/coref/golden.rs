@@ -37,7 +37,12 @@ async fn golden_coref_eng() {
         )
         .await;
 
-    assert_eq!(info.status, batchalign::api::JobStatus::Completed);
+    assert_eq!(
+        info.status,
+        batchalign::api::JobStatus::Completed,
+        "coref_eng: job should complete; error={:?}",
+        info.error
+    );
     let file = parse_output(&results[0].content, "coref_eng");
     if has_user_defined_tier(&file, "xcoref") {
         eprintln!("Coref model detected chains: snapshotting with %xcoref");
@@ -78,7 +83,12 @@ async fn golden_coref_spa_passthrough() {
         )
         .await;
 
-    assert_eq!(info.status, batchalign::api::JobStatus::Completed);
+    assert_eq!(
+        info.status,
+        batchalign::api::JobStatus::Completed,
+        "coref_spa_passthrough: job should complete; error={:?}",
+        info.error
+    );
     let file = parse_output(&results[0].content, "coref_spa_passthrough");
     assert!(
         !has_user_defined_tier(&file, "xcoref"),

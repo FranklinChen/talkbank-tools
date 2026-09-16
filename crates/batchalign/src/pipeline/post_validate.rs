@@ -50,7 +50,7 @@
 //! named twice in two types and the two could disagree: a document gated as
 //! `"transcribe"` was written under whatever the job dispatched, and for a
 //! `transcribe_s` job the provenance suppression therefore looked for a
-//! `[ba3 transcribe_s |` line that the transcribe pipeline never writes.
+//! `transcribe_s` stamp that the transcribe pipeline never writes.
 //!
 //! # The rule the gate enforces, and it depends on what was ADMITTED
 //!
@@ -142,7 +142,7 @@
 //!   NOTHING about, and re-serializing was therefore the wrong answer there;
 //!   its entry point now carries the original text and takes `pass_through`.
 //! - [`PostValidated::with_provenance_injected`] consumes a proof, stamps the
-//!   run's `[ba3 ...]` comment onto the MODEL IT CARRIES, and re-runs the
+//!   run's `[fc-ba3 ...]` comment onto the MODEL IT CARRIES, and re-runs the
 //!   gate. Same
 //!   shape as the merge below and for the same reason: the stamp used to run
 //!   on the finished TEXT at the dispatch seam, so the bytes written carried a
@@ -247,26 +247,47 @@ enum OutputProof {
         /// are still derived at most once per proof.
         text: OnceLock<String>,
     },
-    /// Final bytes that no gate judged and that carry no model to transition.
+    /// Final bytes that no gate judged, from a command that DECLINED to
+    /// analyze the document and applied only its declared no-op.
     ///
-    /// The variant was called `Unchanged` until 2026-09-07 and that was a
-    /// false statement for one of its two constructors:
-    /// [`PostValidated::declined_stripping_decision_tiers`] EDITS the model
-    /// before serializing it, so its bytes are not the input's and the
-    /// document is not unchanged. What both constructors share, and all this
-    /// variant claims, is that the bytes are final, there is no output model,
-    /// and nothing judged them.
+    /// It carries the model that no-op was applied to, which is the one thing
+    /// that distinguishes it from [`Self::PassedThrough`]. A consumer that
+    /// continues in the AST rather than writing bytes can therefore go on from
+    /// a declined document exactly as it goes on from a gated one, through
+    /// [`PostValidated::into_judged_document`].
     ///
-    /// It carried an `origin` field naming which of the two constructors made
-    /// it, added and removed on 2026-09-07. Nothing ever read it but
-    /// `PartialEq` and the one test written to observe that: no behaviour
-    /// anywhere differs between the two origins, both being returned untouched
-    /// by every transition, so the field made no wrong value unrepresentable
-    /// and was a second thing to keep true. The false claim was in the
-    /// variant's NAME, and renaming it is the whole of the fix; what each
-    /// constructor did is stated on the constructor, where a reader is.
-    Ungated {
+    /// # Why the two routes are variants again
+    ///
+    /// Both this and [`Self::PassedThrough`] were one `Ungated` variant with an
+    /// `origin` field naming which constructor made it, and that field was
+    /// removed on 2026-09-07 because nothing read it: no behaviour differed
+    /// between the two origins, so the label made no wrong value
+    /// unrepresentable. That reasoning was right about a LABEL and is not an
+    /// argument against a variant. Something reads the difference now, because
+    /// compare continues from morphotag's document in the AST: a declined
+    /// document HAS a model and a pass-through never had one, so the two
+    /// carry different things rather than the same thing under different
+    /// names.
+    Declined {
+        /// The model the declared no-op was applied to, and the model `text`
+        /// was serialized from.
+        ///
+        /// Boxed for the reason [`Self::Gated::file`] is boxed: a `ChatFile`
+        /// dwarfs the other fields.
+        file: Box<ChatFile>,
         /// The final bytes.
+        text: String,
+    },
+    /// Final bytes that no gate judged and behind which NO output model
+    /// exists: they are the input's own bytes, and this route never parsed
+    /// them.
+    ///
+    /// This is what `@Options: dummy` on a text command, `NoAlign`, and a
+    /// document with no collectible payloads all get. Asking such a proof to
+    /// continue in the AST is refused rather than answered by parsing the
+    /// bytes, which is what [`ProofCarriesNoDocument`] says.
+    PassedThrough {
+        /// The final bytes, which are the input's own.
         text: String,
     },
 }
@@ -480,7 +501,11 @@ impl Clone for OutputProof {
                     None => OnceLock::new(),
                 },
             },
-            Self::Ungated { text } => Self::Ungated { text: text.clone() },
+            Self::Declined { file, text } => Self::Declined {
+                file: file.clone(),
+                text: text.clone(),
+            },
+            Self::PassedThrough { text } => Self::PassedThrough { text: text.clone() },
         }
     }
 }
@@ -515,11 +540,21 @@ impl PartialEq for OutputProof {
                 // proof CLAIMS is part of what it is, so the same bytes
                 // admitted on different grounds are not the same proof.
             ) => judgement == other_judgement && mine == theirs,
-            (Self::Ungated { text: mine }, Self::Ungated { text: theirs }) => mine == theirs,
-            // Written out rather than a catch-all so a third route to a proof
+            // The MODEL, for the same reason the gated arm compares one: a
+            // declined proof's bytes are serialized from its model at
+            // construction, so comparing the model and comparing the bytes
+            // answer identically, and the model is what the proof is about.
+            (Self::Declined { file: mine, .. }, Self::Declined { file: theirs, .. }) => {
+                mine == theirs
+            }
+            (Self::PassedThrough { text: mine }, Self::PassedThrough { text: theirs }) => {
+                mine == theirs
+            }
+            // Written out rather than a catch-all so a fourth route to a proof
             // has to say what it compares equal to.
-            (Self::Gated { .. }, Self::Ungated { .. })
-            | (Self::Ungated { .. }, Self::Gated { .. }) => false,
+            (Self::Gated { .. }, Self::Declined { .. } | Self::PassedThrough { .. })
+            | (Self::Declined { .. }, Self::Gated { .. } | Self::PassedThrough { .. })
+            | (Self::PassedThrough { .. }, Self::Gated { .. } | Self::Declined { .. }) => false,
         }
     }
 }
@@ -580,6 +615,24 @@ fn render_errors(errors: &[ValidationError]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// A proof was asked to continue in the AST and has no document to continue
+/// from.
+///
+/// Only [`OutputProof::PassedThrough`] can raise this: its bytes are the
+/// INPUT's own and this route never parsed them, so there is no output model
+/// anywhere. It is an error rather than a parse because parsing the bytes here
+/// is precisely the re-parse a proof exists to make unnecessary: it would hand
+/// a consumer the parser's reading of our own text in place of the document the
+/// command actually produced.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "{command} applied nothing, so its output carries the input's own bytes and no document to continue from"
+)]
+pub(crate) struct ProofCarriesNoDocument {
+    /// The command whose proof was asked for a document.
+    pub(crate) command: ReleasedCommand,
 }
 
 impl PostValidated {
@@ -704,7 +757,7 @@ impl PostValidated {
     pub(crate) fn pass_through(original_text: &str, command: ReleasedCommand) -> Self {
         Self {
             command,
-            proof: OutputProof::Ungated {
+            proof: OutputProof::PassedThrough {
                 text: original_text.to_owned(),
             },
         }
@@ -761,11 +814,20 @@ impl PostValidated {
         Self {
             command,
             // Serialized here rather than lazily, because this route judges
-            // nothing and so has no model to transition afterwards: the bytes
-            // are final the moment they exist, and this is the one and only
-            // serialization the document gets.
-            proof: OutputProof::Ungated {
+            // nothing and so has no gate to transition through afterwards: the
+            // bytes are final the moment they exist, and this is the one and
+            // only serialization the document gets.
+            //
+            // The MODEL is kept beside them, because "declined" does not mean
+            // "there is nothing to continue from". compare reads morphotag's
+            // document out of the proof and goes on comparing it in the AST,
+            // and a CA main transcript, which morphotag declines to analyze, is
+            // exactly a document compare must still compare. Written before
+            // `file` because the serialization borrows what the next field
+            // moves.
+            proof: OutputProof::Declined {
                 text: to_chat_string(&file),
+                file: Box::new(file),
             },
         }
     }
@@ -857,7 +919,7 @@ impl PostValidated {
     ///
     /// Unlike the merge, a refusal here does not hand the pre-stamp proof
     /// back, and that is deliberate rather than an oversight: a document
-    /// written without its `[ba3 ...]` line is not a lesser version of the
+    /// written without its `[fc-ba3 ...]` line is not a lesser version of the
     /// same output, it is one the provenance gate can no longer recognise on
     /// the next run, so there is no fallback for a caller to choose.
     ///
@@ -905,7 +967,7 @@ impl PostValidated {
     pub(crate) fn as_str(&self) -> &str {
         match &self.proof {
             OutputProof::Gated { file, text, .. } => text.get_or_init(|| to_chat_string(file)),
-            OutputProof::Ungated { text, .. } => text,
+            OutputProof::Declined { text, .. } | OutputProof::PassedThrough { text } => text,
         }
     }
 
@@ -917,7 +979,7 @@ impl PostValidated {
     /// itself, so a bare `String` still cannot reach disk.
     pub(crate) fn into_text(self) -> String {
         match self.proof {
-            OutputProof::Ungated { text, .. } => text,
+            OutputProof::Declined { text, .. } | OutputProof::PassedThrough { text } => text,
             OutputProof::Gated { file, text, .. } => match text.into_inner() {
                 // Already materialized by an earlier `as_str`; reuse rather
                 // than serialize a second time.
@@ -926,6 +988,33 @@ impl PostValidated {
                 // and only serialization.
                 None => to_chat_string(&file),
             },
+        }
+    }
+
+    /// Take ownership of the DOCUMENT this proof is about, for a consumer that
+    /// continues in the AST instead of writing bytes.
+    ///
+    /// This is [`Self::into_text`]'s counterpart and the one a downstream
+    /// ANALYSIS should reach for. compare is the caller: it morphotags the main
+    /// transcript and then compares it, and comparing is done on a model. It
+    /// used to take the text and parse it again with [`parse_lenient`], so the
+    /// document it compared was the parser's recovery of our own bytes rather
+    /// than the document morphotag produced and the gate judged, and a parse
+    /// error on that path was a `warn!` rather than an answer.
+    ///
+    /// [`OutputProof::Gated`] and [`OutputProof::Declined`] both carry their
+    /// model and both succeed. Only a pass-through cannot, because no output
+    /// model was ever built on that route; it is refused by
+    /// [`ProofCarriesNoDocument`] rather than answered by parsing, so the
+    /// re-parse cannot come back in through this door either.
+    ///
+    /// [`parse_lenient`]: batchalign_transform::parse::parse_lenient
+    pub(crate) fn into_judged_document(self) -> Result<ChatFile, ProofCarriesNoDocument> {
+        match self.proof {
+            OutputProof::Gated { file, .. } | OutputProof::Declined { file, .. } => Ok(*file),
+            OutputProof::PassedThrough { .. } => Err(ProofCarriesNoDocument {
+                command: self.command,
+            }),
         }
     }
 

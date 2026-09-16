@@ -1,7 +1,7 @@
 # Command Contracts: Input Preconditions and Output Guarantees
 
 **Status:** Current
-**Last updated:** 2026-05-19 20:10 EDT
+**Last updated:** 2026-09-15 20:20 EDT
 
 This document specifies, for each batchalign3 command that operates
 on CHAT files, the minimum input validity required, what the command
@@ -182,8 +182,9 @@ dependent tiers are dropped during splitting, their validity is irrelevant.
 - Single-word utterances are never split (passed through unchanged with all
   tiers preserved)
 - Non-utterance lines (headers, comments) are preserved in original positions
-- If inference produces an assignment that doesn't match the word count, the
-  original utterance is preserved unchanged
+- A prediction whose assignments are not parallel to the request words is
+  refused when the worker result is admitted, and the file fails: there is no
+  path that quietly keeps the original utterance and reports success
 
 **Invariants:**
 - Speaker codes are preserved
@@ -202,7 +203,9 @@ dependent tiers are dropped during splitting, their validity is irrelevant.
 **Input:** CHAT file with main tier utterances
 
 **Reads:**
-- Main tier words (space-joined into text for translation)
+- Main tier words the speaker produced, in order, with the utterance's
+  terminator (retraced words and filled pauses included; omissions, nonwords,
+  fragments and untranscribed markers left out)
 
 **Writes:**
 - `%xtra` tier: translated text as a `UserDefined` dependent tier
@@ -219,8 +222,11 @@ critical since words are joined into a plain text string for the translation API
 - Word-level markers (joined into text, model handles gracefully)
 
 **Output guarantees:**
-- Every utterance with extractable words has a `%xtra` tier (unless the
-  translation is empty)
+- Every utterance that produced words has a `%xtra` tier
+- An empty translation is refused when the worker result is admitted, so a
+  written file never has an utterance silently missing its tier; the file fails
+  instead, with a typed per-item failure that names the engine and the remedy.
+  The verdict is terminal: an identical request gets an identical answer
 - All other tiers and headers are preserved unchanged
 
 **Invariants:**

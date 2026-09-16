@@ -610,30 +610,92 @@ With special forms (e.g., `gumma@c`):
 
 ### Response (Python → Rust)
 
+One item per payload item, in payload order, each a tagged union
+(`MorphosyntaxItemResultV2`) with exactly three kinds. Python does NOT build
+`%mor` or `%gra`: it returns Stanza's own `doc.to_dict()` sentences, and the
+UD-to-CHAT mapping happens in Rust (section 5 above).
+
 ```json
 {
-  "mor": "pro:sub|I v|eat n|cookie-PL .",
-  "gra": "1|2|SUBJ 2|0|ROOT 3|2|OBJ 4|2|PUNCT",
-  "tokens": ["I", "eat", "cookies"]
+  "kind": "analyzed",
+  "raw_sentences": [[
+    {"id": 1, "text": "attenzi", "lemma": "attenzare", "upos": "VERB",
+     "head": 0, "deprel": "root"},
+    {"id": 2, "text": "ne", "lemma": "ne", "upos": "PRON",
+     "head": 1, "deprel": "iobj"}
+  ]],
+  "model": {"stanza_version": "1.13.0", "lang": "ita", "pipeline": "standard"},
+  "repairs": [
+    {"kind": "relation_alias", "word": "ne",
+     "from_relation": "iob", "to_relation": "iobj"}
+  ]
 }
 ```
 
-The `tokens` field is always present.  When `retokenize=false`, it's ignored.  When
-`retokenize=true`, Rust compares tokens against original words and rebuilds the AST if
-they differ.
+The other two kinds carry no analysis: `{"kind": "no_words"}` for an utterance
+with no words (no model ran, so it names none), and `{"kind": "failed",
+"error": "..."}` for an item whose file fails with that message. All three
+fields of `analyzed` are required, with no defaults: an analysis that could not
+name its model, or that left "repaired nothing" indistinguishable from "does
+not report repairs", is exactly the shape that hid these facts before.
+
+### Relation repair
+
+Stanza does not guarantee that `deprel` is a Universal Dependencies relation.
+`RepairedSentence` (in `inference/morphosyntax.py`) is the boundary that fixes
+that, and it reports what it fixed instead of only logging it. Four repairs
+exist, named identically on both sides of the wire
+(`RelationRepairKind` / `UdRelationRepairKindV2`):
+
+| Kind | Trigger | Applied |
+|---|---|---|
+| `pad_relation` | a padding label, `<PAD>` or `<UNK>` | `dep` |
+| `relation_case` | a UD relation in the wrong case, `NSUBJ` | lowercased, subtype kept |
+| `relation_alias` | a known non-UD spelling, `iob` | the UD relation it means, `iobj` |
+| `unknown_relation` | no UD relation and no known alias | `dep` |
+
+Only the relation HEAD is a closed set. UD defines subtypes as open and
+language-specific, and the corpora legitimately use many (`nmod:poss`,
+`acl:relcl`, `flat:foreign`), so a subtype is preserved verbatim and never
+validated.
+
+Two properties are worth knowing before changing any of this:
+
+- **The repair is the constructor.** `RepairedSentence` can only be built from
+  raw Stanza words, and `_analysis` takes nothing else, so the step cannot be
+  skipped and no caller can produce an analysis claiming repairs it did not
+  make. It replaced a validator that returned `None` and mutated its argument,
+  which left no proof in any signature that it had run; the production path
+  did not call it for months while `PAD` and `IOB` flowed into published
+  corpora.
+- **A repair cannot be a no-op or invalid.** `RelationRepair` refuses a
+  rewrite whose relation did not change, and one whose result is not a UD
+  relation, so a count of repairs cannot be inflated by either.
+
+Rust collects the repairs per file (`AppliedAnalyses`, beside the models) and
+writes the total into the morphotag provenance comment as `ud_repairs=`; see
+[Provenance](../architecture/provenance.md).
 
 ### Worker-side batch inference (`worker/_infer_hosts.py` + `inference/morphosyntax.py`)
 
 The worker-side morphosyntax host wraps Stanza to conform to this interface:
 
-1. Parse JSON payload array
-2. For each utterance: replace special-form words with `"xbxxx"` (Stanza placeholder)
-3. Strip parentheses, join words as text
-4. Set `tokenizer_context["sentence"]` for Stanza's postprocessor
-5. Call `nlp(text)` under lock on GIL-enabled Python
-6. `map_ud_sentence()` converts UD output to %mor/%gra
-7. Extract Stanza token texts
-8. Return `[{mor, gra, tokens}, ...]` JSON array
+1. Validate each payload item (`MorphosyntaxBatchItem`); one that does not
+   validate becomes that item's error and no other item is affected
+2. An utterance with no words becomes `no_words` without reaching Stanza
+3. Group the rest by each item's own language, so a code-switched utterance
+   reaches the model for its language
+4. Per group, resolve the pipeline variant and the realignment mode, install
+   the CHAT word boundaries for Stanza's tokenizer, and call `nlp(text)` under
+   the lock on GIL-enabled Python. The terminator is appended to the text as a
+   parsing cue, never as data
+5. A raise, a missing pipeline, or a sentence-count mismatch fails every item
+   of that group with a typed reason; none of them gets an empty analysis
+6. Per item: remove the appended terminator, apply the PyCantonese POS
+   override where the variant says so, then build `RepairedSentence`, which
+   validates every word and repairs its relation
+7. Return one tagged item per payload item, each analysis naming its model and
+   carrying its repairs
 
 ### Cache orchestration
 

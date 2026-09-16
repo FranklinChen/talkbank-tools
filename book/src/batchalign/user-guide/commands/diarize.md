@@ -1,7 +1,7 @@
 # diarize
 
 **Status:** Current
-**Last updated:** 2026-09-02 06:51 EDT
+**Last updated:** 2026-09-16 03:36 EDT
 
 Detect speaker turns in audio (speaker diarization) without transcribing.
 Each input media file produces a speaker-turns JSON artifact naming which
@@ -74,7 +74,7 @@ flowchart TD
 | --- | --- | --- |
 | `PATHS...` | | Input media files and/or directories (`.mp3`, `.mp4`, `.wav`) |
 | `-o, --output DIR` | | Output directory for `.turns.json` artifacts |
-| `--num-speakers N` | auto-detect | Expected speaker count hint. Omit unless known: auto-detection is the point of the engine |
+| `--num-speakers N` | auto-detect | Expected speaker count, 2 or more. Omit unless known: auto-detection is the point of the engine. A count of 1 is refused when the arguments are parsed |
 | `--speaker-engine {pyannote,pyannote-ai,nemo}` | `pyannote` | Local TalkBank Pyannote, paid pyannoteAI Precision-2, or local NeMo |
 | `--lang CODE` | `eng` | 3-letter ISO code for worker-pool selection only; diarization itself is language-independent |
 
@@ -95,13 +95,18 @@ For input `session.mp3`, the artifact is `session.turns.json`:
 ```
 
 Track codes (`PAR0`..`PARn`) are **anonymous acoustic identities**, not
-CHAT roles: `PAR0` means "the first distinct voice", not "the target
-participant". Diarizer-native labels are mapped to track codes
-deterministically (distinct labels sorted lexically become `PAR0..PARn`),
-so re-running the same audio yields the same track assignment. Track-to-tier
-projection happens downstream in `chatter rediarize`; semantic role assignment
-remains a separate step, for example `chatter speaker-id` using additional
-evidence or adjudication.
+CHAT roles. `PAR0` is not "the target participant", and it is not
+necessarily the first voice heard either: diarizer-native labels are mapped
+to track codes deterministically by sorting the distinct labels lexically
+into `PAR0..PARn`, so re-running the same audio yields the same assignment
+whatever order the provider returned its turns in. Each recording is
+diarized on its own, with no speaker identity carried between recordings,
+so `PAR0` in one file and `PAR0` in another need not be the same person even
+when a corpus has fixed participants. Track-to-tier projection happens
+downstream in `chatter rediarize`; semantic role assignment remains a
+separate step, for example `chatter speaker-id` using additional evidence or
+adjudication, or `batchalign3 speaker-identify` scoring each track against
+voices enrolled from the same recording.
 
 The command does not run ASR and does not modify a CHAT file. The later
 `chatter rediarize` step uses interval overlap to assign existing transcript
@@ -190,6 +195,15 @@ explicit `--server` to target a remote daemon.
 present forces the model to collapse speakers, which is the classic failure
 mode this command exists to repair. Omit `--num-speakers` unless the count is
 certain. (`-n` was removed on 2026-08-19; it read as a worker count.)
+
+**A count of 1 is refused.** The count is 2 or more, or it is omitted so the
+diarizer detects the number itself. One is neither: it asks the engine to
+separate the speakers of a recording asserted to hold one, so it is refused
+when the arguments are parsed rather than silently treated as detection:
+
+```text
+a diarization speaker count must be at least 2, and 1 was given. Omit the count to have the diarizer detect it, which is the recommended mode.
+```
 
 **Turns JSON is strict on the chatter side.** `chatter rediarize` rejects
 files with unknown or missing fields rather than guessing; do not

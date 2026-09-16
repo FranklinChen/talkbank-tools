@@ -12,7 +12,12 @@ import pytest
 import torch
 
 import batchalign.inference.languages.cantonese._aliyun_asr as aliyun_asr
-from batchalign.inference.asr import AsrElement, AsrMonologue, MonologueAsrResponse
+from batchalign.inference.asr import (
+    AsrElement,
+    AsrMonologue,
+    MonologueAsrResponse,
+    UndiarizedSpeaker,
+)
 from batchalign.inference.languages.cantonese._aliyun_asr import (
     _AliyunRunner,
     _ensure_wav,
@@ -286,7 +291,7 @@ def test_transcribe_to_monologues_cleans_up_temp_dir(monkeypatch) -> None:
         lang="yue",
         monologues=[
             AsrMonologue(
-                speaker=0,
+                speaker=UndiarizedSpeaker(),
                 elements=[AsrElement(value="好", ts=0.0, end_ts=0.2, type="text")],
             )
         ],

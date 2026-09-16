@@ -166,6 +166,10 @@ deleting or editing the source declaration.
 
 - `%mor` tier added or replaced with POS tags and lemmas per word
 - `%gra` tier added or replaced with dependency relations
+- A provenance `@Comment` naming the Stanza models that ran, and counting any
+  dependency relations that had to be repaired because Stanza produced a label
+  outside Universal Dependencies (`ud_repairs=`, absent when there were none).
+  See [Provenance](../provenance.md#repaired-relations)
 - Main tier text may be retokenized when `--retokenize` is set
 - Special `@Options: dummy` notation is auto-detected and preserved
 - No audio is involved; this is a text-only transform

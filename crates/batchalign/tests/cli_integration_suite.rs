@@ -11,6 +11,7 @@
 
 mod cli_common;
 mod common;
+mod live_deadline;
 
 #[path = "cli.rs"]
 mod cli;

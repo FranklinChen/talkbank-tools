@@ -72,9 +72,12 @@ pub(super) fn count_ast_mor_tiers(file: &ChatFile) -> usize {
         .count()
 }
 
-pub(super) fn strip_ba3_comments(chat: &str) -> String {
+/// Drop every line holding one of our provenance stamps, under the current
+/// `[fc-ba3 ` name or the legacy `[ba3 ` name, so outputs can be compared
+/// without their wall-clock timestamps.
+pub(super) fn strip_provenance_stamps(chat: &str) -> String {
     chat.lines()
-        .filter(|line| !line.contains("[ba3 "))
+        .filter(|line| !line.contains("[fc-ba3 ") && !line.contains("[ba3 "))
         .collect::<Vec<_>>()
         .join("\n")
 }

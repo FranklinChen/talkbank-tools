@@ -49,6 +49,32 @@ impl<'a> LiveDirectJobClient<'a> {
         .await
     }
 
+    /// Submit a paths-mode job whose speaker count the caller STATES.
+    ///
+    /// See the server client's counterpart: a diarized test must say how many
+    /// speakers its fixture holds, because a count of one is refused at
+    /// submission as a contradiction.
+    pub async fn submit_paths_job_with_speakers(
+        &self,
+        command: ReleasedCommand,
+        lang: &str,
+        source_paths: Vec<String>,
+        output_paths: Vec<String>,
+        num_speakers: batchalign::api::NumSpeakers,
+        options: CommandOptions,
+    ) -> (JobInfo, Vec<String>) {
+        super::submit_paths_and_complete_direct_with_speakers(
+            self.session,
+            command,
+            lang,
+            source_paths,
+            output_paths,
+            num_speakers,
+            options,
+        )
+        .await
+    }
+
     pub async fn submit_paths_job_with_before(
         &self,
         command: ReleasedCommand,

@@ -132,6 +132,117 @@ pub struct TokenTiming {
     pub end_ms: u64,
 }
 
+/// How far a `%wor` tier's slot count stands from the main tier's.
+///
+/// The fields are private and the only thing that fills them is
+/// [`TokenTimingState::drifted`] in this module, reading chatter's own drift
+/// payload. A row therefore cannot report a drift that nobody measured, and in
+/// particular cannot be built by a consumer that did not look at the tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WorSlotDrift {
+    /// Slots the `%wor` tier actually carries.
+    wor_slots: usize,
+    /// Main-tier words the projection expected one slot each for.
+    main_words: usize,
+}
+
+impl WorSlotDrift {
+    /// Slots the `%wor` tier actually carries.
+    pub fn wor_slots(&self) -> usize {
+        self.wor_slots
+    }
+
+    /// Main-tier words the projection expected one slot each for.
+    pub fn main_words(&self) -> usize {
+        self.main_words
+    }
+}
+
+/// How many `%wor` slots failed to corroborate the word they would time.
+///
+/// Private field, one constructor, for the reason [`WorSlotDrift`] gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LexicalMismatchCount {
+    /// Slots whose display token did not match its main-tier word.
+    mismatches: usize,
+}
+
+impl LexicalMismatchCount {
+    /// Slots whose display token did not match its main-tier word.
+    pub fn mismatches(&self) -> usize {
+        self.mismatches
+    }
+}
+
+/// Why one aligned token carries the timing it carries, or carries none.
+///
+/// Four of these five states were one bare `None` until 2026-09-16, and the
+/// collapse answered four different questions with the same silence: a
+/// corroborated slot that simply has no bullet, an utterance with no `%wor`
+/// tier at all, a tier whose slot count has drifted from the main tier, and a
+/// tier whose display tokens do not match the words they would time. A reader
+/// of the report could see THAT a token had no timing and could not see which
+/// of the four had happened, though chatter had said so in a payload this
+/// module was discarding.
+///
+/// The three failure states are not interchangeable to anybody acting on them:
+/// a missing tier means alignment never ran, a drifted one means the transcript
+/// was edited after it ran, and an uncorroborated one means the tier belongs to
+/// different words than the ones beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TokenTimingState {
+    /// A corroborated `%wor` tier times this slot.
+    Timed(TokenTiming),
+    /// A corroborated `%wor` tier carries no bullet for this slot. The tier is
+    /// trustworthy and this word is simply not timed in it.
+    Unaligned,
+    /// The utterance carries no `%wor` tier, so no word in it is timed.
+    NoWorTier,
+    /// The `%wor` tier's slot count disagrees with the main tier's, so no slot
+    /// can be paired with a word without guessing.
+    WorTierDrifted(WorSlotDrift),
+    /// Slot counts agreed, but display tokens did not match the words they
+    /// would time, so the bullets belong to a different reading of the
+    /// utterance.
+    WorTierUncorroborated(LexicalMismatchCount),
+}
+
+impl TokenTimingState {
+    /// Name a count drift, from chatter's own drift payload.
+    ///
+    /// Private, like the payload types' fields: the only caller is the one
+    /// place that asked chatter and was told.
+    fn drifted(wor_slots: usize, main_words: usize) -> Self {
+        Self::WorTierDrifted(WorSlotDrift {
+            wor_slots,
+            main_words,
+        })
+    }
+
+    /// Name a lexical corroboration failure, from chatter's own payload.
+    fn uncorroborated(mismatches: usize) -> Self {
+        Self::WorTierUncorroborated(LexicalMismatchCount { mismatches })
+    }
+
+    /// The timing, for the one state that has one.
+    ///
+    /// The other four arms are written out rather than swept into a `_`, so a
+    /// sixth cause breaks this function instead of silently joining the
+    /// untimed ones. This is the only place in the module that turns a state
+    /// back into an `Option`, and it exists because a DELTA between two tokens
+    /// genuinely requires both of them to be timed.
+    pub fn timing(&self) -> Option<TokenTiming> {
+        match self {
+            Self::Timed(timing) => Some(*timing),
+            Self::Unaligned
+            | Self::NoWorTier
+            | Self::WorTierDrifted(_)
+            | Self::WorTierUncorroborated(_) => None,
+        }
+    }
+}
+
 /// One alignment timing comparison row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AlignmentTokenDifference {
@@ -145,10 +256,10 @@ pub struct AlignmentTokenDifference {
     pub token: usize,
     /// Normalized token identity.
     pub text: String,
-    /// Left timing, explicitly absent when `%wor` has no bullet.
-    pub left_timing: Option<TokenTiming>,
-    /// Right timing, explicitly absent when `%wor` has no bullet.
-    pub right_timing: Option<TokenTiming>,
+    /// Left timing, or the named cause it has none.
+    pub left_timing: TokenTimingState,
+    /// Right timing, or the named cause it has none.
+    pub right_timing: TokenTimingState,
     /// Absolute start delta when both timings exist.
     pub start_delta_ms: Option<u64>,
     /// Absolute end delta when both timings exist.
@@ -531,7 +642,7 @@ struct AlignedToken {
     utterance: usize,
     token: usize,
     text: String,
-    timing: Option<TokenTiming>,
+    state: TokenTimingState,
 }
 
 fn alignment_tokens(
@@ -570,34 +681,51 @@ fn alignment_tokens(
         // each `%wor` display token matches its main-tier word, which is what
         // chatter's type graph requires before a bullet may be trusted (a
         // same-count edit to either tier would otherwise pair a word with
-        // another word's timing). Missing, drifted and uncorroborated tiers
-        // all yield untimed tokens; which of the three it was is chatter's
-        // diagnostic and is not carried into the comparison yet.
-        let untimed = || vec![None; slot_texts.len()];
-        let timings: Vec<Option<TokenTiming>> = match projection.bind_timing(utterance.wor_tier()) {
+        // another word's timing).
+        //
+        // Each way this can fail NAMES itself in the token's state, from the
+        // payload chatter already hands back. Missing, drifted and
+        // uncorroborated tiers all produced the same bare `None` until
+        // 2026-09-16, indistinguishable from a corroborated slot that simply
+        // carries no bullet, so the report could say a token had no timing but
+        // never which of the four things had happened.
+        let states: Vec<TokenTimingState> = match projection.bind_timing(utterance.wor_tier()) {
             WorTimingBinding::CountMatched(matched) => match corroborate_wor_timing(matched) {
                 WorTimingCorrespondence::Corroborated(corroborated) => corroborated
                     .slots()
                     .iter()
                     .map(|slot| match slot.timing() {
-                        WorSlotTiming::Timed(interval) => Some(TokenTiming {
+                        WorSlotTiming::Timed(interval) => TokenTimingState::Timed(TokenTiming {
                             start_ms: interval.start().get(),
                             end_ms: interval.end().get(),
                         }),
-                        WorSlotTiming::Unaligned => None,
+                        WorSlotTiming::Unaligned => TokenTimingState::Unaligned,
                     })
                     .collect(),
-                WorTimingCorrespondence::Uncorroborated(_) => untimed(),
+                // The whole utterance shares one cause: corroboration is a
+                // property of the tier, not of a slot.
+                WorTimingCorrespondence::Uncorroborated(uncorroborated) => {
+                    vec![
+                        TokenTimingState::uncorroborated(uncorroborated.mismatches().len());
+                        slot_texts.len()
+                    ]
+                }
             },
-            WorTimingBinding::Missing(_) | WorTimingBinding::Drifted(_) => untimed(),
+            WorTimingBinding::Missing(_) => vec![TokenTimingState::NoWorTier; slot_texts.len()],
+            WorTimingBinding::Drifted(drift) => {
+                vec![
+                    TokenTimingState::drifted(drift.wor_count().get(), drift.main_count().get());
+                    slot_texts.len()
+                ]
+            }
         };
-        for (token, (text, timing)) in slot_texts.into_iter().zip(timings).enumerate() {
+        for (token, (text, state)) in slot_texts.into_iter().zip(states).enumerate() {
             result.push(AlignedToken {
                 speaker: speaker.clone(),
                 utterance: utterance_index,
                 token,
                 text,
-                timing,
+                state,
             });
         }
     }
@@ -635,14 +763,13 @@ fn compare_align_pair(
     let mut starts = Vec::new();
     let mut ends = Vec::new();
     for (left, right) in left_tokens.iter().zip(&right_tokens) {
-        let start_delta_ms = left
-            .timing
-            .zip(right.timing)
-            .map(|(l, r)| l.start_ms.abs_diff(r.start_ms));
-        let end_delta_ms = left
-            .timing
-            .zip(right.timing)
-            .map(|(l, r)| l.end_ms.abs_diff(r.end_ms));
+        // A delta exists only where BOTH sides are timed, which is the one
+        // question `timing()` exists to answer. Every other pairing, including
+        // two tokens untimed for different reasons, has no delta to report and
+        // now says why in the row itself.
+        let paired = left.state.timing().zip(right.state.timing());
+        let start_delta_ms = paired.map(|(l, r)| l.start_ms.abs_diff(r.start_ms));
+        let end_delta_ms = paired.map(|(l, r)| l.end_ms.abs_diff(r.end_ms));
         if let Some(value) = start_delta_ms {
             starts.push(value);
         }
@@ -659,8 +786,8 @@ fn compare_align_pair(
             utterance: left.utterance,
             token: left.token,
             text: left.text.clone(),
-            left_timing: left.timing,
-            right_timing: right.timing,
+            left_timing: left.state,
+            right_timing: right.state,
             start_delta_ms,
             end_delta_ms,
         });
@@ -682,8 +809,9 @@ fn order_violations(tokens: &[AlignedToken]) -> usize {
         .filter(|window| {
             window[0].speaker == window[1].speaker
                 && window[0]
-                    .timing
-                    .zip(window[1].timing)
+                    .state
+                    .timing()
+                    .zip(window[1].state.timing())
                     .is_some_and(|(left, right)| {
                         right.start_ms < left.start_ms || right.end_ms < left.end_ms
                     })

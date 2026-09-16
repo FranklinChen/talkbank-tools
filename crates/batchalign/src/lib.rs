@@ -150,6 +150,7 @@ pub use batchalign_types::domain::ReleasedCommand;
 pub use types::{api, config, options, params, runtime, scheduling, traces};
 
 // ── Engine modules (always available) ────────────────────────────────
+pub(crate) mod model_manifest;
 pub mod benchmark;
 pub mod cache;
 pub(crate) mod capability;
@@ -160,6 +161,8 @@ pub mod compare;
 pub mod coref;
 pub mod debug_artifacts;
 pub mod direct;
+pub(crate) mod dispatch_language;
+pub mod engine_reports;
 pub mod ensure_wav;
 pub mod error;
 pub(crate) mod execution;
@@ -191,6 +194,7 @@ pub mod transcribe;
 pub mod translate;
 pub mod utseg;
 pub(crate) mod utseg_evidence;
+pub(crate) mod utseg_route;
 pub mod whisper_native;
 pub mod worker;
 pub mod worker_setup;
@@ -232,6 +236,17 @@ pub use server::{
 pub use state::AppState;
 #[cfg(feature = "server")]
 pub(crate) use websocket::ws_route;
+
+/// This build's identity: the `git describe` string `build.rs` embeds as
+/// `BUILD_HASH`. It changes on every rebuild, even when the version stays the
+/// same, because staleness is judged by build identity and never by semver.
+///
+/// The one reader of `BUILD_HASH` in the crate. The CLI's stale-daemon check,
+/// the unchecked-ASR warning, receipts and the registry's foreign-build
+/// refusal all ask here, so they cannot disagree about which build this is.
+pub fn build_hash() -> &'static str {
+    env!("BUILD_HASH")
+}
 
 /// Create a CHAT parser handle.
 ///

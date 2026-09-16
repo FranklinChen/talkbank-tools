@@ -1,7 +1,7 @@
 # transcribe: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-16 08:18 EDT
 
 Implementation guide for the `transcribe` command. For user-facing
 documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe.md).
@@ -104,20 +104,26 @@ All ASR post-processing runs in Rust (`crates/batchalign-transform/src/asr_postp
    - Language-specific: English phrasal verbs, CJK terms, etc.
    - Implemented: `compounds::merge_compounds()`
 
-2. **Multi-word token splitting**: split tokens containing spaces, interpolate timestamps
+2. **Cantonese normalization** (yue only), simplified→HK traditional + domain replacements
+   - One pass over the whole monologue, before anything splits it: the engines
+     report one word per Han character, so a two-character replacement has to
+     see both, and each word then gets back exactly its own characters
+   - Uses the `ferrous-opencc` crate + the 31-entry replacement table
+   - Implemented: `cantonese::AlignedNormalization`, the only route to
+     normalized Cantonese text, applied by `prepare_words_pre_expansion()`
+   - A conversion that changed the character count refuses the file rather than
+     re-cutting words away from their timings
+
+3. **Multi-word token splitting**: split tokens containing spaces, interpolate timestamps
    - Normalizes ASR outputs that glue multiple words together
    - Distributes timing proportionally by text length
 
-3. **Number expansion**: convert digit strings to word form
+4. **Number expansion**: convert digit strings to word form
    - Cardinals: 47 languages via `NUM2LANG` static table (data/num2lang.json)
    - CJK: specialized `num2chinese` path
    - Ordinals/decades: English-specific `ordinal_year_eng` composer
    - Currency, percent, dash-ranges: dedicated Rust handlers
    - **Runtime:** Pure Rust table lookup (Python `num2words` involved at **build time only** for codegen; removed from runtime 2026-04-26)
-
-4. **Cantonese normalization** (yue only), simplified→HK traditional + domain replacements
-   - Uses `ferrous-opencc` crate + replacement table
-   - Implemented: `cantonese::normalize()`
 
 5. **Long-turn splitting**: chunk monologues >300 words
    - Prevents unbounded utterance lengths in downstream processing
@@ -146,8 +152,25 @@ CHAT assembly**:
 
 - Implemented in `crates/batchalign/src/pipeline/transcribe.rs`:
   `process_asr_with_prechat_segmentation()`
-- Called only when utterance segmentation is enabled and
-  `uses_prechat_utterance_model(resolved_lang)` is true
+- Called only when utterance segmentation is enabled and the resolved
+  language's route is `UtsegRoute::BoundaryModel`
+  (`crates/batchalign/src/utseg_route.rs`). That route answers which segmenter
+  a language gets, reading availability from `UTSEG_BOUNDARY_MODELS` in
+  `crates/batchalign/src/model_manifest.rs`, which is the one owner of which
+  languages have a boundary model and of the revision each one is pinned to. It
+  replaced a `matches!(lang.as_ref(), "eng" | "cmn" | "zho" | "yue")` here that
+  was one of three copies of that set, the others being a list in
+  `utseg_route.rs` and the key set of `_RESOLVER["utterance"]` in
+  `batchalign/models/resolve.py`, which the worker used to decide whether to
+  refuse and which no longer exists
+- A language whose route is `StanzaFallback` takes the punctuation path here:
+  there is no pre-CHAT Stanza segmenter, so an authorized fallback segments
+  only after CHAT is built
+- A language with no route at all cannot reach this function. For a resolved
+  `--lang`, `TranscribeDispatchPlan::from_job` refuses the job before ASR is
+  dispatched (`DispatchPlanRefusal::UtsegUnavailable`). Under `--lang auto` the
+  language is unknown until ASR returns, so the same route resolution refuses
+  here instead, which is as early as it can be known
 - Workflow:
   1. Prepare ASR chunks (stages 1-8 above)
   2. If dedicated diarization ran, project its segments onto timed words with
@@ -217,10 +240,17 @@ edit cannot enter the partition operation. `CompletePerChildMainTiming` then
 exists only when Chatter's sequence assessment yields one complete positive
 word-timing hull for every retained child; the transform assigns those hulls
 to the corresponding main tiers. All other shapes become
-`ParentOnlyMainTiming`, which can preserve the original parent bullet on the
-last child but cannot create an earlier-child bullet. This all-or-fallback
-transition prevents stale or partially timed evidence from presenting a
-mixture of measured and guessed child spans as if they had the same status.
+`SplitMainTimingEvidence::ParentOnly`, which gives no child a main-tier bullet
+at all. The parent bullet measures the whole parent utterance, so it is not any
+one child's span: its start is where the first child began and its end is where
+the last one finished, and nothing measured the boundary between them. Carrying
+it onto the last child, which is what this did until 2026-09-16, presents an
+unmeasured span as a measured one. The single exception is a split that kept one
+child, which holds the parent's whole content and therefore does have the
+parent's span; `SoleChildSpan` is that span's only constructor and admits
+exactly that case. This all-or-nothing transition prevents stale or partially
+timed evidence from presenting a mixture of measured and guessed child spans as
+if they had the same status.
 
 ---
 
@@ -295,8 +325,10 @@ reconciliation.
 Before that worker call, `SpeakerEvidenceRequest::from_audio()` hashes the full
 inference media source and combines the digest with the preparation revision,
 backend, expected speaker count, speaker-model revision, and evidence schema.
-The model revision is a dedicated `SpeakerEvidenceModelRevision` newtype; the
-pipeline cannot substitute its ASR `EngineVersion`.
+The model revision is a dedicated `SpeakerEvidenceModelRevision` newtype whose
+only production constructor, `for_backend`, derives it from the speaker
+backend. The raw speaker-evidence cache task accepts only that namespace type,
+so no other identity, the ASR engine's included, can scope speaker evidence.
 
 `resolve_speaker_evidence()` owns the production decision:
 

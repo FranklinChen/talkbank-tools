@@ -1,7 +1,7 @@
 # Evidence, Replay, and Experiment Topology
 
 **Status:** Current
-**Last updated:** 2026-09-01 06:40 EDT
+**Last updated:** 2026-09-15 21:24 EDT
 
 This chapter is the visual map for BA3's evidence architecture. Version 0.3.0
 has raw-evidence caching and FA evidence schema 2. Version 0.4.0 additionally
@@ -68,7 +68,7 @@ flowchart TB
 
     subgraph OUTPUTS["Durable experiment products"]
         CACHE["Content-addressed raw/derived cache"]
-        SIDE["Causal evidence sidecars<br/>schema 3: line + utterance identity"]
+        SIDE["Causal evidence sidecars<br/>schema 3: line + utterance identity<br/>utseg evidence: schema 4"]
         REPLAY["Fingerprint-admitted replay bundle"]
         OUT["Validated CHAT"]
     end
@@ -96,6 +96,13 @@ flowchart TB
 Solid arrows are semantic processing. Dashed arrows are retained evidence or
 replay products. Sidecars are files, not CHAT dependent tiers: current BA3 does
 not generate `%xalign` or `%xrev`.
+
+Utterance-segmentation sidecars carry their own version, and this build writes
+schema 4, in which the boundary model's pinned revision is a required part of
+the evidence. `eval utseg-replay` admits only that version and refuses any
+other by name rather than migrating it, so every utseg sidecar retained before
+this build is schema 3 and cannot be replayed; regenerating it with the current
+build is the remedy.
 
 ## Inference authorization is a state transition
 
@@ -190,6 +197,56 @@ coverage, lexical relation, and proposal validity before comparing policies.
 Reports are serialized completely before a destination is touched, staged in
 the destination directory, fsynced, and atomically published without
 replacing an existing evidence artifact.
+
+## Utterance segmentation has a reproduction seam
+
+The `eval utseg-replay` action is a fourth seam, and the only one that
+reproduces rather than explores. It reapplies the boundary evidence a run
+retained and asks whether the current build still produces the document that
+run wrote. The evidence and the output are both retained artifacts, so the
+answer isolates the local segmentation projection: nothing infers, and the
+boundary model never loads.
+
+```mermaid
+flowchart LR
+    subgraph RETAINED["One run's retained artifacts"]
+        UEV["Utseg evidence sidecar<br/>pre-CHAT or post-CHAT"]
+        USRC["Input CHAT, or retained ASR response"]
+        UOUT["Output CHAT the run wrote"]
+    end
+
+    UEV --> UADM{"Admit: schema, pass,<br/>per-item invariants"}
+    USRC --> UCOL["Collect requests with<br/>the current build"]
+    UADM --> UBIND{"Bind one-to-one"}
+    UCOL --> UBIND
+    UBIND --> UAPP["Reapply boundaries<br/>through the production transform"]
+    UAPP --> UCMP["Compare CHAT semantics,<br/>generated comments set aside"]
+    UOUT --> UCMP
+    UCMP --> UVERD["Reproduced, or a typed difference"]
+```
+
+Two properties make the verdict mean something. The evidence passes the same
+admission a live worker result passes, so a sidecar is reapplied only while it
+still describes applicable work, and binding proves the retained items describe
+the very requests this build collects rather than some other population. What
+a run generates to say a run happened, its stamp and the unchecked-ASR warning,
+is recognized through the provenance codec that writes it and set aside on both
+sides: a timestamp can never match by equality, and comparing it would report
+every replay as a difference.
+
+A difference is an outcome, not an error, and what it implicates depends on the
+pass. The post-CHAT pass holds everything else fixed: the document is given, the
+boundaries are retained, and only the local boundary-application projection runs,
+so a difference there does say that projection changed between the build that
+wrote the artifact and the build replaying it. The pre-ASR pass rebuilds the
+document from the retained response, so ASR post-processing, utterance
+retokenization and CHAT construction all run again, and a difference there
+implicates any of them until a post-CHAT replay or a narrower probe separates
+them. Neither is by itself a verdict about which segmentation is better.
+
+Both passes compare one basis, the AST of the serialized CHAT text, so a
+difference always refers to what a run would have written rather than to an
+in-memory shape no reader sees.
 
 ## Reproducible comparative experiment loop
 

@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-09-07 16:10 EDT
+**Last updated:** 2026-09-15 09:28 EDT
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -360,7 +360,7 @@ is more conservative about turning real pauses/fillers into dominant words.
 | --- | --- |
 | `PATHS...` | Input `.cha` files or directories |
 | `-o`, `--output DIR` | Output directory (omit to overwrite inputs in place) |
-| `--file-list FILE` | Read input paths from a text file (one path per line; `#` comments and blank lines ignored) |
+| `--file-list FILE` | Read input paths from a text file (one path per line; `#` comments and blank lines ignored; relative paths resolve against the list file's directory; directories expand like positional directories; duplicates are processed once). Cannot be combined with positional `PATHS`. Full rules: [CLI reference](../cli-reference.md) |
 | `--in-place` | Explicit in-place flag |
 
 ### Alignment options

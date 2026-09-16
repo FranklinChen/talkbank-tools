@@ -33,6 +33,7 @@ pub(crate) async fn mark_file_done(
     result_filename: DisplayPath,
     content_type: ContentType,
     finished_at: UnixTimestamp,
+    stamp: crate::api::FileStampOutcome,
 ) {
     sink.mark_file_done(
         job_id,
@@ -41,6 +42,7 @@ pub(crate) async fn mark_file_done(
         Some(CompletedFileOutput {
             filename: result_filename,
             content_type,
+            stamp,
         }),
     )
     .await;
@@ -292,11 +294,33 @@ impl<'a> FileRunTracker<'a> {
 
     /// Mark the file as done with a downloadable result and close the active
     /// attempt as successful.
+    ///
+    /// Records no stamp decision: use [`Self::complete_with_stamped_result`]
+    /// where the command decided one, so `Unrecorded` means "this command does
+    /// not stamp per file" rather than "somebody forgot".
     pub(crate) async fn complete_with_result(
         &self,
         result_filename: DisplayPath,
         content_type: ContentType,
         finished_at: UnixTimestamp,
+    ) {
+        self.complete_with_stamped_result(
+            result_filename,
+            content_type,
+            finished_at,
+            crate::api::FileStampOutcome::Unrecorded,
+        )
+        .await;
+    }
+
+    /// Mark the file as done, recording what the command decided about
+    /// stamping it with provenance.
+    pub(crate) async fn complete_with_stamped_result(
+        &self,
+        result_filename: DisplayPath,
+        content_type: ContentType,
+        finished_at: UnixTimestamp,
+        stamp: crate::api::FileStampOutcome,
     ) {
         mark_file_done(
             self.sink,
@@ -305,6 +329,7 @@ impl<'a> FileRunTracker<'a> {
             result_filename,
             content_type,
             finished_at,
+            stamp,
         )
         .await;
         finish_file_attempt_success(self.sink, self.job_id, self.filename, finished_at).await;

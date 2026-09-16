@@ -11,6 +11,10 @@ import pytest
 
 from batchalign.errors import ConfigError
 from batchalign.inference.languages.cantonese._tencent_api import TencentRecognizer
+from batchalign.worker._types_v2 import (
+    IntegratedDiarizationV2,
+    NotRequestedDiarizationV2,
+)
 
 
 def _config_with_asr(**entries: str) -> configparser.ConfigParser:
@@ -88,7 +92,7 @@ def _valid_config(**overrides: str) -> configparser.ConfigParser:
 def _make_recognizer() -> TencentRecognizer:
     recognizer = TencentRecognizer.__new__(TencentRecognizer)
     recognizer.lang_code = "yue"
-    recognizer.provider_lang = "yue"
+    recognizer.engine_model_type = "16k_zh_large"
     recognizer._poll_interval_s = 0.0
     recognizer._bucket_name = "bucket"
     recognizer._region = "ap-guangzhou"
@@ -106,16 +110,25 @@ def test_init_reports_missing_sdk_dependency(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(ImportError, match="Tencent engine dependencies"):
-        TencentRecognizer("yue", config=_valid_config())
+        TencentRecognizer(
+            "yue", engine_model_type="16k_zh_large", config=_valid_config()
+        )
 
 
 def test_init_wires_sdk_clients_and_language_state(monkeypatch) -> None:
     _install_tencent_init_modules(monkeypatch)
 
-    recognizer = TencentRecognizer("yue", poll_interval_s=0.5, config=_valid_config())
+    recognizer = TencentRecognizer(
+        "yue",
+        poll_interval_s=0.5,
+        engine_model_type="16k_zh_large",
+        config=_valid_config(),
+    )
 
     assert recognizer.lang_code == "yue"
-    assert recognizer.provider_lang == "yue"
+    # The model type is CHOSEN by the Rust control plane and carried in, not
+    # derived here from the language.
+    assert recognizer.engine_model_type == "16k_zh_large"
     assert recognizer._poll_interval_s == 1.0
     assert recognizer._bucket_name == "bucket"
     assert recognizer._region == "ap-guangzhou"
@@ -125,7 +138,11 @@ def test_init_rejects_empty_region_in_shared_config_reader(monkeypatch) -> None:
     _install_tencent_init_modules(monkeypatch)
 
     with pytest.raises(ConfigError, match=r"engine\.tencent\.region"):
-        TencentRecognizer("yue", config=_valid_config(**{"engine.tencent.region": ""}))
+        TencentRecognizer(
+            "yue",
+            engine_model_type="16k_zh_large",
+            config=_valid_config(**{"engine.tencent.region": ""}),
+        )
 
 
 def test_transcribe_reports_missing_runtime_sdk_dependency(monkeypatch) -> None:
@@ -139,7 +156,7 @@ def test_transcribe_reports_missing_runtime_sdk_dependency(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(ImportError, match="Tencent engine dependencies"):
-        _make_recognizer().transcribe("clip.wav")
+        _make_recognizer().transcribe("clip.wav", NotRequestedDiarizationV2())
 
 
 def test_transcribe_surfaces_failed_status_and_ignores_cleanup_errors(
@@ -174,7 +191,7 @@ def test_transcribe_surfaces_failed_status_and_ignores_cleanup_errors(
     recognizer._asr_client = FakeAsrClient()
 
     with pytest.raises(RuntimeError, match="Tencent ASR failed: bad result"):
-        recognizer.transcribe("clip.wav")
+        recognizer.transcribe("clip.wav", NotRequestedDiarizationV2())
 
 
 def test_transcribe_returns_result_detail_after_polling(monkeypatch) -> None:
@@ -227,11 +244,20 @@ def test_transcribe_returns_result_detail_after_polling(monkeypatch) -> None:
     recognizer._bucket = bucket = FakeBucket()
     recognizer._asr_client = FakeAsrClient()
 
-    result = recognizer.transcribe("clip.wav", num_speakers=2)
+    result = recognizer.transcribe(
+        "clip.wav", diarization=IntegratedDiarizationV2(speakers=2)
+    )
 
     assert result == [{"word": "好"}]
     assert sleep_calls == [0.0]
     assert bucket.deleted[0]["Bucket"] == "bucket"
+    # A separation request reaches Tencent's own two parameters. This is the
+    # wire end of the typed request: the count is carried by a type that cannot
+    # hold one, so `SpeakerNumber` can never ask this service to separate a
+    # recording into a single speaker.
+    submitted = recognizer._asr_client.request
+    assert submitted.SpeakerDiarization == 1
+    assert submitted.SpeakerNumber == 2
 
 
 def test_transcribe_times_out_when_status_never_completes(monkeypatch) -> None:
@@ -272,4 +298,4 @@ def test_transcribe_times_out_when_status_never_completes(monkeypatch) -> None:
     recognizer._asr_client = FakeAsrClient()
 
     with pytest.raises(RuntimeError, match="timed out"):
-        recognizer.transcribe("clip.wav")
+        recognizer.transcribe("clip.wav", NotRequestedDiarizationV2())

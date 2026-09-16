@@ -13,6 +13,7 @@
 )]
 
 mod cli_common;
+mod live_deadline;
 
 #[path = "chat_ops_mor_count_parity_reference_corpus.rs"]
 mod chat_ops_mor_count_parity_reference_corpus;
@@ -28,6 +29,8 @@ mod json_compat;
 mod merge_verify;
 #[path = "utr_alignment_cli.rs"]
 mod utr_alignment_cli;
+#[path = "utseg_replay_cli.rs"]
+mod utseg_replay_cli;
 #[path = "worker_protocol_v2_compat.rs"]
 mod worker_protocol_v2_compat;
 #[path = "workflow_helpers.rs"]

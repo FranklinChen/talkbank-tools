@@ -419,7 +419,10 @@ async fn start_session(
         None,
         None,
         Some(cache_dir),
-        Some("test-echo-fixture-hash".into()),
+        // This build's own identity: the CLI refuses a server of any other
+        // build before submitting work, so a fixture hash would make every
+        // explicit-server test a build-mismatch refusal.
+        Some(batchalign::build_hash().into()),
         backend.prepared_workers.clone(),
     )
     .await

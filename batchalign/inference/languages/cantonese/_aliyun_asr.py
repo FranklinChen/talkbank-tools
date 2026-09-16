@@ -46,11 +46,20 @@ L = logging.getLogger("batchalign.hk.aliyun")
 
 
 class AliyunWord(BaseModel):
-    """One word from an Aliyun NLS SentenceEnd payload."""
+    """One word from an Aliyun NLS SentenceEnd payload.
+
+    The two times are OPTIONAL, and their absence crosses into Rust as absence.
+    They used to default to ``0``, which is a legal time: a word Aliyun sent
+    without timing therefore claimed to have been spoken in the first
+    millisecond of the recording, and nothing downstream could tell that from a
+    measurement. Rust's provider admission now turns a missing bound into an
+    untimed word with a named cause (see
+    ``crates/batchalign-pyo3/src/cantonese_asr_bridge/provider_admission.rs``).
+    """
 
     text: str
-    startTime: int = 0
-    endTime: int = 0
+    startTime: int | None = None
+    endTime: int | None = None
 
 
 class _AliyunSentencePayload(BaseModel):

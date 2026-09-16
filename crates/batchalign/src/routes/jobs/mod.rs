@@ -24,11 +24,10 @@ pub(crate) use lifecycle::{
 #[allow(unused_imports)]
 pub(crate) use stream::__path_stream_job;
 
-use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::api::{CorrelationId, JobInfo, JobSubmission, ReleasedCommand};
+use crate::api::{CorrelationId, JobInfo, JobSubmission};
 use axum::extract::State;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -79,10 +78,6 @@ pub fn router() -> Router<Arc<AppState>> {
 /// bounded even if a client sends a very long header.
 const CORRELATION_ID_MAX_LEN: usize = 128;
 
-fn command_supported(command: ReleasedCommand, capabilities: &[String]) -> bool {
-    capabilities.iter().any(|c| c.as_str() == command.as_ref())
-}
-
 fn sanitize_correlation_id(raw: &str) -> Option<CorrelationId> {
     let mut out = String::new();
     for ch in raw.chars() {
@@ -109,16 +104,6 @@ fn correlation_id_from_headers(headers: &HeaderMap, fallback: &str) -> Correlati
         .unwrap_or_else(|| CorrelationId::from(fallback.to_string()))
 }
 
-fn supported_command_list(capabilities: &[String]) -> Vec<String> {
-    let mut set: BTreeSet<String> = BTreeSet::new();
-    for c in capabilities {
-        if c != "test-echo" {
-            set.insert(c.clone());
-        }
-    }
-    set.into_iter().collect()
-}
-
 /// Accept a new processing job and begin execution.
 ///
 /// Validates the command against built-in tasks and worker-advertised capabilities,
@@ -143,11 +128,11 @@ pub(crate) async fn submit_job(
     Json(submission): Json<JobSubmission>,
 ) -> Result<impl IntoResponse, ServerError> {
     // Validate command
-    if !command_supported(submission.command, &state.workers.capabilities) {
-        let supported = supported_command_list(&state.workers.capabilities);
+    if !state.workers.capabilities.serves(submission.command) {
         return Err(ServerError::UnknownCommand(format!(
             "Unknown command: {}. Valid commands: {:?}",
-            submission.command, supported
+            submission.command,
+            state.workers.capabilities.command_names()
         )));
     }
 
@@ -226,22 +211,6 @@ pub(crate) async fn list_jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn advertised_command_is_supported() {
-        assert!(command_supported(
-            ReleasedCommand::Morphotag,
-            &["morphotag".to_string()]
-        ));
-    }
-
-    #[test]
-    fn command_not_in_capabilities_is_rejected() {
-        assert!(!command_supported(
-            ReleasedCommand::Morphotag,
-            &["align".to_string()]
-        ));
-    }
 
     #[test]
     fn correlation_id_uses_x_request_id_when_valid() {

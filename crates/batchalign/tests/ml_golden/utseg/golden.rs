@@ -6,13 +6,24 @@ use batchalign::options::{CommandOptions, CommonOptions, UtsegOptions};
 use batchalign::worker::InferTask;
 
 fn utseg_options() -> CommandOptions {
+    utseg_options_with_fallback(false)
+}
+
+/// Utseg options stating this fixture's segmenter policy.
+///
+/// A language with no TalkBank boundary model (Spanish here) has no segmenter
+/// unless the operator authorizes the Stanza fallback, and that is now refused
+/// at planning time rather than discovered at the worker. Such a fixture must
+/// therefore say which segmenter it expects; passing `false` for Spanish asks
+/// for a run that cannot happen.
+fn utseg_options_with_fallback(allow_stanza_fallback: bool) -> CommandOptions {
     CommandOptions::Utseg(UtsegOptions {
         common: CommonOptions {
             override_media_cache: true,
             ..CommonOptions::default()
         },
         merge_abbrev: false.into(),
-        utseg_fallback: false.into(),
+        utseg_fallback: allow_stanza_fallback.into(),
     })
 }
 
@@ -62,7 +73,9 @@ async fn golden_utseg_spa() {
             "spa",
             "spa_multi_utt.cha",
             SPA_MULTI_UTT,
-            utseg_options(),
+            // Spanish has no TalkBank boundary model, so the Stanza fallback
+            // is the only segmenter it has, and it must be asked for.
+            utseg_options_with_fallback(true),
         )
         .await;
 

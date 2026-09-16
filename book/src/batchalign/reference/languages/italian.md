@@ -64,7 +64,7 @@ measured evidence:
 | 10 (`posala` head lemma `posa`) | wrong head lemma on a real Range | **reconciler rewrite, STILL ACTIVE** | `posare`-specific |
 | 12/13 (`aprilo` -> `verb|aprilare`) | withheld split, fabricated lemma | **policy: forced at source** | open verb+enclitic class covered generally, not per surface |
 | Singleton skips (`soffioni`, `pettole`, `babbolo`) | spurious split, unlisted | **policy: suppressed at source** | correct without listing; verified whole with real lemmas |
-| non-UD `iob` relation | `%gra` content | `validate_ud_words` on the production path (2026-07-28) | was unit-tested but uncalled for months |
+| non-UD `iob` relation | `%gra` content | repaired on the production path (2026-07-28), and since reported as a typed `relation_alias` repair that the file's `ud_repairs=` counts | was unit-tested but uncalled for months |
 
 ### Corpus repair status
 

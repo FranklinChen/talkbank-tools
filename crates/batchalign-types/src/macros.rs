@@ -108,8 +108,11 @@ macro_rules! validated_string_id {
     };
     (@base $(#[$meta:meta])* $vis:vis $name:ident) => {
         $(#[$meta])*
+        // `PartialOrd`/`Ord` order by the underlying string, so a validated
+        // identifier can key a `BTreeMap` or `BTreeSet` without a hand-written
+        // comparison.
         #[derive(
-            Debug, Clone, PartialEq, Eq, Hash,
+            Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord,
             serde::Serialize,
             utoipa::ToSchema,
             schemars::JsonSchema,

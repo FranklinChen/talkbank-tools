@@ -178,6 +178,14 @@ mod tests {
             payload: TaskRequestV2::Asr(AsrRequestV2 {
                 lang: crate::api::WorkerLanguage::from(LanguageCode3::eng()),
                 backend: AsrBackendV2::LocalWhisper,
+                models: crate::types::worker_v2::AsrRequestedModelsV2::Whisper {
+                    asr: crate::types::worker_v2::RequestedModelV2 {
+                        id: crate::types::worker_v2::ModelIdV2::from_static(
+                            "openai/whisper-large-v3",
+                        ),
+                        revision: crate::types::worker_v2::RequestedRevisionV2::Unpinned,
+                    },
+                },
                 input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                     audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
                 }),

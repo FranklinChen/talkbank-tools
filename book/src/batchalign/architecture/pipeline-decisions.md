@@ -1,7 +1,7 @@
 # NLP Pipeline Decision Architecture
 
 **Status:** Current
-**Last updated:** 2026-08-31 00:52 EDT
+**Last updated:** 2026-09-16 08:18 EDT
 
 This chapter documents how batchalign3's four NLP pipelines (morphotag,
 utseg, coref, forced alignment) represent per-utterance decisions, how
@@ -187,7 +187,7 @@ classDiagram
     }
     class UtsegBoundaryModelEvidenceV2 {
         +model_id: String
-        +model_revision: Option~String~
+        +model_revision: HubCommitV2
         +normalization_revision
         +adjacency_policy_revision
         +word_evidence: Vec

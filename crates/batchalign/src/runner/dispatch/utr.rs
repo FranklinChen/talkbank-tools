@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use super::options::ResolvedUtrStrategy;
-use crate::api::{DurationMs, EngineVersion, LanguageCode3, NumSpeakers};
-use crate::cache::{CacheBackend, UtteranceCache};
+use crate::api::{DurationMs, LanguageCode3, NumSpeakers};
+use crate::cache::{UtrAsrCacheEligibility, UtrAsrCacheNamespace, UtteranceCache, tasks};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Recording, WindowMs};
 use crate::chat_ops::fa::origin::EngineId;
@@ -104,8 +104,6 @@ pub(in crate::runner) async fn run_utr_pass(
     context: UtrPassContext<'_>,
     progress: Option<&super::super::util::ProgressSender>,
 ) -> Result<crate::chat_ops::fa::utr::UtrResult, crate::error::ServerError> {
-    use crate::chat_ops::CacheTaskName;
-
     let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(chat_file);
     let total_utts = timed + untimed;
 
@@ -157,6 +155,10 @@ pub(in crate::runner) async fn run_utr_pass(
         // Named once, so every token recovered in this pass records the same
         // engine as its provenance.
         let utr_engine_id = EngineId::new(context.engine.as_wire_name());
+        // Every segment response is read and written under the namespace of the
+        // engine AND the models it ran, never another stage's engine version
+        // and never rows a different checkpoint produced.
+        let cache_namespace = utr_cache_eligibility(context);
         // The recording built above is the single derivation of the audio's
         // length on this path. It used to be derived a SECOND time three lines
         // later, from `context.total_audio_ms` through an `expect` whose safety
@@ -192,7 +194,7 @@ pub(in crate::runner) async fn run_utr_pass(
                 let cached_seg = lookup_utr_asr_cache(
                     context.services.cache,
                     &seg_cache_key,
-                    context.services.engine_version,
+                    &cache_namespace,
                     context.cache_policy,
                 )
                 .await?;
@@ -224,26 +226,14 @@ pub(in crate::runner) async fn run_utr_pass(
 
                         match miss.infer(&segment_path, context).await {
                             Ok(response) => {
-                                let ba_version = env!("CARGO_PKG_VERSION");
-                                if let Ok(value) = serde_json::to_value(&response)
-                                    && let Err(error) = context
-                                        .services
-                                        .cache
-                                        .put(
-                                            seg_cache_key.as_str(),
-                                            CacheTaskName::UtrAsr.as_str(),
-                                            context.services.engine_version,
-                                            ba_version,
-                                            &value,
-                                        )
-                                        .await
-                                {
-                                    warn!(
-                                        context.filename,
-                                        error = %error,
-                                        "Failed to cache UTR segment (non-fatal)"
-                                    );
-                                }
+                                store_utr_asr_cache(
+                                    context.services.cache,
+                                    &seg_cache_key,
+                                    &cache_namespace,
+                                    &response,
+                                    context.filename,
+                                )
+                                .await;
                                 response
                             }
                             Err(error) => {
@@ -298,6 +288,7 @@ pub(in crate::runner) async fn run_utr_pass(
             }
 
             all_tokens.sort_by_key(|token| token.start_ms);
+            let all_tokens = normalize_utr_tokens(all_tokens, context.lang)?;
 
             if context.dumper.is_enabled() {
                 let text = batchalign_transform::serialize::to_chat_string(chat_file);
@@ -346,17 +337,16 @@ async fn run_utr_pass_full(
     chat_file: &mut crate::chat_ops::ChatFile,
     context: UtrPassContext<'_>,
 ) -> Result<crate::chat_ops::fa::utr::UtrResult, crate::error::ServerError> {
-    use crate::chat_ops::CacheTaskName;
-
     let cache_key = crate::chat_ops::fa::utr_asr_cache_key(
         context.audio_identity,
         context.engine,
         context.lang,
     );
+    let cache_namespace = utr_cache_eligibility(context);
     let asr_response = match lookup_utr_asr_cache(
         context.services.cache,
         &cache_key,
-        context.services.engine_version,
+        &cache_namespace,
         context.cache_policy,
     )
     .await?
@@ -373,26 +363,14 @@ async fn run_utr_pass_full(
             );
             match miss.infer(context.audio_path, context).await {
                 Ok(response) => {
-                    let ba_version = env!("CARGO_PKG_VERSION");
-                    if let Ok(value) = serde_json::to_value(&response)
-                        && let Err(error) = context
-                            .services
-                            .cache
-                            .put(
-                                cache_key.as_str(),
-                                CacheTaskName::UtrAsr.as_str(),
-                                context.services.engine_version,
-                                ba_version,
-                                &value,
-                            )
-                            .await
-                    {
-                        warn!(
-                            context.filename,
-                            error = %error,
-                            "Failed to cache UTR ASR result (non-fatal)"
-                        );
-                    }
+                    store_utr_asr_cache(
+                        context.services.cache,
+                        &cache_key,
+                        &cache_namespace,
+                        &response,
+                        context.filename,
+                    )
+                    .await;
                     response
                 }
                 Err(error) => {
@@ -420,7 +398,7 @@ async fn run_utr_pass_full(
         &EngineId::new(context.engine.as_wire_name()),
     );
     converted.warn_if_lossy(&context);
-    let asr_tokens = converted.tokens;
+    let asr_tokens = normalize_utr_tokens(converted.tokens, context.lang)?;
 
     if context.dumper.is_enabled() {
         let text = batchalign_transform::serialize::to_chat_string(chat_file);
@@ -543,22 +521,52 @@ impl UtrAsrCacheMiss {
     }
 }
 
+/// Whether this pass may use the UTR ASR cache, and under which namespace.
+///
+/// Resolved once per pass from the engine and the language, so both recovery
+/// paths key their rows the same way rather than each deriving it.
+///
+/// A plan that cannot be resolved is treated as uncacheable rather than as a
+/// job failure: recovery is an optimisation, and when the models cannot be
+/// named the safe direction is to recompute, never to reuse rows that may have
+/// come from other weights.
+fn utr_cache_eligibility(context: UtrPassContext<'_>) -> UtrAsrCacheEligibility {
+    match crate::model_manifest::utr_pinned_models(context.engine, context.lang) {
+        Ok(models) => UtrAsrCacheNamespace::for_pinned_plan(context.engine, &models),
+        Err(error) => {
+            warn!(
+                context.filename,
+                engine = context.engine.as_wire_name(),
+                %error,
+                "UTR ASR models could not be resolved; running without cache reuse"
+            );
+            UtrAsrCacheEligibility::Floating
+        }
+    }
+}
+
 async fn lookup_utr_asr_cache(
     cache: &UtteranceCache,
     cache_key: &CacheKey,
-    engine_version: &EngineVersion,
+    eligibility: &UtrAsrCacheEligibility,
     policy: CachePolicy,
 ) -> Result<UtrAsrCacheLookup, crate::error::ServerError> {
     match policy {
         CachePolicy::SkipCache => return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss)),
         CachePolicy::UseCache | CachePolicy::RequireCache => {}
     }
+    let cache_namespace = match eligibility {
+        // A floating plan cannot promise a stored row came from the same
+        // weights, so there is nothing safe to read. Reported as a miss, the
+        // same shape a deliberately skipped cache already produces, so the
+        // caller's inference path needs no new branch.
+        UtrAsrCacheEligibility::Floating => {
+            return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss));
+        }
+        UtrAsrCacheEligibility::Pinned(namespace) => namespace,
+    };
     let stored = cache
-        .get(
-            cache_key.as_str(),
-            crate::chat_ops::CacheTaskName::UtrAsr.as_str(),
-            engine_version.as_ref(),
-        )
+        .get(cache_key.as_str(), tasks::UTR_ASR, cache_namespace)
         .await
         .map_err(|error| crate::error::ServerError::Persistence(error.to_string()))?;
     let Some(stored) = stored else {
@@ -570,6 +578,36 @@ async fn lookup_utr_asr_cache(
         ))
     })?;
     Ok(UtrAsrCacheLookup::Hit(response))
+}
+
+/// Store one UTR ASR response under the UTR engine's namespace.
+///
+/// The one write both recovery paths use. A failed write (or a response that
+/// does not serialize) is logged and otherwise ignored: the response is still
+/// used for this run, and a later run recomputes what was not stored.
+async fn store_utr_asr_cache(
+    cache: &UtteranceCache,
+    cache_key: &CacheKey,
+    eligibility: &UtrAsrCacheEligibility,
+    response: &crate::transcribe::AsrResponse,
+    filename: &str,
+) {
+    // Nothing is written for a floating plan. A row whose models cannot be
+    // named would be unreadable by construction anyway, and writing it would
+    // only leave storage that no later run can ever match.
+    let UtrAsrCacheEligibility::Pinned(cache_namespace) = eligibility else {
+        return;
+    };
+    let stored = match serde_json::to_value(response) {
+        Ok(value) => cache
+            .put(cache_key.as_str(), tasks::UTR_ASR, cache_namespace, &value)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Err(error) = stored {
+        warn!(filename, %error, "Failed to cache UTR ASR response (non-fatal)");
+    }
 }
 
 async fn resolve_rev_utr_asr_response<I: crate::revai::RevAsrEvidenceInference>(
@@ -723,6 +761,40 @@ fn asr_response_to_utr_tokens(
     conversion
 }
 
+/// Normalize recovered token text for the job's language, once over the whole
+/// run.
+///
+/// UTR matches ASR text against the transcript's OWN words, so a Cantonese
+/// transcript (HK traditional) and a provider's simplified output would miss
+/// each other word for word. This used to be done inside the provider bridges,
+/// which meant whether it happened at all depended on which engine ran: Tencent
+/// normalized, Whisper and Qwen did not. It now happens here, once, for every
+/// engine, through the pipeline's one owner, and a normalization that changed
+/// the character count refuses rather than re-cutting the tokens away from
+/// their timings.
+fn normalize_utr_tokens(
+    tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
+    lang: &LanguageCode3,
+) -> Result<Vec<crate::chat_ops::fa::utr::AsrTimingToken>, crate::error::ServerError> {
+    if lang.as_ref() != "yue" {
+        return Ok(tokens);
+    }
+    let aligned = batchalign_transform::asr_postprocess::AlignedNormalization::admit(
+        tokens.iter().map(|token| token.text.as_str()),
+    )
+    .map_err(|refusal| {
+        crate::error::ServerError::Validation(format!(
+            "UTR could not normalize its Cantonese tokens: {refusal}"
+        ))
+    })?;
+    // One surface per token, in order, by construction.
+    Ok(tokens
+        .into_iter()
+        .zip(aligned.into_units())
+        .map(|(token, text)| crate::chat_ops::fa::utr::AsrTimingToken { text, ..token })
+        .collect())
+}
+
 #[cfg(test)]
 mod utr_token_conversion_tests {
     use super::*;
@@ -734,6 +806,7 @@ mod utr_token_conversion_tests {
         AsrResponse {
             tokens,
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         }
     }
@@ -872,9 +945,9 @@ mod utr_token_conversion_tests {
 #[cfg(test)]
 mod utr_evidence_cache_tests {
     use super::*;
-    use crate::api::{EngineVersion, LanguageSpec};
-    use crate::cache::{CacheBackend, UtteranceCache};
-    use crate::chat_ops::{CacheKey, CacheTaskName};
+    use crate::api::LanguageSpec;
+    use crate::cache::UtteranceCache;
+    use crate::chat_ops::CacheKey;
     use crate::error::ServerError;
     use crate::revai::{
         AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RevAsrEvidenceInference,
@@ -893,10 +966,12 @@ mod utr_evidence_cache_tests {
             _run: AuthorizedRevEvidenceRun,
         ) -> Result<crate::revai::RevAsrInferenceOutcome, ServerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(crate::revai::RevAsrInferenceOutcome::Completed(CompletedRevAsrEvidence {
-                transcript_evidence: crate::revai::RevTranscriptEvidence::from_legacy_transcript(
-                    serde_json::from_str(
-                        r#"{
+            Ok(crate::revai::RevAsrInferenceOutcome::Completed(
+                CompletedRevAsrEvidence {
+                    transcript_evidence:
+                        crate::revai::RevTranscriptEvidence::from_legacy_transcript(
+                            serde_json::from_str(
+                                r#"{
                         "monologues": [{
                             "speaker": 0,
                             "elements": [{
@@ -908,11 +983,12 @@ mod utr_evidence_cache_tests {
                             }]
                         }]
                     }"#,
-                    )
-                    .expect("valid Rev transcript"),
-                ),
-                resolved_language: LanguageCode3::eng(),
-            }))
+                            )
+                            .expect("valid Rev transcript"),
+                        ),
+                    resolved_language: LanguageCode3::eng(),
+                },
+            ))
         }
     }
 
@@ -993,6 +1069,22 @@ mod utr_evidence_cache_tests {
         );
     }
 
+    /// The cache eligibility one engine resolves for a test, which must be the
+    /// pinned arm: every UTR engine's composition is fully pinned in this
+    /// build, and a test that silently ran against `Floating` would exercise
+    /// the no-cache path while claiming to test the cache.
+    fn test_eligibility(engine: &UtrEngine) -> UtrAsrCacheEligibility {
+        let lang = crate::api::LanguageCode3::eng();
+        let models = crate::model_manifest::utr_pinned_models(engine, &lang)
+            .expect("a UTR engine resolves a pinned composition");
+        let eligibility = UtrAsrCacheNamespace::for_pinned_plan(engine, &models);
+        assert!(
+            matches!(eligibility, UtrAsrCacheEligibility::Pinned(_)),
+            "every UTR engine composition is fully pinned in this build"
+        );
+        eligibility
+    }
+
     #[tokio::test]
     async fn corrupt_derived_utr_cache_fails_closed() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1000,19 +1092,25 @@ mod utr_evidence_cache_tests {
             .await
             .expect("cache");
         let key = CacheKey::from_content("corrupt UTR cache test");
-        let engine = EngineVersion::from("test-engine-v1");
+        let eligibility = test_eligibility(&UtrEngine::Whisper);
+        // The seed write takes the namespace itself; the lookup under test
+        // takes the eligibility. Binding the pinned arm here makes the two
+        // halves provably the same namespace, which is what puts the corrupt
+        // row where the read below will actually find it.
+        let UtrAsrCacheEligibility::Pinned(namespace) = &eligibility else {
+            panic!("every UTR engine composition is fully pinned in this build")
+        };
         cache
             .put(
                 key.as_str(),
-                CacheTaskName::UtrAsr.as_str(),
-                engine.as_ref(),
-                env!("CARGO_PKG_VERSION"),
+                tasks::UTR_ASR,
+                namespace,
                 &serde_json::json!({"not": "an AsrResponse"}),
             )
             .await
             .expect("seed corrupt cache value");
 
-        let error = lookup_utr_asr_cache(&cache, &key, &engine, CachePolicy::UseCache)
+        let error = lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::UseCache)
             .await
             .expect_err("corrupt cache must not become an inference-authorizing miss");
         assert!(matches!(error, ServerError::Persistence(_)));
@@ -1025,9 +1123,9 @@ mod utr_evidence_cache_tests {
             .await
             .expect("cache");
         let key = CacheKey::from_content("required UTR cache test");
-        let engine = EngineVersion::from("test-engine-v1");
+        let eligibility = test_eligibility(&UtrEngine::RevAi);
 
-        let lookup = lookup_utr_asr_cache(&cache, &key, &engine, CachePolicy::RequireCache)
+        let lookup = lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::RequireCache)
             .await
             .expect("a derived miss must remain distinguishable from a raw evidence miss");
 

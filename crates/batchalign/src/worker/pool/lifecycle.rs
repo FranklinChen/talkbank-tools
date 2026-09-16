@@ -15,6 +15,7 @@ use super::idle_eviction;
 use super::memory_gate;
 use super::permit::{PermitRejected, SpawnPermitGuard};
 use super::rss_observer;
+use super::spawn_runtime::PoolSpawnRuntime;
 use super::{GroupsMap, WorkerGroup, WorkerKey, WorkerPool, WorkerRejectionKind};
 
 /// Reason a `try_claim_spawn_slot` call was rejected. Distinguishes
@@ -74,15 +75,21 @@ impl WorkerPool {
     /// Start background tasks for health checking and pressure-driven
     /// eviction.
     ///
-    /// Returns a `JoinHandle` that completes when the pool is shut down.
-    pub fn start_background_tasks(&self) -> tokio::task::JoinHandle<()> {
+    /// Returns a `JoinHandle` that completes when the pool is shut down, or
+    /// `None` for a pool built outside a Tokio runtime: such a pool can own no
+    /// workers, so there is nothing to health-check. See `spawn_runtime.rs`.
+    pub fn start_background_tasks(&self) -> Option<tokio::task::JoinHandle<()>> {
         let groups = self.groups.clone();
         let cancel = self.cancel.clone();
         let health_interval = Duration::from_secs(self.config.health_check_interval_s);
         let pool_config = self.config.clone();
         let observed_worker_runtimes = self.observed_worker_runtimes.clone();
+        // The loop restarts dead workers, so it needs the pool's runtime for
+        // the same reason every other spawn site does. Cloned into the task
+        // rather than reached through `self`, which the task outlives.
+        let spawn_runtime = self.spawn_runtime.clone();
 
-        tokio::spawn(async move {
+        self.spawn_runtime.spawn_background(async move {
             let mut interval = tokio::time::interval(health_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -97,6 +104,7 @@ impl WorkerPool {
                             &groups,
                             &pool_config,
                             &observed_worker_runtimes,
+                            &spawn_runtime,
                         )
                         .await;
                         // Reap orphaned workers left behind by previous server
@@ -114,7 +122,12 @@ impl WorkerPool {
     }
 
     /// Build a `WorkerConfig` at the Rust/Python boundary for one typed key.
-    pub(super) fn worker_config(&self, key: &WorkerKey) -> WorkerConfig {
+    ///
+    /// Fallible since W3: the spawn argv carries the pinned ASR models, and a
+    /// plan that cannot be resolved (a Tencent worker with no resolved
+    /// language, say) must refuse the spawn by name rather than start a worker
+    /// that will ask a provider for a model it does not define.
+    pub(super) fn worker_config(&self, key: &WorkerKey) -> Result<WorkerConfig, WorkerError> {
         worker_config_for_key(&self.config, key)
     }
 
@@ -330,7 +343,11 @@ impl WorkerPool {
         // Ok we hand the permit's lifetime over to the worker (via
         // `guard.forget()`); on Err the guard drops at function exit
         // and refunds the permit alongside the per-key fetch_sub.
-        match WorkerHandle::spawn(self.worker_config(key)).await {
+        match self
+            .spawn_runtime
+            .spawn_worker(self.worker_config(key)?)
+            .await
+        {
             Ok(mut handle) => {
                 if let Err(error) = self.admit_worker_runtime(&handle) {
                     group.total.fetch_sub(1, Ordering::Relaxed);
@@ -338,10 +355,21 @@ impl WorkerPool {
                 }
                 // Lazily detect capabilities from the first spawned worker.
                 // This is a single IPC round-trip on an already-running worker.
-                if self.lazy_capabilities.get().is_none()
-                    && let Err(e) = self.detect_capabilities_from_worker(&mut handle).await
-                {
-                    tracing::warn!(error = %e, "Failed to detect capabilities from first worker (continuing)");
+                if self.first_admitted_capabilities.get().is_none() {
+                    match self.detect_capabilities_from_worker(key, &mut handle).await {
+                        Ok(()) => {}
+                        // A refused report means this worker is not used, so
+                        // it is not pooled: its slot is released here (the
+                        // permit guard refunds on return) and `handle` drops,
+                        // which terminates the process.
+                        Err(super::CapabilityProbeFailure::Refused(refusal)) => {
+                            group.total.fetch_sub(1, Ordering::Relaxed);
+                            return Err(refusal.into());
+                        }
+                        Err(super::CapabilityProbeFailure::Unanswered(error)) => {
+                            tracing::warn!(error = %error, "Failed to detect capabilities from first worker (continuing)");
+                        }
+                    }
                 }
                 // Don't use a separate push_spawned (which would double-increment
                 // total). We already incremented via compare_exchange.
@@ -367,14 +395,17 @@ impl WorkerPool {
     }
 }
 
-fn worker_config_for_key(pool_config: &super::PoolConfig, key: &WorkerKey) -> WorkerConfig {
-    WorkerConfig {
+fn worker_config_for_key(
+    pool_config: &super::PoolConfig,
+    key: &WorkerKey,
+) -> Result<WorkerConfig, WorkerError> {
+    Ok(WorkerConfig {
         python_path: pool_config.python_path.clone(),
         profile: key.target.profile_kind(),
         task: key.target.task(),
         lang: key.language.clone(),
         num_speakers: NumSpeakers(1),
-        engine_overrides: key.engine_selection.worker_config_json(),
+        engine_overrides: spawn_engine_overrides(key)?,
         test_echo: pool_config.test_echo,
         ready_timeout_s: pool_config.ready_timeout_s,
         verbose: pool_config.verbose,
@@ -382,7 +413,75 @@ fn worker_config_for_key(pool_config: &super::PoolConfig, key: &WorkerKey) -> Wo
         audio_task_timeout_s: pool_config.audio_task_timeout_s,
         analysis_task_timeout_s: pool_config.analysis_task_timeout_s,
         test_delay_ms: pool_config.test_delay_ms,
+    })
+}
+
+/// The `--engine-overrides` JSON one worker is spawned with, carrying the
+/// pinned models this worker will load: the ASR composition when it will load
+/// an ASR engine, and the utterance-boundary model when its language has one.
+///
+/// Each pin is injected HERE, at the one place a spawn argv is built, and
+/// deliberately NOT into the worker key. Both are pure functions of what the
+/// key already carries (the ASR backend, the language and the extras), so two
+/// equal keys always imply the same pins and the key needs no new component.
+/// Putting them in the key instead would force the capability-probe path and
+/// the execute path to derive them identically, which would make
+/// `capability_key == execute_key` a coincidence that holds only while two code
+/// paths agree, rather than a consequence of the key's own contents. A worker
+/// spawned for a different pin is a different worker because its language or
+/// its extras already differ.
+///
+/// A worker whose language has a boundary model carries that pin even when it
+/// will never run utseg. That is deliberate and costs nothing: the key is
+/// unchanged, so no worker group is fragmented, and the worker reads the pin
+/// only if it loads the utseg task. The alternative, deciding here which tasks
+/// a target will load, would put a second copy of the target's task set in this
+/// function.
+fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerError> {
+    let overrides = key.engine_selection.overrides();
+    // Only a worker that will actually load an ASR engine needs an ASR pin.
+    // `EngineSelection` has already dropped the engines with no Python loader,
+    // so this is exactly the set of worker-hosted ASR engines.
+    let asr_backend = overrides
+        .asr
+        .as_ref()
+        .and_then(crate::model_manifest::worker_backend_for_engine);
+    // The boundary model is chosen by LANGUAGE alone, exactly as the route is.
+    let boundary_model = key
+        .language
+        .as_resolved()
+        .and_then(crate::model_manifest::utseg_boundary_model)
+        .transpose()
+        .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
+
+    if asr_backend.is_none() && boundary_model.is_none() {
+        return Ok(key.engine_selection.worker_config_json());
     }
+
+    let mut map = overrides.dispatch_overrides();
+    if let Some(backend) = asr_backend {
+        let models = crate::model_manifest::resolve_asr_models(
+            backend,
+            key.language.as_resolved(),
+            &overrides.extras,
+        )
+        .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
+        let pinned = serde_json::to_string(&models)
+            .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
+        map.insert(
+            crate::model_manifest::PINNED_ASR_MODELS_KEY.to_owned(),
+            pinned,
+        );
+    }
+    if let Some(model) = boundary_model {
+        let pinned = serde_json::to_string(&model)
+            .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
+        map.insert(
+            crate::model_manifest::PINNED_UTSEG_MODEL_KEY.to_owned(),
+            pinned,
+        );
+    }
+    serde_json::to_string(&map).map_err(|error| WorkerError::SpawnFailed(error.to_string()))
 }
 
 /// Run a single round of pressure-driven eviction + health checks.
@@ -396,6 +495,7 @@ pub(super) async fn run_health_check(
     groups_ref: &GroupsMap,
     pool_config: &super::PoolConfig,
     observed_worker_runtimes: &crate::worker::runtime_identity::ObservedWorkerRuntimes,
+    spawn_runtime: &PoolSpawnRuntime,
 ) {
     pressure_evict_idle_workers_if_needed(groups_ref).await;
 
@@ -492,9 +592,23 @@ pub(super) async fn run_health_check(
 
             let _bootstrap_guard = group.bootstrap.lock().await;
 
-            let config = worker_config_for_key(pool_config, key);
+            // A restart cannot propagate an error out of this loop, so an
+            // unresolvable model plan skips this worker loudly rather than
+            // restarting it with no pin.
+            let config = match worker_config_for_key(pool_config, key) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        target = %key.target.label(),
+                        lang = %key.language,
+                        "Not restarting worker: its ASR model plan cannot be resolved"
+                    );
+                    continue;
+                }
+            };
 
-            match WorkerHandle::spawn(config).await {
+            match spawn_runtime.spawn_worker(config).await {
                 Ok(handle) => {
                     if let Err(error) = observed_worker_runtimes.admit(handle.runtime_identity()) {
                         tracing::error!(

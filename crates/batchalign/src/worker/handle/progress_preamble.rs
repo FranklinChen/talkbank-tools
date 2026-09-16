@@ -188,7 +188,7 @@ mod progress_preamble_tests {
         "\n",
     );
     const CAPABILITIES_RESPONSE: &str = concat!(
-        r#"{"op": "capabilities", "response": {"commands": ["morphotag"], "free_threaded": false, "infer_tasks": ["morphosyntax"], "engine_versions": {"morphosyntax": "stanza-1.9.2"}}}"#,
+        r#"{"op": "capabilities", "response": {"commands": ["morphotag"], "free_threaded": false, "infer_tasks": ["morphosyntax"], "engine_versions": {"morphosyntax": null}}}"#,
         "\n",
     );
 
@@ -203,7 +203,8 @@ mod progress_preamble_tests {
             });
             let mut reader = BufReader::new(reader);
             let deadline = tokio::time::Instant::now() + crate::worker::CAPABILITY_TIMEOUT;
-            let result = WorkerHandle::read_response_skipping_progress(&mut reader, deadline, None).await;
+            let result =
+                WorkerHandle::read_response_skipping_progress(&mut reader, deadline, None).await;
             if delay == 120 {
                 assert!(matches!(result, Ok(WorkerResponse::Capabilities { .. })));
             } else {

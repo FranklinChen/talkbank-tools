@@ -177,6 +177,12 @@ mod tests {
             TaskRequestV2::Asr(AsrRequestV2 {
                 lang: WorkerLanguage::from(LanguageCode3::eng()),
                 backend: AsrBackendV2::LocalWhisper,
+                models: crate::model_manifest::resolve_asr_models(
+                    AsrBackendV2::LocalWhisper,
+                    None,
+                    &std::collections::BTreeMap::new(),
+                )
+                .expect("the manifest pins stock Whisper"),
                 input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                     audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
                 }),
@@ -220,6 +226,12 @@ mod tests {
             TaskRequestV2::Asr(AsrRequestV2 {
                 lang: WorkerLanguage::from(LanguageCode3::fra()),
                 backend: AsrBackendV2::LocalWhisper,
+                models: crate::model_manifest::resolve_asr_models(
+                    AsrBackendV2::LocalWhisper,
+                    None,
+                    &std::collections::BTreeMap::new(),
+                )
+                .expect("the manifest pins stock Whisper"),
                 input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                     audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
                 }),
@@ -269,9 +281,15 @@ mod tests {
             TaskRequestV2::Asr(AsrRequestV2 {
                 lang: WorkerLanguage::from(LanguageCode3::yue()),
                 backend: AsrBackendV2::HkQwen,
+                models: crate::model_manifest::resolve_asr_models(
+                    AsrBackendV2::HkQwen,
+                    Some(&LanguageCode3::yue()),
+                    &extras,
+                )
+                .expect("the manifest resolves a Qwen composition"),
                 input: AsrInputV2::ProviderMedia(crate::types::worker_v2::ProviderMediaInputV2 {
                     media_path: "/dev/null".into(),
-                    num_speakers: crate::api::NumSpeakers(1),
+                    diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
                 }),
                 extras: extras.clone(),
                 decode_budget_seconds: None,
@@ -302,6 +320,12 @@ mod tests {
             TaskRequestV2::Asr(AsrRequestV2 {
                 lang: WorkerLanguage::from(LanguageCode3::eng()),
                 backend: AsrBackendV2::Revai,
+                models: crate::model_manifest::resolve_asr_models(
+                    AsrBackendV2::Revai,
+                    Some(&LanguageCode3::eng()),
+                    &extras,
+                )
+                .expect("the manifest names the Rev.AI provider constant"),
                 input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                     audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
                 }),
@@ -388,6 +412,12 @@ mod tests {
             TaskRequestV2::Asr(AsrRequestV2 {
                 lang: WorkerLanguage::from(LanguageCode3::eng()),
                 backend: AsrBackendV2::LocalWhisper,
+                models: crate::model_manifest::resolve_asr_models(
+                    AsrBackendV2::LocalWhisper,
+                    None,
+                    &std::collections::BTreeMap::new(),
+                )
+                .expect("the manifest pins stock Whisper"),
                 input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                     audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
                 }),
@@ -446,6 +476,12 @@ mod tests {
             TaskRequestV2::Asr(AsrRequestV2 {
                 lang: language.clone(),
                 backend: AsrBackendV2::LocalWhisper,
+                models: crate::model_manifest::resolve_asr_models(
+                    AsrBackendV2::LocalWhisper,
+                    None,
+                    &std::collections::BTreeMap::new(),
+                )
+                .expect("the manifest pins stock Whisper"),
                 input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                     audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
                 }),

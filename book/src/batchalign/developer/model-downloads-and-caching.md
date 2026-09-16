@@ -1,7 +1,7 @@
 # Model Downloads and Caching (Developer Reference)
 
 **Status:** Current
-**Last updated:** 2026-09-10 01:56 EDT
+**Last updated:** 2026-09-16 09:28 EDT
 
 This page documents how batchalign3 downloads, caches, and verifies ML
 models, the contributor-facing complement to the
@@ -57,12 +57,129 @@ Source verified by reading code on 2026-05-06.
 | 10 | pyannote diarization | `batchalign/inference/speaker.py:350` | `Pipeline.from_pretrained("talkbank/dia-fork")` | HF |
 | 10b | Pyannote speaker embedding | `batchalign/inference/speaker_embedding.py::load_speaker_embedding_model` | `PretrainedSpeakerEmbedding(<pinned local ONNX path>)` | HF |
 | 11 | NeMo speaker (fallback) | `batchalign/inference/speaker.py` (NeMo branch) | `EncDecSpeakerLabelModel.from_pretrained(...)` | NeMo cache |
-| 12 | BERT utterance | `batchalign/models/utterance/infer.py:120-128` | `AutoTokenizer.from_pretrained` + `BertForTokenClassification.from_pretrained` | HF |
+| 12 | BERT utterance (boundary model) | `batchalign/worker/_model_loading/utterance.py::load_utterance_model` resolves the pinned snapshot; `batchalign/models/utterance/infer.py::BertUtteranceModel` loads it | `resolve_pinned_snapshot`, then `AutoTokenizer.from_pretrained` + `BertForTokenClassification.from_pretrained` on the resolved LOCAL PATH | HF |
 | 13 | PyCantonese | (bundled) |, | (none, wheel) |
+| 14 | Model manifest | `crates/batchalign/src/model_manifest.rs` | None: it loads nothing. It is the one place naming which models each ASR engine and each utterance-segmentation language loads, and at which revision | (none) |
+| 15 | Pinned Hugging Face snapshot | `batchalign/worker/_model_loading/pinned_hub.py::resolve_pinned_snapshot` | `huggingface_hub.snapshot_download(model_id, revision=…)`, then the commit is read off the resolved directory | HF |
 
 Cache roots resolve to OS-specific paths via each library's own logic. See
 the [user-facing chapter](../user-guide/model-downloads.md) for the table
 of OS-resolved paths.
+
+### Rows 14 and 15: the pinned path
+
+Row 14 is a manifest, not a loader. It exists so a model's identity is known
+BEFORE dispatch: it is what the request carries, what the worker's report is
+checked against, and what a cache namespace is built from. Hugging Face
+entries pin a commit, native Whisper weights pin the `lfs.oid` of the blob
+(which is its SHA-256), and ModelScope entries pin a TAG, because ModelScope
+exposes no commit behind one.
+
+It covers the ASR engines and the utterance-boundary models. The two are in one
+file because they have one problem and one answer, not because they are one
+subsystem; a second manifest beside it would recreate the mirrored-table defect
+that file exists to remove, so a new pinned model belongs in a table there. The
+boundary models additionally carry the language-to-model map that used to live
+in `_RESOLVER["utterance"]` on the Python side, because an id must be known
+before a load in order to pin its revision. `utseg_route` reads availability
+from the same table, so a language BA3 claims to segment is by construction a
+language it can name a model for.
+
+The boundary model travels to the worker under `PINNED_UTSEG_MODEL_KEY`
+(`utseg_pinned_model`), injected at the one place a spawn argv is built, exactly
+as `PINNED_ASR_MODELS_KEY` is. Its revision is consequently required rather than
+optional: `UtsegBoundaryModelEvidenceV2.model_revision` is a `HubCommitV2`, and
+provenance always writes `<model id>@<revision>`. Before the pin, the worker
+loaded the model by NAME and scraped `config._commit_hash` afterwards, which can
+simply be absent, so the field had to be optional and the stamp had an id-only
+form.
+
+Row 15 is why the pin holds. FunASR's Hugging Face branch IGNORES the
+revision it is given (`get_or_download_model_dir_hf` calls
+`snapshot_download(model)` with no `revision`), so passing `model_revision`
+there pins nothing; the only way to hold a loader to a revision is to resolve
+the snapshot first and hand it a local path. The commit is then read off the
+resolved directory, because the hub cache stores a revision at
+`<cache>/models--<org>--<name>/snapshots/<commit>/`, so the leaf directory IS
+the commit and describes the bytes about to be read. Two refusals follow from
+that, both `PinnedSnapshotError`: a leaf that is not a 40-character
+hexadecimal commit (the layout is not what the function understands, so the
+worker cannot say which revision it loaded), and an observed commit that
+disagrees with the one the plan asked for. A `commit` of `None` means the plan
+deliberately left the model unpinned; the hub default is resolved and the
+commit it landed on is reported.
+
+A drift checker against the upstreams is deliberately NOT in the server binary.
+The comment in `model_manifest.rs` records why: it needs the network, so it
+belongs beside the other drift checks in `scripts/`. It lives at
+`scripts/check_model_pin_drift.py`, described next.
+
+### Checking the pins against upstream
+
+**Pinning is not a freeze.** A pin stops output changing for reasons nobody
+chose; it is not a decision to stay on a revision forever. The drift checker is
+the other half of that bargain, and it is the mechanism by which a pinned model
+gets upgraded DELIBERATELY. It turns "upstream moved" into a reviewed decision
+with a date and a reviewer, following the pattern this project already uses for
+its morphosyntax engine: find a defect, report it upstream, upgrade once it is
+fixed, then rerun the affected material surgically. Without it, a pin freezes
+the project quietly, which inverts the intent of pinning.
+
+```bash
+python3 scripts/check_model_pin_drift.py
+python3 scripts/check_model_pin_drift.py --manifest <path>   # check a variant
+```
+
+It reads the pins from `crates/batchalign/src/model_manifest.rs` rather than
+carrying a second copy of them: a second list would recreate the mirrored-table
+defect that file exists to delete, and it would be the copy that goes stale. The
+read is a narrow parse of the Rust source, guarded by a cross-check. If the
+parse does not recover exactly as many entries as the file holds entry literals,
+it refuses to report anything at all rather than return a clean result for a
+model it never looked at.
+
+It queries PUBLIC APIs only: no credentials, no writes, no model downloads. It
+never consults a local model cache, because a cache would only say what one
+machine happens to hold, and the question here is what UPSTREAM holds.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Every checkable pin still matches upstream. |
+| 1 | Some upstream has MOVED away from its pin; the report names both revisions. |
+| 2 | Some check COULD NOT RUN, so the answer is unknown. |
+
+2 outranks 1 deliberately: a run that both moved and failed exits 2, because an
+unknown is worse than a known difference.
+
+Each pin gets one of three outcomes and never two: it matches, it moved, or the
+check could not run and says why. Conflating "no drift" with "could not check"
+is the failure this shape exists to prevent, so a network failure, a rate limit,
+a withdrawn repository and a private repository are each reported by their own
+reason rather than collapsed together.
+
+#### What the checker cannot see
+
+Two verdicts are NOT matches. The report keeps them separate and counts them
+separately, so a green exit is never read as "every model was confirmed
+unchanged":
+
+- `TAG-ONLY`: ModelScope publishes tags but exposes no commit behind a tag, so a
+  tag pin can be checked only for tag EXISTENCE. The three `iic/...` FunASR
+  models are in this class. A tag that upstream re-points at new bytes is
+  invisible here. A tag that disappears is caught, and is reported as drift.
+- `NOT-OBSERVABLE`: cloud providers (`aliyun-nls`, `revai`) expose no revision at
+  all, so drift there cannot be observed from outside. Tencent's engine model
+  type is in the same class; it is derived per language rather than stored as a
+  manifest entry, so it does not appear as its own row.
+
+Neither raises the exit code, because both are permanent properties of the
+source rather than failures of a run.
+
+One further limit is worth stating plainly: a Hugging Face lookup for a
+repository that has been renamed, withdrawn, or made private answers `401` in
+every one of those cases. The checker therefore reports all three possibilities
+instead of guessing one. Telling them apart would need credentials, which this
+check deliberately does not use.
 
 ### Stanza `DEFAULT_MODEL_DIR` (1.11+)
 
@@ -185,12 +302,23 @@ keys include the task's relevant combination of:
 
 ### Engine identity comes from the selected worker
 
-The engine-version namespace is resolved from the exact typed worker route,
-not from whichever worker first populated the pool's availability snapshot.
-`WorkerKey` owns target, language, and engine recipe. Command dispatch obtains
-that worker, completes any lazy `ensure_task`, queries its live capabilities,
-and only then constructs the `EngineVersion` used by `PipelineServices` and
-the tiered cache.
+There is no pipeline-wide engine version. `PipelineServices`
+(`crates/batchalign/src/pipeline/mod.rs`) carries only the worker pool and the
+cache, and each stage names its own engines: morphosyntax, utterance
+segmentation, translation and coreference from the results they apply, and UTR
+ASR through its engine's own cache namespace. Forced alignment is the only
+stage that reads an engine identity from a worker's capability report, because
+its cache rows are namespaced by that engine before inference runs.
+
+That identity is resolved from the exact typed worker route, not from whichever
+worker first populated the pool's availability snapshot. `WorkerKey` owns
+target, language, and engine recipe. Command dispatch obtains that worker, and
+`WorkerPool::ensure_command_capabilities` completes any lazy `ensure_task` for
+FA and takes the worker's report after that load (`LoadedCapabilities`). Only
+then does `FaCacheNamespace::from_loaded` construct the FA identity, which
+forced alignment carries in `FaServices` and uses for its cache rows and
+evidence envelopes. A worker that still names no FA engine after loading is
+refused.
 
 Lazy-profile keys retain engine selection. This is required for correctness,
 not only cache hygiene: a task-only key could load Wave2Vec once, report
@@ -373,17 +501,25 @@ PyCantonese tests run in the default suite because PyCantonese is bundled
 
 1. Identify the upstream library's auto-download API (`from_pretrained`,
    `Pipeline`, `get_model`, etc.). Use it as-is. Do not pre-flight-check.
-2. Add a `progress_v2` emit immediately before the load:
+2. If the model is one a stage loads BY DEFAULT rather than only under an
+   explicit override, add a manifest pin in `crates/batchalign/src/model_manifest.rs`
+   (a commit for Hugging Face, a tag where the hub exposes no commit) and load
+   it through `resolve_pinned_snapshot`, pointing the library at the resolved
+   LOCAL PATH rather than at the model name. A default model with no pin has no
+   identity before it loads, which means no honest provenance stamp and no
+   cache namespace; and a model loaded by name cannot report a revision it was
+   never asked for, which is what forces a revision field to be optional.
+3. Add a `progress_v2` emit immediately before the load:
    - HuggingFace: `emit_hf_download_if_missing(model_id, kind=...)`.
    - Stanza language pack: extend the helper in `_stanza_loading.py` (or
      copy its shape).
    - Other libraries: use `emit_download_event(stage, user_message)`.
-3. Add a size-hint entry to `_HF_SIZE_HINTS_GB` if the model is > 100 MB,
+4. Add a size-hint entry to `_HF_SIZE_HINTS_GB` if the model is > 100 MB,
    so the user sees a useful estimate.
-4. Update the [user-facing chapter](../user-guide/model-downloads.md)
+5. Update the [user-facing chapter](../user-guide/model-downloads.md)
    table with the new family + size + first-run wait estimate.
-5. Update this page's inventory table.
-6. Add a golden-marked test that exercises a fresh download path.
+6. Update this page's inventory table.
+7. Add a golden-marked test that exercises a fresh download path.
 
 ## Related references
 

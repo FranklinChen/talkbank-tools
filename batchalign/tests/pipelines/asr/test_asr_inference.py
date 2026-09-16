@@ -12,13 +12,16 @@ import sys
 from types import ModuleType
 
 import numpy as np
+import pytest
 import torch
+from pydantic import ValidationError
 
 from batchalign.device import DevicePolicy
 from batchalign.inference.asr import (
     AsrBatchItem,
     AsrElement,
     AsrMonologue,
+    AttributedSpeaker,
     MonologueAsrResponse,
     WhisperChunk,
     WhisperChunksAsrResponse,
@@ -27,6 +30,8 @@ from batchalign.inference.asr import (
     iso3_to_language_name,
     load_whisper_asr,
 )
+from batchalign.tests._asr_model_pins import loaded_identity
+from batchalign.worker._types_v2 import AsrBackendV2, NotRequestedDiarizationV2
 
 # ---------------------------------------------------------------------------
 # Pydantic model tests
@@ -37,10 +42,22 @@ class TestAsrModels:
     """Test Pydantic model serialization/validation."""
 
     def test_asr_batch_item_defaults(self) -> None:
-        item = AsrBatchItem(audio_path="/tmp/test.wav")
+        item = AsrBatchItem(
+            audio_path="/tmp/test.wav", diarization=NotRequestedDiarizationV2()
+        )
         assert item.lang == "eng"
-        assert item.num_speakers == 1
         assert item.rev_job_id is None
+
+    def test_asr_batch_item_requires_an_answer_about_separation(self) -> None:
+        """Whether to separate speakers has no default, and cannot acquire one.
+
+        The field used to default to a count of 1, which under this programme's
+        ruling reads as "separate this recording into one speaker": the
+        contradiction submission refuses. A caller that does not say is refused
+        here rather than handed an answer nobody chose.
+        """
+        with pytest.raises(ValidationError):
+            AsrBatchItem(audio_path="/tmp/test.wav")
 
     def test_asr_element_with_all_fields(self) -> None:
         element = AsrElement(
@@ -60,7 +77,7 @@ class TestAsrModels:
             lang="eng",
             monologues=[
                 AsrMonologue(
-                    speaker=1,
+                    speaker=AttributedSpeaker(label="1"),
                     elements=[
                         AsrElement(value="hello", ts=0.0, end_ts=0.5),
                         AsrElement(value="world", ts=0.5, end_ts=1.0),
@@ -142,7 +159,11 @@ class TestWhisperPathBoundary:
                 }
 
         model = _FakeWhisperHandle()
-        item = AsrBatchItem(audio_path="/tmp/input.wav", lang="eng")
+        item = AsrBatchItem(
+            audio_path="/tmp/input.wav",
+            lang="eng",
+            diarization=NotRequestedDiarizationV2(),
+        )
 
         response = _infer_whisper(model, item)  # type: ignore[arg-type]
 
@@ -159,6 +180,9 @@ class TestWhisperPathBoundary:
             def __init__(self) -> None:
                 self.sample_rate = 16000
                 self.calls: list[tuple[object, int, object]] = []
+                # The prepared-audio helper stamps its handle's identity onto
+                # every result, so a double for it has to carry one.
+                self.model_identity = loaded_identity(AsrBackendV2.LOCAL_WHISPER)
 
             def gen_kwargs(self, lang: str) -> dict[str, object]:
                 return {"language": lang}
@@ -229,7 +253,11 @@ class TestWhisperPathBoundary:
                 }
 
         model = _FakeWhisperHandle()
-        item = AsrBatchItem(audio_path="/tmp/bilingual.wav", lang="auto")
+        item = AsrBatchItem(
+            audio_path="/tmp/bilingual.wav",
+            lang="auto",
+            diarization=NotRequestedDiarizationV2(),
+        )
 
         response = _infer_whisper(model, item)  # type: ignore[arg-type]
 
@@ -249,6 +277,9 @@ class TestWhisperPathBoundary:
             def __init__(self) -> None:
                 self.sample_rate = 16000
                 self.calls: list[tuple[object, int, object]] = []
+                # As above: the prepared-audio helper needs a handle that knows
+                # which checkpoint it loaded.
+                self.model_identity = loaded_identity(AsrBackendV2.LOCAL_WHISPER)
 
             def gen_kwargs(self, lang: str) -> dict[str, object]:
                 from batchalign.inference.types import WhisperASRHandle

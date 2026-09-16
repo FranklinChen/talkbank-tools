@@ -16,26 +16,171 @@
     "items"
   ],
   "$defs": {
+    "LanguageCode3": {
+      "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected, use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
+      "type": "string"
+    },
     "MorphosyntaxItemResultV2": {
-      "description": "One morphosyntax item result returned by Python.",
-      "type": "object",
-      "properties": {
-        "error": {
-          "description": "Optional per-item runtime error.",
-          "type": [
-            "string",
-            "null"
+      "description": "One morphosyntax item result returned by Python.\n\nA tagged union, so an analysis cannot exist without the model that\nproduced it and an item cannot be both an analysis and an error.",
+      "oneOf": [
+        {
+          "description": "Stanza analyzed the item.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "analyzed"
+            },
+            "model": {
+              "description": "The model that produced them.",
+              "$ref": "#/$defs/MorphosyntaxModelIdentityV2"
+            },
+            "raw_sentences": {
+              "description": "Raw Stanza `doc.to_dict()` sentence arrays.",
+              "type": "array",
+              "items": true
+            },
+            "repairs": {
+              "description": "Every relation the worker rewrote inside `raw_sentences`, in the\norder it made them. Empty means it rewrote nothing.\n\nRequired, with no serde default, for the reason the model is:\na default would make \"this worker reports no repairs\" and \"this\nworker does not report repairs\" the same value on the wire, which\nis the shape that let a rewrite live only in a log line.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UdRelationRepairV2"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "raw_sentences",
+            "model",
+            "repairs"
           ]
         },
-        "raw_sentences": {
-          "description": "Raw Stanza `doc.to_dict()` sentence arrays when inference succeeded.",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": true
+        {
+          "description": "The item had no words, so no model ran and there is nothing to apply.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "no_words"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The item failed; the file it belongs to fails with this message.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "Operator-facing failure message.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
         }
-      }
+      ]
+    },
+    "MorphosyntaxModelIdentityV2": {
+      "description": "The Stanza model that analyzed one morphosyntax item, as reported by the\nworker that ran it.\n\nCarried per item rather than once per worker because one batch can span\nlanguage groups, and because the process that ran the item is the only\nhonest witness: a capability snapshot taken from another process (inside\n`transcribe`, the ASR worker) describes a different runtime.",
+      "type": "object",
+      "properties": {
+        "lang": {
+          "description": "Language whose Stanza pipeline analyzed the item.",
+          "$ref": "#/$defs/LanguageCode3"
+        },
+        "pipeline": {
+          "description": "Which pipeline variant ran, so provenance does not hide a\nretokenizing or POS-overriding path behind the plain Stanza name.",
+          "$ref": "#/$defs/MorphosyntaxPipelineV2"
+        },
+        "stanza_version": {
+          "description": "Installed Stanza package version (`stanza.__version__`).",
+          "$ref": "#/$defs/ReportedEngineName"
+        }
+      },
+      "required": [
+        "stanza_version",
+        "lang",
+        "pipeline"
+      ]
+    },
+    "MorphosyntaxPipelineV2": {
+      "description": "The morphosyntax pipeline variant that analyzed an item. Closed: a new variant must be named here before a worker can report it.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "type": "string",
+          "const": "mandarin_retokenize"
+        },
+        {
+          "type": "string",
+          "const": "cantonese_pycantonese_pos"
+        }
+      ]
+    },
+    "ReportedEngineName": {
+      "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "UdRelationRepairKindV2": {
+      "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_relation"
+        },
+        {
+          "type": "string",
+          "const": "relation_case"
+        },
+        {
+          "type": "string",
+          "const": "relation_alias"
+        },
+        {
+          "type": "string",
+          "const": "unknown_relation"
+        }
+      ]
+    },
+    "UdRelationRepairV2": {
+      "description": "One relation rewrite a worker made inside an analysis it returned.\n\nCarries what it takes to attribute the rewrite as well as count it: the\nword it was made on, and both relations. The worker is the only witness,\nbecause the relation Stanza produced does not survive into the analysis it\nsends: by the time the server sees the item, the repaired relation is the\nonly one there.",
+      "type": "object",
+      "properties": {
+        "from_relation": {
+          "description": "The relation the model produced, verbatim.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which rewrite this is.",
+          "$ref": "#/$defs/UdRelationRepairKindV2"
+        },
+        "to_relation": {
+          "description": "The relation applied in its place, which the worker admits is a UD\nrelation before it builds this value.",
+          "type": "string"
+        },
+        "word": {
+          "description": "Surface form of the word whose relation was rewritten, so a reader can\nfind it in the transcript.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "from_relation",
+        "to_relation"
+      ]
     }
   }
 }

@@ -24,8 +24,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use batchalign::types::worker_v2::{
-    CapabilitiesRequestV2, CapabilitiesResponseV2, ExecuteRequestV2, ExecuteResponseV2,
-    HelloRequestV2, HelloResponseV2, ProgressEventV2, ShutdownRequestV2,
+    ExecuteRequestV2, ExecuteResponseV2, HelloRequestV2, HelloResponseV2, ProgressEventV2,
+    ShutdownRequestV2,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -77,16 +77,6 @@ fn roundtrip_fixture(schema: &str, raw: Value) -> Value {
                 .expect("hello_response fixture is valid"),
         )
         .expect("hello_response should serialize"),
-        "capabilities_request" => serde_json::to_value(
-            serde_json::from_value::<CapabilitiesRequestV2>(raw)
-                .expect("capabilities_request fixture is valid"),
-        )
-        .expect("capabilities_request should serialize"),
-        "capabilities_response" => serde_json::to_value(
-            serde_json::from_value::<CapabilitiesResponseV2>(raw)
-                .expect("capabilities_response fixture is valid"),
-        )
-        .expect("capabilities_response should serialize"),
         "execute_request" => serde_json::to_value(
             serde_json::from_value::<ExecuteRequestV2>(raw)
                 .expect("execute_request fixture is valid"),

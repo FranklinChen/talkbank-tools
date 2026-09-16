@@ -19,6 +19,8 @@ import numpy as np
 import pytest
 
 from batchalign.inference.asr import infer_whisper_prepared_audio
+from batchalign.tests._asr_model_pins import loaded_identity
+from batchalign.worker._types_v2 import AsrBackendV2
 
 
 class _FakeWhisper:
@@ -32,6 +34,11 @@ class _FakeWhisper:
 
     def __init__(self, chunks: list[dict[str, Any]]) -> None:
         self._chunks = chunks
+        # An ASR result now names the checkpoint behind it, so even a stand-in
+        # has to say what it loaded. These tests are about timestamp handling
+        # and nothing here reads the identity; it is a stock pinned Whisper so
+        # that the double stays a double rather than becoming a second fixture.
+        self.model_identity = loaded_identity(AsrBackendV2.LOCAL_WHISPER)
 
     def gen_kwargs(self, _language_name: str) -> dict[str, Any]:
         return {}

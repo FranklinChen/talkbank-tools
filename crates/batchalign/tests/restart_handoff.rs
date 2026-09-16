@@ -31,6 +31,8 @@ use batchalign::worker::pool::PoolConfig;
 use common::resolve_python;
 use common::test_server_fixture::isolate_host_memory_ledger;
 
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
+
 /// Per-response artificial worker delay. Long enough that the first
 /// runner is reliably mid-file when the cancel+restart lands; short
 /// enough to keep the whole test a few seconds.
@@ -147,12 +149,9 @@ async fn cancel_restart_while_running_hands_off_to_one_runner() {
         .expect("parse submission");
     let job_id = info.job_id;
 
-    let start = tokio::time::Instant::now();
+    let mut progress_deadline =
+        ServerTestDeadline::new(WaitSubject::job_starts_making_progress(&job_id));
     loop {
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(30),
-            "job never started making progress"
-        );
         let info = get_job(&client, &base_url, &job_id).await;
         if info.completed_files >= 1 && (info.completed_files as usize) < NUM_FILES {
             break;
@@ -166,7 +165,9 @@ async fn cancel_restart_while_running_hands_off_to_one_runner() {
              raise NUM_FILES or ECHO_DELAY_MS",
             info.status
         );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        progress_deadline
+            .keep_waiting(ProgressSnapshot::job(&info))
+            .await;
     }
 
     // Cancel, then restart as soon as the server accepts it (cancel is
@@ -178,7 +179,7 @@ async fn cancel_restart_while_running_hands_off_to_one_runner() {
         .expect("POST cancel");
     assert_eq!(resp.status(), 200, "cancel accepted");
 
-    let restart_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut restart_deadline = ServerTestDeadline::new(WaitSubject::restart_accepted(&job_id));
     loop {
         let resp = client
             .post(format!("{base_url}/jobs/{job_id}/restart"))
@@ -188,23 +189,16 @@ async fn cancel_restart_while_running_hands_off_to_one_runner() {
         if resp.status() == 200 {
             break;
         }
-        assert!(
-            tokio::time::Instant::now() < restart_deadline,
-            "restart never accepted, last status {}",
-            resp.status()
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        restart_deadline
+            .keep_waiting(ProgressSnapshot::http_status(resp.status().as_u16()))
+            .await;
     }
 
     // From here on the job belongs to the restarted runner. The old
     // runner's teardown must not clobber it: no Failed status, no
     // counter overflow, and a Completed settle with every file done.
-    let settle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut settle_deadline = ServerTestDeadline::new(WaitSubject::restarted_job_settles(&job_id));
     let final_info = loop {
-        assert!(
-            tokio::time::Instant::now() < settle_deadline,
-            "restarted job never settled"
-        );
         let info = get_job(&client, &base_url, &job_id).await;
         assert_ne!(
             info.status,
@@ -226,7 +220,11 @@ async fn cancel_restart_while_running_hands_off_to_one_runner() {
                     "restarted job settled Cancelled; restart was accepted so a runner must own it"
                 )
             }
-            _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            _ => {
+                settle_deadline
+                    .keep_waiting(ProgressSnapshot::job(&info))
+                    .await;
+            }
         }
     };
 

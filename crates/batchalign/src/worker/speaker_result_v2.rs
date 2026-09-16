@@ -241,10 +241,7 @@ mod tests {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("req-speaker-v2-2"),
             TaskResultV2::TranslationResult(crate::types::worker_v2::TranslationResultV2 {
-                items: vec![crate::types::worker_v2::TranslationItemResultV2 {
-                    raw_translation: Some("hola".into()),
-                    error: None,
-                }],
+                items: vec![crate::types::worker_v2::TranslationItemResultV2::BlankInput],
             }),
             DurationSeconds(0.01),
         );

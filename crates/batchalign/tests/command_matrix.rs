@@ -85,8 +85,15 @@ fn assert_command(harness: &CliHarness, case: &CommandExpectation) {
 }
 
 async fn start_health_only_server(capabilities: &[&str]) -> String {
+    start_health_server_of_build(capabilities, batchalign::build_hash()).await
+}
+
+/// A server that answers only `/health`, reporting `build_hash` as its build.
+/// It has no `/jobs` route, so a CLI that got past its pre-submission checks
+/// would fail with a different error than the one a test expects.
+async fn start_health_server_of_build(capabilities: &[&str], build_hash: &str) -> String {
     let capabilities: Vec<String> = capabilities.iter().map(|cap| (*cap).to_string()).collect();
-    let build_hash = batchalign::cli::build_hash().to_string();
+    let build_hash = build_hash.to_string();
 
     let router = Router::new().route(
         "/health",
@@ -317,6 +324,44 @@ async fn command_matrix_explicit_server_rejects_unsupported_commands() {
 
     for case in &cases {
         assert_command(&harness, case);
+    }
+}
+
+/// A server of another build, or one reporting no build, is refused before
+/// anything is submitted: exit 5, and the message names the restart remedy.
+/// The command is one the server advertises, so the refusal is the build
+/// check and not the capability check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_matrix_explicit_server_of_another_build_is_refused_before_submission() {
+    let harness = CliHarness::new();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let corpus_file = tmp.path().join("corpus").join("sample.cha");
+    write_chat(&corpus_file);
+
+    for (name, build) in [
+        ("explicit server of another build", "0.0.1-another-build-1"),
+        ("explicit server reporting no build", ""),
+    ] {
+        let server_url = start_health_server_of_build(&["morphotag"], build).await;
+        let out_dir = tmp.path().join(format!("morphotag-out-{}", build.len()));
+        assert_command(
+            &harness,
+            &CommandExpectation {
+                name,
+                args: vec![
+                    "morphotag".into(),
+                    corpus_file.display().to_string(),
+                    "-o".into(),
+                    out_dir.display().to_string(),
+                    "--server".into(),
+                    server_url,
+                ],
+                status: 5,
+                stderr: "nothing was submitted. Restart that server with this build",
+                output_dir: None,
+            },
+        );
+        assert!(!out_dir.join("sample.cha").exists(), "{name} wrote output");
     }
 }
 

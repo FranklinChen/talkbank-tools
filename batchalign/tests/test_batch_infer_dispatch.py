@@ -115,7 +115,11 @@ class TestDispatchRouting:
                 assert isinstance(raw_item, dict)
                 results.append(
                     InferResponse(
-                        result={"raw_translation": str(raw_item["text"]).upper()},
+                        result={
+                            "kind": "translated",
+                            "raw_translation": str(raw_item["text"]).upper(),
+                            "engine": "test-engine",
+                        },
                         elapsed_s=0.0,
                     )
                 )
@@ -132,7 +136,11 @@ class TestDispatchRouting:
             resp = _batch_infer(req)
             assert len(resp.results) == 1
             assert resp.results[0].error is None
-            assert resp.results[0].result == {"raw_translation": "HELLO"}
+            assert resp.results[0].result == {
+                "kind": "translated",
+                "raw_translation": "HELLO",
+                "engine": "test-engine",
+            }
         finally:
             _state.clear_batch_infer_handlers()
             _state.batch_infer_handlers.update(previous_handlers)
@@ -227,7 +235,9 @@ class TestCapabilitiesAdvertisement:
 
             caps = _capabilities()
             assert InferTask.ASR in caps.infer_tasks
-            assert caps.engine_versions[InferTask.ASR] == "rev"
+            # No ASR engine is loaded, so none is named: null, never a
+            # name guessed from which credentials happen to be present.
+            assert caps.engine_versions[InferTask.ASR] is None
         finally:
             _state.test_echo = old_test_echo
             _state.ready = old_ready

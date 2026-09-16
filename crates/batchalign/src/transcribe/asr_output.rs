@@ -1,16 +1,12 @@
-//! ASR response conversion, participant ID generation, and CHAT helpers.
+//! ASR response conversion and speaker-track admission.
 
 use batchalign_transform::asr_postprocess::{
-    self, AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
+    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
     SpeakerIndex,
 };
-use batchalign_transform::build_chat::{self, TranscriptDescription};
-use batchalign_transform::serialize::to_chat_string;
 use tracing::warn;
 
-use crate::error::ServerError;
-
-use super::types::{AsrResponse, TranscribeOptions};
+use super::types::AsrResponse;
 
 /// Convert flat ASR tokens (with speaker labels) into speaker-grouped monologues.
 ///
@@ -34,22 +30,7 @@ pub(crate) fn convert_asr_response(response: &AsrResponse) -> AsrOutput {
     let mut current_elements: Vec<AsrElement> = Vec::new();
 
     for token in &response.tokens {
-        let speaker_idx = SpeakerIndex(
-            token
-                .speaker
-                .as_deref()
-                .and_then(parse_speaker_label)
-                .unwrap_or_else(|| {
-                    if let Some(ref label) = token.speaker {
-                        warn!(
-                            speaker = %label,
-                            token = %token.text,
-                            "unparseable speaker label in ASR token, defaulting to speaker 0"
-                        );
-                    }
-                    0
-                }),
-        );
+        let speaker_idx = admit_token_speaker(token.speaker.as_deref(), &token.text);
 
         if current_speaker != Some(speaker_idx) {
             // Flush previous monologue
@@ -66,20 +47,8 @@ pub(crate) fn convert_asr_response(response: &AsrResponse) -> AsrOutput {
 
         current_elements.push(AsrElement {
             value: AsrRawText::new(token.text.clone()),
-            ts: AsrTimestampSecs(token.start_s.map(|s| s.0).unwrap_or_else(|| {
-                warn!(
-                    token = %token.text,
-                    "ASR token missing start timestamp, defaulting to 0.0s"
-                );
-                0.0
-            })),
-            end_ts: AsrTimestampSecs(token.end_s.map(|s| s.0).unwrap_or_else(|| {
-                warn!(
-                    token = %token.text,
-                    "ASR token missing end timestamp, defaulting to 0.0s"
-                );
-                0.0
-            })),
+            ts: AsrTimestampSecs::from(token.start_s.map(|s| s.0)),
+            end_ts: AsrTimestampSecs::from(token.end_s.map(|s| s.0)),
             kind: AsrElementKind::Text,
         });
     }
@@ -97,60 +66,36 @@ pub(crate) fn convert_asr_response(response: &AsrResponse) -> AsrOutput {
     AsrOutput { monologues }
 }
 
-pub(super) fn parse_speaker_label(label: &str) -> Option<usize> {
-    let trimmed = label.trim();
-    trimmed.parse::<usize>().ok().or_else(|| {
-        trimmed
-            .rsplit('_')
-            .next()
-            .and_then(|suffix| suffix.parse().ok())
-    })
-}
-
-/// Generate participant IDs from speaker indices.
+/// The track one flat ASR token belongs to.
 ///
-/// Uses standard CHAT speaker codes: PAR, INV, CHI, etc.
-pub(crate) fn generate_participant_ids(
-    utterances: &[asr_postprocess::Utterance],
-    num_speakers: usize,
-) -> Vec<String> {
-    let mut max_speaker = 0usize;
-    for utt in utterances {
-        let s = utt.speaker.as_usize();
-        if s > max_speaker {
-            max_speaker = s;
+/// This is the LEGACY admission, and it is the only one left: the live worker
+/// path carries a typed `SpeakerAttributionV2` and admits it in
+/// `worker::asr_result_v2`. What still arrives here as a bare
+/// `Option<String>` is Rev's own projection and replayed
+/// `_asr_response.json` evidence, both of which number their speakers, and
+/// replayed evidence carrying speaker `"0"` must keep working exactly as it
+/// did.
+///
+/// Absence means the engine attributed nobody, which is the single track of an
+/// undiarized recording. A label that is not a speaker NUMBER is reported and
+/// takes the first track; it is no longer put through `rsplit('_')`, which
+/// silently merged distinct labels (`A_0` and `B_0` became one speaker) and
+/// read a suffix out of labels that never had that shape.
+pub(super) fn admit_token_speaker(label: Option<&str>, token_text: &str) -> SpeakerIndex {
+    let Some(label) = label else {
+        return SpeakerIndex(0);
+    };
+    let trimmed = label.trim();
+    match trimmed.parse::<usize>() {
+        Ok(speaker) => SpeakerIndex(speaker),
+        Err(_) => {
+            warn!(
+                speaker = %label,
+                token = %token_text,
+                "ASR token speaker label is not a speaker number; it cannot number a \
+                 transcript tier, so this token takes the first track"
+            );
+            SpeakerIndex(0)
         }
     }
-    generate_standard_participant_ids((max_speaker + 1).max(num_speakers))
-}
-
-pub(crate) fn generate_standard_participant_ids(count: usize) -> Vec<String> {
-    // Use generic numbered codes (PAR0, PAR1, ...) so the user can safely
-    // rename them after reviewing who is who. BA2 used this convention.
-    // Named codes (PAR, INV, CHI) are tempting but dangerous: if diarization
-    // assigns speakers in the wrong order, swapping PAR↔INV requires a
-    // three-step rename with a temp placeholder. PAR0→INV and PAR1→PAR
-    // are safe sequential replacements.
-    (0..count).map(|index| format!("PAR{index}")).collect()
-}
-
-pub(crate) fn build_empty_chat_text(opts: &TranscribeOptions) -> Result<String, ServerError> {
-    warn!(audio_path = %opts.media_name.as_deref().unwrap_or("<unknown>"), "ASR returned no tokens");
-    let desc = TranscriptDescription {
-        langs: vec![opts.lang.to_string()],
-        participants: vec![build_chat::ParticipantDesc {
-            id: "PAR".to_string(),
-            name: None,
-            role: "Participant".to_string(),
-            corpus: String::new(),
-        }],
-        media_name: opts.media_name.clone(),
-        media_type: Some("audio".to_string()),
-        media_status: Some(talkbank_model::model::MediaStatus::Unlinked),
-        utterances: vec![],
-        write_wor: opts.write_wor,
-    };
-    let chat_file = build_chat::build_chat(&desc)
-        .map_err(|e| ServerError::Validation(format!("Failed to build empty CHAT: {e}")))?;
-    Ok(to_chat_string(&chat_file))
 }

@@ -15,6 +15,7 @@ pub mod api {
 
 pub mod command_spec;
 pub mod domain;
+pub mod iso639_part1;
 pub mod memory;
 pub mod paths;
 pub mod scheduling;

@@ -237,16 +237,15 @@ async fn capabilities_test_echo() {
     let caps = lease.capabilities().await.expect("capabilities failed");
     assert!(caps.commands.iter().any(|c| c == "test-echo"));
     assert!(caps.commands.iter().any(|c| c == "morphotag"));
-    // Test-echo workers intentionally advertise *all* infer tasks
-    // and stamp every entry with engine_version `"test-echo"`. The
-    // contract is documented in `batchalign/worker/_handlers.py`
-    // (`_capabilities` test-echo branch): without that universal
-    // advertisement the server's capability gate
-    // (`AppState::validate_infer_capability_gate`) refuses to
-    // dispatch jobs to an echo worker, which would block any
-    // `test_echo: true` integration test that exercises the
-    // dispatch path. Keep these assertions in sync with the Python
-    // handler, when one side changes, the other must match.
+    // Test-echo workers intentionally advertise *all* infer tasks. Like a
+    // real worker, only forced alignment names an engine (`"test-echo"`) and
+    // every other entry is null. The contract is documented in
+    // `batchalign/worker/_handlers.py` (`_capabilities` test-echo branch). The
+    // pool admits every report it records (`WorkerPool::record_capabilities`)
+    // and admission refuses a name for any task but FA, so an echo worker's
+    // report must pass that admission like any other. Keep these assertions
+    // in sync with the Python handler: when one side changes, the other must
+    // match.
     assert!(
         !caps.infer_tasks.is_empty(),
         "test-echo worker must advertise infer tasks so the capability gate passes"
@@ -256,8 +255,11 @@ async fn capabilities_test_echo() {
         "test-echo capabilities must include Morphosyntax (smoke check on the universal-advertise contract)"
     );
     assert!(
-        caps.engine_versions.values().all(|v| v == "test-echo"),
-        "every engine_version on a test-echo worker must be the string \"test-echo\"; got {:?}",
+        caps.engine_versions.iter().all(|(task, name)| {
+            name.as_ref().map(|name| name.as_str())
+                == (*task == InferTask::Fa).then_some("test-echo")
+        }),
+        "a test-echo worker names only the FA engine, as \"test-echo\"; got {:?}",
         caps.engine_versions
     );
     assert!(!caps.free_threaded);

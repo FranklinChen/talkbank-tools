@@ -58,10 +58,31 @@ pub fn require_success_result<'a>(
 ) -> Result<&'a TaskResultV2, ExecuteFailureRead> {
     match response.read() {
         ExecuteOutcomeRef::Success(result) => Ok(result),
-        ExecuteOutcomeRef::Failed { code, message } => Err(ExecuteFailureRead {
+        ExecuteOutcomeRef::Failed { code, message } => {
+            Err(ExecuteFailureRead::new(task, code, message))
+        }
+    }
+}
+
+/// The owned counterpart of [`require_success_result`]: move the payload out
+/// of a successful response, so a consumer can move its parts into its own
+/// types instead of cloning them.
+pub fn take_success_result(
+    response: ExecuteResponseV2,
+    task: &str,
+) -> Result<TaskResultV2, ExecuteFailureRead> {
+    response
+        .into_outcome()
+        .map_err(|(code, message)| ExecuteFailureRead::new(task, code, &message))
+}
+
+impl ExecuteFailureRead {
+    /// The one message shape both readers share.
+    fn new(task: &str, code: ProtocolErrorCodeV2, message: &str) -> Self {
+        Self {
             code,
             message: format!("worker protocol V2 {task} request failed with {code:?}: {message}"),
-        }),
+        }
     }
 }
 

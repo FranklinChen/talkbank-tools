@@ -1,7 +1,7 @@
 # utseg
 
 **Status:** Current
-**Last updated:** 2026-08-30 19:35 EDT
+**Last updated:** 2026-09-16 08:18 EDT
 
 Re-segment utterance boundaries in an existing CHAT transcript. Text-only
 , no audio involved. The model selected per language is either a trained
@@ -108,8 +108,9 @@ belong to transcribe's distinct pre-CHAT and post-CHAT phases; standalone
 
 ## Language support
 
-Per-language model selection is driven by `_RESOLVER["utterance"]` in
-`batchalign/models/resolve.py`:
+Per-language model selection is driven by `UTSEG_BOUNDARY_MODELS` in
+`crates/batchalign/src/model_manifest.rs`, which also pins the exact revision
+each one loads:
 
 | `--lang` | Model loaded | Source |
 |----------|--------------|--------|
@@ -121,10 +122,13 @@ Per-language model selection is driven by `_RESOLVER["utterance"]` in
 The English BERT is **not** applied cross-lingually, running `utseg
 --lang fra` does not load `CHATUtterance-en`. For any language without
 a TalkBank BERT model in the table above, `utseg` refuses the
-substitution by default and the file passes through unchanged. To
-permit the legacy Stanza constituency-parser fallback (the same
-segmenter Batchalign 2 used for unsupported languages), pass
-`--utseg-fallback-stanza`:
+substitution by default, and **the job is refused when it is planned**:
+the language and the fallback policy are both known before any work is
+dispatched, so the run stops there with a message naming the language.
+Nothing is written, and the input is not quietly copied through as if it
+had been segmented. To permit the legacy Stanza constituency-parser
+fallback (the same segmenter Batchalign 2 used for unsupported
+languages), pass `--utseg-fallback-stanza`:
 
 ```bash
 batchalign3 utseg corpus-fra/ --lang fra --utseg-fallback-stanza
@@ -138,6 +142,32 @@ See [Utterance Segmentation](../../reference/utterance-segmentation.md)
 for the algorithm details and the
 [Stanza Capability Registry](../../architecture/stanza-capability-registry.md)
 for the per-language processor availability table.
+
+---
+
+## Provenance
+
+Every file utseg writes records what segmented it in a
+`[fc-ba3 utseg | engine=... ; lang=... | ...]` comment. `engine=` is one of:
+
+| Value | Meaning |
+| --- | --- |
+| `<model id>@<revision>` | The TalkBank boundary model, with the exact revision the worker loaded (for example `talkbank/CHATUtterance-en@764ec3f...`) |
+| `stanza-constituency` | The opt-in Stanza constituency fallback (`--utseg-fallback-stanza`) |
+
+A boundary model is always written with its revision. It is loaded from a
+pinned snapshot and the commit is read off the directory on disk, so a worker
+that cannot say which revision it loaded refuses the job rather than reporting
+a bare id. Files written before that pin landed may carry an id with no
+revision; re-running `utseg` over them records the full identity.
+
+Several sources on one file are joined with `+` in text order. There is no
+placeholder: a worker that returns boundaries without naming what produced them
+leaves the file with no comment at all, and the run says so.
+
+Files segmented by a build before 2026-09-15 carry no comment, because the
+standalone command wrote none; re-running `utseg` over them adds one. See
+[Processing Provenance](../provenance.md).
 
 ---
 

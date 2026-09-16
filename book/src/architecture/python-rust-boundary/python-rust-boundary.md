@@ -1,7 +1,7 @@
 # Python-Rust Boundary
 
 **Status:** Current
-**Last updated:** 2026-08-31 07:13 EDT
+**Last updated:** 2026-09-16 04:34 EDT
 
 The talkbank-tools workspace has two architectural layers: the **CHAT
 core** (entirely Rust, no Python) and the **Batchalign runtime** (Rust
@@ -284,9 +284,21 @@ worker_fa_exec.rs       forced-alignment execution
 worker_media_exec.rs    speaker diarization, OpenSMILE, AVQI
 worker_text_results.rs  text task normalization + align_tokens
 worker_artifacts.rs     prepared-artifact loading from IPC
-cantonese_asr_bridge.rs Cantonese provider projection + normalization
-py_json_bridge.rs       Python → JSON conversion utility
+cantonese_asr_bridge.rs Cantonese provider projection + field admission
+py_json_bridge.rs       Python → JSON conversion, dispatched on exact type
 ```
+
+`py_json_bridge.rs` is the gate every worker response and provider payload
+passes through, so what it accepts is the real wire contract. It dispatches on
+EXACT Python type, in this order: `None`, `bool` (before `int`, because Python's
+`bool` is an `int` subclass), `str`, anything with `model_dump`, `dict`,
+`list`/`tuple`, exact `int` (refused outside the 64-bit range rather than
+wrapped), exact `float` (a non-finite value is refused naming its path, for
+example `$.monologues[0].elements[1].start_s`), and anything else refused by
+type name. It previously tried numeric extraction FIRST, and PyO3's numeric
+extraction honours `__int__` / `__float__` / `__index__`, so any number-like
+object silently became a JSON number: the conversion was deciding what a value
+meant rather than reading what it was.
 
 ### Worker V2 executors
 
@@ -300,7 +312,7 @@ calls the Python ML model, and returns raw results:
 | `execute_speaker_request_v2` | Speaker | PCM audio bytes | Run pyannote / NeMo |
 | `execute_opensmile_request_v2` | OpenSMILE | PCM audio bytes | Extract acoustic features |
 | `execute_avqi_request_v2` | AVQI | Paired audio bytes | Calculate voice quality |
-| `normalize_text_task_result` | Text tasks | n/a | Reshape `BatchInferResponse` → V2 types |
+| `normalize_*_result` (`worker_text_results.rs`) | Text tasks | n/a | Parse each host item into its tagged V2 result; an item that does not parse becomes that item's failure |
 
 ### Cantonese provider bridges
 
@@ -311,9 +323,37 @@ Python Cantonese ASR engines call back into Rust for output projection
 |---|---|
 | `funaudio_segments_to_asr` | FunASR segments → monologues + timed words |
 | `tencent_result_detail_to_asr` | Tencent output → monologues + timed words |
-| `aliyun_sentences_to_asr` | Aliyun output → monologues + timed words |
-| `normalize_cantonese` | Simplified → traditional + domain replacements |
-| `cantonese_char_tokens` | Per-character tokenization for Cantonese FA |
+| `aliyun_sentences_to_asr` | Aliyun output → monologues + timed words (with per-character tokenization when Aliyun sends a sentence without per-word timing) |
+
+Cantonese normalization is NOT on this boundary. `normalize_cantonese` and
+`cantonese_char_tokens` were exported here until 2026-09-16, for Python callers
+that production no longer had; normalization now has one owner in
+`batchalign-transform` and runs in the server.
+
+They also own SPEAKER ADMISSION. A provider adapter reports
+`{"kind": "attributed", "label": ...}` or `{"kind": "undiarized"}` rather than a
+bare speaker number, and the bridge admits that against what the REQUEST asked
+for (`ProviderDiarizationV2`): an absent speaker is `Undiarized` when no
+separation was requested, and a refusal when it was. No adapter writes a track
+number it was not given.
+
+The request's half of that question crosses the boundary as the same tagged
+value: `AsrBatchItem.diarization` is a `ProviderDiarizationV2`, parsed once by
+Pydantic and carrying no default, so every caller says what it asked the
+provider for. The one adapter that uses it, Tencent, matches on the two states
+to set that service's own two parameters. It used to receive an integer whose
+zero meant "do not separate" beside a Python default of 1, a count that means
+"separate this into one speaker" and is refused at submission.
+
+These bridges also own FIELD ADMISSION for the cloud providers. Tencent and
+Aliyun document every result field as nullable and their SDKs leave absent
+attributes as `None`, so the Python adapters forward the payload unchanged and
+Rust decides what each absence means: an absent time produces an untimed word
+with a named cause, never a zero, and a wrong-typed or inadmissible value
+refuses the file naming the provider, the position and the fault. The rules and
+the one interval owner are on the
+[ASR Token Pipeline](../../batchalign/architecture/asr-token-pipeline.md#provider-adapters-absent-fields-and-the-one-interval-owner)
+page.
 
 ### Rev.AI HTTP client
 
@@ -324,7 +364,7 @@ PyO3 wrappers were removed as dead code.
 
 ### GIL strategy
 
-All pure-Rust functions use `py.detach()` (PyO3 0.28) to release the
+All pure-Rust functions use `py.detach()` (PyO3 0.29) to release the
 GIL during computation. Worker executors hold the GIL only during
 Python model invocation.
 
@@ -375,32 +415,50 @@ profile starts up, the Rust server queries it and:
 1. **Infer tasks**: which inference backends are available
    (`_capabilities()` import probes in
    `batchalign/worker/_handlers.py`).
-2. **Engine versions**: non-empty engine identifier per advertised
-   infer task, used for cache / version gating.
+2. **Engine versions**: one entry per advertised infer task, keyed by task.
+   Forced alignment's entry is a validated engine name (`ReportedEngineName`,
+   a wrapper over `StampSafeText`: non-blank, no surrounding whitespace, none
+   of `|`, `;`, `]` or a line break), or `null` before an FA model has loaded.
+   Every other task's entry is `null`.
 
-The Rust server then runs these through
-`validate_infer_capability_gate()`, which validates the engine-version
-table and derives the released command surface from infer-task
-support. Server-owned commands (`transcribe`, `transcribe_s`,
-`benchmark`) are synthesized there from ASR availability rather than
-advertised by the worker.
+`WorkerPool::record_capabilities()` admits the report once, into
+`WorkerEngineReports` (`crates/batchalign/src/engine_reports.rs`), and stores
+the admitted form per worker key; nothing downstream reads the raw report. The
+released command surface is derived from it by `capability::command_supported`,
+the one availability rule that dispatch applies too: a command is advertised
+when the worker supports the `primary_infer_task` of the command's
+`CapabilityPlan` (`crates/batchalign/src/recipe_runner/command_spec.rs`,
+declared per entry in `recipe_runner/catalog.rs`). Engine names are not
+consulted. A plan names ONE task. A second declared list, `additional_infer_tasks`,
+was deleted on 2026-09-16: a later stage does not run on the worker this plan
+admitted, but goes back to the pool and derives its own key from its own
+request, so the speaker stage of `transcribe_s` is served by a speaker worker
+about which the admitting ASR worker's report says nothing. Server-owned commands (`transcribe`,
+`transcribe_s`, `benchmark`) are synthesized there from ASR availability
+rather than advertised by the worker.
 
 ### Infer-task probes
 
 Each `InferTask` has a set of Python imports that must succeed for it
 to be advertised:
 
-| InferTask | Required imports | Default engine version |
+| InferTask | Required imports | `engine_versions` entry |
 |---|---|---|
-| `morphosyntax` | `stanza` | `"stanza"` |
-| `utseg` | `stanza` | `"stanza"` |
-| `coref` | `stanza` | `"stanza"` |
-| `translate` | `googletrans` | `"googletrans-v1"` |
-| `fa` | `torch`, `torchaudio` | `"whisper"` |
-| `asr` | `whisper` or a configured Rev.AI key | `"whisper"` or `"rev"` |
-| `opensmile` | `opensmile` | `"opensmile"` |
-| `avqi` | `parselmouth`, `torchaudio` | `"praat"` |
-| `speaker` | `pyannote.audio` | `"pyannote"` |
+| `morphosyntax` | `stanza` | `null` |
+| `utseg` | `stanza` | `null` |
+| `coref` | `stanza` | `null` |
+| `translate` | `googletrans` | `null` |
+| `fa` | `torch`, `torchaudio` | the loaded FA model name; `null` until FA loads |
+| `asr` | `whisper` or a configured Rev.AI key | `null` |
+| `opensmile` | `opensmile` | `null` |
+| `avqi` | `parselmouth`, `torchaudio` | `null` |
+| `speaker` | `pyannote.audio` | `null` |
+
+Task advertisement uses import probes. The FA engine name is the opposite: it
+reflects what has actually loaded, so it is `null` before that. Only
+`_reported_engine()` in `batchalign/worker/_handlers.py` decides these
+entries, and it names FA's engine alone; a test-echo worker reports
+`"test-echo"` for FA and `null` for the rest.
 
 Rev.AI-backed server-mode transcription and Rev-backed UTR are
 synthesized on the Rust side. The infer-task table represents "can the
@@ -430,23 +488,45 @@ local model package?".
   "infer_tasks": ["morphosyntax", "utseg", "translate", "coref", "fa",
                   "asr", "opensmile", "avqi", "speaker"],
   "engine_versions": {
-    "morphosyntax": "1.9.2",
-    "utseg": "1.9.2",
-    "translate": "googletrans-v1",
-    "coref": "1.9.2",
-    "fa": "whisper-fa-whisper-large-v2",
-    "asr": "rev-v1"
+    "morphosyntax": null,
+    "utseg": null,
+    "translate": null,
+    "coref": null,
+    "fa": "whisper-fa-large-v2",
+    "asr": null,
+    "opensmile": null,
+    "avqi": null,
+    "speaker": null
   }
 }
 ```
 
-Engine versions drive cache invalidation: when a worker reports a new
-engine version, previously cached results for that task are
-automatically invalidated by the cache layer. The `commands` field
-remains only as compatibility metadata on the older `infer` /
-`batch_infer` IPC ops; current callers should treat
-`infer_tasks + engine_versions` as the authoritative capability
-contract.
+Every advertised task has exactly one `engine_versions` entry: FA's engine
+name (or `null` until an FA engine has loaded), and `null` for every other
+task. A blank or separator-bearing name, or a key that is not a task, is
+refused while the report is deserialized; admission
+(`WorkerEngineReports::admit`) refuses a missing entry, an entry for a task
+that was not advertised, or a name for any task other than forced alignment
+(`EngineReportAdmissionError::EngineNamedForNonFaTask`, reported as
+`{"kind": "engine_named_for_non_fa_task", "task": "<task>"}`). A refused report
+is recorded as that worker key's refusal (`WorkerError::CapabilitiesRefused`
+to the caller), and `/health` lists every key's latest outcome in
+`worker_capability_admissions`, so an operator sees why a worker is not used.
+
+Only forced alignment reads its engine from this map, because its cache rows
+are namespaced by that engine before any worker runs: when the FA worker
+reports a new engine, cached FA results for the old one miss. A worker that
+supports FA but has not loaded it yet still advertises `align`; dispatch loads
+FA on the selected worker (`ensure_task`), reads the report again, and
+`FaCacheNamespace::from_loaded` refuses only if the engine is still `null`
+after that load (or the report was taken after another task loaded).
+Morphosyntax, translation and coreference name their engines on every result
+item instead (see [Worker Protocol V2](../../batchalign/developer/worker-protocol-v2.md)),
+so their provenance comes from the results a file applied, never from this
+map. The `commands` field remains only as compatibility metadata on the older
+`infer` / `batch_infer` IPC ops. The authoritative capability contract is
+`infer_tasks`, which alone decides the command surface, plus FA's
+`engine_versions` entry, which is read only at dispatch.
 
 ### Checking capabilities at runtime
 
@@ -456,7 +536,9 @@ curl http://localhost:8000/health | python3 -m json.tool
 
 The `capabilities` field lists all advertised commands. If a command
 you expect is missing, the corresponding infer task likely failed its
-import probe or did not report an engine version.
+import probe, or the worker's report was refused (see
+`worker_capability_admissions` in the same response). Engine names never
+decide whether a command is advertised.
 
 ## See also
 

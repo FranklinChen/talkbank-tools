@@ -11,11 +11,11 @@
 
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-
-use crate::api::{ChatText, LanguageCode3};
+use crate::api::{LanguageCode3, ReportedEngineName};
 use crate::chat_ops::LanguageCode;
 use crate::chat_ops::morphosyntax_ops::declared_languages;
+use crate::provenance::TextStamp;
+use crate::types::worker_v2::{CorefAnnotationV2, CorefItemResultV2};
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_coref_request_v2};
@@ -25,16 +25,16 @@ use batchalign_transform::coref::{
     apply_coref_results, collect_coref_payloads, raw_to_bracket_response,
 };
 use batchalign_transform::parse::{is_dummy, parse_lenient};
-use batchalign_transform::serialize::to_chat_string;
 use batchalign_transform::validate::{ValidityLevel, validate_to_level};
 use tracing::{info, warn};
 
+use crate::api::FileStampOutcome;
 use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
 use crate::pipeline::post_validate::PostValidated;
 use crate::text_batch::{
-    TextBatchFileInput, TextBatchFileResult, TextBatchFileResults, TextBatchOperation,
-    TextBatchWorkflow, TextBatchWorkflowRequest, TextPerFileWorkflowRequest,
+    EngineItemFailure, ItemError, ItemFailures, TextBatchFileInput, TextBatchFileResult,
+    TextBatchFileResults,
 };
 
 /// Check whether a parsed CHAT file declares English as one of its languages.
@@ -61,176 +61,32 @@ fn file_has_english(chat_file: &crate::chat_ops::ChatFile) -> Result<bool, Serve
     Ok(langs.iter().any(|l| l.as_str() == "eng"))
 }
 
-/// Typed workflow operation for coref.
-pub(crate) struct CorefOperation;
-
-/// Trait-oriented workflow wrapper for coref.
-pub(crate) type CorefWorkflow = TextBatchWorkflow<CorefOperation>;
-
-#[async_trait]
-impl TextBatchOperation for CorefOperation {
-    type Shared<'a>
-        = &'a WorkerPool
-    where
-        Self: 'a;
-
-    type Params<'a>
-        = Cancellation<'a>
-    where
-        Self: 'a;
-
-    async fn run_single(
-        chat_text: ChatText<'_>,
-        lang: &LanguageCode3,
-        pool: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> Result<String, ServerError> {
-        run_coref_impl(chat_text.as_ref(), lang, pool, params).await
-    }
-
-    async fn run_batch(
-        files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
-        pool: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> TextBatchFileResults {
-        run_coref_batch_impl(files, lang, pool, params).await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Per-file coref processing
-// ---------------------------------------------------------------------------
-
-/// Process a single CHAT file through the coreference resolution pipeline.
+/// One document's coreference result, admitted at the worker boundary.
 ///
-/// Returns the serialized CHAT text with `%xcoref` tiers injected.
-/// Non-English files are returned as-is (checked via per-file `@Languages`).
-pub async fn process_coref(
-    chat_text: &str,
-    lang: &LanguageCode3,
-    pool: &WorkerPool,
-    cancellation: Cancellation<'_>,
-) -> Result<String, ServerError> {
-    CorefWorkflow::new()
-        .run_per_file(TextPerFileWorkflowRequest {
-            chat_text: ChatText::from(chat_text),
-            lang,
-            shared: pool,
-            params: cancellation,
-        })
-        .await
-}
-
-async fn run_coref_impl(
-    chat_text: &str,
-    lang: &LanguageCode3,
-    pool: &WorkerPool,
-    cancellation: Cancellation<'_>,
-) -> Result<String, ServerError> {
-    let parser = crate::chat_parser();
-    // 1. Parse
-    let (mut chat_file, parse_errors) = parse_lenient(&parser, chat_text);
-    if !parse_errors.is_empty() {
-        warn!(
-            num_errors = parse_errors.len(),
-            "Parse errors in coref input (continuing with recovery)"
-        );
-    }
-
-    // 1b. Skip dummy files
-    if is_dummy(&chat_file) {
-        return Ok(to_chat_string(&chat_file));
-    }
-
-    // 1c. Pre-validation gate (L1: StructurallyComplete)
-    if let Err(errors) = validate_to_level(
-        &chat_file,
-        &parse_errors,
-        ValidityLevel::StructurallyComplete,
-    ) {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return Err(ServerError::Validation(format!(
-            "coref pre-validation failed: {}",
-            msgs.join("; ")
-        )));
-    }
-
-    // 2. English-only gate (per-file @Languages, not job-level lang)
-    if !file_has_english(&chat_file)? {
-        return Ok(to_chat_string(&chat_file));
-    }
-
-    // 3. Collect payloads
-    let collected = collect_coref_payloads(&chat_file);
-    let coref_item = collected.batch_item;
-    let line_indices = collected.line_indices;
-    // Wave 5: collected.not_applicable carries typed NotApplicable
-    // outcomes for empty utterances. Not surfaced through the reporting
-    // tier here; available to any caller that wants them.
-
-    if coref_item.sentences.is_empty() {
-        return Ok(to_chat_string(&chat_file));
-    }
-
-    // 4. Infer via worker. Per-item failure surfaces as a typed
-    //    ServerError carrying the rendered failure list, no silent
-    //    no-coref fallback.
-    let coref_responses = infer_batch(
-        pool,
-        std::slice::from_ref(&coref_item),
-        &LanguageCode3::eng(),
-        cancellation,
-    )
-    .await?;
-    let mut unwrapped = crate::text_batch::unwrap_per_item_results("coref", coref_responses)
-        .map_err(|err| ServerError::Validation(err.to_string()))?;
-    let coref_response = unwrapped.pop().unwrap_or(CorefResponse {
-        annotations: Vec::new(),
-    });
-
-    // 5. Map sentence_idx → line_idx and build results map
-    let mut results: HashMap<usize, String> = HashMap::new();
-    for ann in &coref_response.annotations {
-        if ann.sentence_idx < line_indices.len() {
-            let line_idx = line_indices[ann.sentence_idx];
-            results.insert(line_idx, ann.annotation.clone());
-        } else {
-            warn!(
-                sentence_idx = ann.sentence_idx,
-                num_sentences = line_indices.len(),
-                "Coref annotation sentence_idx out of range"
-            );
-        }
-    }
-
-    // 6. Apply annotations
-    apply_coref_results(&mut chat_file, &results);
-
-    // 7. Inject provenance, then gate. Coref is English-only, so the
-    // provenance lang is hardcoded `eng` regardless of any value the
-    // gateway/dispatch handed in. The `lang: &LanguageCode3` parameter on
-    // this function is retained for shared-trait symmetry with the other
-    // text commands but is otherwise unused, see the 2026-05-03 incident
-    // for why a job-level lang must not flow into provenance.
-    let _ = lang; // intentionally ignored
-    let provenance = crate::provenance::coref_provenance(LanguageCode3::eng().as_ref(), "stanza");
-    crate::provenance::inject_provenance(&mut chat_file, &provenance);
-
-    // 8. The gate runs last, over the model that becomes the returned bytes.
-    // A refusal fails the command; no partial or invalid output is produced.
-    PostValidated::gate_owned(
-        chat_file,
-        ValidityLevel::StructurallyComplete,
-        crate::api::ReleasedCommand::Coref,
-    )
-    .map(PostValidated::into_text)
-    .map_err(|failure| ServerError::Validation(failure.to_string()))
+/// Each resolved document names the engine that resolved it, which is what
+/// coref provenance names: nothing is read from the worker's capability
+/// report.
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedCoref {
+    /// Resolved, by the engine the worker named on the result.
+    Resolved {
+        /// The bracket annotations to apply.
+        response: CorefResponse,
+        /// The engine that produced them.
+        engine: ReportedEngineName,
+    },
+    /// The worker found no sentences to resolve, so no engine ran.
+    NoSentences,
 }
 
 // ---------------------------------------------------------------------------
 // Cross-file batch coref processing
 // ---------------------------------------------------------------------------
+//
+// There is no per-file entry point. Every coref job runs through the batch
+// path below, which now stamps provenance the way the deleted per-file path
+// did; keeping a second implementation of the same lifecycle meant the two
+// could disagree about what a file records, and they did.
 
 /// Process multiple CHAT files, sending one `CorefBatchItem` per eligible file
 /// in a single batched `execute_v2` call.
@@ -238,32 +94,25 @@ async fn run_coref_impl(
 /// Returns `(filename, Ok(output_text) | Err(error_msg))` for each file.
 pub(crate) async fn process_coref_batch(
     files: &[TextBatchFileInput],
-    lang: &LanguageCode3,
     pool: &WorkerPool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    CorefWorkflow::new()
-        .run_batch_files(TextBatchWorkflowRequest {
-            files,
-            lang,
-            shared: pool,
-            params: cancellation,
-        })
-        .await
+    run_coref_batch_impl(files, pool, cancellation).await
 }
 
 async fn run_coref_batch_impl(
     files: &[TextBatchFileInput],
-    _lang: &LanguageCode3,
     pool: &WorkerPool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    // `_lang` is intentionally unused. Coref is English-only (BA2 parity),
-    // so per-file English-ness is read from each file's `@Languages:` header
-    // (`file_has_english`) and the inference language is hardcoded to
-    // `LanguageCode3::eng()`. The parameter remains in the signature for
-    // shared-trait symmetry with utseg/translate. See the 2026-05-03
-    // morphotag incident for why a job-level lang must not flow through.
+    // No language parameter. Coref is English-only (BA2 parity): per-file
+    // English-ness is read from each file's `@Languages:` header
+    // (`file_has_english`) and the inference language is the constant
+    // `LanguageCode3::eng()`. The parameter that used to sit here existed only
+    // for shared-trait symmetry with utseg/translate; it was never read, and
+    // the dispatch that filled it refused every coref job trying to produce a
+    // value for it. See the 2026-05-03 morphotag incident for why a job-level
+    // lang must not flow through.
     let parser = crate::chat_parser();
     let mut results: TextBatchFileResults = Vec::with_capacity(files.len());
 
@@ -395,19 +244,28 @@ async fn run_coref_batch_impl(
 
     // 4. Per-file outcome map driven by per-item engine errors.
     //    Files whose item came back Err are marked failed; files whose
-    //    item came back Ok have annotations applied. ``per_file_failures``
-    //    is indexed by file_idx so step 5 can take ownership of the
-    //    error message via ``.take()`` without a HashMap lookup.
-    let mut per_file_failures: Vec<Option<String>> = vec![None; files.len()];
+    //    item came back Ok have annotations applied, and the engine that
+    //    resolved them is kept for that file's provenance stamp, which the
+    //    batch path used to drop on the floor. ``per_file_failures`` is
+    //    indexed by file_idx so step 5 can take ownership of the failure via
+    //    ``.take()`` without a HashMap lookup.
+    let mut per_file_failures: Vec<Option<EngineItemFailure>> = vec![None; files.len()];
+    let mut per_file_engines: Vec<Option<ReportedEngineName>> = vec![None; files.len()];
+    // No bounds guard: `infer_batch` refuses a count mismatch, so every
+    // `batch_idx` recorded above indexes a response. The guard that used to sit
+    // here was unreachable, and had it ever run it would have dropped a file's
+    // result silently, which is the shape this file's admission exists to stop.
     for &(file_idx, ref info) in &eligible_files {
-        if info.batch_idx >= all_responses.len() {
-            continue;
-        }
         match &all_responses[info.batch_idx] {
-            Err(message) => {
-                per_file_failures[file_idx] = Some(message.clone());
+            Err(failure) => {
+                per_file_failures[file_idx] = Some(failure.clone());
             }
-            Ok(coref_resp) => {
+            Ok(ResolvedCoref::NoSentences) => {}
+            Ok(ResolvedCoref::Resolved {
+                response: coref_resp,
+                engine,
+            }) => {
+                per_file_engines[file_idx] = Some(engine.clone());
                 let mut annotation_map: HashMap<usize, String> = HashMap::new();
                 for ann in &coref_resp.annotations {
                     if ann.sentence_idx < info.line_indices.len() {
@@ -436,18 +294,50 @@ async fn run_coref_batch_impl(
 
         // Per-item engine failure: file marked failed with typed
         // ItemErrors variant so the user sees the engine reason.
-        if let Some(message) = per_file_failures[file_idx].take() {
+        if let Some(failure) = per_file_failures[file_idx].take() {
             results.push(TextBatchFileResult::err(
                 file.filename.clone(),
                 crate::text_batch::TextWorkflowFileError::item_errors(
                     "coref",
-                    vec![crate::text_batch::ItemError {
+                    ItemFailures::of_one(ItemError {
                         item_index: 0,
-                        message,
-                    }],
+                        failure,
+                    }),
                 ),
             ));
             continue;
+        }
+
+        // Provenance, before the gate so the proof covers the bytes that are
+        // written: the engine THIS file's own result named. Coref is
+        // English-only, so the stamp's language is the constant `eng` rather
+        // than any job-level value (see the 2026-05-03 incident). A file that
+        // was never eligible (dummy, or not English) had no coref run, so no
+        // stamp question arises for it.
+        let mut stamp = FileStampOutcome::Unrecorded;
+        if eligible_files.iter().any(|(idx, _)| *idx == file_idx) {
+            let command = crate::api::ReleasedCommand::Coref.to_string();
+            match crate::provenance::result_named_provenance(
+                crate::provenance::ResultNamedCommand::Coref,
+                &LanguageCode3::eng(),
+                per_file_engines[file_idx].as_ref(),
+            ) {
+                TextStamp::Stamped(comment) => {
+                    crate::provenance::inject_provenance(&mut parsed_files[file_idx], &comment);
+                    stamp = FileStampOutcome::Stamped { command };
+                }
+                TextStamp::NotStamped(reason) => {
+                    info!(
+                        filename = %filename,
+                        reason = %reason,
+                        "coref wrote no provenance stamp"
+                    );
+                    stamp = FileStampOutcome::NotStamped {
+                        command,
+                        reason: reason.to_string(),
+                    };
+                }
+            }
         }
 
         // Fail-closed post-validation, per file: a file whose output fails
@@ -458,7 +348,11 @@ async fn run_coref_batch_impl(
             ValidityLevel::StructurallyComplete,
             crate::api::ReleasedCommand::Coref,
         ) {
-            Ok(output) => results.push(TextBatchFileResult::ok(file.filename.clone(), output)),
+            Ok(output) => results.push(TextBatchFileResult::ok_stamped(
+                file.filename.clone(),
+                output,
+                stamp,
+            )),
             Err(failure) => {
                 warn!(filename = %filename, error = %failure, "coref output refused");
                 results.push(TextBatchFileResult::err(file.filename.clone(), failure));
@@ -476,7 +370,7 @@ async fn run_coref_batch_impl(
 /// Send one or more documents to a worker for coref inference via batched
 /// `execute_v2`.
 ///
-/// Returns one `Result<CorefResponse, String>` per item. Per-item engine
+/// Returns one `Result<ResolvedCoref, String>` per item. Per-item engine
 /// failures are propagated as `Err(message)` so callers can attribute the
 /// failure back to the affected file rather than silently emitting an
 /// empty (no-coref) response that looks like success.
@@ -485,7 +379,7 @@ async fn infer_batch(
     items: &[CorefBatchItem],
     lang: &LanguageCode3,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<CorefResponse, String>>, ServerError> {
+) -> Result<Vec<Result<ResolvedCoref, EngineItemFailure>>, ServerError> {
     let artifacts = PreparedArtifactRuntimeV2::new("coref_v2").map_err(|error| {
         ServerError::Validation(format!(
             "failed to create coref V2 artifact runtime: {error}"
@@ -498,7 +392,7 @@ async fn infer_batch(
         })?;
 
     let response = dispatch_execute_v2_with_retry(pool, lang, &request, cancellation).await?;
-    let result = parse_coref_result_v2(&response)
+    let result = parse_coref_result_v2(response)
         .map_err(|error| ServerError::Validation(format!("invalid coref V2 result: {error}")))?;
     if result.items.len() != items.len() {
         return Err(ServerError::Validation(format!(
@@ -508,50 +402,48 @@ async fn infer_batch(
         )));
     }
 
-    let mut responses = Vec::with_capacity(result.items.len());
-    for item_result in result.items.iter() {
-        if let Some(error) = &item_result.error {
-            responses.push(Err(error.clone()));
-            continue;
-        }
-
-        responses.push(Ok(coref_response_from_v2_item(item_result)));
-    }
-
-    Ok(responses)
+    // Each item is one of three outcomes; a resolved one carries its engine.
+    Ok(result
+        .items
+        .into_iter()
+        .map(|item| match item {
+            CorefItemResultV2::Resolved {
+                annotations,
+                engine,
+            } => Ok(ResolvedCoref::Resolved {
+                response: coref_response_from_v2_annotations(&annotations),
+                engine,
+            }),
+            CorefItemResultV2::NoSentences => Ok(ResolvedCoref::NoSentences),
+            CorefItemResultV2::Failed { error } => Err(EngineItemFailure::EngineReported(error)),
+        })
+        .collect())
 }
 
-/// Convert one typed V2 coref item result into the established Rust response.
-fn coref_response_from_v2_item(
-    item_result: &crate::types::worker_v2::CorefItemResultV2,
-) -> CorefResponse {
+/// Convert one resolved V2 document's annotations into the established Rust
+/// response.
+fn coref_response_from_v2_annotations(annotations: &[CorefAnnotationV2]) -> CorefResponse {
     let raw = CorefRawResponse {
-        annotations: item_result
-            .annotations
-            .as_ref()
-            .map(|annotations| {
-                annotations
+        annotations: annotations
+            .iter()
+            .map(|annotation| CorefRawAnnotation {
+                sentence_idx: annotation.sentence_idx,
+                words: annotation
+                    .words
                     .iter()
-                    .map(|annotation| CorefRawAnnotation {
-                        sentence_idx: annotation.sentence_idx,
-                        words: annotation
-                            .words
+                    .map(|word_refs| {
+                        word_refs
                             .iter()
-                            .map(|word_refs| {
-                                word_refs
-                                    .iter()
-                                    .map(|chain_ref| ChainRef {
-                                        chain_id: chain_ref.chain_id,
-                                        is_start: chain_ref.is_start,
-                                        is_end: chain_ref.is_end,
-                                    })
-                                    .collect()
+                            .map(|chain_ref| ChainRef {
+                                chain_id: chain_ref.chain_id,
+                                is_start: chain_ref.is_start,
+                                is_end: chain_ref.is_end,
                             })
-                            .collect(),
+                            .collect()
                     })
-                    .collect()
+                    .collect(),
             })
-            .unwrap_or_default(),
+            .collect(),
     };
     raw_to_bracket_response(&raw)
 }

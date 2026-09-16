@@ -1,7 +1,7 @@
 # Rust Core (`batchalign_core`)
 
 **Status:** Current
-**Last updated:** 2026-09-06 08:07 EDT
+**Last updated:** 2026-09-16 03:36 EDT
 
 For new contributors, start with:
 
@@ -46,6 +46,8 @@ runtime, never via callbacks from Python.
 |--------|---------|
 | `lib.rs` | Module registration |
 | `worker_protocol.rs` | IPC message dispatch (health, capabilities, infer, execute_v2) |
+| `worker_execute.rs` | Shared executor control plane: request validation, failure taxonomy, response building |
+| `worker_text_exec.rs` | Batched text-task executors (morphosyntax, utseg, translate, coref) |
 | `worker_asr_exec.rs` | ASR execution (Whisper, Cantonese providers) |
 | `worker_fa_exec.rs` | Forced alignment execution |
 | `worker_media_exec.rs` | Speaker diarization, OpenSMILE, AVQI |
@@ -76,16 +78,19 @@ the source under `crates/batchalign-pyo3/src/`.
 | `execute_speaker_request_v2(...)` | Load prepared audio, call pyannote / NeMo |
 | `execute_opensmile_request_v2(...)` | Load prepared audio, extract acoustic features |
 | `execute_avqi_request_v2(...)` | Load paired audio, calculate voice quality |
-| `normalize_text_task_result(...)` | Reshape `BatchInferResponse` → typed V2 results |
+| `execute_morphosyntax_request_v2(...)`, `execute_utseg_request_v2(...)`, `execute_translate_request_v2(...)`, `execute_coref_request_v2(...)` | Load the prepared text batch and check its item count, call the Python runner adapter, then normalize the host's `BatchInferResponse` into the typed V2 result (`normalize_<task>_result` in `worker_text_results.rs`) |
 
 ### Utilities
 
 | Function | Purpose |
 |----------|---------|
 | `align_tokens(...)` | Map Stanza tokenizer output back to CHAT words |
-| `normalize_cantonese(...)` | Simplified → traditional + domain replacements |
-| `cantonese_char_tokens(...)` | Per-character tokenization for Cantonese FA |
 | Cantonese bridge functions | Project FunASR / Tencent / Aliyun output into common shapes |
+
+Cantonese normalization is not on this list any more. It was exported as
+`normalize_cantonese` and `cantonese_char_tokens` until 2026-09-16, for Python
+callers production did not have; it now has one owner,
+`AlignedNormalization` in `batchalign-transform`, applied by the server.
 
 These functions are internal, they exist for the Rust runtime to
 call into the worker process. They are not part of any public API
@@ -167,7 +172,7 @@ select it from this workspace. Run it from a chatter checkout.
 ## GIL release strategy
 
 All pure-Rust `batchalign_core` entry points release the Python GIL
-via `py.detach()` (pyo3 0.28). This lets other Python threads run
+via `py.detach()` (pyo3 0.29). This lets other Python threads run
 while Rust does CPU-bound work.
 
 The few entry points that take Python callbacks hold the GIL only

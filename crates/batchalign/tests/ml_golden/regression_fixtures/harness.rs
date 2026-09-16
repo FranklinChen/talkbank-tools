@@ -10,7 +10,6 @@ use crate::common::regression_manifest::{
 use crate::common::{require_live_direct, require_revai_key, submit_paths_and_complete_direct};
 use batchalign::api::{JobStatus, ReleasedCommand};
 use batchalign::chat_ops::ChatFile;
-use batchalign::chat_ops::TierDomain;
 use batchalign::options::{
     AlignOptions, AsrEngineName, CommandOptions, CommonOptions, FaEngineName, TranscribeOptions,
     WorTierPolicy,

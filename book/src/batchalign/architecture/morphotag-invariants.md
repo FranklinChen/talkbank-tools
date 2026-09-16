@@ -46,7 +46,7 @@ flowchart TD
     Nlabel -->|"N == 0"| NA["MorOutcome::NotApplicable<br/>no %mor produced (correct)"]
     Nlabel -->|"N > 0"| D
 
-    D["Stage 2: Dispatch<br/>tok_ctx.original_words = word_lists<br/>(batchalign/inference/morphosyntax.py:375)"] --> S
+    D["Stage 2: Dispatch<br/>tok_ctx.original_words = word_lists<br/>(_realignment_applied in batchalign/inference/morphosyntax.py)"] --> S
     S["Stanza neural tokenizer<br/>re-tokenizes text, realigning<br/>to word_lists boundaries"] --> P
 
     P["Stage 3: Project<br/>map_ud_sentence + MWT Range reassembly<br/>(crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs)"] --> M

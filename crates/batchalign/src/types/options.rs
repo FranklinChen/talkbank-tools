@@ -545,6 +545,68 @@ pub struct OpensmileOptions {
     pub feature_set: String,
 }
 
+/// How many speakers a diarizer is asked to find.
+///
+/// Exactly N, and N is at least two. A count of ONE has no representation,
+/// because asking a diarizer to separate speakers while asserting the recording
+/// has one is a contradiction rather than a request: it is not "detect the
+/// count" (that is the absence of this value) and it is not a separation
+/// problem. Before this type, a count of 1 was representable and was obeyed:
+/// diarized runs forced every utterance onto a single track, which is why
+/// `--diarization enabled` transcripts came back with one `PAR0`.
+///
+/// Franklin's ruling, 2026-09-15: "a diarization speaker count is either
+/// exactly N (N at least 2) or automatic, for every diarizer."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct DiarizationSpeakerCount(u32);
+
+impl DiarizationSpeakerCount {
+    /// The smallest count that asks a diarizer a question it can answer.
+    pub const MINIMUM: u32 = 2;
+
+    /// The count, as the diarizer's own parameter.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for DiarizationSpeakerCount {
+    type Error = InvalidDiarizationSpeakerCount;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value < Self::MINIMUM {
+            return Err(InvalidDiarizationSpeakerCount { value });
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<DiarizationSpeakerCount> for u32 {
+    fn from(value: DiarizationSpeakerCount) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for DiarizationSpeakerCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A speaker count that cannot be asked of a diarizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "a diarization speaker count must be at least {minimum}, and {value} was given. \
+     Omit the count to have the diarizer detect it, which is the recommended mode.",
+    minimum = DiarizationSpeakerCount::MINIMUM
+)]
+pub struct InvalidDiarizationSpeakerCount {
+    /// The count that was asked for.
+    pub value: u32,
+}
+
 /// Options for the `diarize` command (standalone speaker diarization).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiarizeOptions {
@@ -562,8 +624,11 @@ pub struct DiarizeOptions {
 
     /// Expected speaker count when the caller knows it; `None` lets the
     /// diarizer auto-detect (the normal mode, and pyannote's strength).
+    ///
+    /// Typed so that a count of one has no representation: see
+    /// [`DiarizationSpeakerCount`].
     #[serde(default)]
-    pub expected_speakers: Option<crate::api::NumSpeakers>,
+    pub expected_speakers: Option<DiarizationSpeakerCount>,
 }
 
 fn default_standalone_speaker_engine() -> SpeakerEngineName {
@@ -1082,12 +1147,44 @@ mod tests {
         let options = CommandOptions::Diarize(DiarizeOptions {
             common: CommonOptions::default(),
             speaker_engine: SpeakerEngineName::PyannoteAi,
-            expected_speakers: Some(crate::api::NumSpeakers(3)),
+            expected_speakers: Some(
+                DiarizationSpeakerCount::try_from(3).expect("three speakers is answerable"),
+            ),
         });
         let json = serde_json::to_string(&options).expect("serialize diarize options");
         assert!(json.contains(r#""speaker_engine":"pyannote_ai""#));
         let back = serde_json::from_str(&json).expect("deserialize diarize options");
         assert_eq!(options, back);
+    }
+
+    /// A diarization count of one has no representation, on either door.
+    ///
+    /// The ruling is that a count is exactly N (N at least 2) or automatic;
+    /// automatic is the ABSENCE of a count, so one is neither. Refused at
+    /// deserialization as well as construction, because a direct HTTP client
+    /// posts this JSON without passing the CLI's value parser.
+    #[test]
+    fn a_diarization_count_below_two_has_no_representation() {
+        for refused in [0, 1] {
+            assert!(
+                DiarizationSpeakerCount::try_from(refused).is_err(),
+                "{refused} speakers is not a question a diarizer can answer"
+            );
+            let json = format!(r#"{{"command":"diarize","expected_speakers":{refused}}}"#);
+            let error = serde_json::from_str::<CommandOptions>(&json)
+                .expect_err("the wire must refuse it too");
+            assert!(error.to_string().contains("at least 2"), "{error}");
+        }
+        assert_eq!(
+            DiarizationSpeakerCount::try_from(2).expect("two is the minimum").get(),
+            2
+        );
+        let automatic: CommandOptions = serde_json::from_str(r#"{"command":"diarize"}"#)
+            .expect("omitting the count asks for automatic detection");
+        let CommandOptions::Diarize(automatic) = automatic else {
+            panic!("expected diarize options");
+        };
+        assert_eq!(automatic.expected_speakers, None);
     }
 
     #[test]

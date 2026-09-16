@@ -146,7 +146,7 @@ use super::helpers::{
     order_files_for_command, poll_and_write_incrementally,
 };
 use super::paths::prepare_paths_submission;
-use super::{server_supports_command, warn_stale_server};
+use super::{refuse_foreign_server_build, server_supports_command};
 use crate::cli::args::InputKind;
 
 /// Submit files to a single server, poll for completion, write results.
@@ -174,7 +174,9 @@ pub(super) async fn dispatch_single_server(
             return Err(e);
         }
     };
-    warn_stale_server(server_url, &health);
+    // Before anything is submitted: a server of another build would produce
+    // results this CLI then writes as its own.
+    refuse_foreign_server_build(server_url, &health)?;
 
     // Check capabilities
     if !server_supports_command(&health.capabilities, command) {

@@ -5,15 +5,9 @@
 //! conventions.
 
 use crate::api::ReleasedCommand;
-use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind, command_spec};
+use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind};
 #[cfg(test)]
 use crate::recipe_runner::runtime::result_display_path_for_command;
-use crate::worker::InferTask;
-
-/// Return the primary infer task backing one released command.
-pub(crate) fn infer_task_for_command(command: ReleasedCommand) -> InferTask {
-    command_spec(command).capabilities.primary_infer_task
-}
 
 /// Return `true` when the released command must use a Rust-owned CHAT-backed
 /// infer dispatch path instead of a pure content relay.

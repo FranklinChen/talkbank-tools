@@ -40,13 +40,12 @@ flowchart TD
     discover --> pair[Pair FILE.cha with FILE.gold.cha]
     pair --> found{Gold companion or template found?}
     found -->|No| fail[Report file error]
-    found -->|Yes| morph[process_morphosyntax\nmain transcript only]
+    found -->|Yes| morph[process_morphosyntax\nmain transcript only\n→ validated document, carried as a proof]
     pair --> parse_gold[parse_lenient raw gold\n→ gold AST]
-    morph --> parse_main[parse_lenient morphotagged main\n→ main AST]
-    parse_main --> bundle[compare()\nconform + local window search + local DP\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
+    morph --> bundle[compare()\nconform + local window search + local DP\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
     parse_gold --> bundle
-    bundle --> released[materialize_released\nproject_gold_structurally()\n(compare.rs:132)]
-    bundle --> internal_main[materialize_main_annotated\n(compare.rs:112: internal/benchmark)\ninject %xsrep / %xsmor on main]
+    bundle --> released[materialize_released\nproject_gold_structurally]
+    bundle --> internal_main[materialize_main_annotated\ninternal/benchmark\ninject %xsrep / %xsmor on main]
     released --> safe{Exact structural match?}
     safe -->|Yes| copy[Copy %mor / %gra / %wor]
     safe -->|No, full gold coverage| mor_only[Project %mor only]
@@ -110,6 +109,43 @@ The output is the **projected reference transcript**, not the main hypothesis.
 The gold transcript's structure is preserved; morphosyntactic information from
 the main transcript is projected onto it structurally where safe.
 
+### Where the part of speech comes from
+
+compare morphotags the main transcript itself and reads the gold companion off
+disk as it is, so the usual pairing is a tagged main side and an untagged gold
+one. Which transcript a tag is read from is decided once per file, from whether
+the gold companion carries `%mor` at all:
+
+| Gold companion | Matches report | Insertions report | Deletions report |
+| --- | --- | --- | --- |
+| Carries `%mor` | the gold tag | the main tag | the gold tag |
+| Carries no `%mor` | the main tag | the main tag | `?` |
+
+With a tagged gold companion the gold tag is what a reviewer needs: when the two
+transcripts disagree about a word they both contain, the gold-standard tag is
+the point of running compare.
+
+With an untagged one there is no gold tag to report. A match means both sides
+hold the same word, and the main side was morphotagged by this very run, so its
+tag describes that word and is the only tag in existence for it. A deletion is a
+gold word the main transcript does not contain, so nothing tagged it anywhere
+and it reports `?`.
+
+**This differs from batchalign2 on purpose.** batchalign2 attributes the gold
+form's tag to every match and falls back to the literal `?` per form, with no
+notion of whether the gold side is tagged at all. Against the untagged gold
+companion that is the normal case, that makes every matched word `?` and
+collapses the whole per-POS breakdown in `.compare.csv` into a single `?` row.
+BA3 reports the tag it actually has.
+
+One consequence is worth knowing. Punctuation is excluded from the comparison by
+its surface form or by a `PUNCT` tag, and the second test can only fire on a
+document that has tags. On an untagged gold companion, a token that is
+punctuation only by its tag is therefore aligned as an ordinary word. Nothing
+can recover a tag from a document that has none; the tagged-versus-untagged
+decision is what makes that a stated property of an untagged companion rather
+than an accident.
+
 ## Output: `.compare.csv`
 
 A companion `.compare.csv` is written alongside each output `.cha` file. It
@@ -129,6 +165,14 @@ command materializes the projected-reference view. The main-annotated view
 
 **Gold files are never modified.** Only the primary `.cha` and the output
 `.cha` and `.compare.csv` are written.
+
+**The main transcript is never re-read from text.** compare morphotags the main
+transcript and then compares the document that morphotag produced, which is the
+document its own validation gate judged. The main side used to be serialized
+and parsed again with the lenient parser before being compared, so the compared
+document was the parser's recovery of those bytes and a parse failure on that
+path was a log line rather than a failure. The gold companion is still parsed
+leniently, because it is read off disk as it is and nothing vouched for it.
 
 ---
 

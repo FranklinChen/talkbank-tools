@@ -1,43 +1,64 @@
-//! Worker capability discovery, validation, and snapshot resolution.
+//! Which released commands a worker set can serve.
 //!
-//! This module owns the logic that determines which released commands a
-//! batchalign3 instance can serve, based on the infer-task set reported by
-//! the Python worker subsystem. It does NOT depend on axum, sqlx, or any
-//! server-specific crate.
+//! The worker's report is admitted in [`crate::engine_reports`] (one typed
+//! engine report per advertised task), where the pool records it. This module
+//! owns the rule that turns an admitted report into command availability,
+//! [`command_supported`], and applies it in both places that ask: the
+//! advertised surface ([`WorkerCapabilitySnapshot::detected`], served by
+//! `/health` and used to accept job submissions) and dispatch
+//! (`runner::routing`).
 //!
-//! Used by both the direct-mode host ([`crate::worker_setup`]) and the HTTP
-//! server ([`crate::state`]).
-
-use std::collections::BTreeMap;
+//! # Supporting a task is not knowing its engine
+//!
+//! A command is available when the worker advertises the command's primary
+//! infer task. That alone decides advertisement and job acceptance, from any
+//! admitted report, including one a lazily loading worker gave before it
+//! loaded anything, so advertisement never withholds a command merely because
+//! a model has not been loaded yet.
+//!
+//! Knowing which engine runs a task is a separate fact, read later. Only forced
+//! alignment needs it before dispatch (its cache rows are namespaced by the FA
+//! engine), and the forced-alignment dispatch arm reads it itself with
+//! [`crate::engine_reports::FaCacheNamespace::from_loaded`], from the report
+//! the pool took after loading FA on the selected worker. There is no second
+//! declaration of which commands need an identity: the arm that reads the
+//! namespace is the only place that says so.
+//!
+//! It does NOT depend on axum, sqlx, or any server-specific crate. Used by
+//! both the direct-mode host ([`crate::worker_setup`]) and the HTTP server
+//! ([`crate::state`]).
 
 use tracing::warn;
 
-use crate::command_model::{CommandCapabilityKind, command_specs};
-use crate::error;
-use crate::worker::target::task_name as infer_task_capability_name;
-use crate::worker::{InferTask, WorkerCapabilities};
+use crate::api::ReleasedCommand;
+use crate::command_model::{CapabilityPlan, CommandCapabilityKind, command_specs};
+use crate::engine_reports::{EngineIdentityUnavailable, WorkerEngineReports};
+use crate::worker::InferTask;
 
 // ---------------------------------------------------------------------------
-// Capability snapshot
+// The availability rule
 // ---------------------------------------------------------------------------
 
-/// One resolved view of worker capability state used by execution-time callers.
+/// The availability rule: the worker supports the command's primary infer
+/// task.
 ///
-/// The startup path may only know an optimistic command list while the worker
-/// pool has not yet spawned a real backend. Once the pool has lazily probed a
-/// live worker, callers should switch to that detected infer-task/engine view.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkerCapabilitySnapshot {
-    pub capabilities: Vec<String>,
-    pub infer_tasks: Vec<InferTask>,
-    pub engine_versions: BTreeMap<String, String>,
+/// Read from any admitted report, loaded or not, because support does not
+/// depend on a model having been loaded.
+pub(crate) fn command_supported(
+    plan: &CapabilityPlan,
+    reports: &WorkerEngineReports,
+) -> Result<(), EngineIdentityUnavailable> {
+    if reports.supports(plan.primary_infer_task) {
+        Ok(())
+    } else {
+        Err(EngineIdentityUnavailable::NotSupported {
+            task: plan.primary_infer_task,
+        })
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Capability validation
-// ---------------------------------------------------------------------------
-
-fn derive_command_capabilities(infer_tasks: &[InferTask]) -> Vec<String> {
+/// The released commands a worker supports, in advertised order.
+fn derive_command_capabilities(reports: &WorkerEngineReports) -> Vec<ReleasedCommand> {
     let mut derived = Vec::new();
 
     // Two passes, so server-composed commands are advertised after the
@@ -52,13 +73,10 @@ fn derive_command_capabilities(infer_tasks: &[InferTask]) -> Vec<String> {
             .iter()
             .filter(|spec| spec.capability_kind == kind)
         {
-            let command = spec.command;
-            if infer_tasks.contains(&spec.capabilities.primary_infer_task)
-                && !derived
-                    .iter()
-                    .any(|cap: &String| command.as_str() == cap.as_str())
+            if command_supported(&spec.capabilities, reports).is_ok()
+                && !derived.contains(&spec.command)
             {
-                derived.push(command.to_string());
+                derived.push(spec.command);
             }
         }
     }
@@ -66,289 +84,256 @@ fn derive_command_capabilities(infer_tasks: &[InferTask]) -> Vec<String> {
     derived
 }
 
-/// Derive released command capabilities from infer tasks and validate engine versions.
-///
-/// Engine version entries for reported infer tasks must still be present and
-/// non-empty. The worker-reported `commands` field is treated as compatibility
-/// metadata only; released server command availability is derived entirely from
-/// infer-task support.
-pub(crate) fn validate_infer_capability_gate(
-    infer_tasks: &[InferTask],
-    engine_versions: &BTreeMap<String, String>,
-    test_echo_mode: bool,
-) -> Result<Vec<String>, error::ServerError> {
-    if test_echo_mode {
-        let mut commands: Vec<String> = batchalign_types::command_spec::COMMAND_SPECS
-            .iter()
-            .map(|s| s.name.as_str().to_string())
-            .collect();
-        commands.sort();
-        commands.dedup();
-        return Ok(commands);
-    }
+// ---------------------------------------------------------------------------
+// Capability snapshot
+// ---------------------------------------------------------------------------
 
-    // Validate engine versions for all reported infer tasks.
-    for task in infer_tasks {
-        let task_name = infer_task_capability_name(*task);
-        let Some(version) = engine_versions.get(task_name) else {
-            return Err(error::ServerError::Validation(format!(
-                "worker capability gate failed: infer task '{task_name}' is reported but engine_versions['{task_name}'] is missing"
-            )));
-        };
-        if version.trim().is_empty() {
-            return Err(error::ServerError::Validation(format!(
-                "worker capability gate failed: infer task '{task_name}' has empty engine_versions['{task_name}']"
-            )));
+/// One resolved view of what a worker set can serve: the released commands
+/// and the infer tasks behind them.
+///
+/// Both lists are derived at construction and private, so no caller can hand
+/// in a command list that disagrees with the tasks, and there is exactly one
+/// copy for the server's state, the direct host and `/health` to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerCapabilitySnapshot {
+    commands: Vec<ReleasedCommand>,
+    infer_tasks: Vec<InferTask>,
+}
+
+impl WorkerCapabilitySnapshot {
+    /// Every released command, from every task a command is advertised from.
+    ///
+    /// The view for two situations that both lack a report to derive from:
+    /// before any worker has answered (real capabilities are detected lazily
+    /// on the first spawn, which avoids a slow probe worker at startup), and
+    /// test-echo workers, which answer every task. Commands are listed by
+    /// wire name, as `/health` has always listed this view.
+    pub(crate) fn every_released_command() -> Self {
+        let mut commands: Vec<ReleasedCommand> =
+            command_specs().iter().map(|spec| spec.command).collect();
+        commands.sort_by_key(|command| command.as_str());
+        commands.dedup();
+        let infer_tasks = command_specs()
+            .iter()
+            .map(|spec| spec.capabilities.primary_infer_task)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self {
+            commands,
+            infer_tasks,
         }
     }
 
-    let derived = derive_command_capabilities(infer_tasks);
-    if derived.is_empty() && !infer_tasks.is_empty() {
-        warn!(infer_tasks = ?infer_tasks, "No released commands derived from infer-task set");
+    /// The view a live worker's admitted report supports.
+    pub(crate) fn detected(reports: &WorkerEngineReports) -> Self {
+        let commands = derive_command_capabilities(reports);
+        let infer_tasks: Vec<InferTask> = reports.tasks().collect();
+        if commands.is_empty() && !infer_tasks.is_empty() {
+            warn!(
+                infer_tasks = ?infer_tasks,
+                "No released commands derived from the admitted infer-task set"
+            );
+        }
+        Self {
+            commands,
+            infer_tasks,
+        }
     }
 
-    Ok(derived)
-}
-
-/// Resolve one capability snapshot, preferring live detected worker data when
-/// the pool has already probed a real backend.
-pub(crate) fn resolve_worker_capability_snapshot(
-    startup_capabilities: &[String],
-    startup_infer_tasks: &[InferTask],
-    startup_engine_versions: &BTreeMap<String, String>,
-    test_echo_mode: bool,
-    detected: Option<&WorkerCapabilities>,
-) -> Result<WorkerCapabilitySnapshot, error::ServerError> {
-    if let Some(detected) = detected {
-        let capabilities = validate_infer_capability_gate(
-            &detected.infer_tasks,
-            &detected.engine_versions,
-            test_echo_mode,
-        )?;
-        return Ok(WorkerCapabilitySnapshot {
-            capabilities,
-            infer_tasks: detected.infer_tasks.clone(),
-            engine_versions: detected.engine_versions.clone(),
-        });
+    /// Choose the view: test-echo workers answer everything, a detected
+    /// report is authoritative once one exists, and until then every released
+    /// command is assumed.
+    pub(crate) fn resolve(test_echo_mode: bool, detected: Option<&WorkerEngineReports>) -> Self {
+        match (test_echo_mode, detected) {
+            (true, _) | (false, None) => Self::every_released_command(),
+            (false, Some(reports)) => Self::detected(reports),
+        }
     }
 
-    Ok(WorkerCapabilitySnapshot {
-        capabilities: startup_capabilities.to_vec(),
-        infer_tasks: startup_infer_tasks.to_vec(),
-        engine_versions: startup_engine_versions.clone(),
-    })
+    /// Released commands this worker set can serve.
+    pub(crate) fn commands(&self) -> &[ReleasedCommand] {
+        &self.commands
+    }
+
+    /// Whether this worker set can serve `command`.
+    pub(crate) fn serves(&self, command: ReleasedCommand) -> bool {
+        self.commands.contains(&command)
+    }
+
+    /// The served commands by wire name, for responses and error messages.
+    pub(crate) fn command_names(&self) -> Vec<String> {
+        self.commands
+            .iter()
+            .map(|command| command.as_str().to_owned())
+            .collect()
+    }
+
+    /// Infer tasks behind those commands, in `InferTask` order.
+    pub(crate) fn infer_tasks(&self) -> &[InferTask] {
+        &self.infer_tasks
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_worker_capability_snapshot, validate_infer_capability_gate};
-    use crate::worker::{InferTask, WorkerCapabilities};
-    use std::collections::BTreeMap;
+    use super::{WorkerCapabilitySnapshot, command_supported};
+    use crate::api::{ReleasedCommand, ReportedEngineName};
+    use crate::command_model::command_spec;
+    use crate::engine_reports::{EngineIdentityUnavailable, FaCacheNamespace, WorkerEngineReports};
+    use crate::worker::InferTask;
+    use crate::worker::pool::LoadedCapabilities;
 
-    #[test]
-    fn infer_gate_returns_no_commands_without_infer_tasks() {
-        let filtered = validate_infer_capability_gate(&[], &BTreeMap::new(), false)
-            .expect("empty infer task set should derive an empty command list");
-        assert!(filtered.is_empty());
+    /// An admitted report: the advertised tasks plus one engine entry each.
+    fn reports(entries: &[(InferTask, Option<&str>)]) -> WorkerEngineReports {
+        WorkerEngineReports::admit(
+            &entries.iter().map(|(task, _)| *task).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|(task, name)| {
+                    (
+                        *task,
+                        name.map(|name| ReportedEngineName::try_from(name).expect("valid name")),
+                    )
+                })
+                .collect(),
+        )
+        .expect("complete report")
+    }
+
+    fn commands(snapshot: &WorkerCapabilitySnapshot) -> Vec<&str> {
+        snapshot
+            .commands()
+            .iter()
+            .map(|command| command.as_str())
+            .collect()
     }
 
     #[test]
-    fn infer_gate_derives_released_commands_from_infer_tasks() {
-        let infer_tasks = vec![
-            InferTask::Morphosyntax,
-            InferTask::Utseg,
-            InferTask::Translate,
-            InferTask::Coref,
+    fn no_infer_tasks_derive_no_commands() {
+        assert!(
+            WorkerCapabilitySnapshot::detected(&reports(&[]))
+                .commands()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn released_commands_derive_from_infer_tasks_in_advertised_order() {
+        let snapshot = WorkerCapabilitySnapshot::detected(&reports(&[
+            (InferTask::Morphosyntax, None),
+            (InferTask::Utseg, None),
+            (InferTask::Translate, None),
+            (InferTask::Coref, None),
+            (InferTask::Fa, Some("whisper-fa-v1")),
+            (InferTask::Opensmile, None),
+            (InferTask::Avqi, None),
+        ]));
+        assert_eq!(
+            commands(&snapshot),
+            vec![
+                "morphotag",
+                "utseg",
+                "translate",
+                "coref",
+                "align",
+                "compare",
+                "opensmile",
+                "avqi",
+            ]
+        );
+    }
+
+    /// The lazy-daemon case. A registry daemon that loads models on demand is
+    /// probed before it has loaded FA, so its first report SUPPORTS FA but
+    /// names no FA engine. It still advertises and accepts `align`. At
+    /// dispatch the pool loads FA and reads again: a named engine resolves the
+    /// namespace, and only an engine still unnamed after that load refuses.
+    #[test]
+    fn a_lazy_daemon_probed_before_fa_loads_advertises_align_and_refuses_only_if_unnamed_after_load()
+     {
+        let align = &command_spec(ReleasedCommand::Align).capabilities;
+
+        let before_load = reports(&[(InferTask::Fa, None), (InferTask::Asr, None)]);
+        assert!(WorkerCapabilitySnapshot::detected(&before_load).serves(ReleasedCommand::Align));
+        assert_eq!(command_supported(align, &before_load), Ok(()));
+
+        let named_after_load = LoadedCapabilities::for_test(
             InferTask::Fa,
-            InferTask::Opensmile,
-            InferTask::Avqi,
-        ];
-        let versions = BTreeMap::from([
-            ("morphosyntax".to_string(), "stanza-1.9.2".to_string()),
-            ("utseg".to_string(), "stanza".to_string()),
-            ("translate".to_string(), "seamless-v1".to_string()),
-            ("coref".to_string(), "stanza-1.9.2".to_string()),
-            ("fa".to_string(), "whisper".to_string()),
-            ("opensmile".to_string(), "opensmile".to_string()),
-            ("avqi".to_string(), "praat".to_string()),
-        ]);
-        let filtered = validate_infer_capability_gate(&infer_tasks, &versions, false)
-            .expect("complete infer-task set should derive released commands");
+            reports(&[(InferTask::Fa, Some("wave2vec-fa-v1"))]),
+        );
+        assert_eq!(command_supported(align, named_after_load.reports()), Ok(()));
         assert_eq!(
-            filtered,
-            vec![
-                "morphotag".to_string(),
-                "utseg".to_string(),
-                "translate".to_string(),
-                "coref".to_string(),
-                "align".to_string(),
-                "compare".to_string(),
-                "opensmile".to_string(),
-                "avqi".to_string(),
-            ]
+            FaCacheNamespace::from_loaded(&named_after_load),
+            Ok(FaCacheNamespace::for_test("wave2vec-fa-v1"))
         );
-    }
 
-    #[test]
-    fn infer_gate_rejects_missing_engine_version() {
-        let infer_tasks = vec![InferTask::Morphosyntax];
-        let err = validate_infer_capability_gate(&infer_tasks, &BTreeMap::new(), false)
-            .expect_err("missing engine_versions entry should fail");
-        assert!(
-            err.to_string()
-                .contains("engine_versions['morphosyntax'] is missing"),
-            "actual: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn infer_gate_rejects_empty_engine_version() {
-        let infer_tasks = vec![InferTask::Fa];
-        let versions = BTreeMap::from([("fa".to_string(), " ".to_string())]);
-        let err = validate_infer_capability_gate(&infer_tasks, &versions, false)
-            .expect_err("empty engine version should fail");
-        assert!(
-            err.to_string().contains("empty engine_versions['fa']"),
-            "actual: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn infer_gate_accepts_complete_capabilities() {
-        let infer_tasks = vec![InferTask::Morphosyntax, InferTask::Fa];
-        let versions = BTreeMap::from([
-            ("morphosyntax".to_string(), "stanza-1.9.2".to_string()),
-            ("fa".to_string(), "whisper-fa-large-v3".to_string()),
-        ]);
-        let filtered = validate_infer_capability_gate(&infer_tasks, &versions, false)
-            .expect("complete infer capability data should pass");
+        let unnamed_after_load =
+            LoadedCapabilities::for_test(InferTask::Fa, reports(&[(InferTask::Fa, None)]));
         assert_eq!(
-            filtered,
-            vec![
-                "morphotag".to_string(),
-                "align".to_string(),
-                "compare".to_string(),
-            ]
+            FaCacheNamespace::from_loaded(&unnamed_after_load),
+            Err(EngineIdentityUnavailable::UnreportedAfterLoad {
+                task: InferTask::Fa
+            })
         );
     }
 
+    /// A command whose task is not supported is neither advertised nor
+    /// accepted, whatever else the worker names.
     #[test]
-    fn infer_gate_synthesizes_server_owned_asr_commands() {
-        let infer_tasks = vec![InferTask::Asr];
-        let versions = BTreeMap::from([("asr".to_string(), "whisper".to_string())]);
-        let filtered = validate_infer_capability_gate(&infer_tasks, &versions, false)
-            .expect("server-owned ASR commands should be synthesized when ASR is available");
+    fn an_unsupported_task_is_neither_advertised_nor_accepted() {
+        let align = &command_spec(ReleasedCommand::Align).capabilities;
+        let no_fa = reports(&[(InferTask::Morphosyntax, None)]);
+        assert!(!WorkerCapabilitySnapshot::detected(&no_fa).serves(ReleasedCommand::Align));
         assert_eq!(
-            filtered,
-            vec![
-                "transcribe".to_string(),
-                "transcribe_s".to_string(),
-                "benchmark".to_string(),
-            ]
+            command_supported(align, &no_fa),
+            Err(EngineIdentityUnavailable::NotSupported {
+                task: InferTask::Fa
+            })
         );
     }
 
     #[test]
-    fn infer_gate_skips_test_echo_mode() {
-        let filtered = validate_infer_capability_gate(&[], &BTreeMap::new(), true)
-            .expect("test-echo mode should bypass strict infer gate");
-        assert!(filtered.iter().any(|command| command == "morphotag"));
-        assert!(filtered.iter().any(|command| command == "transcribe"));
-    }
-
-    #[test]
-    fn resolve_worker_capability_snapshot_prefers_live_detected_tasks() {
-        let startup_capabilities = vec!["morphotag".to_string(), "utseg".to_string()];
-        let startup_infer_tasks = Vec::new();
-        let startup_engine_versions = BTreeMap::new();
-        let detected = WorkerCapabilities {
-            commands: Vec::new(),
-            free_threaded: false,
-            infer_tasks: vec![InferTask::Morphosyntax, InferTask::Utseg],
-            engine_versions: BTreeMap::from([
-                ("morphosyntax".to_string(), "stanza-1.10.1".to_string()),
-                ("utseg".to_string(), "stanza-1.10.1".to_string()),
-            ]),
-            stanza_capabilities: BTreeMap::new(),
-        };
-
-        let snapshot = resolve_worker_capability_snapshot(
-            &startup_capabilities,
-            &startup_infer_tasks,
-            &startup_engine_versions,
-            false,
-            Some(&detected),
-        )
-        .expect("live detected capabilities should override startup placeholder state");
-
+    fn server_owned_asr_commands_are_synthesized_after_direct_ones() {
+        let snapshot = WorkerCapabilitySnapshot::detected(&reports(&[(InferTask::Asr, None)]));
         assert_eq!(
-            snapshot.capabilities,
-            vec![
-                "morphotag".to_string(),
-                "utseg".to_string(),
-                "compare".to_string(),
-            ]
-        );
-        assert_eq!(
-            snapshot.infer_tasks,
-            vec![InferTask::Morphosyntax, InferTask::Utseg]
-        );
-        assert_eq!(
-            snapshot.engine_versions.get("morphosyntax"),
-            Some(&"stanza-1.10.1".to_string())
+            commands(&snapshot),
+            vec!["transcribe", "transcribe_s", "benchmark"]
         );
     }
 
     #[test]
-    fn resolve_worker_capability_snapshot_falls_back_to_startup_when_no_live_data() {
-        let startup_capabilities = vec!["morphotag".to_string()];
-        let startup_infer_tasks = vec![InferTask::Morphosyntax];
-        let startup_engine_versions =
-            BTreeMap::from([("morphosyntax".to_string(), "stanza-1.9.2".to_string())]);
-
-        let snapshot = resolve_worker_capability_snapshot(
-            &startup_capabilities,
-            &startup_infer_tasks,
-            &startup_engine_versions,
-            false,
-            None,
-        )
-        .expect("startup snapshot should still be usable when no live worker was probed");
-
-        assert_eq!(snapshot.capabilities, startup_capabilities);
-        assert_eq!(snapshot.infer_tasks, startup_infer_tasks);
-        assert_eq!(snapshot.engine_versions, startup_engine_versions);
+    fn test_echo_and_an_unprobed_pool_assume_every_released_command() {
+        let every = WorkerCapabilitySnapshot::every_released_command();
+        assert_eq!(every.commands().len(), ReleasedCommand::ALL.len());
+        let names = every.command_names();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(
+            names, sorted,
+            "the assumed view lists commands by wire name"
+        );
+        assert!(every.infer_tasks().contains(&InferTask::Fa));
+        let detected = reports(&[(InferTask::Morphosyntax, None)]);
+        assert_eq!(
+            WorkerCapabilitySnapshot::resolve(true, Some(&detected)),
+            every
+        );
+        assert_eq!(WorkerCapabilitySnapshot::resolve(false, None), every);
     }
 
     #[test]
-    fn resolve_worker_capability_snapshot_prefers_empty_live_probe_over_startup_guess() {
-        let startup_capabilities = vec!["align".to_string(), "morphotag".to_string()];
-        let startup_infer_tasks = vec![InferTask::Fa, InferTask::Morphosyntax];
-        let startup_engine_versions = BTreeMap::from([
-            ("fa".to_string(), "wave2vec".to_string()),
-            ("morphosyntax".to_string(), "stanza-1.9.2".to_string()),
-        ]);
-        let detected = WorkerCapabilities {
-            commands: Vec::new(),
-            free_threaded: false,
-            infer_tasks: Vec::new(),
-            engine_versions: BTreeMap::new(),
-            stanza_capabilities: BTreeMap::new(),
-        };
+    fn a_detected_report_replaces_the_assumed_view_even_when_empty() {
+        let detected = reports(&[(InferTask::Morphosyntax, None), (InferTask::Utseg, None)]);
+        let snapshot = WorkerCapabilitySnapshot::resolve(false, Some(&detected));
+        assert_eq!(commands(&snapshot), vec!["morphotag", "utseg", "compare"]);
+        assert_eq!(
+            snapshot.infer_tasks(),
+            &[InferTask::Morphosyntax, InferTask::Utseg]
+        );
 
-        let snapshot = resolve_worker_capability_snapshot(
-            &startup_capabilities,
-            &startup_infer_tasks,
-            &startup_engine_versions,
-            false,
-            Some(&detected),
-        )
-        .expect("live detected empty capabilities should override optimistic startup data");
-
-        assert!(snapshot.capabilities.is_empty());
-        assert!(snapshot.infer_tasks.is_empty());
-        assert!(snapshot.engine_versions.is_empty());
+        let empty = WorkerCapabilitySnapshot::resolve(false, Some(&reports(&[])));
+        assert!(empty.commands().is_empty());
+        assert!(empty.infer_tasks().is_empty());
     }
 }

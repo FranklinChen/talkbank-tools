@@ -4,6 +4,7 @@ use crate::ml_golden::audio_helpers::{
     count_wor_tiers, revai_available,
 };
 use crate::ml_golden::transcribe::helpers::{
+    MULTI_SPEAKER_FIXTURE_SPEAKERS, prepare_multi_speaker_transcribe_fixture_job,
     prepare_named_transcribe_fixture_job, prepare_transcribe_fixture_job, transcribe_options,
 };
 use batchalign::api::{JobStatus, ReleasedCommand};
@@ -213,17 +214,27 @@ async fn transcribe_eng_diarize() {
     }
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(jobs.state_dir(), "transcribe_diarize")
+    // The multi-speaker fixture, because this test asks for DIARIZATION. The
+    // single-speaker fixture it used to run on declares one participant
+    // (`@Participants: PAR0 Participant`), so diarizing it asked a diarizer to
+    // separate speakers in a recording asserted to hold one, which submission
+    // now refuses as a contradiction. What this test is for, that diarized
+    // transcription completes and yields valid CHAT, needs audio where
+    // separation means something; the two `*_surfaces_multiple_speakers*`
+    // tests cover the stronger claim that more than one speaker comes back.
+    let Some(fixture) =
+        prepare_multi_speaker_transcribe_fixture_job(jobs.state_dir(), "transcribe_diarize")
     else {
         return;
     };
 
     let (info, outputs) = jobs
-        .submit_paths_job(
+        .submit_paths_job_with_speakers(
             ReleasedCommand::Transcribe,
             "eng",
             vec![fixture.source_path],
             vec![fixture.output_path],
+            MULTI_SPEAKER_FIXTURE_SPEAKERS,
             transcribe_options(AsrEngineName::Whisper, true, WorTierPolicy::Omit),
         )
         .await;

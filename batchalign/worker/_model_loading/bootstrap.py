@@ -76,7 +76,6 @@ def _configure_loaded_tasks(
     _state.loaded_tasks = set(tasks)
     _state.command = target_label
     _state.lang = lang
-    _state.num_speakers = num_speakers
     _state.ready = True
     L.info("Models ready: target=%s pid=%d", target_label, os.getpid())
 
@@ -133,7 +132,6 @@ def load_worker_profile_lazy(bootstrap: WorkerBootstrapRuntime) -> None:
     _state.bootstrap = bootstrap
     _state.command = f"lazy-profile:{bootstrap.profile.value}"
     _state.lang = bootstrap.lang
-    _state.num_speakers = bootstrap.num_speakers
     _state.ready = True
     L.info(
         "Lazy profile ready (no models loaded): target=%s lang=%s pid=%d",
@@ -274,7 +272,7 @@ def _load_single_task(task: str, bootstrap: WorkerBootstrapRuntime) -> None:
             )
         else:
             load_utseg_builder(bootstrap.lang)
-            load_utterance_model(bootstrap.lang)
+            load_utterance_model(bootstrap.lang, bootstrap.engine_overrides)
         _state.register_batch_infer_handler(
             InferTask.UTSEG,
             build_utseg_batch_infer_handler(),

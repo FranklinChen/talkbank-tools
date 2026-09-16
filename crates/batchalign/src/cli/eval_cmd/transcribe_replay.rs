@@ -3,7 +3,7 @@
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-use crate::api::{EngineVersion, LanguageCode3, LanguageSpec};
+use crate::api::{LanguageCode3, LanguageSpec};
 use crate::cache::UtteranceCache;
 use crate::cli::args::{
     TranscribeReplayAction, TranscribeReplayArgs, TranscribeReplayManifestArgs,
@@ -97,11 +97,6 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
     let cache = UtteranceCache::tiered(None, None)
         .await
         .map_err(|error| CliError::InvalidArgument(format!("cache init failed: {error}")))?;
-    let engine_version = EngineVersion::from(format!(
-        "offline-replay:{}:{}",
-        env!("CARGO_PKG_VERSION"),
-        crate::cli::build_hash()
-    ));
     let executable = std::env::current_exe()?;
     let executable_blake3 = file_blake3_hex(&executable).map_err(replay_error)?;
 
@@ -115,12 +110,15 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
             .and_then(|name| name.to_str())
             .map(ToOwned::to_owned);
         let opts = TranscribeOptions {
-            auto_speakers: false,
-            backend: AsrBackend::RustRevAi,
+            asr: crate::transcribe::TranscribeAsrPlan::from_request(
+                AsrBackend::RustRevAi,
+                false,
+                args.num_speakers,
+                &std::collections::BTreeMap::new(),
+            )?,
             diarize: args.diarize,
             speaker_backend: args.diarize.then_some(SpeakerBackendV2::PyannoteAi),
             lang: LanguageSpec::Resolved(lang.clone()),
-            num_speakers: args.num_speakers,
             with_utseg: utseg_execution.pre_chat_policy().is_some(),
             with_morphosyntax: false,
             // These policies are unreachable in the replay typestate. Keeping
@@ -138,7 +136,7 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
         let chat = run_transcribe_pipeline_with_legacy_replay(
             replay,
             utseg_execution,
-            PipelineServices::new(workers.pool(), &cache, &engine_version),
+            PipelineServices::new(workers.pool(), &cache),
             &opts,
             None,
             debug_dir.as_deref(),
@@ -163,7 +161,6 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
         staging.path(),
         args,
         utseg_execution,
-        &engine_version,
         &executable_blake3,
         &receipts,
     )?;
@@ -212,7 +209,6 @@ struct ReplayRunReceipt<'a> {
     schema_version: u32,
     batchalign_version: &'static str,
     batchalign_build: &'static str,
-    engine_version: &'a str,
     executable_blake3: &'a str,
     lang: &'a str,
     diarize: bool,
@@ -227,15 +223,15 @@ fn write_run_receipt(
     output_root: &std::path::Path,
     args: &TranscribeReplayRunArgs,
     utseg_execution: TranscribeUtsegExecution,
-    engine_version: &EngineVersion,
     executable_blake3: &str,
     receipts: &[ReplayReceipt],
 ) -> Result<(), CliError> {
     let receipt = ReplayRunReceipt {
-        schema_version: 2,
+        // 3 since `engine_version` was removed: it only repeated the version
+        // and build below under a label that named no engine.
+        schema_version: 3,
         batchalign_version: env!("CARGO_PKG_VERSION"),
-        batchalign_build: crate::cli::build_hash(),
-        engine_version: engine_version.as_ref(),
+        batchalign_build: crate::build_hash(),
         executable_blake3,
         lang: &args.lang,
         diarize: args.diarize,
@@ -369,6 +365,7 @@ mod tests {
                     confidence: None,
                 }],
                 lang: LanguageCode3::eng(),
+                model: None,
                 source_monologues: None,
             })
             .expect("ASR JSON"),

@@ -1,5 +1,5 @@
 use super::super::fixtures::YUE_GU_SHI;
-use super::super::helpers::{minimal_chat, strip_ba3_comments};
+use super::super::helpers::{minimal_chat, strip_provenance_stamps};
 use crate::common::{LiveServerJobClient, require_live_server};
 use batchalign::api::{FilePayload, JobStatus, LanguageSpec, ReleasedCommand};
 use batchalign::options::{CommandOptions, CommonOptions, MorphotagOptions};
@@ -104,13 +104,13 @@ async fn morphotag_server_multilingual_warm_cache_preserves_per_language_outputs
             "both server cache reruns should complete cleanly for {}",
             cold_file.filename
         );
-        // Compare with the `[ba3 ...]` provenance comments stripped. They embed
+        // Compare with the `[fc-ba3 ...]` provenance comments stripped. They embed
         // a wall-clock timestamp, so two runs are never byte-equal and this
         // assertion could not pass as written; it was invisible from 2026-05-06,
         // when the whole suite started failing at submission, to 2026-07-29.
         assert_eq!(
-            strip_ba3_comments(&cold_file.content),
-            strip_ba3_comments(&warm_file.content),
+            strip_provenance_stamps(&cold_file.content),
+            strip_provenance_stamps(&warm_file.content),
             "warm server cache rerun should preserve exact output for {}",
             cold_file.filename
         );
@@ -232,8 +232,8 @@ async fn morphotag_server_cantonese_retokenize_cache_isolated_from_preserve_mode
         "final preserve-mode server run should not reuse the retokenized cache entry"
     );
     assert_eq!(
-        strip_ba3_comments(first_output),
-        strip_ba3_comments(third_output),
+        strip_provenance_stamps(first_output),
+        strip_provenance_stamps(third_output),
         "preserve-mode server outputs should match before and after a retokenized rerun"
     );
     assert_ne!(

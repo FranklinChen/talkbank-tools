@@ -3,6 +3,7 @@
 //! These are re-exported from [`super::api`] for backward compatibility.
 
 use std::borrow::Cow;
+use std::num::NonZeroUsize;
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -229,7 +230,7 @@ impl AsRef<str> for ChatText<'_> {
     schemars::JsonSchema,
 )]
 #[serde(transparent)]
-pub struct LanguageCode3(pub String);
+pub struct LanguageCode3(String);
 
 /// Error returned when a string is not a valid 3-letter ISO 639-3 code.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -285,6 +286,23 @@ impl LanguageCode3 {
         } else {
             Err(InvalidLanguageCode(s.to_string()))
         }
+    }
+
+    // -- Conversion --
+
+    /// This language's ISO 639-1 two-letter code, when the standard assigns
+    /// one.
+    ///
+    /// PARTIAL, and the return type says so: most ISO 639-3 languages have no
+    /// two-letter form, Mandarin (`cmn`) and Cantonese (`yue`) among them. The
+    /// result is a closed sum rather than an `Option` so no caller can
+    /// substitute the three-letter code for a missing two-letter one, which is
+    /// how provider requests came to carry codes like `cmn` that no provider
+    /// defines. See [`crate::iso639_part1`] for the single owner of this
+    /// conversion and where its table comes from.
+    #[must_use]
+    pub fn to_iso_639_1(&self) -> crate::iso639_part1::Iso639Part1Lookup {
+        crate::iso639_part1::lookup(&self.0)
     }
 }
 
@@ -881,10 +899,434 @@ numeric_id!(
     pub MemoryMb(u64) [Eq]
 );
 
-validated_string_id!(
-    /// ML engine version string for cache keying (e.g. `"stanza-1.9.2"`, non-empty).
-    pub EngineVersion
-);
+// ---------------------------------------------------------------------------
+// StampSafeText: text that cannot change a provenance stamp's structure
+// ---------------------------------------------------------------------------
+
+/// Text that cannot change the structure of a provenance stamp.
+///
+/// A stamp is one `@Comment` line, `[<name> <command> | key=value ; key=value |
+/// <timestamp>]`, and the text written into its fields (engine names, a
+/// language, a checkpoint) goes in byte for byte. Such text is refused when it
+/// is blank, when it has surrounding whitespace (the grammar's spacing would
+/// swallow it), or when it contains a character the grammar uses as structure:
+/// `|`, `;`, `]` or a line break. The characters are refused on their own, not
+/// only in their spaced forms: a value ending in ` |` would still form a
+/// separator with the space the writer puts after it.
+///
+/// Three routes build one, and each keeps the invariant:
+/// - [`TryFrom`] checks runtime text, and is what deserialization uses;
+/// - [`Self::from_static`] checks a literal at compile time, when evaluated in
+///   a `const` context (every caller writes it inside `const { ... }`);
+/// - [`Self::join`] composes values that are already safe with a
+///   [`StampJoiner`] that is itself safe, so the result needs no second check.
+///
+/// "Whitespace" means exactly [`Self::WHITESPACE`], the Unicode `White_Space`
+/// characters written out, so the Python producer and the JSON Schema pattern
+/// ([`Self::json_schema_pattern`]) refuse the same set rather than each
+/// language's own idea of whitespace.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct StampSafeText(Cow<'static, str>);
+
+/// Why text cannot be written into a provenance stamp.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidStampSafeText {
+    /// The text was empty or only whitespace.
+    #[error("stamp text is blank")]
+    Blank,
+    /// The text had leading or trailing whitespace.
+    #[error("stamp text {0:?} has surrounding whitespace")]
+    SurroundingWhitespace(String),
+    /// The text contained a character the stamp grammar uses as structure.
+    #[error(
+        "stamp text {0:?} contains a provenance stamp character (`|`, `;`, `]` or a line break)"
+    )]
+    StampStructure(String),
+}
+
+/// A separator [`StampSafeText::join`] may place between safe parts. None of
+/// them is whitespace or stamp structure, which is what makes a join safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampJoiner {
+    /// Nothing: the parts are concatenated.
+    Concat,
+    /// `+`, between the entries of an engine list.
+    Plus,
+    /// `:`, between the facets of one engine identity.
+    Colon,
+    /// `@`, between a model id and its revision.
+    At,
+}
+
+impl StampJoiner {
+    /// The separator text, for a reader that splits what a join wrote.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Concat => "",
+            Self::Plus => "+",
+            Self::Colon => ":",
+            Self::At => "@",
+        }
+    }
+}
+
+impl StampSafeText {
+    /// The characters the stamp grammar uses as structure.
+    pub const STAMP_STRUCTURE: [char; 5] = ['|', ';', ']', '\n', '\r'];
+
+    /// What counts as whitespace: the Unicode `White_Space` characters.
+    pub const WHITESPACE: [char; 25] = [
+        '\t', '\n', '\u{0B}', '\u{0C}', '\r', ' ', '\u{85}', '\u{A0}', '\u{1680}', '\u{2000}',
+        '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
+        '\u{2008}', '\u{2009}', '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}',
+        '\u{3000}',
+    ];
+
+    fn is_whitespace(character: char) -> bool {
+        Self::WHITESPACE.contains(&character)
+    }
+
+    /// Admit a literal. In a `const` context an unsafe literal is a compile
+    /// error, which is the only way this constructor may be used: it accepts
+    /// ASCII only, so the check stays exact without decoding UTF-8 in `const`.
+    pub const fn from_static(text: &'static str) -> Self {
+        assert!(
+            static_text_is_stamp_safe(text),
+            "a static stamp text must be non-blank ASCII with no surrounding whitespace and \
+             no `|`, `;`, `]` or line break"
+        );
+        Self(Cow::Borrowed(text))
+    }
+
+    /// Join `first` and `rest` with `joiner`. Total: every part is already
+    /// safe, and the joiner is neither whitespace nor structure, so the result
+    /// begins with `first`'s first character and ends with the last part's last.
+    pub fn join<'a>(
+        first: &StampSafeText,
+        rest: impl IntoIterator<Item = &'a StampSafeText>,
+        joiner: StampJoiner,
+    ) -> Self {
+        let mut joined = String::from(first.as_str());
+        for part in rest {
+            joined.push_str(joiner.as_str());
+            joined.push_str(part.as_str());
+        }
+        Self(Cow::Owned(joined))
+    }
+
+    /// The text, byte for byte.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// A decimal count, as stamp text.
+    ///
+    /// Total, and the fourth route to a value: the decimal digits of a count
+    /// are ASCII, none of them is whitespace or stamp structure, and a
+    /// non-zero count has at least one of them, so the result cannot change a
+    /// stamp's shape and needs no runtime check.
+    ///
+    /// [`NonZeroUsize`] rather than `usize` on purpose. A count field whose
+    /// ABSENCE states "none" must not also be writable as `0`, or the same
+    /// fact would have two spellings in the grammar and a reader would have to
+    /// know they mean the same thing.
+    pub fn from_count(count: NonZeroUsize) -> Self {
+        Self(Cow::Owned(count.to_string()))
+    }
+
+    /// The JSON Schema `pattern` equivalent to the check, generated from
+    /// [`Self::WHITESPACE`] and [`Self::STAMP_STRUCTURE`] so the two cannot
+    /// disagree: a first and last character that are neither whitespace nor
+    /// structure, and no structure character anywhere between.
+    pub fn json_schema_pattern() -> String {
+        use std::fmt::Write as _;
+        let mut edge = String::new();
+        for character in Self::WHITESPACE.iter().chain(Self::STAMP_STRUCTURE.iter()) {
+            let _ = write!(edge, "\\u{:04X}", u32::from(*character));
+        }
+        let mut inner = String::new();
+        for character in Self::STAMP_STRUCTURE {
+            let _ = write!(inner, "\\u{:04X}", u32::from(character));
+        }
+        format!("^[^{edge}](?:[^{inner}]*[^{edge}])?$")
+    }
+}
+
+/// The compile-time check behind [`StampSafeText::from_static`], over ASCII.
+const fn static_text_is_stamp_safe(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !byte.is_ascii() || byte == b'|' || byte == b';' || byte == b']' {
+            return false;
+        }
+        if (index == 0 || index == bytes.len() - 1) && (byte.is_ascii_whitespace() || byte == 0x0B)
+        {
+            return false;
+        }
+        if byte == b'\n' || byte == b'\r' {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+impl TryFrom<String> for StampSafeText {
+    type Error = InvalidStampSafeText;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        if text.chars().all(Self::is_whitespace) {
+            return Err(InvalidStampSafeText::Blank);
+        }
+        let surrounded = text.chars().next().is_some_and(Self::is_whitespace)
+            || text.chars().next_back().is_some_and(Self::is_whitespace);
+        if surrounded {
+            return Err(InvalidStampSafeText::SurroundingWhitespace(text));
+        }
+        if text.contains(Self::STAMP_STRUCTURE) {
+            return Err(InvalidStampSafeText::StampStructure(text));
+        }
+        Ok(Self(Cow::Owned(text)))
+    }
+}
+
+impl TryFrom<&str> for StampSafeText {
+    type Error = InvalidStampSafeText;
+
+    fn try_from(text: &str) -> Result<Self, Self::Error> {
+        Self::try_from(text.to_owned())
+    }
+}
+
+impl From<StampSafeText> for String {
+    fn from(text: StampSafeText) -> Self {
+        text.0.into_owned()
+    }
+}
+
+impl From<&LanguageCode3> for StampSafeText {
+    /// Total: a language code is three ASCII letters, which can never be blank,
+    /// padded or structure.
+    fn from(code: &LanguageCode3) -> Self {
+        Self(Cow::Owned(code.0.clone()))
+    }
+}
+
+impl AsRef<str> for StampSafeText {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StampSafeText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl schemars::JsonSchema for StampSafeText {
+    fn schema_name() -> Cow<'static, str> {
+        "StampSafeText".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": StampSafeText::json_schema_pattern(),
+            "description": "Text that cannot change a provenance stamp's structure: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+        })
+    }
+}
+
+/// An engine identity as a worker reported it: in a capability report, or on
+/// a result the worker produced (for example `wave2vec-fa-v1` or
+/// `googletrans-v1`).
+///
+/// Stamp-safe text ([`StampSafeText`]), because a reported name is written into
+/// cache namespaces and provenance fields byte for byte and must not be able
+/// to change their structure. The only constructor is [`TryFrom`], shared by
+/// deserialization, so every route in admits the same values. There is no
+/// infallible `From`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct ReportedEngineName(StampSafeText);
+
+impl ReportedEngineName {
+    /// The name as the worker reported it, byte for byte.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// The name as stamp-safe text, for writing into a provenance field.
+    pub fn as_stamp_text(&self) -> &StampSafeText {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ReportedEngineName {
+    type Error = InvalidStampSafeText;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        StampSafeText::try_from(name).map(Self)
+    }
+}
+
+impl TryFrom<&str> for ReportedEngineName {
+    type Error = InvalidStampSafeText;
+
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        Self::try_from(name.to_owned())
+    }
+}
+
+impl From<ReportedEngineName> for String {
+    fn from(name: ReportedEngineName) -> Self {
+        name.0.into()
+    }
+}
+
+impl AsRef<str> for ReportedEngineName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ReportedEngineName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl schemars::JsonSchema for ReportedEngineName {
+    fn schema_name() -> Cow<'static, str> {
+        "ReportedEngineName".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": StampSafeText::json_schema_pattern(),
+            "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+        })
+    }
+}
+
+#[cfg(test)]
+mod stamp_safe_text_tests {
+    use super::{
+        InvalidStampSafeText, LanguageCode3, ReportedEngineName, StampJoiner, StampSafeText,
+    };
+
+    #[test]
+    fn admits_text_byte_for_byte_and_refuses_what_could_corrupt_a_stamp() {
+        for name in [
+            "stanza-1.11.1",
+            "wave2vec-fa-v1",
+            "facebook/nllb-200-distilled-1.3B",
+        ] {
+            assert_eq!(
+                ReportedEngineName::try_from(name).map(String::from),
+                Ok(name.to_owned())
+            );
+        }
+        assert_eq!(
+            ReportedEngineName::try_from(" "),
+            Err(InvalidStampSafeText::Blank)
+        );
+        assert_eq!(
+            ReportedEngineName::try_from(""),
+            Err(InvalidStampSafeText::Blank)
+        );
+        assert!(matches!(
+            ReportedEngineName::try_from("wave2vec "),
+            Err(InvalidStampSafeText::SurroundingWhitespace(_))
+        ));
+        for name in ["a | b", "a ; b", "a]b", "a\nb", "x |", "a|b", "a;b"] {
+            assert!(
+                matches!(
+                    ReportedEngineName::try_from(name),
+                    Err(InvalidStampSafeText::StampStructure(_))
+                ),
+                "{name:?}"
+            );
+        }
+        // Deserialization is the same constructor.
+        assert!(serde_json::from_str::<ReportedEngineName>("\"\"").is_err());
+        assert_eq!(
+            serde_json::from_str::<ReportedEngineName>("\"stanza-1.11.1\"")
+                .ok()
+                .map(String::from),
+            Some("stanza-1.11.1".to_owned())
+        );
+        assert!(serde_json::from_str::<ReportedEngineName>("\"a|b\"").is_err());
+    }
+
+    /// The cases the Python producer's check is held to as well
+    /// (`batchalign/tests/test_stamp_safe_text_conformance.py` reads the same
+    /// file), so the two languages agree case by case, including whitespace
+    /// that only one of them would otherwise count.
+    #[test]
+    fn the_shared_conformance_cases_are_decided_as_recorded() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            text: String,
+            admitted: bool,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/stamp_safe_text_cases.json"
+        ))
+        .expect("the conformance cases parse");
+        assert!(!cases.is_empty());
+        for case in cases {
+            assert_eq!(
+                StampSafeText::try_from(case.text.as_str()).is_ok(),
+                case.admitted,
+                "{:?}",
+                case.text
+            );
+        }
+    }
+
+    #[test]
+    fn joins_safe_parts_without_a_second_check() {
+        let stanza = const { StampSafeText::from_static("stanza-") };
+        let version = StampSafeText::try_from("1.14.0").expect("safe");
+        let identity = StampSafeText::join(&stanza, [&version], StampJoiner::Concat);
+        let lang = StampSafeText::from(&LanguageCode3::eng());
+        let facets = StampSafeText::join(&identity, [&lang], StampJoiner::Colon);
+        assert_eq!(facets.as_str(), "stanza-1.14.0:eng");
+        assert_eq!(
+            StampSafeText::join(&facets, [&facets], StampJoiner::Plus).as_str(),
+            "stanza-1.14.0:eng+stanza-1.14.0:eng"
+        );
+        // Every join result is itself admissible text.
+        assert!(StampSafeText::try_from(facets.as_str()).is_ok());
+    }
+
+    #[test]
+    fn the_schema_pattern_names_every_refused_character() {
+        let pattern = StampSafeText::json_schema_pattern();
+        for character in StampSafeText::WHITESPACE
+            .iter()
+            .chain(StampSafeText::STAMP_STRUCTURE.iter())
+        {
+            assert!(
+                pattern.contains(&format!("\\u{:04X}", u32::from(*character))),
+                "{character:?}"
+            );
+        }
+    }
+}
 
 validated_string_id!(
     /// Correlation ID for tracing a job across log entries (non-empty).

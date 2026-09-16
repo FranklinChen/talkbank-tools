@@ -165,6 +165,11 @@ alignment and a matching `%xsmor` tier showing the POS alignment:
 - `[+ main]` = insertion (in hypothesis but not gold)
 - `[- gold]` = deletion (in gold but not hypothesis)
 
+The `?` above is a deletion: a gold word the hypothesis does not contain, so
+neither transcript tagged it. Matches and insertions carry a real tag even when
+the gold companion has no `%mor` of its own; see
+[compare: where the part of speech comes from](../user-guide/commands/compare.md#where-the-part-of-speech-comes-from).
+
 ### 2. Metrics CSV file (`{stem}.compare.csv`)
 
 ```csv

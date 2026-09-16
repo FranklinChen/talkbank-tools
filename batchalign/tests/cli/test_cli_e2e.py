@@ -146,11 +146,14 @@ def test_worker_capabilities() -> None:
             "avqi",
             "asr",
         }, f"Unexpected infer_tasks: {infer_tasks}"
-        # Test-echo engine versions should all be "test-echo"
+        # Like a real worker, a test-echo worker names only the FA engine
+        # ("test-echo"); every other entry is null, which is the only report
+        # the Rust capability gate admits for those tasks.
         engine_versions = resp.get("engine_versions", {})
-        assert all(v == "test-echo" for v in engine_versions.values()), (
-            "test-echo engine_versions should all be 'test-echo'"
-        )
+        assert all(
+            name == ("test-echo" if task == "fa" else None)
+            for task, name in engine_versions.items()
+        ), f"test-echo names only the FA engine: {engine_versions}"
     finally:
         _shutdown(proc)
 

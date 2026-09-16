@@ -121,7 +121,6 @@ CatalogEntry {
     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
     capabilities: CapabilityPlan {
         primary_infer_task: InferTask::YourTask,
-        additional_infer_tasks: &[],
         surface: CapabilitySurface::RecipeOwned,
     },
     output_policy: OutputPolicy {
@@ -294,8 +293,8 @@ boundary.
 ```mermaid
 flowchart TD
     request["batchalign/src/compare.rs orchestration\nmain_text + gold_text"] --> morph["Morphotag main only\nreuses morphosyntax worker"]
-    request --> gold["Parse raw gold"]
-    morph --> main["Parse morphotagged main"]
+    request --> gold["Parse raw gold leniently"]
+    morph --> main["MorphotaggedMain::from_proof\n(the judged document,\nnot its bytes)"]
     main --> bundle["talkbank_transform::compare::compare(&main, &gold)\n→ ComparisonBundle:\nmain_utterances + gold_utterances\n+ gold_word_matches + metrics"]
     gold --> bundle
     bundle --> tiers["XsrepTierContent / XsmorTierContent\n(talkbank-transform/src/compare/serialize.rs)"]
@@ -310,10 +309,18 @@ flowchart TD
 ### Key types
 
 ```text
-// Intermediate artifacts: produced by build_comparison_artifacts(), consumed by materializer
-struct ComparisonArtifacts {
-    main_file: ChatFile,        // parsed morphotagged main
-    gold_file: ChatFile,        // parsed gold
+// Intermediate artifacts, in compare.rs's private `artifacts` module. Every
+// field is private and the ONE constructor is
+// `ComparisonArtifacts::build(MorphotaggedMain, ChatFile)`, which RUNS the
+// comparison rather than accepting one, so no caller supplies a bundle and
+// none can assemble a comparison that began with a String.
+struct ComparisonArtifacts { /* main_file, gold_file, bundle: private */ }
+
+// How a materializer takes ownership, by destructuring `into_parts()`.
+// Nothing turns these back into a ComparisonArtifacts.
+struct ComparisonParts {
+    main_file: ChatFile,        // the judged morphotagged main
+    gold_file: ChatFile,        // the leniently parsed gold companion
     bundle: ComparisonBundle,   // alignment + metrics from DP
 }
 

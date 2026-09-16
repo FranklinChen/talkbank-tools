@@ -7,6 +7,7 @@
     "kind": "morphosyntax_result",
     "items": [
       {
+        "kind": "analyzed",
         "raw_sentences": [
           [
             {
@@ -34,9 +35,26 @@
               "deprel": "obj"
             }
           ]
+        ],
+        "model": {
+          "stanza_version": "1.10.1",
+          "lang": "eng",
+          "pipeline": "standard"
+        },
+        "repairs": [
+          {
+            "kind": "relation_alias",
+            "word": "it",
+            "from_relation": "iob",
+            "to_relation": "iobj"
+          }
         ]
       },
       {
+        "kind": "no_words"
+      },
+      {
+        "kind": "failed",
         "error": "Stanza pipeline unavailable"
       }
     ]

@@ -80,10 +80,9 @@ fn plan_benchmark_pairs(inputs: &[DiscoveredInput]) -> Result<Vec<PlannedWorkUni
         .cloned()
         .map(|audio| {
             let gold_chat = derive_benchmark_gold_input(&audio)?;
-            Ok(PlannedWorkUnit::Benchmark(BenchmarkWorkUnit {
-                audio,
-                gold_chat,
-            }))
+            Ok(PlannedWorkUnit::Benchmark(BenchmarkWorkUnit::new(
+                audio, gold_chat,
+            )))
         })
         .collect()
 }
@@ -197,11 +196,11 @@ mod tests {
             panic!("expected benchmark unit");
         };
         assert_eq!(
-            unit.gold_chat.display_path,
+            unit.gold_chat().display_path,
             DisplayPath::from("audio/session.cha")
         );
         assert_eq!(
-            unit.gold_chat.source_path,
+            unit.gold_chat().source_path,
             std::path::PathBuf::from("/abs/audio/session.cha")
         );
     }

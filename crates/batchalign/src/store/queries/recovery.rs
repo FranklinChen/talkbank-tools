@@ -3,8 +3,7 @@
 use std::collections::HashMap;
 
 use crate::api::{
-    ContentType, DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand,
-    UnixTimestamp,
+    DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand, UnixTimestamp,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -136,6 +135,14 @@ impl JobStore {
                     }
 
                     let (status, job_status_note) = recover_job_status(&row.job_id, &row.status);
+                    let command = match ReleasedCommand::try_from(row.command.as_str()) {
+                        Ok(command) => command,
+                        Err(_) => {
+                            warn!(job_id = %row.job_id, command = %row.command,
+                                "Unknown command in DB, skipping job recovery");
+                            continue;
+                        }
+                    };
 
                     let mut file_statuses = HashMap::new();
                     let mut results: Vec<FileResultEntry> = Vec::new();
@@ -165,6 +172,10 @@ impl JobStore {
                                 error_codes: None,
                                 error_line: None,
                                 bug_report_id: fs_row.bug_report_id.clone(),
+                                // Not persisted: a restored status never held
+                                // a stamp decision, and saying so beats
+                                // inventing one.
+                                stamp: crate::api::FileStampOutcome::Unrecorded,
                                 started_at: fs_row.started_at.map(UnixTimestamp),
                                 finished_at: fs_row.finished_at.map(UnixTimestamp),
                                 next_eligible_at: fs_row.next_eligible_at.map(UnixTimestamp),
@@ -176,13 +187,18 @@ impl JobStore {
                         );
 
                         if fs_status.is_terminal() {
+                            // Persisted file-status names identify inputs, not artifacts.
+                            let artifact = crate::recipe_runner::runtime::primary_output_artifact(
+                                command,
+                                &DisplayPath::from(fs_row.filename.clone()),
+                            );
                             results.push(FileResultEntry {
-                                filename: DisplayPath::from(fs_row.filename.clone()),
-                                content_type: match fs_row.content_type.as_str() {
-                                    "csv" => ContentType::Csv,
-                                    "text" => ContentType::Text,
-                                    _ => ContentType::Chat,
+                                filename: if fs_status == FileStatusKind::Done {
+                                    artifact.display_path
+                                } else {
+                                    DisplayPath::from(fs_row.filename.clone())
                                 },
+                                content_type: artifact.content_type,
                                 error: file_error,
                             });
                         }
@@ -208,17 +224,7 @@ impl JobStore {
                             },
                         },
                         dispatch: JobDispatchConfig {
-                            command: match ReleasedCommand::try_from(row.command.as_str()) {
-                                Ok(cmd) => cmd,
-                                Err(_) => {
-                                    tracing::warn!(
-                                        job_id = %row.job_id,
-                                        command = %row.command,
-                                        "Unknown command in DB, skipping job recovery"
-                                    );
-                                    continue;
-                                }
-                            },
+                            command,
                             lang: {
                                 let (spec, valid) =
                                     crate::api::LanguageSpec::parse_from_db(&row.lang);
@@ -366,6 +372,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+    use crate::api::ContentType;
     use crate::config::ServerConfig;
     use crate::db::{JobDB, NewJobRecord};
     use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
@@ -410,6 +417,77 @@ mod tests {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
         let store = JobStore::new(ServerConfig::default(), Some(db.clone()), tx);
         (store, db, dir)
+    }
+
+    /// Restore evidence through the actual SQLite-to-store boundary, without directories.
+    #[tokio::test]
+    async fn restart_recovery_preserves_speaker_result_policy() {
+        for paths_mode in [false, true] {
+            let db = Arc::new(JobDB::in_memory_for_test().await.unwrap());
+            let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+            let store = JobStore::new(ServerConfig::default(), Some(db.clone()), tx);
+            let mut record = make_job_record(
+                "evidence-job",
+                "completed",
+                vec!["nested/sample.cha".into(), "nested/failed.cha".into()],
+            );
+            record.command = "speaker_identify".into();
+            record.paths_mode = paths_mode;
+            record.options = serde_json::from_value(serde_json::json!({
+                "command": "speaker_identify", "enrollments": ["100-500:REF"],
+                "threshold": 0.5, "tiers": []
+            }))
+            .unwrap();
+            db.insert_job(&record).await.unwrap();
+            db.update_file_status(
+                "evidence-job",
+                "nested/sample.cha",
+                "done",
+                None,
+                None,
+                None,
+                Some("json"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            db.update_file_status(
+                "evidence-job",
+                "nested/failed.cha",
+                "error",
+                Some("no evidence"),
+                None,
+                None,
+                Some("json"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            store.load_from_db().await.unwrap();
+            let detail = store
+                .get_job_detail(&JobId::from("evidence-job"))
+                .await
+                .unwrap();
+            let result = detail.results.iter().find(|r| r.error.is_none()).unwrap();
+            assert_eq!(
+                result.filename.as_ref(),
+                "nested/sample_speaker_identity.json"
+            );
+            assert_eq!(result.content_type, ContentType::Json);
+            assert!(
+                detail
+                    .file_statuses
+                    .iter()
+                    .any(|s| s.filename == "nested/sample.cha")
+            );
+            let failed = detail.results.iter().find(|r| r.error.is_some()).unwrap();
+            assert_eq!(failed.filename.as_ref(), "nested/failed.cha");
+            assert_eq!(failed.error.as_deref(), Some("no evidence"));
+        }
     }
 
     /// Startup recovery re-queues resumable work and persists the queued state.

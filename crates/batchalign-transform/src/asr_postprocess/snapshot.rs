@@ -35,13 +35,19 @@ pub struct AsrPipelineSnapshot {
     pub after_compound_merge: Vec<AsrElement>,
     /// Stage 2: after `extract_timed_words` (raw seconds → ms timing).
     pub after_timing_extract: Vec<AsrWord>,
+    /// Stage 2d: after Cantonese normalization. `None` for non-yue.
+    ///
+    /// Normalization runs over a whole monologue BEFORE the multi-word split,
+    /// so this snapshot sits between `after_timing_extract` and
+    /// `after_multiword_split`. Until 2026-09-16 it ran per word after number
+    /// expansion, as stage 4b, and appeared between `after_number_expand` and
+    /// `after_long_turn_split`.
+    pub after_cantonese_norm: Option<Vec<AsrWord>>,
     /// Stage 3: after `split_multiword_tokens` and `split_percent_suffix_words`.
     /// Includes the post-Stage-3 boundary-quote re-strip (Stage 3c).
     pub after_multiword_split: Vec<AsrWord>,
     /// Stage 4: after per-word number expansion.
     pub after_number_expand: Vec<AsrWord>,
-    /// Stage 4b: after Cantonese normalization. `None` for non-yue.
-    pub after_cantonese_norm: Option<Vec<AsrWord>>,
     /// Stage 5: after long-turn splitting (one inner Vec per turn chunk).
     pub after_long_turn_split: Vec<Vec<AsrWord>>,
     /// Stage 6: final retokenized utterances.

@@ -11,8 +11,14 @@ evidence for it, and what the pipeline does about it.
 
 **The governing rule: never trust Stanza's output shape.** Everything it
 returns crosses a validation boundary before anything downstream sees it. That
-boundary is `validate_ud_words()` in `batchalign/inference/morphosyntax.py`,
-called from `batch_infer_morphosyntax` immediately after `doc.to_dict()`.
+boundary is `RepairedSentence` in `batchalign/inference/morphosyntax.py`:
+`batch_infer_morphosyntax` builds each returned item from one, and the only way
+to build one is from raw Stanza words, so the step cannot be skipped.
+
+Every relation it rewrites is reported as well as applied. The repair travels
+to the server on the analyzed item, and the file's morphotag provenance comment
+counts it as `ud_repairs=`, so a repaired transcript says so in itself rather
+than only in a worker log.
 
 ## Why that boundary is load-bearing (2026-07-28 incident)
 
@@ -349,7 +355,7 @@ rediscovered.
 ## Related
 
 - `batchalign/inference/morphosyntax.py`: `UD_RELATIONS`, `UD_DEPREL_ALIASES`,
-  `validate_ud_words`, `batch_infer_morphosyntax`.
+  `_repaired_relation`, `RepairedSentence`, `batch_infer_morphosyntax`.
 - `batchalign/inference/_tokenizer_realign.py`: the MWT-hint postprocessor.
 - `batchalign/worker/_stanza_loading.py`: per-language pipeline construction;
   note Italian takes the `tokenize_postprocessor` branch, NOT the

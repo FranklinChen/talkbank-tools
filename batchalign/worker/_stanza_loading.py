@@ -346,11 +346,8 @@ def _build_stanza_models(lang: LanguageCode) -> None:
     # Install into the bounded cache, which may evict another language's
     # pipeline to stay under its ceiling. The context travels with it.
     pipeline_cache().install(lang, nlp, context=ctx)
-
-    try:
-        _state.stanza_version = stanza.__version__
-    except AttributeError:
-        _state.stanza_version = "unknown"
+    # No version is recorded here: `_state.stanza_version()` is the one
+    # accessor, and it reads the installed package this pipeline came from.
 
 
 def load_stanza_retokenize_model(lang: LanguageCode) -> None:
@@ -773,14 +770,10 @@ def load_utseg_builder(lang: LanguageCode) -> None:
             }
         return lang_alpha2, configs
 
+    # Installing the builder is what "utseg has loaded" means to the
+    # capability report; the version it names comes from
+    # `_state.stanza_version()`, not from a copy taken here.
     _state.utseg_config_builder = build_stanza_config_from_langs
-
-    try:
-        import stanza
-
-        _state.utseg_version = stanza.__version__
-    except (ImportError, AttributeError):
-        _state.utseg_version = "unknown"
 
 
 # ---------------------------------------------------------------------------

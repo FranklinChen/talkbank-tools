@@ -83,7 +83,7 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
     monkeypatch.setitem(
         __import__("sys").modules,
         "stanza",
-        SimpleNamespace(Pipeline=_FakePipeline),
+        SimpleNamespace(Pipeline=_FakePipeline, __version__="1.99.0"),
     )
 
     response = batch_infer_coref(
@@ -107,14 +107,20 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
     assert seen_texts == ["the dog\n\nit ran", "hello"]
     assert response.results[0].error is None
     assert response.results[0].result == {
+        "kind": "resolved",
+        "engine": "stanza-1.99.0/ontonotes-singletons_roberta-large-lora",
         "annotations": [
             {
                 "sentence_idx": 0,
                 "words": [[{"chain_id": 7, "is_start": True, "is_end": True}], []],
             }
-        ]
+        ],
     }
-    assert response.results[1].result == {"annotations": []}
+    assert response.results[1].result == {
+        "kind": "resolved",
+        "annotations": [],
+        "engine": "stanza-1.99.0/ontonotes-singletons_roberta-large-lora",
+    }
 
 
 def test_batch_infer_coref_ignores_extra_sentences_from_runtime(monkeypatch) -> None:
@@ -167,7 +173,7 @@ def test_batch_infer_coref_ignores_extra_sentences_from_runtime(monkeypatch) -> 
     monkeypatch.setitem(
         __import__("sys").modules,
         "stanza",
-        SimpleNamespace(Pipeline=_FakePipeline),
+        SimpleNamespace(Pipeline=_FakePipeline, __version__="1.99.0"),
     )
 
     response = batch_infer_coref(
@@ -179,12 +185,14 @@ def test_batch_infer_coref_ignores_extra_sentences_from_runtime(monkeypatch) -> 
     )
 
     assert response.results[0].result == {
+        "kind": "resolved",
+        "engine": "stanza-1.99.0/ontonotes-singletons_roberta-large-lora",
         "annotations": [
             {
                 "sentence_idx": 0,
                 "words": [[{"chain_id": 2, "is_start": True, "is_end": True}]],
             }
-        ]
+        ],
     }
 
 
@@ -202,7 +210,7 @@ def test_batch_infer_coref_reports_invalid_items_and_empty_documents(
     monkeypatch.setitem(
         __import__("sys").modules,
         "stanza",
-        SimpleNamespace(Pipeline=_UnusedPipeline),
+        SimpleNamespace(Pipeline=_UnusedPipeline, __version__="1.99.0"),
     )
 
     response = batch_infer_coref(
@@ -214,13 +222,48 @@ def test_batch_infer_coref_reports_invalid_items_and_empty_documents(
     )
 
     assert response.results[0].error == "Invalid CorefBatchItem"
-    assert response.results[1].result == {"annotations": []}
+    # Never sent to the engine, so it names none.
+    assert response.results[1].result == {"kind": "no_sentences"}
 
 
-def test_batch_infer_coref_returns_empty_annotations_on_runtime_failure(
+def test_batch_infer_coref_fails_a_document_when_no_engine_can_be_named(
     monkeypatch,
 ) -> None:
-    """Unexpected Stanza failures should degrade to empty structured annotations."""
+    """With no Stanza version there is no identity to report, so no resolution."""
+
+    class _UnusedPipeline:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("no pipeline should run without an engine identity")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "stanza",
+        SimpleNamespace(Pipeline=_UnusedPipeline),
+    )
+
+    response = batch_infer_coref(
+        BatchInferRequest(
+            task="coref",
+            lang="eng",
+            items=[{"sentences": [["she"]]}, {"sentences": []}],
+        )
+    )
+
+    assert response.results[0].result is None
+    assert response.results[0].error is not None
+    assert "cannot name the Stanza version" in response.results[0].error
+    assert response.results[1].result == {"kind": "no_sentences"}
+
+
+def test_batch_infer_coref_fails_the_document_on_runtime_failure(
+    monkeypatch,
+) -> None:
+    """A Stanza failure fails that document instead of emptying its chains.
+
+    POLICY CHANGE: this used to assert an empty annotation list, which is the
+    same bytes as a document with no chains, so the file was written without
+    its ``%xcoref`` tiers and reported as a success.
+    """
 
     class _ExplodingPipeline:
         def __init__(self, **_kwargs) -> None:
@@ -232,7 +275,7 @@ def test_batch_infer_coref_returns_empty_annotations_on_runtime_failure(
     monkeypatch.setitem(
         __import__("sys").modules,
         "stanza",
-        SimpleNamespace(Pipeline=_ExplodingPipeline),
+        SimpleNamespace(Pipeline=_ExplodingPipeline, __version__="1.99.0"),
     )
 
     response = batch_infer_coref(
@@ -243,6 +286,6 @@ def test_batch_infer_coref_returns_empty_annotations_on_runtime_failure(
         )
     )
 
-    assert response.results[0].error is None
-    assert response.results[0].result == {"annotations": []}
+    assert response.results[0].result is None
+    assert response.results[0].error == "Coref failed: coref runtime exploded"
     assert response.results[0].elapsed_s >= 0.0

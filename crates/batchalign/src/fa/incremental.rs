@@ -10,7 +10,7 @@
 //! the worker protocol evolves from V1 payloads to V2 prepared artifacts.
 
 use crate::api::DurationMs;
-use crate::cache::CacheBackend;
+use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::fa::{
     BulletRepairPolicy, FaGroup, WordTiming, apply_fa_results_with_projection_policy, cache_key,
     collect_existing_fa_word_timings, expand_bullets_for_edge_fillers, group_utterances,
@@ -19,7 +19,6 @@ use crate::chat_ops::fa::{
 use crate::chat_ops::{CacheKey, ChatFile, Line, Utterance};
 use crate::error::ServerError;
 use crate::params::{AudioContext, FaParams};
-use crate::pipeline::PipelineServices;
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 use crate::types::results::{FaOutput, FaResult};
 use crate::types::traces::{FaEvidenceSourceTrace, FaGroupTrace, TimingTrace};
@@ -34,8 +33,8 @@ use super::transport::{
     FaInferencePlan, FaWorkerTransport, UncheckedFaWorkerBatch, plan_fa_inference,
 };
 use super::{
-    AdmittedFaResult, CACHE_TASK, FaAdmission, RAW_EVIDENCE_CACHE_TASK, assemble_group_evidence,
-    collect_evidence_sources, collect_final_timings,
+    AdmittedFaResult, FaAdmission, assemble_group_evidence, collect_evidence_sources,
+    collect_final_timings,
 };
 use crate::chat_ops::fa::Grouping;
 
@@ -68,7 +67,7 @@ pub(crate) async fn process_fa_incremental(
     after: super::FaInputDocument<'_>,
     audio: &AudioContext<'_>,
     worker_lang: &crate::api::LanguageCode3,
-    services: PipelineServices<'_>,
+    services: super::FaServices<'_>,
     fa_params: &FaParams,
     progress: Option<&ProgressSender>,
 ) -> Result<AdmittedFaResult, ServerError> {
@@ -116,7 +115,7 @@ pub(crate) async fn process_fa_incremental(
             after_text,
             fa_params.gap_healing,
             fa_params.engine.as_wire_name(),
-            services.engine_version.as_ref(),
+            services.cache_namespace,
         ));
     }
 
@@ -174,7 +173,7 @@ pub(crate) async fn process_fa_incremental(
                 chat_file,
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
-                services.engine_version.as_ref(),
+                services.cache_namespace,
             )?
             .with_written_decisions(written),
         );
@@ -238,8 +237,9 @@ pub(crate) async fn process_fa_incremental(
         crate::params::CachePolicy::SkipCache => std::collections::HashMap::new(),
         crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
             match services
+                .pipeline
                 .cache
-                .get_batch(&key_strings, CACHE_TASK.as_str(), services.engine_version)
+                .get_batch(&key_strings, FORCED_ALIGNMENT, services.cache_namespace)
                 .await
             {
                 Ok(map) => map,
@@ -254,11 +254,12 @@ pub(crate) async fn process_fa_incremental(
         crate::params::CachePolicy::SkipCache => std::collections::HashMap::new(),
         crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
             match services
+                .pipeline
                 .cache
                 .get_batch(
                     &key_strings,
-                    RAW_EVIDENCE_CACHE_TASK.as_str(),
-                    services.engine_version,
+                    FORCED_ALIGNMENT_RAW_EVIDENCE,
+                    services.cache_namespace,
                 )
                 .await
             {
@@ -286,7 +287,7 @@ pub(crate) async fn process_fa_incremental(
         let resolution = super::FaCacheGroupAdmission::new(
             key,
             fa_params.engine,
-            services.engine_version,
+            services.cache_namespace,
             i,
             &groups[i],
         )
@@ -368,7 +369,6 @@ pub(crate) async fn process_fa_incremental(
                 fallback_events.push(event);
             }
 
-            let ba_version = env!("CARGO_PKG_VERSION");
             if let Some(raw_evidence) = raw_evidence {
                 match super::AdmittedCachedFaTimings::encode_from_raw(
                     timings.clone(),
@@ -376,12 +376,12 @@ pub(crate) async fn process_fa_incremental(
                 ) {
                     Ok(cache_data) => {
                         if let Err(error) = services
+                            .pipeline
                             .cache
                             .put_batch(
                                 &[(cache_keys[miss_idx].as_str().to_string(), cache_data)],
-                                CACHE_TASK.as_str(),
-                                services.engine_version,
-                                ba_version,
+                                FORCED_ALIGNMENT,
+                                services.cache_namespace,
                             )
                             .await
                         {
@@ -395,12 +395,12 @@ pub(crate) async fn process_fa_incremental(
                 match serde_json::to_value(raw_evidence) {
                     Ok(cache_data) => {
                         if let Err(error) = services
+                            .pipeline
                             .cache
                             .put_batch(
                                 &[(cache_keys[miss_idx].as_str().to_string(), cache_data)],
-                                RAW_EVIDENCE_CACHE_TASK.as_str(),
-                                services.engine_version,
-                                ba_version,
+                                FORCED_ALIGNMENT_RAW_EVIDENCE,
+                                services.cache_namespace,
                             )
                             .await
                         {
@@ -517,7 +517,7 @@ pub(crate) async fn process_fa_incremental(
         output,
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
-        engine_version: services.engine_version.as_ref().to_owned(),
+        cache_namespace: services.cache_namespace.clone(),
         decisions: decision_traces,
         timing_decisions,
         gap_healing: fa_params.gap_healing,

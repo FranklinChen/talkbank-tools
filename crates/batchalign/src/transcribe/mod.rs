@@ -124,7 +124,8 @@ mod tests {
             assert_eq!(
                 AsrBackend::try_from_engine(engine)
                     .expect("every engine in this table is implemented")
-                    .provenance_name(),
+                    .provenance_name()
+                    .as_str(),
                 *expected_provenance,
                 "provenance must retain the selected ASR engine identity"
             );
@@ -177,35 +178,6 @@ mod tests {
         assert!(msg.contains("PerFile"), "{msg}");
     }
 
-    fn sample_transcribe_options(backend: AsrBackend) -> TranscribeOptions {
-        TranscribeOptions {
-            auto_speakers: false,
-            backend,
-            diarize: false,
-            speaker_backend: None,
-            lang: LanguageCode3::fra().into(),
-            num_speakers: 1,
-            with_utseg: false,
-            with_morphosyntax: false,
-            cache_policies: TranscribeCachePolicies::uniform(crate::params::CachePolicy::UseCache),
-            allow_stanza_fallback_utseg: false,
-            write_wor: false,
-            media_name: Some("sample".into()),
-            engine_extras: std::collections::BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn build_empty_chat_text_marks_existing_media_unlinked() {
-        let text =
-            build_empty_chat_text(&sample_transcribe_options(AsrBackend::RustRevAi)).unwrap();
-
-        assert!(
-            text.contains("@Media:\tsample, audio, unlinked"),
-            "empty ASR output must not claim timing linkage:\n{text}"
-        );
-    }
-
     #[test]
     fn test_convert_asr_response_groups_by_speaker() {
         let response = AsrResponse {
@@ -233,6 +205,7 @@ mod tests {
                 },
             ],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         };
 
@@ -271,6 +244,7 @@ mod tests {
                 },
             ],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         };
 
@@ -286,6 +260,7 @@ mod tests {
         let response = AsrResponse {
             tokens: vec![],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         };
         let output = convert_asr_response(&response);
@@ -303,12 +278,35 @@ mod tests {
                 confidence: None,
             }],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         };
 
         let output = convert_asr_response(&response);
         assert_eq!(output.monologues.len(), 1);
         assert_eq!(output.monologues[0].speaker, 0);
+    }
+
+    #[test]
+    fn flat_asr_missing_timestamp_is_preserved() {
+        let response = AsrResponse {
+            tokens: vec![AsrToken {
+                text: "hello".into(),
+                start_s: None,
+                end_s: Some(DurationSeconds(2.0)),
+                speaker: Some("0".into()),
+                confidence: None,
+            }],
+            lang: LanguageCode3::eng(),
+            model: None,
+            source_monologues: None,
+        };
+        let output = convert_asr_response(&response);
+        assert_eq!(
+            output.monologues[0].elements[0].ts,
+            asr_postprocess::AsrTimestampSecs::Absent
+        );
+        assert_eq!(output.monologues[0].elements[0].end_ts, 2.0);
     }
 
     /// Regression test for an operator's bug report (2026-03-18): bare
@@ -340,6 +338,7 @@ mod tests {
                 },
             ],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         };
 
@@ -358,15 +357,36 @@ mod tests {
         assert_eq!(output.monologues[1].elements.len(), 1);
     }
 
+    /// Legacy token speakers are admitted as NUMBERS, and nothing else.
+    ///
+    /// This used to accept `SPEAKER_2` by taking the text after the last
+    /// underscore, which is how two distinct provider labels (`A_0`, `B_0`)
+    /// became one track, and how any label ending in a number acquired a
+    /// speaker it never claimed. The live worker path no longer reaches here
+    /// at all: it carries a typed attribution. What remains is replayed
+    /// evidence and Rev's own projection, both numeric, and a zero must keep
+    /// working.
     #[test]
-    fn test_parse_speaker_label_accepts_suffix_format() {
-        assert_eq!(parse_speaker_label("1"), Some(1));
-        assert_eq!(parse_speaker_label("SPEAKER_2"), Some(2));
-        assert_eq!(parse_speaker_label("not-a-speaker"), None);
+    fn legacy_token_speakers_are_admitted_as_numbers_only() {
+        assert_eq!(admit_token_speaker(Some("1"), "hello"), SpeakerIndex(1));
+        // Replayed `_asr_response.json` evidence carries this.
+        assert_eq!(admit_token_speaker(Some("0"), "hello"), SpeakerIndex(0));
+        // No label at all: the single track of an undiarized recording.
+        assert_eq!(admit_token_speaker(None, "hello"), SpeakerIndex(0));
+        // Not a speaker number: reported, and it takes the first track rather
+        // than being folded onto whichever speaker its suffix resembles.
+        assert_eq!(
+            admit_token_speaker(Some("SPEAKER_2"), "hello"),
+            SpeakerIndex(0)
+        );
+        assert_eq!(
+            admit_token_speaker(Some("not-a-speaker"), "hello"),
+            SpeakerIndex(0)
+        );
     }
 
     #[test]
-    fn test_generate_participant_ids() {
+    fn test_observed_participant_ids() {
         let utterances = vec![
             asr_postprocess::Utterance {
                 speaker: SpeakerIndex(0),
@@ -379,28 +399,30 @@ mod tests {
                 lang: None,
             },
         ];
-        let ids = generate_participant_ids(&utterances, 2);
+        let transcript = build_chat::NamedAsrUtterances::numbered(&utterances)
+            .into_transcript(&["eng".to_string()], None, false)
+            .unwrap();
+        let ids: Vec<_> = transcript
+            .description
+            .participants
+            .iter()
+            .map(|participant| participant.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["PAR0", "PAR1"]);
     }
 
     #[test]
-    fn test_generate_participant_ids_many_speakers() {
+    fn test_observed_participant_ids_sparse_speakers() {
         let utterances = vec![asr_postprocess::Utterance {
             speaker: SpeakerIndex(9),
             words: vec![],
             lang: None,
         }];
-        let ids = generate_participant_ids(&utterances, 10);
-        assert_eq!(ids.len(), 10);
-        assert_eq!(ids[0], "PAR0");
-        assert_eq!(ids[8], "PAR8");
-        assert_eq!(ids[9], "PAR9");
-    }
-
-    #[test]
-    fn test_generate_standard_participant_ids_uses_chat_defaults_then_sp() {
-        let ids = generate_standard_participant_ids(5);
-        assert_eq!(ids, vec!["PAR0", "PAR1", "PAR2", "PAR3", "PAR4"]);
+        let transcript = build_chat::NamedAsrUtterances::numbered(&utterances)
+            .into_transcript(&["eng".to_string()], None, false)
+            .unwrap();
+        assert_eq!(transcript.description.participants.len(), 1);
+        assert_eq!(transcript.description.participants[0].id, "PAR9");
     }
 
     // -----------------------------------------------------------------------
@@ -408,7 +430,7 @@ mod tests {
     //
     // Exercise the full conversion chain with realistic ASR payloads:
     //   AsrResponse → convert_asr_response() → process_raw_asr()
-    //   → generate_participant_ids() → transcript_from_asr_utterances()
+    //   → NamedAsrUtterances → into_transcript()
     //   → build_chat() → to_chat_string()
     //
     // These catch bugs that unit tests on individual stages miss, the same
@@ -622,6 +644,7 @@ mod tests {
                 },
             ],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         }
     }
@@ -724,6 +747,7 @@ mod tests {
                 },
             ],
             lang: LanguageCode3::eng(),
+            model: None,
             source_monologues: None,
         }
     }
@@ -731,25 +755,15 @@ mod tests {
     /// Run the full canned-response conversion chain and return CHAT text.
     ///
     /// Mirrors the pipeline stages in `pipeline/transcribe.rs`:
-    /// `convert_asr_response` → `process_raw_asr` → `generate_participant_ids`
-    /// → `transcript_from_asr_utterances` → `build_chat` → `to_chat_string`.
-    fn run_canned_response_to_chat(
-        response: &AsrResponse,
-        num_speakers: usize,
-        media_name: Option<&str>,
-    ) -> String {
+    /// `convert_asr_response` → `process_raw_asr` → `NamedAsrUtterances`
+    /// → `into_transcript` → `build_chat` → `to_chat_string`.
+    fn run_canned_response_to_chat(response: &AsrResponse, media_name: Option<&str>) -> String {
         let asr_output = convert_asr_response(response);
-        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang);
-        let participant_ids = generate_participant_ids(&utterances, num_speakers);
-        let desc = build_chat::transcript_from_asr_utterances(
-            &utterances,
-            &participant_ids,
-            &[response.lang.to_string()],
-            media_name,
-            false,
-        )
-        .expect("test: transcript_from_asr_utterances should succeed")
-        .description;
+        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang).expect("test: ASR post-processing must not refuse this input");
+        let desc = build_chat::NamedAsrUtterances::numbered(&utterances)
+            .into_transcript(&[response.lang.to_string()], media_name, false)
+            .expect("test: transcript_from_asr_utterances should succeed")
+            .description;
         let chat_file = build_chat::build_chat(&desc).expect("build_chat must succeed");
         to_chat_string(&chat_file)
     }
@@ -759,7 +773,7 @@ mod tests {
     #[test]
     fn canned_revai_response_produces_multi_speaker_chat() {
         let response = canned_revai_two_speaker_response();
-        let chat = run_canned_response_to_chat(&response, 2, Some("interview.mp3"));
+        let chat = run_canned_response_to_chat(&response, Some("interview.mp3"));
 
         // Must have 2 @Participants entries (PAR0 + PAR1, generic numbered codes)
         let participants_line = chat
@@ -813,7 +827,7 @@ mod tests {
     #[test]
     fn canned_whisper_response_produces_single_speaker_chat() {
         let response = canned_whisper_no_speaker_response();
-        let chat = run_canned_response_to_chat(&response, 1, Some("recording.wav"));
+        let chat = run_canned_response_to_chat(&response, Some("recording.wav"));
 
         // Must have exactly 1 participant
         let id_count = chat.lines().filter(|l| l.starts_with("@ID:")).count();
@@ -868,7 +882,7 @@ mod tests {
         // The pipeline does not consult opts.diarize during
         // convert_asr_response → process_raw_asr → build_chat. Verify this
         // by running the same canned data through the conversion chain.
-        let chat = run_canned_response_to_chat(&response, 2, Some("test.mp3"));
+        let chat = run_canned_response_to_chat(&response, Some("test.mp3"));
 
         // Count distinct speaker codes in utterance lines
         let speaker_codes: std::collections::BTreeSet<&str> = chat
@@ -885,15 +899,14 @@ mod tests {
         );
     }
 
-    /// Whisper response (no speaker labels) should produce single-speaker
-    /// output even when num_speakers > 1, without dedicated diarization,
-    /// Whisper tokens all default to speaker 0.
+    /// Legacy unlabeled Whisper conversion produces one observed speaker.
+    /// Requested counts no longer enter participant naming at all.
     #[test]
     fn canned_whisper_no_labels_stays_single_speaker_even_with_high_num_speakers() {
         let response = canned_whisper_no_speaker_response();
-        // Pass num_speakers=3, but since there are no labels, all tokens
-        // map to speaker 0 and only PAR appears in the output.
-        let chat = run_canned_response_to_chat(&response, 3, None);
+        // The conversion's existing absence policy maps these tokens to zero;
+        // participant naming must not add speakers beyond that observation.
+        let chat = run_canned_response_to_chat(&response, None);
 
         let speaker_codes: std::collections::BTreeSet<&str> = chat
             .lines()
@@ -917,7 +930,7 @@ mod tests {
     #[test]
     fn canned_revai_response_expands_numbers() {
         let response = canned_revai_two_speaker_response();
-        let chat = run_canned_response_to_chat(&response, 2, None);
+        let chat = run_canned_response_to_chat(&response, None);
 
         assert!(
             chat.contains("three"),
@@ -939,7 +952,7 @@ mod tests {
     fn canned_revai_response_splits_on_embedded_periods() {
         let response = canned_revai_two_speaker_response();
         let asr_output = convert_asr_response(&response);
-        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang);
+        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang).expect("test: ASR post-processing must not refuse this input");
 
         // "program." and "ago." should create utterance boundaries, so we
         // expect more than 2 utterances from the 4-turn conversation.

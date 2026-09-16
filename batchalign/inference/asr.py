@@ -7,7 +7,7 @@ No CHAT assembly, no number expansion, no retokenization.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias
 
 import numpy as np
 import pycountry
@@ -17,12 +17,12 @@ from batchalign.inference._domain_types import (
     AudioPath,
     ConfidenceScore,
     LanguageCode,
-    NumSpeakers,
     RevAiJobId,
     SampleRate,
     SpeakerId,
     TimestampSeconds,
 )
+from batchalign.worker._types_v2 import ProviderDiarizationV2
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,19 @@ class AsrBatchItem(BaseModel):
 
     audio_path: AudioPath
     lang: LanguageCode = "eng"
-    num_speakers: NumSpeakers = 1
+    # Whether this provider must separate speakers, and into how many, carried
+    # verbatim from the request's ``ProviderMediaInputV2.diarization``. NO
+    # default: the two states answer a question only the caller can answer, and
+    # a default answers it for everyone who forgets to.
+    #
+    # This was ``num_speakers: NumSpeakers = 1`` until 2026-09-16, and the same
+    # boundary then carried two spellings of "do not separate": the Rust bridge
+    # sent 0, while this default said 1, which under the ruling that a
+    # diarization count is either automatic or at least two means "separate this
+    # recording into one speaker", the contradiction submission refuses. The
+    # default was unreachable in production only because Rust always sets the
+    # key, which is a property of one caller rather than of the type.
+    diarization: ProviderDiarizationV2
     rev_job_id: RevAiJobId | None = None
     # The request's own wall-clock decode budget, forwarded verbatim from
     # the Rust worker-protocol V2 request's ``decode_budget_seconds``
@@ -63,10 +75,40 @@ class AsrElement(BaseModel):
     confidence: ConfidenceScore | None = None
 
 
-class AsrMonologue(BaseModel):
-    """One speaker-attributed ASR span returned by a provider adapter."""
+class AttributedSpeaker(BaseModel):
+    """The provider named a speaker; this is its own label for them."""
 
-    speaker: int | SpeakerId = 0
+    kind: Literal["attributed"] = "attributed"
+    label: SpeakerId = Field(min_length=1)
+
+
+class UndiarizedSpeaker(BaseModel):
+    """The provider separates no speakers and named none.
+
+    A claim about the ENGINE, not a guess about the recording. Aliyun, FunASR,
+    Whisper and Qwen all report this; before it existed they reported speaker
+    ``0``, which no downstream reader could tell from a provider's real first
+    speaker.
+    """
+
+    kind: Literal["undiarized"] = "undiarized"
+
+
+SpeakerAttribution: TypeAlias = Annotated[
+    AttributedSpeaker | UndiarizedSpeaker,
+    Field(discriminator="kind"),
+]
+"""Who a provider adapter attributed one monologue to."""
+
+
+class AsrMonologue(BaseModel):
+    """One speaker-attributed ASR span returned by a provider adapter.
+
+    ``speaker`` has NO default. It used to default to ``0``, so an adapter that
+    simply did not know invented a first speaker by omission.
+    """
+
+    speaker: SpeakerAttribution
     elements: list[AsrElement] = Field(default_factory=list)
 
 
@@ -146,23 +188,17 @@ def load_whisper_asr(
     from batchalign.device import resolve_inference_device
     from batchalign.inference.audio import bind_whisper_token_timestamp_extractor
     from batchalign.inference.types import WhisperASRHandle
-    from batchalign.worker._progress import (
-        HF_ARTIFACTS_WHISPER,
-        emit_hf_download_if_missing,
-    )
 
     device = resolve_inference_device(device_policy)
 
-    # Surface a download notification if the user is about to wait for a
-    # multi-GB Whisper download. ``base`` and ``model`` may be the same
-    # repo; we probe both because either path could trigger a download
-    # depending on which file was previously cached. Probe the full
-    # Whisper artifact set (config + generation_config + tokenizer +
-    # tokenizer_config + preprocessor_config) so a partial-cache state
-    # doesn't bypass the notification.
-    emit_hf_download_if_missing(base, kind="ASR", artifacts=HF_ARTIFACTS_WHISPER)
-    if model != base:
-        emit_hf_download_if_missing(model, kind="ASR", artifacts=HF_ARTIFACTS_WHISPER)
+    # No download probe here. The worker resolves the pinned snapshot before
+    # calling this function and passes the resolved DIRECTORY as both ``model``
+    # and ``base``, so probing them asked whether a local path was a cached
+    # repository: it never is, the notification fired on every load and named a
+    # directory, and ``model != base`` could no longer be true, so the second
+    # probe was dead. The announcement now lives in
+    # ``worker._model_loading.asr._load_hub_member``, the call that actually
+    # downloads and the only one that knows the revision it is fetching.
 
     config = GenerationConfig.from_pretrained(base)
     config.no_repeat_ngram_size = 4
@@ -303,8 +339,22 @@ def infer_whisper_prepared_audio(
             dropped_without_span,
             len(clamped_chunks),
         )
+    # The handle is the honest witness: it is the object the loader resolved a
+    # snapshot into, so it knows which commit actually came off the hub. A
+    # handle that never got one cannot have its output attributed, and guessing
+    # the configured checkpoint here would record a model that may not be the
+    # one on disk, which is the exact substitution this workstream removes.
+    identity = model.model_identity
+    if identity is None:
+        raise RuntimeError(
+            "this Whisper handle was never told which checkpoint it loaded, so "
+            "its results cannot name their model. The worker ASR loader sets "
+            "`model_identity` as soon as it resolves the snapshot; a handle "
+            "built outside that path must do the same before inference."
+        )
     return WhisperChunkResultPayloadV2(
         lang=lang,
         text=raw.get("text", "") if isinstance(raw, dict) else "",
         chunks=clamped_chunks,
+        model=identity,
     )

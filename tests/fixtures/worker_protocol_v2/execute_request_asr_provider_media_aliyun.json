@@ -8,7 +8,19 @@
     "input": {
       "kind": "provider_media",
       "media_path": "/tmp/example-aliyun.wav",
-      "num_speakers": 1
+      "diarization": {
+        "kind": "not_requested"
+      }
+    },
+    "models": {
+      "engine": "aliyun",
+      "service": {
+        "id": "aliyun-nls",
+        "revision": {
+          "kind": "provider_parameter",
+          "parameter": "speech-transcriber-v1"
+        }
+      }
     }
   },
   "attachments": []

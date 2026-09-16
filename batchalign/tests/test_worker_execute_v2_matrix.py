@@ -14,7 +14,13 @@ from typing import Literal
 import numpy as np
 import pytest
 
-from batchalign.inference.asr import AsrElement, AsrMonologue, MonologueAsrResponse
+from batchalign.inference.asr import (
+    AsrElement,
+    AsrMonologue,
+    AttributedSpeaker,
+    MonologueAsrResponse,
+    UndiarizedSpeaker,
+)
 from batchalign.inference.speaker import (
     LocalPyannoteSpeakerEvidence,
     NemoSpeakerEvidence,
@@ -22,6 +28,8 @@ from batchalign.inference.speaker import (
     SpeakerResponse,
     SpeakerSegment,
 )
+from batchalign.inference.types import Wave2VecWordAlignment
+from batchalign.tests._asr_model_pins import request_models, worker_loaded
 from batchalign.worker._asr_v2 import AsrExecutionHostV2
 from batchalign.worker._execute_v2 import WorkerExecutionHostV2, execute_request_v2
 from batchalign.worker._fa_v2 import ForcedAlignmentExecutionHostV2
@@ -29,7 +37,9 @@ from batchalign.worker._speaker_v2 import SpeakerExecutionHostV2
 from batchalign.worker._text_v2 import TextExecutionHostV2
 from batchalign.worker._types import BatchInferResponse, InferResponse, WorkerJSONValue
 from batchalign.worker._types_v2 import (
+    ArtifactRefV2,
     AsrBackendV2,
+    AsrInputV2,
     AsrRequestV2,
     CorefRequestV2,
     CorefResultV2,
@@ -41,9 +51,11 @@ from batchalign.worker._types_v2 import (
     ForcedAlignmentRequestV2,
     IndexedWordTimingResultV2,
     InferenceTaskV2,
+    IntegratedDiarizationV2,
     MonologueAsrResultV2,
     MorphosyntaxRequestV2,
     MorphosyntaxResultV2,
+    NotRequestedDiarizationV2,
     PreparedAudioEncodingV2,
     PreparedAudioInputV2,
     PreparedAudioRefV2,
@@ -106,7 +118,8 @@ def _make_asr_request(
 ) -> ExecuteRequestV2:
     """Build one ASR execute request for the requested backend/input pair."""
 
-    attachments: list[PreparedAudioRefV2] = []
+    attachments: list[ArtifactRefV2] = []
+    input_payload: AsrInputV2
     if input_kind == "prepared_audio":
         audio_attachment = _make_prepared_audio_attachment(
             tmp_path, f"asr-{backend.value}"
@@ -114,9 +127,17 @@ def _make_asr_request(
         attachments = [audio_attachment]
         input_payload = PreparedAudioInputV2(audio_ref_id=audio_attachment.id)
     elif input_kind == "provider_media":
+        # Ask each provider for what it can actually do. Tencent separates
+        # speakers; Aliyun, FunASR and Qwen separate none, and asking them to
+        # while their own output attributes nobody is the contradiction the
+        # bridge refuses. One request shape for all four hid that.
         input_payload = ProviderMediaInputV2(
             media_path=f"/tmp/{backend.value}.wav",
-            num_speakers=2,
+            diarization=(
+                IntegratedDiarizationV2(speakers=2)
+                if _separates_speakers(backend)
+                else NotRequestedDiarizationV2()
+            ),
         )
     else:
         input_payload = SubmittedJobInputV2(
@@ -130,9 +151,23 @@ def _make_asr_request(
             lang="yue",
             backend=backend,
             input=input_payload,
+            models=request_models(backend),
         ),
         attachments=attachments,
     )
+
+
+def _separates_speakers(backend: AsrBackendV2) -> bool:
+    """Whether this provider attributes speakers of its own.
+
+    Tencent is the only HK provider that does. Aliyun streams one track,
+    FunASR's speaker model is never built (its `spk_model` argument reaches
+    `generate`, which does not read it), and Qwen3-ASR emits no diarization;
+    for those three, BA3's dedicated diarization stage attributes speakers
+    afterwards.
+    """
+
+    return backend is AsrBackendV2.HK_TENCENT
 
 
 def _provider_asr_host(backend: AsrBackendV2) -> AsrExecutionHostV2:
@@ -143,7 +178,15 @@ def _provider_asr_host(backend: AsrBackendV2) -> AsrExecutionHostV2:
             lang="yue",
             monologues=[
                 AsrMonologue(
-                    speaker=0,
+                    # A provider that separates speakers names one; a provider
+                    # that does not says so. Reporting "undiarized" from an
+                    # engine the request asked to separate is refused at the
+                    # bridge, which is what this double used to do for all four.
+                    speaker=(
+                        AttributedSpeaker(label="1")
+                        if _separates_speakers(backend)
+                        else UndiarizedSpeaker()
+                    ),
                     elements=[AsrElement(value=f"{label}:{media_path}", type="text")],
                 )
             ],
@@ -202,7 +245,6 @@ def _make_fa_request(
             payload_ref_id=payload_attachment.id,
             audio_ref_id=audio_attachment.id,
             text_mode=text_mode,
-            pauses=backend is FaBackendV2.WHISPER,
         ),
         attachments=[payload_attachment, audio_attachment],
     )
@@ -221,19 +263,23 @@ def _fa_host(backend: FaBackendV2) -> ForcedAlignmentExecutionHostV2:
     if backend is FaBackendV2.WAVE2VEC:
         return ForcedAlignmentExecutionHostV2(
             wave2vec_runner=lambda audio, words: [
-                (words[0], (100, 180), 0.8),
-                (words[1], (240, 320 if audio.shape == (4,) else 0), 0.9),
+                Wave2VecWordAlignment(words[0], (100, 180), 0.8),
+                Wave2VecWordAlignment(
+                    words[1], (240, 320 if audio.shape == (4,) else 0), 0.9
+                ),
             ]
         )
     if backend is FaBackendV2.WAV2VEC_CANTO:
         return ForcedAlignmentExecutionHostV2(
             canto_runner=lambda audio, payload, request: [
-                (
+                Wave2VecWordAlignment(
                     payload.words[0],
                     (50, 120 if request.text_mode is FaTextModeV2.CHAR_JOINED else 0),
                     None,
                 ),
-                (payload.words[1], (130, 220 if audio.shape == (4,) else 0), None),
+                Wave2VecWordAlignment(
+                    payload.words[1], (130, 220 if audio.shape == (4,) else 0), None
+                ),
             ]
         )
     raise AssertionError(f"unexpected FA backend {backend!s}")
@@ -435,10 +481,14 @@ def test_routes_provider_asr_backend_matrix(
     """Provider ASR backends should route to the matching host runner."""
 
     request = _make_asr_request(tmp_path, backend, "provider_media")
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(asr=_provider_asr_host(backend)),
-    )
+    # The backend varies per parameter case, so this one records its load
+    # identity inline rather than through the decorator the fixed-backend
+    # tests use.
+    with worker_loaded(backend):
+        response = execute_request_v2(
+            request=request,
+            host=WorkerExecutionHostV2(asr=_provider_asr_host(backend)),
+        )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, MonologueAsrResultV2)
@@ -624,9 +674,24 @@ def test_text_execute_v2_rejects_result_count_mismatch(
     [
         pytest.param(
             "morphosyntax",
-            {"raw_sentences": []},
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
+                "model": {
+                    "stanza_version": "1.99.0",
+                    "lang": "eng",
+                    "pipeline": "standard",
+                },
+                "repairs": [],
+            },
             MorphosyntaxResultV2,
             id="morphosyntax",
+        ),
+        pytest.param(
+            "morphosyntax",
+            {"kind": "no_words"},
+            MorphosyntaxResultV2,
+            id="morphosyntax-no-words",
         ),
         pytest.param(
             "utseg",
@@ -642,15 +707,31 @@ def test_text_execute_v2_rejects_result_count_mismatch(
         ),
         pytest.param(
             "translate",
-            {"raw_translation": "hola"},
+            {
+                "kind": "translated",
+                "raw_translation": "hola",
+                "engine": "googletrans-v1",
+            },
             TranslationResultV2,
             id="translate",
         ),
         pytest.param(
+            "translate",
+            {"kind": "blank_input"},
+            TranslationResultV2,
+            id="translate-blank-input",
+        ),
+        pytest.param(
             "coref",
-            {"annotations": []},
+            {"kind": "resolved", "annotations": [], "engine": "stanza-1.99.0"},
             CorefResultV2,
             id="coref",
+        ),
+        pytest.param(
+            "coref",
+            {"kind": "no_sentences"},
+            CorefResultV2,
+            id="coref-no-sentences",
         ),
     ],
 )
@@ -681,12 +762,6 @@ def test_text_execute_v2_accepts_valid_result_shapes(
     ("task_name", "bad_result", "message_fragment"),
     [
         pytest.param(
-            "morphosyntax",
-            {"raw_sentences": {}},
-            "raw_sentences must be a list",
-            id="morphosyntax-raw_sentences",
-        ),
-        pytest.param(
             "utseg",
             {"trees": [1]},
             "list[str]",
@@ -697,18 +772,6 @@ def test_text_execute_v2_accepts_valid_result_shapes(
             {"assignments": ["bad"]},
             "list[usize]",
             id="utseg-assignments",
-        ),
-        pytest.param(
-            "translate",
-            {"raw_translation": ["hola"]},
-            "must be a string",
-            id="translate-raw_translation",
-        ),
-        pytest.param(
-            "coref",
-            {"annotations": {}},
-            "annotations must match CorefRawResponse",
-            id="coref-annotations",
         ),
     ],
 )
@@ -734,3 +797,115 @@ def test_text_execute_v2_rejects_invalid_result_shapes(
     _assert_error_response(
         response, ProtocolErrorCodeV2.RUNTIME_FAILURE, message_fragment
     )
+
+
+_MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
+
+
+@pytest.mark.parametrize(
+    ("task_name", "bad_item"),
+    [
+        pytest.param("morphosyntax", {"raw_sentences": []}, id="morphosyntax-untagged"),
+        pytest.param(
+            "morphosyntax",
+            {"kind": "analyzed", "raw_sentences": {}, "model": _MODEL, "repairs": []},
+            id="morphosyntax-raw_sentences",
+        ),
+        pytest.param(
+            "morphosyntax",
+            {"kind": "analyzed", "raw_sentences": [], "repairs": []},
+            id="morphosyntax-missing-model",
+        ),
+        # A host that reports no repairs must say so. Defaulting the field
+        # would make "repaired nothing" and "does not report repairs" the same
+        # item, which is the shape that kept relation rewrites in the log only.
+        pytest.param(
+            "morphosyntax",
+            {"kind": "analyzed", "raw_sentences": [], "model": _MODEL},
+            id="morphosyntax-missing-repairs",
+        ),
+        pytest.param(
+            "morphosyntax",
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
+                "model": _MODEL,
+                "repairs": [{"kind": "transposed", "word": "ne"}],
+            },
+            id="morphosyntax-unknown-repair-kind",
+        ),
+        pytest.param(
+            "morphosyntax",
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
+                "model": {**_MODEL, "stanza_version": ""},
+                "repairs": [],
+            },
+            id="morphosyntax-blank-model-version",
+        ),
+        pytest.param(
+            "morphosyntax",
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
+                "model": {**_MODEL, "pipeline": "retokenize"},
+                "repairs": [],
+            },
+            id="morphosyntax-unknown-pipeline",
+        ),
+        pytest.param(
+            "translate",
+            {"kind": "translated", "raw_translation": ["hola"], "engine": "x"},
+            id="translate-raw_translation",
+        ),
+        pytest.param(
+            "translate",
+            {"kind": "translated", "raw_translation": "hola"},
+            id="translate-missing-engine",
+        ),
+        pytest.param(
+            "translate",
+            {"kind": "translated", "raw_translation": "hola", "engine": "google|v1"},
+            id="translate-separator-in-engine",
+        ),
+        pytest.param(
+            "coref",
+            {"kind": "resolved", "annotations": {}, "engine": "stanza-1.99.0"},
+            id="coref-annotations",
+        ),
+        pytest.param(
+            "coref",
+            {"kind": "resolved", "annotations": [], "engine": " "},
+            id="coref-blank-engine",
+        ),
+    ],
+)
+def test_text_execute_v2_fails_only_the_item_that_does_not_parse(
+    tmp_path: Path,
+    task_name: TextTaskName,
+    bad_item: WorkerJSONValue,
+) -> None:
+    """A host item outside its tagged V2 shape becomes that item's failure.
+
+    The bridge parses each item through the canonical tagged type, so an
+    analysis without its model or an engine name a stamp cannot hold is not a
+    value that crosses; the batch still succeeds and only this item fails.
+    """
+
+    request = _make_text_request(tmp_path, task_name)
+    response = execute_request_v2(
+        request=request,
+        host=WorkerExecutionHostV2(
+            text=_text_host_with_results(
+                task_name,
+                [InferResponse(result=bad_item, elapsed_s=0.0)],
+            ),
+        ),
+    )
+
+    assert isinstance(response.outcome, ExecuteSuccessV2)
+    assert response.result is not None
+    item = response.result.items[0]
+    assert item.kind == "failed"
+    assert f"invalid {task_name} host item" in item.error

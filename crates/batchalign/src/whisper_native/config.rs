@@ -2,6 +2,22 @@
 
 use std::path::PathBuf;
 
+/// Where the weights this config names came from.
+///
+/// The whole reason this exists: whether the build may claim a pinned revision
+/// for the file is a property of HOW it was obtained, not of the path, and a
+/// path alone cannot be asked. The default is fetched from a pinned repository
+/// revision and can be named exactly; a host-chosen file is whatever that host
+/// put there, and saying so is the honest record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhisperModelSource {
+    /// Fetched from the repository revision this build pins.
+    PinnedDefault,
+    /// A file the host named, through `BATCHALIGN_WHISPER_RS_MODEL` or an
+    /// engine override. This build pins no revision for it.
+    HostChosen,
+}
+
 /// Where the model file lives + how to invoke whisper.cpp's decoder.
 ///
 /// Defaults are platform-aware:
@@ -15,6 +31,9 @@ use std::path::PathBuf;
 pub struct WhisperNativeConfig {
     /// Absolute path to a ggml-format model file (`.bin`).
     pub model_path: PathBuf,
+    /// Where `model_path` came from, which decides what revision the result
+    /// may claim.
+    pub source: WhisperModelSource,
     /// Number of CPU threads to use during decoding. `None` lets
     /// whisper.cpp pick a sane default (typically 4 or `min(4, ncpu)`).
     pub n_threads: Option<i32>,
@@ -36,6 +55,23 @@ impl WhisperNativeConfig {
     pub fn for_model(model_path: PathBuf) -> Self {
         Self {
             model_path,
+            source: WhisperModelSource::HostChosen,
+            n_threads: Some(8),
+            max_context: Some(0),
+            translate: false,
+        }
+    }
+
+    /// The default weights, fetched at the repository revision this build pins.
+    ///
+    /// Private, so only [`Self::resolve`]'s own fetch can mint a config that
+    /// claims to be pinned. A public constructor would let any caller assert
+    /// the pin over a file that never came from it, which is the weakest
+    /// possible proof of a revision.
+    fn pinned_default(model_path: PathBuf) -> Self {
+        Self {
+            model_path,
+            source: WhisperModelSource::PinnedDefault,
             n_threads: Some(8),
             max_context: Some(0),
             translate: false,
@@ -73,7 +109,7 @@ impl WhisperNativeConfig {
             use std::sync::OnceLock;
             static RESOLVED_DEFAULT: OnceLock<PathBuf> = OnceLock::new();
             if let Some(path) = RESOLVED_DEFAULT.get() {
-                return Ok(Self::for_model(path.clone()));
+                return Ok(Self::pinned_default(path.clone()));
             }
             let client = hf_hub::HFClientSync::new().map_err(|e| {
                 super::WhisperNativeError::ModelResolution {
@@ -91,12 +127,18 @@ impl WhisperNativeConfig {
                 .model(owner, name)
                 .download_file()
                 .filename(DEFAULT_MODEL_FILE.to_owned())
+                // Pinned, not floating. Without this the fetch tracks the
+                // repository's default branch, so two machines running the
+                // same build could hold different weights and neither
+                // transcript could say which. The revision lives in the
+                // manifest beside every other pinned revision this build has.
+                .revision(crate::model_manifest::NATIVE_WHISPER_REVISION.to_owned())
                 .send()
                 .map_err(|e| super::WhisperNativeError::ModelResolution {
                     reason: format!("download of {owner}/{name}/{DEFAULT_MODEL_FILE} failed: {e}"),
                 })?;
             let path = RESOLVED_DEFAULT.get_or_init(|| path).clone();
-            Ok(Self::for_model(path))
+            Ok(Self::pinned_default(path))
         }
         #[cfg(not(feature = "whisper-rs-backend"))]
         {

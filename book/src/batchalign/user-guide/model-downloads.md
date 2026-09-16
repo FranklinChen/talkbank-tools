@@ -1,7 +1,7 @@
 # Model Downloads and Caching
 
 **Status:** Current
-**Last updated:** 2026-09-02 06:51 EDT
+**Last updated:** 2026-09-16 03:36 EDT
 
 ## The contract
 
@@ -49,6 +49,36 @@ local cache and the same command runs without any download.
 
 These sizes are ballpark. Real numbers depend on the upstream artifact and
 your network speed.
+
+## Which revision you get
+
+The models BA3 loads by default are PINNED: each resolves to an exact revision
+rather than to whatever the upstream repository happens to hold today. Hugging
+Face models are pinned to a commit (`openai/whisper-large-v3` at
+`06f233fe06e710322aca913c1bc4249a0d71fce1`, for instance), and the ModelScope
+models the Paraformer engine loads, the checkpoint together with its
+voice-activity and punctuation models, are pinned to the tag `v2.0.4`, because
+ModelScope publishes no commit behind a tag. Cloud engines have no weights to
+pin; their request names the provider's own model instead.
+
+That covers the utterance-segmentation boundary models too, so a `transcribe`
+or `utseg` run in English, Mandarin or Cantonese loads a known revision
+(`talkbank/CHATUtterance-en` at `764ec3f762c2e24df2def8df98b5fe34940085c6`, for
+instance). Because the revision is now known before the model loads rather than
+read back afterwards, every file those runs write records it: the `engine=`
+field of the `[fc-ba3 utseg ...]` comment is always `<model id>@<revision>`.
+
+What that buys you: the same command on the same media loads the same weights
+next month as it does today, and a repository that moves upstream cannot
+silently change your output.
+
+An override still loads. Passing your own model (for example
+`--engine-overrides '{"funaudio_model":"..."}'`) leaves that model unpinned
+rather than refusing the job, and BA3 records it at the revision actually
+observed when it loaded, so the run still says which weights produced it.
+What an override cannot do is name its revision BEFORE the model loads, which
+is why a run with an unpinned model does not use the UTR ASR result cache
+(see below): no stored row could promise it came from the same weights.
 
 ## What you'll see on first run
 
@@ -214,11 +244,21 @@ raw Rev transcript evidence, raw speaker evidence, and normalized speaker
 segments.
 
 The authoritative list of cached task kinds is in
-`crates/batchalign/src/chat_ops/cache_key.rs::CacheTaskName`. Cache keys
-include the engine version reported by the exact selected worker, language,
-evidence/projection revision, and relevant inputs, so changing any of those
-produces a fresh entry. In server mode, worker models remain loaded between
-jobs as well; result caching and warm workers remove different costs.
+`crates/batchalign/src/chat_ops/cache_key.rs::CacheTaskName`. Every kind is
+scoped to an identity of its own, alongside language, evidence/projection
+revision, and relevant inputs, so changing any of those produces a fresh
+entry. Which identity depends on the kind:
+
+- **Forced alignment** is scoped to the engine version reported by the exact
+  selected worker, because its rows are namespaced before inference runs.
+- **UTR ASR** is scoped to the pinned plan instead: the engine together with
+  the exact models it was pinned to, which is known before dispatch without
+  loading anything. A run whose ASR model is unpinned has no such identity,
+  so it infers without reading or writing UTR ASR rows rather than pooling
+  them with another plan's.
+
+In server mode, worker models remain loaded between jobs as well; result
+caching and warm workers remove different costs.
 
 **Text NLP tasks are not cached.** Running `morphotag`, `utseg`,
 `translate`, or `coref` twice on the same file runs the model twice. The

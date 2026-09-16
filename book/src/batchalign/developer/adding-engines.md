@@ -1,7 +1,7 @@
 # Adding Inference Providers
 
 **Status:** Current
-**Last updated:** 2026-08-30 21:00 EDT
+**Last updated:** 2026-09-16 03:36 EDT
 
 Batchalign3 no longer has a public entry-point plugin system. New engines are
 added in-tree as built-in worker capabilities.
@@ -79,21 +79,59 @@ Update:
 - `batchalign/worker/_execute_v2.py` to route the task or engine
 - `batchalign/worker/_text_v2.py` if the task belongs to the shared batched
   text host
-- `batchalign/worker/_handlers.py` to advertise `infer_tasks` and
-  `engine_versions`
+- `batchalign/worker/_handlers.py` to advertise `infer_tasks`, and, for forced
+  alignment only, to name the engine in `engine_versions`
 
-If the new engine is a variant of an existing task, keep the task stable and
-report the engine version string through `engine_versions`.
+A capability report carries task support plus the FA identity only.
+`_reported_engine()` names FA's engine and returns `None` for every other
+task; Rust admission refuses a report that names an engine for any other task
+(`EngineNamedForNonFaTask`). If the new engine is an FA variant, keep the task
+stable and make `_reported_engine()` name the FA engine that actually loaded.
+Report `None` until the process can name it (FA reports `None` until an FA
+engine has loaded); never a guessed name or `"unknown"`. Set an identity where
+the loader loads the model, as the translation loaders build one
+`LoadedTranslation` record (backend and engine together) on `_state`. A name
+must be a valid `ReportedEngineName`, a wrapper over `StampSafeText`:
+non-blank, no surrounding whitespace (the Unicode `White_Space` set, written
+out as `_STAMP_WHITESPACE` in `batchalign/worker/_types.py`), and none of `|`,
+`;`, `]` or a line break.
+
+Where the engine is named depends on when the server needs it:
+
+- **On results (translate, coref, morphosyntax).** Each result item names the
+  engine or model that produced it: `translated` and `resolved` items carry
+  `engine`, and `analyzed` items carry `model` with the pipeline variant.
+  Provenance is built from the results a file applied, so these commands never
+  read the capability report for identity and never fail a job for a `None`
+  report. A new engine for a text task should name itself the same way.
+- **Before dispatch (forced alignment only).** FA cache rows are read under
+  the FA engine's namespace before any worker runs, so FA's identity comes
+  from the capability report. Two different facts are read at two moments.
+  Whether the worker SUPPORTS a command's primary infer task is
+  `command_supported` in `capability.rs`, which decides what `/health`
+  advertises and which jobs are accepted. Whether the FA engine is NAMED is
+  read at dispatch: `WorkerPool::ensure_command_capabilities` loads the task
+  on the selected worker and returns `LoadedCapabilities` (the task it loaded
+  and the report taken after that load), and the forced-alignment arm in
+  `runner/routing.rs` reads the engine with `FaCacheNamespace::from_loaded`
+  (`crates/batchalign/src/engine_reports.rs`). That constructor refuses a
+  report taken after another task loaded, an engine still unnamed after the
+  load, and a worker that does not support FA. So a lazily loading worker, or
+  a registry daemon probed before it loaded FA, still advertises and accepts
+  `align`; dispatch loads FA and reads the engine then. `FaCacheNamespace` is
+  a plain newtype over `ReportedEngineName`, and that dispatch arm is the only
+  place a pre-dispatch identity is required; no catalog field declares one.
 
 **Capability gate (critical):** The `_capabilities()` function in `_handlers.py`
 uses **import probes** to decide which infer tasks to advertise. If you add a new
 `InferTask`, you must add it to the `_INFER_TASK_PROBES` dict with the tuple of
-Python modules that must be importable:
+Python modules that must be importable, and give it an arm in the exhaustive
+`_reported_engine()` match:
 
 ```python
-_INFER_TASK_PROBES: dict[InferTask, tuple[tuple[str, ...], str]] = {
+_INFER_TASK_PROBES: dict[InferTask, tuple[str, ...]] = {
     ...
-    InferTask.MY_TASK: (("my_library",), "my-engine-v1"),
+    InferTask.MY_TASK: ("my_library",),
 }
 ```
 
@@ -102,11 +140,16 @@ dedicated probe worker at startup. The capability check uses import probes, not
 loaded model state. This means capability advertisement must be based on import
 availability, never on `_state.my_model is not None`. If you gate on loaded
 model state, your task will not be advertised and the server will silently
-exclude the command.
+exclude the command. The FA engine NAME in `engine_versions` is the opposite:
+it reflects what has actually loaded, and is `None` before that.
 
-The Rust server cross-checks: commands whose required `InferTask` is not in the
+The Rust server cross-checks: commands whose primary `InferTask` is not in the
 worker's `infer_tasks` list are excluded from the server's advertised
-capabilities. See [Capability Discovery](../../architecture/python-rust-boundary/python-rust-boundary.md#capability-discovery)
+capabilities; engine names are not consulted. A report whose
+`engine_versions` holds an invalid name or a key that is not a task fails to
+deserialize, and one that lacks an entry for an advertised task, names a task
+that was not advertised, or names an engine for a task other than FA is
+refused where the pool admits it (`WorkerPool::record_capabilities`). See [Capability Discovery](../../architecture/python-rust-boundary/python-rust-boundary.md#capability-discovery)
 for the full flow.
 
 ### 5. Register dependencies
@@ -153,6 +196,20 @@ must update when adding a new variant. Use the `whisper_hub` addition
 | `AsrBackend::provenance_name()` | `transcribe/types.rs` | Canonical engine identity for production transcript provenance and warnings. |
 | `asr_backend_engine()` | `crates/batchalign/src/worker/pool/execute_v2.rs` | Maps the wire backend to an `AsrEngineName`; the pool-key string then comes from `dispatch_override_name()`, so there is no second table to keep in step. |
 | *(input-source routing)* | `crates/batchalign/src/transcribe/infer.rs` | Match on `AsrWorkerMode` picks `PreparedAudio` (local model) vs `ProviderMedia` (external service). |
+
+**Model identity obligations.** A variant present in all three enums and
+every helper above is still refused at the bridge without these three:
+
+| Obligation | Where | Why it is not optional |
+|---|---|---|
+| The ASR result carries `AsrModelIdentityV2` | your worker-side runner builds it; typed in `crates/batchalign-types/src/worker_v2/responses.rs` | `model` is required, not optional, so a result naming no models does not compile. The bridge admits the reported composition against the request's pin and refuses a disagreement by name; for a provider backend it does so BEFORE calling the provider, so a mismatch costs no paid request. A worker that recorded no identity is refused per engine, never handed one inferred from the request. |
+| The composition is per engine, not one model | `crates/batchalign/src/model_manifest.rs` | An engine that loads more than one model names all of them: Qwen names its ASR model AND its forced aligner, Paraformer names its checkpoint plus the voice-activity and punctuation models it additionally loads. The UTR ASR cache namespace is built from that composition, so an omitted member pools rows produced by different weights. |
+| A monologue speaker is `SpeakerAttributionV2` | `responses.rs::AsrMonologueV2::speaker` | A bare string cannot tell "this engine separates nobody, so it named nobody" from "it named nobody although separation was requested". That is why undiarized engines once wrote `"0"`, which became a `PAR0` tier indistinguishable from a real first speaker. |
+
+The contract itself is specified twice, and both are worth reading before you
+add a variant: the ASR `#### Result` section of
+[worker-protocol-v2](worker-protocol-v2.md), and the ASR row of
+`INTERFACE_MAP.md` at the repository root.
 
 Worker-side enum (matches Rust wire name one-to-one):
 
@@ -273,6 +330,17 @@ For ASR engine additions, the RED test baseline is:
    raises on a missing default, pin the error type and message
    fragment. Don't let the error degrade into a silent stock
    fallback.
+7. **`test_<engine>_result_carries_model_identity`**: build the result
+   your runner returns and assert its `model` names every model the
+   engine loads, each at the revision it was OBSERVED at rather than
+   the one that was requested.
+8. **`test_<engine>_bridge_refuses_unreported_identity`**: a worker
+   response recording no identity for your engine must be refused by
+   name, and for a provider backend the refusal must happen before the
+   provider is called.
+9. **`test_<engine>_monologue_speaker_attribution`**: if your engine
+   produces monologues, assert an undiarized result carries the
+   `undiarized` attribution rather than a speaker labelled `"0"`.
 
 Guard-rail tests must accompany any deny-list / recommendation
 changes, if you redirect users from engine X to engine Y for some

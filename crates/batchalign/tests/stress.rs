@@ -24,6 +24,7 @@
 //! `cargo test -p batchalign --test stress -- --test-threads=1`.
 
 mod common;
+mod live_deadline;
 
 use std::time::Duration;
 
@@ -34,6 +35,8 @@ use batchalign::api::{
 use batchalign::config::ServerConfig;
 use batchalign::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use common::test_server_fixture::{TestServerSession, acquire_test_server_session_with_config};
+
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -174,17 +177,13 @@ impl StressServer {
 
     /// Poll until job reaches a terminal state (completed, failed, cancelled).
     async fn poll_until_done(&self, job_id: &str) -> JobInfo {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(job_id));
         loop {
             let info = self.get_job(job_id).await;
             if info.status.is_terminal() {
                 return info;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "Job {job_id} did not reach terminal state within 60s"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            deadline.keep_waiting(ProgressSnapshot::job(&info)).await;
         }
     }
 }
@@ -335,18 +334,25 @@ async fn rapid_submit_cancel_cycle_no_permit_leak() {
     let sub = morphotag_submission("final-after-rapid.cha");
     let id = server.submit_ok(&sub).await;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(&id));
     loop {
         let info = server.get_job(&id).await;
         if info.status.is_terminal() {
             // Success: permits are not leaked
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "PERMIT LEAK DETECTED: final job hung for 30s after 50 cancel cycles"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The bespoke panic is kept: a leaked permit shows up here as a job
+        // that never moves at all, and naming that outright is what makes this
+        // failure readable. The deadline supplies the evidence underneath it.
+        if let Err(expired) =
+            deadline.observe_at(std::time::Instant::now(), ProgressSnapshot::job(&info))
+        {
+            panic!(
+                "PERMIT LEAK DETECTED: the job submitted after 50 cancel cycles never \
+                 reached a terminal state.\n{expired}"
+            );
+        }
+        tokio::time::sleep(deadline.poll_interval()).await;
     }
 }
 

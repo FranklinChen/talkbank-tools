@@ -86,11 +86,14 @@ class StanzaCapabilityTable:
     ``languages`` is keyed by ISO-639-3 code (e.g. ``"eng"``, ``"nld"``).
     ``iso3_to_alpha2`` maps ISO-639-3 → Stanza alpha-2 for all supported
     languages (derived from pycountry + overrides).
+
+    The table carries no Stanza version. It used to, with an empty-string
+    default here and ``"unknown"`` in both builders, and nothing read it;
+    the installed version has one accessor, ``_state.stanza_version()``.
     """
 
     languages: dict[str, StanzaLanguageCapability] = field(default_factory=dict)
     iso3_to_alpha2: dict[str, str] = field(default_factory=dict)
-    stanza_version: str = ""
 
     def supports_morphosyntax(self, iso3: str) -> bool:
         """Whether ``iso3`` has the core Stanza processors morphotag needs."""
@@ -102,8 +105,6 @@ class StanzaCapabilityTable:
 
 def build_stanza_capability_table_from_resources(
     resources: dict[str, object],
-    *,
-    stanza_version: str = "unknown",
 ) -> StanzaCapabilityTable:
     """Build the capability table from an already-loaded resources mapping."""
     # Build alpha2 → capability mapping from resources.json.
@@ -171,17 +172,15 @@ def build_stanza_capability_table_from_resources(
 
     L.info(
         "Built Stanza capability table: %d languages, %d with constituency, "
-        "%d with mwt (stanza %s)",
+        "%d with mwt",
         len(languages),
         sum(1 for c in languages.values() if c.has_constituency),
         sum(1 for c in languages.values() if c.has_mwt),
-        stanza_version,
     )
 
     return StanzaCapabilityTable(
         languages=languages,
         iso3_to_alpha2=iso3_map,
-        stanza_version=stanza_version,
     )
 
 
@@ -191,34 +190,9 @@ def build_stanza_capability_table() -> StanzaCapabilityTable:
     This is the single source of truth for what Stanza can process per
     language.  Called once at worker startup; the result is cached.
     """
-    import stanza
     import stanza.resources.common as src
 
-    return build_stanza_capability_table_from_resources(
-        src.load_resources_json(),
-        stanza_version=getattr(stanza, "__version__", "unknown"),
-    )
-
-
-def resolve_stanza_version(loaded_version: str = "") -> str:
-    """Return the installed Stanza version: the model-loaded value when
-    populated, otherwise the package's ``__version__``, otherwise
-    ``"unknown"``. The literal engine name ``"stanza"`` is never an
-    acceptable return value: returning it produces malformed
-    ``engine=stanza-stanza`` provenance comments downstream.
-
-    Pass ``_state.stanza_version`` (or any caller-side cached version
-    string) as ``loaded_version``; the function uses that when truthy
-    and falls back to the package import otherwise.
-    """
-    if loaded_version:
-        return loaded_version
-    try:
-        import stanza
-
-        return getattr(stanza, "__version__", "unknown")
-    except (ImportError, ModuleNotFoundError):
-        return "unknown"
+    return build_stanza_capability_table_from_resources(src.load_resources_json())
 
 
 def refresh_resources_manifest_if_present() -> None:

@@ -10,6 +10,10 @@ fn execute_request_envelope_accepts_null_extras() {
         "task": "asr",
         "payload": {"kind": "asr", "lang": "eng", "backend": "local_whisper",
                      "input": {"kind": "prepared_audio", "audio_ref_id": "a-1"},
+                     "models": {"engine": "whisper",
+                                "asr": {"id": "openai/whisper-large-v3",
+                                        "revision": {"kind": "commit",
+                                                     "commit": "06f233fe06e710322aca913c1bc4249a0d71fce1"}}},
                      "extras": null},
         "attachments": []
     }"#;

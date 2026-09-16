@@ -54,12 +54,42 @@ pub(crate) struct CompareWorkUnit {
 }
 
 /// Audio input plus derived gold CHAT companion for benchmark.
+///
+/// The fields are private and the constructor is visible only inside
+/// `recipe_runner`, so `plan_benchmark_pairs` is the one place a benchmark work
+/// unit comes from. That matters because the pairing is DERIVED: the gold
+/// transcript is the audio's own path with the extension replaced, and the
+/// audio is then handed to `ensure_wav`, which hands it to ffmpeg. A unit
+/// assembled anywhere else could pair two unrelated files, or put a transcript
+/// in the `audio` slot, and nothing downstream inspects the slot's contents
+/// before decoding it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BenchmarkWorkUnit {
     /// Source audio input.
-    pub audio: DiscoveredInput,
+    audio: DiscoveredInput,
     /// Gold CHAT transcript expected for the benchmark.
-    pub gold_chat: DiscoveredInput,
+    gold_chat: DiscoveredInput,
+}
+
+impl BenchmarkWorkUnit {
+    /// Pair one audio input with its derived gold transcript.
+    ///
+    /// `pub(super)`, so only `recipe_runner` can call it; in practice that is
+    /// `plan_benchmark_pairs`, which is the only code that knows how the gold
+    /// path is derived.
+    pub(super) fn new(audio: DiscoveredInput, gold_chat: DiscoveredInput) -> Self {
+        Self { audio, gold_chat }
+    }
+
+    /// The recording this benchmark transcribes.
+    pub(crate) fn audio(&self) -> &DiscoveredInput {
+        &self.audio
+    }
+
+    /// The gold transcript this benchmark scores against.
+    pub(crate) fn gold_chat(&self) -> &DiscoveredInput {
+        &self.gold_chat
+    }
 }
 
 /// Media-analysis work unit for openSMILE or AVQI.

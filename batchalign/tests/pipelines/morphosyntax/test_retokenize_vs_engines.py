@@ -33,10 +33,8 @@ class TestRetokenizeVsFunASR:
 
     def test_funasr_per_char_has_no_multichar_words(self) -> None:
         """FunASR output (simulated) is all single characters, zero word info."""
-        import batchalign_core
-
         text = "佢哋好鍾意食嘢"
-        funasr_tokens = batchalign_core.cantonese_char_tokens(text)
+        funasr_tokens = list(text)
         multichar = [t for t in funasr_tokens if len(t) > 1]
         assert len(multichar) == 0, (
             f"FunASR should produce zero multi-char words, got {multichar}"
@@ -44,10 +42,8 @@ class TestRetokenizeVsFunASR:
 
     def test_pycantonese_retokenize_creates_multichar_words(self) -> None:
         """PyCantonese retokenize groups characters into real words."""
-        import batchalign_core
-
         text = "佢哋好鍾意食嘢"
-        funasr_tokens = batchalign_core.cantonese_char_tokens(text)
+        funasr_tokens = list(text)
         retokenized = pycantonese.segment("".join(funasr_tokens))
 
         multichar = [t for t in retokenized if len(t) > 1]
@@ -64,8 +60,6 @@ class TestRetokenizeVsFunASR:
 
         This proves sub-claim 1: retokenize is better than FunASR alone.
         """
-        import batchalign_core
-
         sentences = [
             "佢哋好鍾意食嘢",  # they really like eating stuff
             "我想去買故事書",  # I want to go buy a storybook
@@ -74,7 +68,7 @@ class TestRetokenizeVsFunASR:
             "直升飛機好大架",  # the helicopter is very big
         ]
         for text in sentences:
-            funasr = batchalign_core.cantonese_char_tokens(text)
+            funasr = list(text)
             retok = pycantonese.segment("".join(funasr))
             assert len(retok) < len(funasr), (
                 f"'{text}': retokenize ({len(retok)}) should be < FunASR ({len(funasr)})\n"

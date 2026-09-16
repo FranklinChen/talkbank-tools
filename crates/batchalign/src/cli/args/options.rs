@@ -20,28 +20,59 @@ use super::{
     UtrOverlapStrategy as CliUtrOverlapStrategy,
 };
 
-/// Parse one `--engine-overrides` JSON payload into typed `EngineOverrides`.
+/// What the user typed for `--engine-overrides`, before any JSON parse.
 ///
-/// Rejects unknown keys and invalid engine names at parse time.
-pub(crate) fn parse_engine_overrides_json(input: &str) -> Result<EngineOverrides, String> {
-    serde_json::from_str::<EngineOverrides>(input)
-        .map_err(|error| format!("invalid --engine-overrides JSON: {error}"))
+/// The bare word earns its own variant: `--engine-overrides whisper` is an
+/// engine NAME, and engine names belong to `--asr-engine` and its siblings.
+/// Reporting that as malformed JSON answers a question the user did not ask.
+enum EngineOverridesArg<'a> {
+    /// One bare word and nothing else: an engine name typed at the wrong flag.
+    EngineName(&'a str),
+    /// Anything else, handed to the JSON parser, which owns every other way a
+    /// payload can be wrong.
+    Payload(&'a str),
 }
 
-/// Parse an optional JSON string into typed `EngineOverrides`.
+impl<'a> EngineOverridesArg<'a> {
+    /// Classify one raw argument. A bare word is a non-empty trimmed argument
+    /// of engine-name shape: ASCII letters, digits, `_` and `-`, and nothing
+    /// else. No JSON payload can land there, since the smallest one still
+    /// needs a brace.
+    fn classify(input: &'a str) -> Self {
+        let trimmed = input.trim();
+        let looks_like_engine_name = !trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if looks_like_engine_name {
+            Self::EngineName(trimmed)
+        } else {
+            Self::Payload(input)
+        }
+    }
+}
+
+/// Parse one `--engine-overrides` payload into typed `EngineOverrides`.
 ///
-/// Returns default (empty) overrides if `input` is `None` or empty.
-pub fn parse_engine_overrides(input: &Option<String>) -> EngineOverrides {
-    // clap-validation invariant: `--engine-overrides` is parsed by
-    // `clap::ValueParser` which calls `parse_engine_overrides_json`
-    // and rejects invalid input at the CLI parse boundary. Reaching
-    // this expect would mean the validator drifted out of sync with
-    // the canonical parser: caught by the args integration tests.
-    #[allow(clippy::expect_used)]
-    match input.as_deref() {
-        None | Some("") => EngineOverrides::default(),
-        Some(json) => parse_engine_overrides_json(json)
-            .expect("clap should reject invalid --engine-overrides JSON before option building"),
+/// This is the flag's clap value parser and the ONLY parse of that payload:
+/// [`GlobalOpts::engine_overrides`] holds what this returned, so nothing
+/// downstream re-reads the string and no separate validator exists to drift
+/// from this function.
+///
+/// Rejects invalid engine names at parse time; unknown KEYS flow through to
+/// `EngineOverrides::extras` for the Python worker.
+///
+/// [`GlobalOpts::engine_overrides`]: super::GlobalOpts
+pub(crate) fn parse_engine_overrides_json(input: &str) -> Result<EngineOverrides, String> {
+    match EngineOverridesArg::classify(input) {
+        EngineOverridesArg::EngineName(name) => Err(format!(
+            "`--engine-overrides` takes a JSON object of per-engine settings, not an engine \
+             name; did you mean `--asr-engine {name}` (or the matching `--fa-engine`, \
+             `--utr-engine` or `--translate-engine`)? To select through this flag instead, \
+             pass `--engine-overrides '{{\"asr\": \"{name}\"}}'`"
+        )),
+        EngineOverridesArg::Payload(payload) => serde_json::from_str::<EngineOverrides>(payload)
+            .map_err(|error| format!("invalid --engine-overrides JSON: {error}")),
     }
 }
 
@@ -161,7 +192,10 @@ pub fn build_typed_options(
     let common = CommonOptions {
         override_media_cache: global.media_cache.override_media_cache,
         require_media_cache: global.media_cache.require_media_cache,
-        engine_overrides: parse_engine_overrides(&global.engine_overrides),
+        // Nothing is parsed here: the flag's value parser already produced the
+        // typed value, and an absent flag means no overrides, which is what an
+        // empty `EngineOverrides` says.
+        engine_overrides: global.engine_overrides.clone().unwrap_or_default(),
         debug_dir: global.debug_dir.as_deref().map(canonicalize_debug_dir),
         override_media_cache_tasks: global.media_cache.override_media_cache_tasks.clone(),
         ..Default::default()
@@ -338,7 +372,7 @@ pub fn build_typed_options(
         Commands::Diarize(a) => Some(CommandOptions::Diarize(DiarizeOptions {
             common,
             speaker_engine: a.speaker_engine,
-            expected_speakers: a.num_speakers.map(crate::api::NumSpeakers),
+            expected_speakers: a.num_speakers,
         })),
         _ => None,
     })
@@ -405,19 +439,9 @@ mod tests {
     use crate::options::{AsrEngineName, FaEngineName};
 
     #[test]
-    fn parse_engine_overrides_none() {
-        assert!(parse_engine_overrides(&None).is_empty());
-    }
-
-    #[test]
-    fn parse_engine_overrides_empty_string() {
-        assert!(parse_engine_overrides(&Some(String::new())).is_empty());
-    }
-
-    #[test]
     fn parse_engine_overrides_valid_json() {
-        let input = Some(r#"{"asr": "tencent", "fa": "cantonese_fa"}"#.to_string());
-        let overrides = parse_engine_overrides(&input);
+        let overrides = parse_engine_overrides_json(r#"{"asr": "tencent", "fa": "cantonese_fa"}"#)
+            .expect("a valid payload parses");
         assert_eq!(overrides.asr, Some(AsrEngineName::HkTencent));
         assert_eq!(overrides.fa, Some(FaEngineName::Wav2vecCanto));
     }
@@ -431,8 +455,29 @@ mod tests {
 
     #[test]
     fn parse_engine_overrides_empty_object() {
-        let input = Some("{}".to_string());
-        assert!(parse_engine_overrides(&input).is_empty());
+        assert!(
+            parse_engine_overrides_json("{}")
+                .expect("an empty object is a valid payload")
+                .is_empty()
+        );
+    }
+
+    /// A bare engine word is a wrong-flag mistake, not malformed JSON, and the
+    /// message has to say which flag the user wanted.
+    #[test]
+    fn parse_engine_overrides_bare_engine_word_names_the_engine_flag() {
+        for typed in ["whisper", "  paraformer  ", "wav2vec_fa"] {
+            let error =
+                parse_engine_overrides_json(typed).expect_err("a bare word is not a payload");
+            assert!(
+                error.contains("--asr-engine"),
+                "expected the engine-flag remedy for {typed:?}, got `{error}`"
+            );
+            assert!(
+                !error.contains("invalid --engine-overrides JSON"),
+                "a bare word must not be reported as malformed JSON, got `{error}`"
+            );
+        }
     }
 
     #[test]

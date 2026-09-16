@@ -10,6 +10,7 @@
 )]
 
 mod common;
+mod live_deadline;
 
 #[path = "pool_per_key_worker_throughput.rs"]
 mod pool_per_key_worker_throughput;

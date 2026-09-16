@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RequestedModelV2",
+  "description": "One model the plan pinned, before anything loaded it.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "Which model.",
+      "$ref": "#/$defs/ModelIdV2"
+    },
+    "revision": {
+      "description": "Which revision of it.",
+      "$ref": "#/$defs/RequestedRevisionV2"
+    }
+  },
+  "required": [
+    "id",
+    "revision"
+  ],
+  "$defs": {
+    "ContentDigestV2": {
+      "description": "A SHA-256 content digest: 64 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "HubCommitV2": {
+      "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ModelIdV2": {
+      "description": "A model identifier as BA3 names it: a hub repo id, a ModelScope repo id, a ggml file name, or a provider service name. Stamp-safe text, because provenance records it byte for byte.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "ProviderParameterV2": {
+      "description": "A provider's own model-selection parameter (Tencent's EngineModelType, Aliyun's service identity, Rev.AI's constant). Never a credential.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "RequestedRevisionV2": {
+      "description": "What the plan asked a worker to load.\n\n[`Self::Unpinned`] is a real state, not a placeholder: a user may name an\narbitrary hub model this build has no pin for, and if plan-time resolution\ncannot reach the hub the honest answer is \"load the default and tell me\nwhat you got\". It has its own admission rule (the worker MUST report a\ncommit) and it can never build a cache key.",
+      "oneOf": [
+        {
+          "description": "Load exactly this hub commit.",
+          "type": "object",
+          "properties": {
+            "commit": {
+              "description": "The pinned commit.",
+              "$ref": "#/$defs/HubCommitV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "commit"
+            }
+          },
+          "required": [
+            "kind",
+            "commit"
+          ]
+        },
+        {
+          "description": "Load exactly this published tag. Recorded as a tag, never as a commit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tag"
+            },
+            "tag": {
+              "description": "The pinned tag.",
+              "$ref": "#/$defs/RevisionTagV2"
+            }
+          },
+          "required": [
+            "kind",
+            "tag"
+          ]
+        },
+        {
+          "description": "Load the file with exactly these contents.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "description": "The pinned digest.",
+              "$ref": "#/$defs/ContentDigestV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "content_digest"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ]
+        },
+        {
+          "description": "Select the provider's model with this parameter.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "provider_parameter"
+            },
+            "parameter": {
+              "description": "The parameter sent to the provider.",
+              "$ref": "#/$defs/ProviderParameterV2"
+            }
+          },
+          "required": [
+            "kind",
+            "parameter"
+          ]
+        },
+        {
+          "description": "The plan could not pin this model, so the worker loads the hub default\nand must report the commit it observed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unpinned"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "RevisionTagV2": {
+      "description": "A release tag as a hub publishes it (for example ModelScope's `v2.0.4`). A tag is never recorded as a commit.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    }
+  }
+}

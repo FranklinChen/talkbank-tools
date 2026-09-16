@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-07 19:54 EDT
+**Last updated:** 2026-09-15 12:12 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -52,7 +52,7 @@ of the parsed model, so "unchanged" is literally true. It used to be built by
 the sibling constructor that serializes the model, which made a parse-and-
 serialize round trip of a file align had promised not to touch.
 
-"Zero modifications" includes the `[ba3 align ...]` provenance comment. Until
+"Zero modifications" includes the `[fc-ba3 align ...]` provenance comment. Until
 this became a transition on the typed proof
 (`PostValidated::with_provenance_injected`), the dispatch seam stamped that
 comment onto NoAlign and dummy documents too, so the sentence above was false by
@@ -87,15 +87,31 @@ FA group keys are BLAKE3 hashes over:
 - response-schema discriminator where required
 - for onset-only engines, the text/healing mode that affects parsed timings
 
-The cache backend namespaces that key by task (`forced_alignment`) and the
-worker-advertised engine version. Word-interval keys carry
+The cache backend namespaces that key by task (`forced_alignment`) and the FA
+engine the selected worker reported, admitted at the capability gate and
+carried as `FaCacheNamespace` byte for byte, so evidence cached by earlier
+builds stays admissible. A worker that supports FA but names no engine cannot
+align: the job fails naming the task rather than inventing a namespace.
+Word-interval keys carry
 `model_score_v1`: this intentionally retires historical interval entries that
 deserialize correctly but predate score retention. Whisper has no interval
 score to recover and keeps its established cache namespace.
 
 UTR ASR results are cached separately per audio segment (file path + start_ms
 + end_ms). Segment cache hits avoid re-running ASR on already-processed
-windows during the partial-window optimization.
+windows during the partial-window optimization. Full-file and segment entries
+both live under the UTR engine's own namespace (`UtrAsrCacheNamespace`,
+`utr-asr-v1:<engine wire name>:<composition>` followed by one
+`|<role>=<id>@<revision>` per model), not under the FA engine's version, so
+changing the FA model no longer discards UTR ASR results, and changing a
+recovery model no longer silently reuses rows produced by the previous one.
+
+The `[fc-ba3 align | ...]` stamp records `fa=` (the reported FA engine) and,
+when a timing-recovery pass actually ran (the pre-pass or the retry fallback),
+`utr=` with the recovery engine's name (`rev`, `whisper`, `tencent`). A file
+whose utterances were all timed, so that no pass ran, records no `utr=`. The
+record is a `UtrContribution` on `AlignAudioTask`, updated from each pass's
+`UtrResult::ran()`.
 
 Cache implementation: `crates/batchalign/src/cache/` (hot: moka,
 cold: SQLite). Bypass with global `--override-media-cache`.

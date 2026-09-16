@@ -248,6 +248,8 @@ pub(crate) struct CompletedFileOutput {
     pub filename: DisplayPath,
     /// MIME-like content type stored with the result.
     pub content_type: ContentType,
+    /// What the command decided about stamping this file with provenance.
+    pub stamp: crate::api::FileStampOutcome,
 }
 
 /// Failure details for one terminal file error.

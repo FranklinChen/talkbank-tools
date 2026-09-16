@@ -130,6 +130,32 @@ pub async fn submit_paths_and_complete_direct(
     output_paths: Vec<String>,
     options: CommandOptions,
 ) -> (JobInfo, Vec<String>) {
+    submit_paths_and_complete_direct_with_speakers(
+        session,
+        command,
+        lang,
+        source_paths,
+        output_paths,
+        NumSpeakers(1),
+        options,
+    )
+    .await
+}
+
+/// Submit a direct paths-mode job whose speaker count the caller STATES.
+///
+/// A diarized test must say how many speakers its fixture holds; a count of one
+/// asks a diarizer to separate speakers in a recording asserted to have one,
+/// and submission refuses it.
+pub async fn submit_paths_and_complete_direct_with_speakers(
+    session: &super::LiveDirectSession,
+    command: ReleasedCommand,
+    lang: &str,
+    source_paths: Vec<String>,
+    output_paths: Vec<String>,
+    num_speakers: NumSpeakers,
+    options: CommandOptions,
+) -> (JobInfo, Vec<String>) {
     assert_eq!(
         source_paths.len(),
         output_paths.len(),
@@ -139,7 +165,7 @@ pub async fn submit_paths_and_complete_direct(
     let submission = JobSubmission {
         command,
         lang: submission_lang(command, lang),
-        num_speakers: NumSpeakers(1),
+        num_speakers,
         files: vec![],
         media_files: vec![],
         media_mapping: Default::default(),
@@ -158,8 +184,8 @@ pub async fn submit_paths_and_complete_direct(
 
     if info.status != JobStatus::Completed {
         eprintln!(
-            "DIRECT PATHS JOB FAILED: status={:?}, job_id={}",
-            info.status, info.job_id
+            "DIRECT PATHS JOB FAILED: status={:?}, job_id={}, job error: {:?}",
+            info.status, info.job_id, info.error
         );
         eprintln!("  File results: {}", detail.results.len());
     }
@@ -245,8 +271,8 @@ pub async fn submit_paths_with_before_and_complete_direct(
 
     if info.status != JobStatus::Completed {
         eprintln!(
-            "DIRECT PATHS+BEFORE JOB FAILED: status={:?}, job_id={}",
-            info.status, info.job_id
+            "DIRECT PATHS+BEFORE JOB FAILED: status={:?}, job_id={}, job error: {:?}",
+            info.status, info.job_id, info.error
         );
         eprintln!("  File results: {}", detail.results.len());
     }

@@ -64,13 +64,36 @@ batchalign3 compare-runs align --plan comparison.toml
 Transcription reports agreement WER/cWER, never accuracy, and count excluded
 tokens separately. Morphotag reports tokenization, lemma, POS, feature-set,
 clitic/chunk, dependency-head, and relation differences. Alignment first
-requires identical normalized token identities, then reports missing timing,
-absolute deltas, distributions, and independent order violations.
+requires identical normalized token identities, then reports each token's
+timing state, absolute deltas, distributions, and independent order violations.
+
+## Alignment timing states
+
+Every alignment token carries a timing STATE rather than a timing that may be
+absent, so a token with no timing says why it has none:
+
+| State | Meaning |
+| --- | --- |
+| `timed` | the `%wor` tier was corroborated and times this word; `start_ms` and `end_ms` sit beside the state |
+| `unaligned` | the tier was corroborated and simply carries no bullet for this word |
+| `no_wor_tier` | the utterance has no `%wor` tier, so no word in it is timed |
+| `wor_tier_drifted` | the tier's slot count disagrees with the main tier's (`wor_slots`, `main_words`), which is what an edit made after alignment ran looks like |
+| `wor_tier_uncorroborated` | the counts agree but `mismatches` display tokens do not match the words they would time, so the bullets describe a different reading of the utterance |
+
+The three failure states are not interchangeable: a missing tier means
+alignment never ran, a drifted one means the transcript changed after it ran,
+and an uncorroborated one means the tier belongs to different words than the
+ones beside it. They were one empty value until 2026-09-16.
+
+`summary.csv` carries `left_timing_state` and `right_timing_state` beside the
+millisecond columns. A delta is reported only where both sides are `timed`.
 
 Results are written under `OUTPUT/runs/COMPARISON_ID/`: complete
 `report.json`, `summary.csv`, content-addressed `pairs/PAIR_ID.json`, and
 evidence-only `review/PAIR_ID.json`. Pair caches are reused by default;
-`--recompute` regenerates them. Unpairable or unparsable pairs are recorded,
+`--recompute` regenerates them. The algorithm version is part of the
+comparison identity, so a change to what a comparison computes lands under a
+new `COMPARISON_ID` and rows cached by an earlier version are never reused. Unpairable or unparsable pairs are recorded,
 all pairs continue, and the command exits 2 after materialization. Differences
 are evidence for human review, not automatic winner selection or golden-fixture
 creation.

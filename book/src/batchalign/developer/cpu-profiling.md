@@ -1,7 +1,7 @@
 # CPU Profiling
 
 **Status:** Current
-**Last updated:** 2026-09-06 04:35 EDT
+**Last updated:** 2026-09-16 08:18 EDT
 
 How to profile CPU usage across batchalign's two languages, Python
 (worker process: ML inference, audio decoding, transcript
@@ -25,8 +25,10 @@ a measured CI speedup.
 The lightweight `models.utterance.evidence` types are available without
 loading the model runtime. Model consumers now import
 `batchalign.models.utterance.infer` explicitly; the former package-level
-`BertUtteranceModel`, `normalize_utterance_words`, and
-`resolve_utterance_model` re-exports are removed. Forced CPU serving returns
+`BertUtteranceModel` and `normalize_utterance_words` re-exports are removed,
+along with a per-language model-id resolver that no longer exists on the Python
+side at all (Rust pins the boundary model and sends it with the worker spawn).
+Forced CPU serving returns
 before importing Torch to probe CUDA. Ordinary GPU device detection and real
 model loading retain their existing behavior.
 

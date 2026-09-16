@@ -22,7 +22,12 @@ from typing import TYPE_CHECKING, assert_never
 
 if TYPE_CHECKING:
     from batchalign.inference.languages.cantonese._cantonese_fa import CantoneseFaHost
-    from batchalign.worker._types_v2 import TaskRequestV2, TaskResultV2
+    from batchalign.worker._types_v2 import (
+        AsrModelIdentityV2,
+        AsrRequestV2,
+        TaskRequestV2,
+        TaskResultV2,
+    )
 
 from dataclasses import dataclass, field
 
@@ -192,6 +197,79 @@ def execute_request_v2(
             return _unsupported_task_response(request)
 
 
+def _echo_model_identity(request: AsrRequestV2) -> AsrModelIdentityV2:
+    """The identity an echo worker can honestly report: nothing observed.
+
+    An echo worker loads no model at all, so every observation is an explicit
+    absence and the requested half is the request's own pin, echoed unchanged.
+
+    That makes the result deliberately INADMISSIBLE wherever the plan pinned an
+    exact commit: `AsrModelIdentityV2::admit` refuses a pinned commit that comes
+    back unexposed. This is the point, not a defect. A transport double must be
+    able to answer (success with no result is unrepresentable, and a double that
+    lies about the contract hangs every dispatch waiting on its reply), but its
+    answer must never be readable as a real transcript. Shaping it so the
+    admission check rejects it by name is a stronger guarantee than the comment
+    that used to say echo answers are short-circuited before dispatch.
+    """
+
+    from batchalign.worker._types_v2 import (
+        AliyunModelIdentityV2,
+        AliyunModelsV2,
+        LoadedModelV2,
+        ObservedNotExposedV2,
+        ParaformerModelIdentityV2,
+        ParaformerModelsV2,
+        QwenModelIdentityV2,
+        QwenModelsV2,
+        RequestedModelV2,
+        RevModelIdentityV2,
+        RevModelsV2,
+        SenseVoiceModelIdentityV2,
+        SenseVoiceModelsV2,
+        TencentModelIdentityV2,
+        TencentModelsV2,
+        WhisperModelIdentityV2,
+        WhisperModelsV2,
+    )
+
+    def unobserved(member: RequestedModelV2) -> LoadedModelV2:
+        return LoadedModelV2(
+            id=member.id,
+            requested=member.revision,
+            observed=ObservedNotExposedV2(),
+        )
+
+    models = request.models
+    match models:
+        case WhisperModelsV2():
+            return WhisperModelIdentityV2(asr=unobserved(models.asr))
+        case QwenModelsV2():
+            return QwenModelIdentityV2(
+                asr=unobserved(models.asr), aligner=unobserved(models.aligner)
+            )
+        case ParaformerModelsV2():
+            return ParaformerModelIdentityV2(
+                asr=unobserved(models.asr),
+                vad=unobserved(models.vad),
+                punc=unobserved(models.punc),
+            )
+        case SenseVoiceModelsV2():
+            return SenseVoiceModelIdentityV2(
+                asr=unobserved(models.asr), vad=unobserved(models.vad)
+            )
+        case TencentModelsV2():
+            return TencentModelIdentityV2(
+                engine_model_type=unobserved(models.engine_model_type)
+            )
+        case AliyunModelsV2():
+            return AliyunModelIdentityV2(service=unobserved(models.service))
+        case RevModelsV2():
+            return RevModelIdentityV2(provider=unobserved(models.provider))
+        case _:
+            assert_never(models)
+
+
 def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
     """Derive an empty result from the typed request payload itself."""
 
@@ -234,7 +312,9 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
         case CorefRequestV2():
             return CorefResultPayloadV2(items=[])
         case AsrRequestV2():
-            return MonologueAsrResultPayloadV2(lang="eng", monologues=[])
+            return MonologueAsrResultPayloadV2(
+                lang="eng", monologues=[], model=_echo_model_identity(payload)
+            )
         case ForcedAlignmentRequestV2():
             return IndexedWordTimingResultPayloadV2(indexed_timings=[])
         case SpeakerRequestV2(backend=backend):

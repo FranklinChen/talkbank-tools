@@ -9,7 +9,7 @@ use crate::ml_golden::golden::fixtures::{
 };
 use crate::ml_golden::golden::helpers::{
     assert_golden_snapshot, find_mor_line_for, has_gra_tier, has_mor_tier, parse_output,
-    require_direct_session_warmed,
+    pin_provenance_timestamps, require_direct_session_warmed,
 };
 
 fn morphotag_options(override_media_cache: bool, retokenize: bool) -> CommandOptions {
@@ -117,7 +117,12 @@ async fn golden_morphotag_with_cache() {
         .await;
     assert_completed_without_errors("morphotag_with_cache_warm", &info2, &results2);
 
-    assert_eq!(results1[0].content, results2[0].content);
+    // The two runs may stamp different seconds; everything else, the stamp's
+    // fields included, must be identical.
+    assert_eq!(
+        pin_provenance_timestamps(&results1[0].content),
+        pin_provenance_timestamps(&results2[0].content)
+    );
 }
 
 #[tokio::test]

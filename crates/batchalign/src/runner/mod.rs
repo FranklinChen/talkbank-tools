@@ -42,7 +42,7 @@ pub(crate) use execution::{job_task, run_direct_job};
 #[cfg(test)]
 use execution::record_preflight_media_failures;
 #[cfg(test)]
-use policy::{command_requires_chat_infer, infer_task_for_command, result_filename_for_command};
+use policy::{command_requires_chat_infer, result_filename_for_command};
 
 #[cfg(test)]
 mod tests;

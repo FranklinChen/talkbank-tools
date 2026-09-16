@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-16 09:47 EDT
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -151,6 +151,7 @@ flowchart TD
     engine_check -->|whisper_hub| whisper_hub["HF Whisper fine-tune\n(per-language model_id)"]
     engine_check -->|rev| rev_key["Hash provider media + Rev request semantics"]
     engine_check -->|"whisperx, whisper_oai"| refused["Refused: engine not implemented"]
+    engine_check -->|"whisper_rs, tencent, aliyun, funaudio or paraformer, qwen"| other_asr["Other engines\nprovider adapter pairs each unit\nwith its own timestamp"]
 
     rev_key --> rev_cache{"Validated raw Rev-evidence cache"}
     rev_cache -->|hit| rev_convert["Convert retained raw Rev transcript"]
@@ -161,6 +162,7 @@ flowchart TD
 
     whisper --> asr_tokens
     whisper_hub --> asr_tokens
+    other_asr --> asr_tokens
 
     asr_tokens["Raw ASR tokens\nword + start_s + end_s + optional speaker + confidence"]
     asr_tokens --> convert["convert_asr_response()\nGroups tokens by speaker label"]
@@ -182,11 +184,12 @@ flowchart TD
 
     subgraph postprocess ["Rust post-processing: process_raw_asr()"]
         direction TB
-        p1[1. Compound merging] --> p2[2. Multi-word splitting\nsplit tokens with spaces, interpolate timestamps]
-        p2 --> p3[3. Number expansion\ndigits → word form]
-        p3 --> p3check{lang=yue?}
-        p3check -->|Yes| p4["4. Cantonese normalization\nOpenCC + domain replacements"]
-        p3check -->|No| p5
+        p1[1. Compound merging] --> p1check{lang=yue?}
+        p1check -->|Yes| p2["2. Cantonese normalization\nonce per monologue\nOpenCC + domain replacements"]
+        p1check -->|No| p3
+        p2 --> p3
+        p3[3. Multi-word splitting\nsplit tokens with spaces, interpolate timestamps]
+        p3 --> p4[4. Number expansion\ndigits → word form]
         p4 --> p5[5. Long-turn splitting\nchunk at >300 words]
         p5 --> p6[6. Retokenization\npunctuation-based utterance splitting]
         p6 --> p7[7. Disfluency replacement\nfilled pauses + orthographic from per-language wordlists]
@@ -198,7 +201,7 @@ flowchart TD
     speaker_apply -->|No| utseg_check{"with_utseg?\ndefault: true"}
     project --> utseg_check
 
-    utseg_check -->|Yes| run_utseg[process_utseg\nBERT-based re-segmentation]
+    utseg_check -->|Yes| run_utseg[process_utseg_with_evidence\nBERT-based re-segmentation]
     utseg_check -->|No| mor_check{"with_morphosyntax?\ndefault: false"}
 
     run_utseg --> build_chat["build_chat → ChatFile AST\nHeaders, participants, %wor tiers"]
@@ -225,6 +228,33 @@ There are two paths:
 - `eng`, `cmn`, `zho`, `yue`: dedicated pre-CHAT utterance models
 - all other languages, punctuation-based splitting in Rust
 
+Utterance segmentation also runs as a second pass over the built CHAT, and that
+pass needs a segmenter. A language in the first list has one. A language in the
+second does not, unless you pass `--utseg-fallback-stanza`, and **a run that
+asks for utterance segmentation in such a language is refused when the job is
+planned, before any ASR runs**. That matters because ASR is the expensive part:
+the refusal used to happen at the very end of the pipeline, after the whole
+transcription had been produced and paid for, and it named the worker's wire
+format (`invalid utseg V2 result`) rather than the missing model. So a Spanish,
+French, Japanese or Catalan transcription either authorizes the fallback:
+
+```bash
+batchalign3 transcribe corpus-spa/ -o out/ --lang spa --utseg-fallback-stanza
+```
+
+or is told immediately that it has no segmenter.
+
+With `--lang auto` the language is not known until ASR has returned, so for
+that case alone the same refusal necessarily happens after ASR rather than
+before it.
+
+For the FunASR engines (`funaudio`, `paraformer`), Chinese ASR tokens are
+single characters (Latin words stay whole), each with its own timestamp, and
+the provider's punctuation is not used as a boundary. Builds before 2026-09-15
+paired Paraformer clauses with per-character timestamps, which mistimed whole
+transcripts; re-run Paraformer transcripts made with them. Details:
+[ASR token pipeline](../../architecture/asr-token-pipeline.md#provider-adapters-funasr-unit-admission).
+
 For a supported language, normal transcription applies the utterance model
 again after CHAT construction. This second pass can refine boundaries using
 the completed main-tier context. Standalone `utseg` remains available for
@@ -232,10 +262,14 @@ re-segmenting an existing CHAT transcript without transcribing media again.
 
 With `--wor`, a post-CHAT split that has complete timing for all partitioned
 word tiers receives a main-tier timing bullet on every child, derived from
-that child's own word span. If complete child timing is unavailable, BA3 keeps
-the original enclosing bullet on the last child only; it does not invent
-intermediate timings. This is a timing-preservation rule, not a claim that the
-model's segmentation is the only acceptable CHAT segmentation.
+that child's own word span. If complete child timing is unavailable, no child
+receives a main-tier bullet at all. The parent's bullet measures the whole
+parent, so its start is where the first child began and its end is where the
+last one finished, and writing it onto any one child would present a time
+nobody measured as a measured one. The single exception is a split that kept
+one child, where the parent's span is still exactly that child's. This is a
+timing-preservation rule, not a claim that the model's segmentation is the only
+acceptable CHAT segmentation.
 
 ---
 
@@ -257,7 +291,8 @@ model's segmentation is the only acceptable CHAT segmentation.
 | `--lang CODE` | `eng` | 3-letter ISO language code, or `auto` for language auto-detection |
 | `--asr-engine NAME` | `rev` | ASR engine; see the table below. `--help` prints the same list, generated from the engines that exist, so neither can go stale. |
 | `--asr-engine-custom NAME` |: | **Deprecated alias for `--asr-engine`**, still honoured so existing scripts keep working. Hidden from `--help`. |
-| `--num-speakers N` | `2` | Expected number of speakers. NOT a worker count; see `--workers`. No short flag, deliberately: see below. |
+| `--num-speakers N` | `2` | Speaker count passed to Rev.AI and to the dedicated diarizer. With `--diarization enabled` it must be 2 or more: a count of 1 is refused at submission, not obeyed. NOT a worker count; see `--workers`. No short flag, deliberately: see below. |
+| `--auto-speakers` | off | Let the provider infer the speaker count instead. Rev.AI only: any other `--asr-engine` is refused before the job runs. Conflicts with `--num-speakers`. |
 | `--diarization {auto,enabled,disabled}` | `auto` | Dedicated speaker diarization stage (`auto` = disabled) |
 | `--speaker-engine {pyannote-ai,pyannote,nemo}` | `pyannote-ai` when enabled | Paid pyannoteAI Precision-2 cloud diarization, or an explicit local engine |
 | `--wor` / `--nowor` | `--nowor` | Include or suppress the `%wor` word-timing tier |
@@ -281,14 +316,38 @@ which were built with two.
 **How visible would that have been?** Less than nothing, and more than an
 earlier draft of this page claimed. The run SUCCEEDS, and no warning is
 printed. The effect is visible if you look: `@Participants` and the `@ID`
-headers are rebuilt from the speakers the diarizer actually returned, so an
-over-diarized transcript lists more of them and carries extra `*SPK:`
-prefixes. What is genuinely absent is the CAUSE. The requested count is
-recorded nowhere in the file, so a reader seeing four speakers cannot tell an
+headers list only the speakers that actually occur in the output, so an
+over-diarized transcript lists more of them and carries extra speaker tiers.
+What is genuinely absent is the CAUSE. The requested count is recorded
+nowhere in the file, so a reader seeing four speakers cannot tell an
 over-diarized run from a session that really had four.
 
-Note also that an UNDER-count is absorbed: the pipeline takes
-`max(num_speakers, detected)`. Only over-counts change the result.
+An UNDER-count is not absorbed either. The count is passed to Rev.AI and to
+the dedicated diarizer, and the local `pyannote` and `nemo` engines produce
+exactly the number they are given, so a count below the real number of
+voices merges voices together. (An earlier version of this page said the
+pipeline took `max(num_speakers, detected)`; no such step exists.) Only
+Rev.AI can infer the count, with `--auto-speakers`.
+
+**A count of 1 is refused, not obeyed.** With `--diarization enabled`, a
+count of 1 asks a diarizer to separate the speakers of a recording asserted
+to hold one, which is a contradiction rather than a request. The job is
+refused at submission:
+
+```text
+diarization was requested with a speaker count of 1, which asks a diarizer to separate speakers in a recording asserted to have one. Pass the real count (2 or more); or omit diarization, for a single-speaker recording; or pass auto_speakers to have the count inferred, where the ASR engine supports it.
+```
+
+So with diarization the count is 2 or more, or it is omitted and the number
+is detected (on Rev.AI, `--auto-speakers`). One is neither, and it is refused
+rather than silently treated as detection. It used to be obeyed: the count
+reached the diarizer, which returned a single track, which is why
+`--diarization enabled` runs came back with one `PAR0`.
+
+Speaker codes are also per recording. Each file is diarized on its own, so
+`PAR0` in one transcript and `PAR0` in another need not be the same person,
+even when a corpus has fixed participants; see
+[diarize](diarize.md#output-format).
 
 `-n` is now a hard error, which is the point. A caller who meant parallelism
 goes looking and finds `--workers`; a caller who meant speakers finds
@@ -318,12 +377,18 @@ generated from the engine set itself, as is the one `--help` prints.
 | `aliyun` | Aliyun ASR. |
 | `funaudio` | FunASR / SenseVoice. Local, no credentials, no network. |
 | `qwen` | Qwen3-ASR. Local. |
-| `paraformer` | FunASR loading the Paraformer checkpoint: shorthand for `funaudio` with `funaudio_model=paraformer-zh`. Commonly wanted for Mandarin. An explicit `--engine-overrides '{"funaudio_model":"..."}'` wins over the implied checkpoint. |
+| `paraformer` | FunASR loading the Paraformer checkpoint: shorthand for `funaudio` with `funaudio_model=paraformer-zh`. Commonly wanted for Mandarin. An explicit `--engine-overrides '{"funaudio_model":"..."}'` wins over the implied checkpoint. Either way the transcript's `asr_model=` records what actually loaded: the alias resolves to the checkpoint this build pins, and a checkpoint it does not pin is loaded anyway and recorded at the revision the worker reports for it. |
 
 ```bash
 # Mandarin with Paraformer.
 batchalign3 transcribe Mandarin_mp3 -o out --lang zho --asr-engine paraformer
 ```
+
+The engine NAME goes to `--asr-engine`. `--engine-overrides` takes a JSON
+object of per-engine settings, and it is parsed while the command line is,
+so a name passed to it (`--engine-overrides paraformer`) is refused before
+anything runs, with `--asr-engine paraformer` named in the message rather
+than a JSON syntax complaint.
 
 ---
 
@@ -434,9 +499,15 @@ different punctuation, diarization, and turn boundaries from the provider.
 A new `.cha` file per audio input (audio extension replaced: `foo.wav` →
 `foo.cha`). Contains:
 
-- a structured provenance `@Comment` plus a human-readable warning carrying
-  the Batchalign version, actual ASR engine name, and `DO NOT USE` for unchecked
-  model output
+- a structured provenance `@Comment` (`[fc-ba3 transcribe | ...]`) plus a
+  human-readable warning,
+  `fc-ba3 <build identity>, ASR engine <engine>. Unchecked output of ASR model, DO NOT USE.`,
+  carrying the build identity, the actual ASR engine name (with the models that
+  produced the text in parentheses, in the same form `asr_model=` uses), and
+  `DO NOT USE` for unchecked model output. A run that reported no models, such
+  as one replaying legacy evidence, carries no parenthetical at all rather than
+  naming what was requested. Re-transcribing replaces an earlier warning of
+  ours, including the older `Batchalign <version>, ASR Engine <engine>.` form
 - `@Languages`, `@Participants`, `@ID` headers
 - Utterance lines with timing bullets
 - `%wor` tier (if `--wor` is set)
@@ -460,6 +531,16 @@ like `"80%"` / `"17-year-old"`. For languages outside the en/es
 support pair, no flag is sent (the parameter is a no-op there per
 Rev.AI's docs), and BA3's downstream post-processing handles
 spoken-form normalization.
+
+**A recording with no recognized words fails; it does not produce an empty
+file.** If the ASR engine returns no words, or post-processing keeps no
+utterance from the words it did return, or every token that reaches CHAT
+assembly is a terminator or separator, the job fails and says which of those
+three happened. Until 2026-09-16 the first of these wrote a transcript of
+headers and nothing else and reported the job completed, which is
+indistinguishable from a correct transcript of a silent recording. If the
+recording does contain speech, the usual causes are the wrong `--lang` for the
+audio or an engine that has no model for it.
 
 **`--server` requires server-visible audio.** With `--server`, the server
 resolves audio paths on its own filesystem. Paths valid on your machine must

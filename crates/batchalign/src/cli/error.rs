@@ -5,9 +5,11 @@
 //! [`CliError::exit_code()`], providing a stable contract that shell scripts
 //! and CI pipelines can match on without parsing stderr text.
 //!
-//! Exit code 1 (`EXIT_GENERAL`) is reserved but currently unused -- it exists
-//! so that an unexpected panic or catch-all still produces a nonzero exit
-//! distinguishable from the structured categories.
+//! Exit code 1 (`EXIT_GENERAL`) covers a run that worked and answered "no":
+//! today only an offline evaluation replay whose recomputed result differs from
+//! the retained artifact ([`CliError::ReplayDiffers`]). Keeping it distinct from
+//! the structured categories (2--6) also leaves an unexpected panic or
+//! catch-all distinguishable from a known failure category.
 
 use std::path::PathBuf;
 
@@ -19,6 +21,9 @@ use crate::api::{JobId, ReleasedCommand};
 /// Scripts should match on exit codes, not error messages.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
+    /// ASR backend/count admission failed before inference. Exit code 2.
+    #[error(transparent)]
+    AsrPlan(#[from] crate::transcribe::TranscribeAsrPlanError),
     /// No input files or directories were provided on the command line or via
     /// `--file-list`. Triggers before any server communication.
     /// Exit code: [`EXIT_USAGE`](Self::EXIT_USAGE) (2).
@@ -39,6 +44,19 @@ pub enum CliError {
     /// Exit code: [`EXIT_USAGE`](Self::EXIT_USAGE) (2).
     #[error("file list is empty")]
     FileListEmpty,
+
+    /// An entry in the `--file-list` file names a path that does not exist.
+    /// Carries the list file and line so the list can be fixed directly.
+    /// Exit code: [`EXIT_USAGE`](Self::EXIT_USAGE) (2).
+    #[error("{list}:{line}: input path does not exist: {path}")]
+    FileListEntryMissing {
+        /// The `--file-list` file containing the entry.
+        list: PathBuf,
+        /// Line of the entry within that file.
+        line: crate::cli::resolve::FileListLine,
+        /// The entry's path, already resolved against the list file's directory.
+        path: PathBuf,
+    },
 
     /// A CLI argument value failed validation (e.g. invalid language code).
     /// Exit code: [`EXIT_USAGE`](Self::EXIT_USAGE) (2).
@@ -67,6 +85,24 @@ pub enum CliError {
         command: ReleasedCommand,
         /// Server URL that was queried.
         server: String,
+    },
+
+    /// The server's `/health` build identity is not this CLI's build, or the
+    /// server reports none. Detected before any job is submitted, so no work
+    /// ran; the remedy is to restart that server with this build.
+    /// Exit code: [`EXIT_SERVER`](Self::EXIT_SERVER) (5).
+    #[error(
+        "server {server} is running {server_build}, but this CLI is build {client_build}; \
+         nothing was submitted. Restart that server with this build (on its host: \
+         `batchalign3 serve stop`, then `batchalign3 serve start`) and run the command again"
+    )]
+    ServerBuildMismatch {
+        /// Server URL that was queried.
+        server: String,
+        /// What the server said about its build.
+        server_build: ServerBuild,
+        /// This CLI's build identity.
+        client_build: String,
     },
 
     /// The server returned a non-2xx HTTP status during job submission or
@@ -163,13 +199,42 @@ pub enum CliError {
     /// Exit code: [`EXIT_CONFIG`](Self::EXIT_CONFIG) (3).
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
+
+    /// An offline evaluation replay ran to completion and what it recomputed
+    /// does not reproduce the retained artifact it was replayed against. The
+    /// inputs were admitted and nothing failed: this is the comparison's
+    /// answer, which is why it is neither a usage error nor a runtime one.
+    /// Exit code: [`EXIT_GENERAL`](Self::EXIT_GENERAL) (1).
+    #[error("{0}")]
+    ReplayDiffers(crate::cli::eval_cmd::utseg_replay::UtsegReproductionDifference),
+}
+
+/// What a server's `/health` said about its build identity when it is not this
+/// CLI's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerBuild {
+    /// A different build identity.
+    Reported(String),
+    /// No build identity at all.
+    Unreported,
+}
+
+impl std::fmt::Display for ServerBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reported(build) => write!(f, "build {build}"),
+            Self::Unreported => f.write_str("a build that reports no build identity"),
+        }
+    }
 }
 
 impl CliError {
-    /// Catch-all for unexpected failures (panics, unclassified errors).
+    /// A command that ran correctly and reported a negative answer, and the
+    /// catch-all for unexpected failures (panics, unclassified errors).
     /// Value 1 follows the Unix convention where any nonzero exit means failure;
     /// keeping it distinct from the structured codes (2--6) lets scripts detect
-    /// "something truly unexpected happened" vs. a known failure category.
+    /// "the comparison said no" or "something truly unexpected happened" vs. a
+    /// known failure category.
     pub const EXIT_GENERAL: i32 = 1;
 
     /// The user supplied invalid arguments or paths that could be corrected
@@ -208,17 +273,23 @@ impl CliError {
             | Self::InputMissing(_)
             | Self::FileListMissing(_)
             | Self::FileListEmpty
+            | Self::FileListEntryMissing { .. }
             | Self::InvalidArgument(_)
+            | Self::AsrPlan(_)
             | Self::PathTraversal(_) => Self::EXIT_USAGE,
             Self::Config(_) | Self::DaemonStartFailed => Self::EXIT_CONFIG,
             Self::ServerUnreachable { .. } | Self::Http(_) => Self::EXIT_NETWORK,
             Self::UnsupportedCommand { .. }
+            | Self::ServerBuildMismatch { .. }
             | Self::ServerHttp { .. }
             | Self::PollExhausted { .. }
             | Self::JobLost { .. }
             | Self::JobFailed { .. }
             | Self::Server(_) => Self::EXIT_SERVER,
             Self::Database(_) | Self::Json(_) => Self::EXIT_LOCAL_RUNTIME,
+            // Nothing failed: the replay ran and its answer was "this does not
+            // reproduce". That is neither a usage error nor a broken machine.
+            Self::ReplayDiffers(_) => Self::EXIT_GENERAL,
             Self::Io(err) => match err.kind() {
                 std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
                     Self::EXIT_USAGE
@@ -286,6 +357,21 @@ mod tests {
         for err in &errs {
             assert_eq!(err.exit_code(), CliError::EXIT_SERVER);
         }
+    }
+
+    /// A replay that ran and answered "this does not reproduce" is not a usage
+    /// error, a configuration error or a broken machine, and its exit code must
+    /// not tell a script that it was one.
+    #[test]
+    fn a_replay_difference_maps_to_exit_general() {
+        use crate::cli::eval_cmd::utseg_replay::{FirstDifference, UtsegReproductionDifference};
+
+        let difference =
+            UtsegReproductionDifference::new(12, 13, FirstDifference::Line { index: 7 });
+        assert_eq!(
+            CliError::ReplayDiffers(difference).exit_code(),
+            CliError::EXIT_GENERAL
+        );
     }
 
     #[test]

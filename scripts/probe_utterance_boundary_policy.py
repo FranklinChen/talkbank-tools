@@ -20,6 +20,7 @@ from batchalign.models.utterance.policy_probe import (
     compare_retained_asr_files,
     write_policy_report,
 )
+from batchalign.worker._model_loading.pinned_hub import resolve_pinned_snapshot
 
 
 def _parse_args() -> argparse.Namespace:
@@ -80,7 +81,18 @@ def main() -> None:
         file=sys.stderr,
         flush=True,
     )
-    model = BertUtteranceModel(args.model_id, lang=args.lang)
+    # The probe is an offline research tool and pins nothing itself, so it
+    # resolves the hub default and reports the commit that actually landed.
+    # It still goes through the one snapshot resolver, so the model it loads
+    # names a real revision rather than none.
+    resolved = resolve_pinned_snapshot(args.model_id, None)
+    print(f"Resolved {args.model_id} to {resolved.commit}", file=sys.stderr)
+    model = BertUtteranceModel(
+        model_id=args.model_id,
+        model_path=resolved.path,
+        model_revision=resolved.commit,
+        lang=args.lang,
+    )
     print("Model loaded; capturing and replaying boundary evidence...", file=sys.stderr)
     report = compare_retained_asr_files(
         inputs,

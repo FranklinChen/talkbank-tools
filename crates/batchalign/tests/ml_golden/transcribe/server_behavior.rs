@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use crate::common::{LiveServerJobClient, assert_completed_without_errors, require_live_server};
 use crate::ml_golden::audio_helpers::{count_wor_tiers, parse_output};
 use crate::ml_golden::transcribe::helpers::{
-    prepare_multi_speaker_transcribe_fixture_job, prepare_transcribe_fixture_job,
-    transcribe_options,
+    MULTI_SPEAKER_FIXTURE_SPEAKERS, prepare_multi_speaker_transcribe_fixture_job,
+    prepare_transcribe_fixture_job, transcribe_options,
 };
 use batchalign::api::ReleasedCommand;
 use batchalign::options::{AsrEngineName, WorTierPolicy};
@@ -90,11 +90,14 @@ async fn transcribe_server_diarize_surfaces_multiple_speakers_when_available() {
     };
 
     let (info, outputs) = jobs
-        .submit_paths_job(
+        .submit_paths_job_with_speakers(
             ReleasedCommand::Transcribe,
             "eng",
             vec![fixture.source_path],
             vec![fixture.output_path],
+            // Three participants in the fixture's own CHAT; see the direct
+            // counterpart for why submitting one made this test fail.
+            MULTI_SPEAKER_FIXTURE_SPEAKERS,
             transcribe_options(AsrEngineName::Whisper, true, WorTierPolicy::Omit),
         )
         .await;

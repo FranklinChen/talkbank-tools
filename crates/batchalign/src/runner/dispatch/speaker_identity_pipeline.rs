@@ -136,7 +136,7 @@ impl AudioFileTask for SpeakerIdentityTask {
             embedding_backend: crate::types::worker_v2::SpeakerEmbeddingBackendV2::Pyannote,
             embedding_model_revision: model_revision,
             tiers: tiers.recorded(),
-            produced_by: format!("batchalign3 {}", crate::cli::build_hash()),
+            produced_by: format!("batchalign3 {}", crate::build_hash()),
         };
 
         let evidence = identify_speakers(

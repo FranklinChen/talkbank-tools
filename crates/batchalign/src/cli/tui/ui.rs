@@ -679,6 +679,7 @@ mod tests {
             },
             error_line: None,
             bug_report_id: None,
+            stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: if status == FileStatusKind::Done {
                 Some(UnixTimestamp(0.0))
             } else {

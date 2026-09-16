@@ -2,13 +2,14 @@
 
 use std::collections::HashMap;
 
+use super::identity::AdmittedMorphosyntaxResponse;
 use crate::api::LanguageCode3;
 use crate::chat_ops::morphosyntax_ops::{BatchItemWithPosition, MwtDict};
-use crate::chat_ops::nlp::UdResponse;
 use crate::error::ServerError;
 use crate::execution::morphotag::progress::BackendProgressPort;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry_and_progress};
 use crate::runner::util::batch_progress::BatchChunkIndex;
+use crate::types::worker_v2::MorphosyntaxItemResultV2;
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_morphosyntax_request_v2};
@@ -61,7 +62,8 @@ fn language_groups_for_items(
 /// When the batch is large enough and the pool allows multiple workers per
 /// language key, the items are split into chunks and dispatched concurrently
 /// to separate workers.  This is transparent to callers, the returned
-/// `Vec<UdResponse>` is always parallel to the input `items` slice.
+/// responses are always parallel to the input `items` slice, each admitted
+/// with the model that produced it.
 pub(crate) async fn infer_batch(
     pool: &WorkerPool,
     items: &[BatchItemWithPosition],
@@ -70,9 +72,18 @@ pub(crate) async fn infer_batch(
     retokenize: bool,
     progress: Option<&BackendProgressPort>,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<UdResponse>, ServerError> {
-    let item_results =
-        infer_batch_per_item(pool, items, lang, mwt, retokenize, progress, cancellation).await?;
+) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
+    let item_results: Vec<_> =
+        infer_batch_per_item(pool, items, lang, mwt, retokenize, progress, cancellation)
+            .await?
+            .into_iter()
+            // Each per-item message is the engine's own report about that
+            // item, which is exactly what `EngineReported` names. Morphotag's
+            // failure type is `EngineItemFailure`, whose command-specific
+            // variant is uninhabited: it has no outcome of the kind
+            // translate's empty result is, and cannot be given one.
+            .map(|item| item.map_err(crate::text_batch::EngineItemFailure::EngineReported))
+            .collect();
     crate::text_batch::unwrap_per_item_results("morphotag", item_results)
         .map_err(|err| ServerError::Validation(err.to_string()))
 }
@@ -93,7 +104,7 @@ pub(crate) async fn infer_batch_per_item(
     retokenize: bool,
     progress: Option<&BackendProgressPort>,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<UdResponse, String>>, ServerError> {
+) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
     if items.is_empty() {
         return Ok(Vec::new());
     }
@@ -121,7 +132,8 @@ pub(crate) async fn infer_batch_per_item(
          items in unsupported languages get empty responses (BA2-equivalent L2|xxx fallback)"
     );
 
-    let mut merged: Vec<Option<Result<UdResponse, String>>> = vec![None; items.len()];
+    let mut merged: Vec<Option<Result<AdmittedMorphosyntaxResponse, String>>> =
+        vec![None; items.len()];
 
     // Fill items in unsupported-language groups with INTENTIONAL empty
     // ``Ok(UdResponse)`` values (not Err). Downstream ``inject_results``
@@ -136,9 +148,9 @@ pub(crate) async fn infer_batch_per_item(
             "Stanza does not support this language; emitting L2|xxx fallback for these items"
         );
         for idx in indices {
-            merged[idx] = Some(Ok(UdResponse {
-                sentences: Vec::new(),
-            }));
+            merged[idx] = Some(Ok(
+                AdmittedMorphosyntaxResponse::unsupported_language_placeholder(),
+            ));
         }
     }
 
@@ -217,7 +229,7 @@ async fn infer_batch_homogeneous(
     retokenize: bool,
     progress: Option<&BackendProgressPort>,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<UdResponse, String>>, ServerError> {
+) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
     // Progress reporting for this batch.
     //
     // The Python backend emits `progress_v2` events carrying `completed` /
@@ -377,7 +389,7 @@ async fn infer_batch_single(
     retokenize: bool,
     progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<UdResponse, String>>, ServerError> {
+) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
     let payload_items: Vec<_> = items.iter().map(|(_, _, item, _)| item.clone()).collect();
 
     let artifacts = PreparedArtifactRuntimeV2::new("morphosyntax_v2").map_err(|error| {
@@ -414,7 +426,7 @@ async fn infer_batch_single(
         cancellation,
     )
     .await?;
-    let result = parse_morphosyntax_result_v2(&response).map_err(|error| {
+    let result = parse_morphosyntax_result_v2(response).map_err(|error| {
         ServerError::Validation(format!("invalid morphosyntax V2 result: {error}"))
     })?;
     if result.items.len() != items.len() {
@@ -425,59 +437,65 @@ async fn infer_batch_single(
         )));
     }
 
+    // Each item is one of three outcomes, and each outcome carries exactly
+    // what it needs: an analysis carries its model, a wordless item carries no
+    // identity, and a failure carries its error. There is no "analysis
+    // without a model" or "neither result nor error" case left to reject.
     let mut ud_responses = Vec::with_capacity(result.items.len());
-    for (i, item_result) in result.items.iter().enumerate() {
-        if let Some(error) = &item_result.error {
-            ud_responses.push(Err(error.clone()));
-            continue;
-        }
-
-        if let Some(raw_sentences) = &item_result.raw_sentences {
-            match parse_raw_stanza_output(raw_sentences) {
-                Ok(ud) => ud_responses.push(Ok(ud)),
-                Err(error) => {
-                    // Log full diagnostics so the failure is debuggable
-                    // without a replay, then surface as a per-item Err
-                    // so the cross-file driver can attribute the
-                    // failure back to the file that contributed this
-                    // item: matches the BA2 "one bad utterance
-                    // abandons the file" semantics.
-                    let words_sent = &payload_items[i].words;
-                    let diagnostics = diagnose_parse_failure(raw_sentences);
-                    let diag_str = if diagnostics.is_empty() {
-                        "no structural issues detected by diagnostics".to_string()
-                    } else {
-                        diagnostics
-                            .iter()
-                            .map(|d| d.to_string())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    };
-                    let raw_json = serde_json::to_string(raw_sentences)
-                        .unwrap_or_else(|_| "<serialization failed>".into());
-                    warn!(
-                        item = i,
-                        words = ?words_sent,
-                        diagnostics = %diag_str,
-                        raw_stanza_output = %raw_json,
-                        %error,
-                        "Stanza output parse failure: full diagnostics logged"
-                    );
-                    ud_responses.push(Err(format!(
-                        "Failed to parse raw Stanza output for item {i} \
-                         (words: {words_sent:?}): {error}. Diagnostics: {diag_str}"
-                    )));
-                }
+    for (i, item_result) in result.items.into_iter().enumerate() {
+        let (raw_sentences, model, repairs) = match item_result {
+            MorphosyntaxItemResultV2::Failed { error } => {
+                ud_responses.push(Err(error));
+                continue;
             }
-            continue;
+            MorphosyntaxItemResultV2::NoWords => {
+                ud_responses.push(Ok(AdmittedMorphosyntaxResponse::no_words()));
+                continue;
+            }
+            MorphosyntaxItemResultV2::Analyzed {
+                raw_sentences,
+                model,
+                repairs,
+            } => (raw_sentences, model, repairs),
+        };
+        match parse_raw_stanza_output(&raw_sentences) {
+            Ok(ud) => ud_responses.push(Ok(AdmittedMorphosyntaxResponse::from_worker(
+                ud, model, repairs,
+            ))),
+            Err(error) => {
+                // Log full diagnostics so the failure is debuggable
+                // without a replay, then surface as a per-item Err
+                // so the cross-file driver can attribute the
+                // failure back to the file that contributed this
+                // item: matches the BA2 "one bad utterance
+                // abandons the file" semantics.
+                let words_sent = &payload_items[i].words;
+                let diagnostics = diagnose_parse_failure(&raw_sentences);
+                let diag_str = if diagnostics.is_empty() {
+                    "no structural issues detected by diagnostics".to_string()
+                } else {
+                    diagnostics
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                let raw_json = serde_json::to_string(&raw_sentences)
+                    .unwrap_or_else(|_| "<serialization failed>".into());
+                warn!(
+                    item = i,
+                    words = ?words_sent,
+                    diagnostics = %diag_str,
+                    raw_stanza_output = %raw_json,
+                    %error,
+                    "Stanza output parse failure: full diagnostics logged"
+                );
+                ud_responses.push(Err(format!(
+                    "Failed to parse raw Stanza output for item {i} \
+                     (words: {words_sent:?}): {error}. Diagnostics: {diag_str}"
+                )));
+            }
         }
-
-        // Protocol violation: worker returned neither error nor
-        // raw_sentences. Treat as per-item failure so the affected
-        // file fails rather than silently producing empty %mor tiers.
-        ud_responses.push(Err(
-            "morphosyntax V2 returned no raw_sentences and no error".to_owned(),
-        ));
     }
 
     Ok(ud_responses)

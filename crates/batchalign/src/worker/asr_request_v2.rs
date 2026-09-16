@@ -15,12 +15,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
-use crate::api::{NumSpeakers, WorkerLanguage};
+use crate::api::WorkerLanguage;
 use crate::media::probe::MediaProbe;
 use crate::types::worker_v2::{
     ArtifactRefV2, AsrBackendV2, AsrInputV2, AsrRequestV2, DecodeBudgetSeconds, ExecuteRequestV2,
-    InferenceTaskV2, PreparedAudioInputV2, ProviderMediaInputV2, TaskRequestV2, WorkerArtifactIdV2,
-    WorkerRequestIdV2,
+    InferenceTaskV2, PreparedAudioInputV2, ProviderDiarizationV2, ProviderMediaInputV2,
+    TaskRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2,
 };
 
 use super::artifacts_v2::{PreparedArtifactErrorV2, PreparedArtifactStoreV2};
@@ -109,6 +109,14 @@ pub struct AsrBuildInputV2<'a> {
     pub lang: &'a WorkerLanguage,
     /// Concrete V2 ASR backend selected by Rust.
     pub backend: AsrBackendV2,
+    /// The exact models the worker must load for this request, resolved from
+    /// the manifest by the caller that knows the language and the overrides.
+    ///
+    /// Borrowed rather than moved, because the caller needs the same value
+    /// again when the response comes back: it is the requested half of the
+    /// admission, and reading it back off the response instead would compare
+    /// the answer with itself.
+    pub models: &'a crate::types::worker_v2::AsrRequestedModelsV2,
     /// Per-engine configuration extras (e.g. `qwen_model`,
     /// `qwen_device`) drawn from `CommonOptions.engine_overrides.extras`.
     /// Carried through the V2 dispatch boundary so the worker spawn
@@ -130,8 +138,8 @@ pub enum AsrInputSourceV2<'a> {
     ProviderMedia {
         /// Media file path readable by the worker host.
         media_path: &'a Path,
-        /// Expected number of speakers requested by the control plane.
-        num_speakers: NumSpeakers,
+        /// Whether this provider must separate speakers, and into how many.
+        diarization: ProviderDiarizationV2,
     },
 }
 
@@ -181,7 +189,7 @@ pub async fn build_asr_request_v2(
         }
         AsrInputSourceV2::ProviderMedia {
             media_path,
-            num_speakers,
+            diarization,
         } => {
             if media_path.as_os_str().is_empty() {
                 return Err(AsrRequestBuildErrorV2::MissingAudioPath);
@@ -196,7 +204,7 @@ pub async fn build_asr_request_v2(
             (
                 AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
                     media_path: media_path.to_string_lossy().as_ref().into(),
-                    num_speakers,
+                    diarization,
                 }),
                 Vec::new(),
                 decode_budget_seconds,
@@ -210,6 +218,7 @@ pub async fn build_asr_request_v2(
         payload: TaskRequestV2::Asr(AsrRequestV2 {
             lang: input.lang.clone(),
             backend: input.backend,
+            models: input.models.clone(),
             input: asr_input,
             extras: input.extras.clone(),
             decode_budget_seconds,
@@ -262,16 +271,29 @@ mod tests {
         let media_path = tempdir.path().join("sample.wav");
 
         let empty_extras = std::collections::BTreeMap::new();
+        let models = crate::types::worker_v2::AsrRequestedModelsV2::Tencent {
+            engine_model_type: crate::types::worker_v2::RequestedModelV2 {
+                id: crate::types::worker_v2::ModelIdV2::from_static("tencent-asr"),
+                revision: crate::types::worker_v2::RequestedRevisionV2::ProviderParameter {
+                    parameter: crate::types::worker_v2::ProviderParameterV2::from_static(
+                        "16k_zh_large",
+                    ),
+                },
+            },
+        };
         let request = build_asr_request_v2(
             &store,
             AsrBuildInputV2 {
                 ids: &ids,
                 input: AsrInputSourceV2::ProviderMedia {
                     media_path: &media_path,
-                    num_speakers: NumSpeakers(2),
+                    diarization: ProviderDiarizationV2::for_expected_speakers(
+                        crate::api::NumSpeakers(2),
+                    ),
                 },
                 lang: &lang,
                 backend: AsrBackendV2::HkTencent,
+                models: &models,
                 extras: &empty_extras,
             },
         )
@@ -289,6 +311,9 @@ mod tests {
             &*provider_media.media_path,
             media_path.to_string_lossy().as_ref()
         );
-        assert_eq!(provider_media.num_speakers, NumSpeakers(2));
+        assert_eq!(
+            provider_media.diarization,
+            ProviderDiarizationV2::for_expected_speakers(crate::api::NumSpeakers(2))
+        );
     }
 }

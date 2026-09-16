@@ -587,7 +587,7 @@ fn test_fast_path_strips_backward_wor_timestamps_and_removes_stale_wor_tier() {
         chat.clone(),
         WordGapHealing::Heal,
         "wav2vec_fa",
-        "test-build",
+        &crate::engine_reports::FaCacheNamespace::for_test("test-build"),
     )
     .expect("timed CHAT has a usable media declaration")
     .with_written_decisions(written)

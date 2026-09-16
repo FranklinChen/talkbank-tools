@@ -85,6 +85,6 @@ def test_prediction_refuses_applied_actions_not_derived_from_declared_policy() -
     with pytest.raises(ValueError, match="applied action"):
         UtteranceBoundaryPrediction(
             model_id="test/model",
-            model_revision="revision-1",
+            model_revision="0123456789abcdef0123456789abcdef01234567",
             word_evidence=word_evidence,
         )

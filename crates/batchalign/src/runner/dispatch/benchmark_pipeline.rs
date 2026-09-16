@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 use tracing::warn;
 
-use crate::api::{EngineVersion, NumWorkers, UnixTimestamp};
+use crate::api::{NumWorkers, UnixTimestamp};
 use crate::benchmark::{BenchmarkRequest, process_benchmark};
 use crate::cache::UtteranceCache;
 use crate::pipeline::PipelineServices;
@@ -40,8 +40,6 @@ pub(crate) struct BenchmarkDispatchRuntime {
     pub pool: Arc<WorkerPool>,
     /// Shared utterance cache used by the compare-side morphosyntax phase.
     pub cache: Arc<UtteranceCache>,
-    /// Current engine version string for cache partitioning.
-    pub engine_version: EngineVersion,
     /// Maximum number of file tasks to run concurrently for this job.
     pub num_workers: NumWorkers,
 }
@@ -87,7 +85,7 @@ pub(crate) async fn dispatch_benchmark_infer(
                     .into_iter()
                     .filter_map(|unit| match unit {
                         PlannedWorkUnit::Benchmark(benchmark) => {
-                            Some((benchmark.audio.display_path.to_string(), benchmark))
+                            Some((benchmark.audio().display_path.to_string(), benchmark))
                         }
                         _ => None,
                     })
@@ -134,7 +132,6 @@ pub(crate) async fn dispatch_benchmark_infer(
         let pool = runtime.pool.clone();
         let cache = runtime.cache.clone();
         let job = job.clone();
-        let engine_version = runtime.engine_version.clone();
         let mut opts = base_options.clone();
         let file = file.clone();
         let mwt = mwt.clone();
@@ -146,7 +143,7 @@ pub(crate) async fn dispatch_benchmark_infer(
             "benchmark file task",
             async move {
                 let _permit = permit;
-                let services = PipelineServices::new(&pool, &cache, &engine_version);
+                let services = PipelineServices::new(&pool, &cache);
                 let context = BenchmarkFileContext {
                     job: &job,
                     sink: sink.clone(),
@@ -221,12 +218,12 @@ async fn process_one_benchmark_file(
         return FileTaskOutcome::TerminalStateRecorded;
     };
 
-    let gold_text = match tokio::fs::read_to_string(&planned_unit.gold_chat.source_path).await {
+    let gold_text = match tokio::fs::read_to_string(&planned_unit.gold_chat().source_path).await {
         Ok(text) => text,
         Err(err) => {
             let err_msg = format!(
                 "Failed to read benchmark reference transcript {}: {err}",
-                planned_unit.gold_chat.display_path
+                planned_unit.gold_chat().display_path
             );
             lifecycle
                 .fail(&err_msg, FailureCategory::InputMissing, unix_now())
@@ -331,7 +328,7 @@ async fn process_one_benchmark_file(
 
                 let primary_output = primary_output_artifact(
                     crate::api::ReleasedCommand::Benchmark,
-                    &planned_unit.audio.display_path,
+                    &planned_unit.audio().display_path,
                 );
                 // Recipe-catalog invariant: the `Benchmark` command's
                 // sidecar policy includes `*.compare.csv`. The
@@ -341,7 +338,7 @@ async fn process_one_benchmark_file(
                 #[allow(clippy::expect_used)]
                 let csv_output_artifact = sidecar_output_artifacts(
                     crate::api::ReleasedCommand::Benchmark,
-                    &planned_unit.audio.display_path,
+                    &planned_unit.audio().display_path,
                 )
                 .into_iter()
                 .find(|artifact| artifact.display_path.as_ref().ends_with(".compare.csv"))

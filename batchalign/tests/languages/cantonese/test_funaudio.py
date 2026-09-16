@@ -12,50 +12,9 @@ from batchalign.inference.languages.cantonese._funaudio_common import (
     FunAsrSegment,
     FunAudioRecognizer,
 )
+from batchalign_core import BatchalignError
 
 _S = FunAsrSegment
-
-
-# ---------------------------------------------------------------------------
-# _clean_segment_text
-# ---------------------------------------------------------------------------
-
-
-class TestCleanSegmentText:
-    def test_strips_markers(self) -> None:
-        assert FunAudioRecognizer._clean_segment_text("<|zh|> hello") == "hello"
-
-    def test_strips_cjk_punctuation(self) -> None:
-        assert FunAudioRecognizer._clean_segment_text("你好，世界！") == "你好 世界"
-
-    def test_strips_brackets(self) -> None:
-        assert FunAudioRecognizer._clean_segment_text("「hello」") == "hello"
-
-    def test_complex_real_output(self) -> None:
-        assert (
-            FunAudioRecognizer._clean_segment_text("<|zh|> 「你好」，我係啊！")
-            == "你好 我係啊"
-        )
-
-    def test_multiple_markers(self) -> None:
-        assert (
-            FunAudioRecognizer._clean_segment_text(
-                "<|zh|><|HAPPY|> hello <|NEUTRAL|> world"
-            )
-            == "hello world"
-        )
-
-    def test_empty_string(self) -> None:
-        assert FunAudioRecognizer._clean_segment_text("") == ""
-
-    def test_only_punctuation(self) -> None:
-        assert FunAudioRecognizer._clean_segment_text("，。！？") == ""
-
-    def test_question_mark(self) -> None:
-        assert FunAudioRecognizer._clean_segment_text("係咪？") == "係咪"
-
-    def test_period(self) -> None:
-        assert FunAudioRecognizer._clean_segment_text("好似。") == "好似"
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +41,16 @@ class TestFunAsrSegmentFromRaw:
         seg = _S.from_raw({"text": "hi"})
         assert seg.timestamp == []
 
+    def test_parses_checkpoint_unit_lists(self) -> None:
+        paraformer = _S.from_raw(
+            {"text": "好。", "timestamp": [[0, 100]], "raw_text": "好"}
+        )
+        assert (paraformer.raw_text, paraformer.words) == ("好", None)
+        sensevoice = _S.from_raw(
+            {"text": "好", "timestamp": [[0, 100]], "words": ["好"]}
+        )
+        assert (sensevoice.words, sensevoice.raw_text) == (["好"], None)
+
 
 # ---------------------------------------------------------------------------
 # transcribe, with stubbed _run_model
@@ -93,12 +62,13 @@ class TestTranscribe:
     def _make_recognizer(lang: str = "yue") -> FunAudioRecognizer:
         return FunAudioRecognizer(lang=lang)
 
-    def test_cantonese_char_tokenization(self) -> None:
+    def test_cantonese_sensevoice_words_are_units(self) -> None:
         rec = self._make_recognizer("yue")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
             _S(
                 text="<|zh|> 我仲清楚啊",
                 timestamp=[[0, 100], [100, 200], [200, 300], [300, 400], [400, 500]],
+                words=["我", "仲", "清", "楚", "啊"],
             )
         ]
         payload, timed_words = rec.transcribe("dummy.wav")
@@ -106,19 +76,29 @@ class TestTranscribe:
         assert values == ["我", "仲", "清", "楚", "啊"]
         assert len(timed_words) == 5
 
-    def test_cantonese_normalization_in_transcribe(self) -> None:
+    def test_cantonese_surfaces_leave_the_bridge_unnormalized(self) -> None:
+        """The bridge reports what FunASR said, character for character.
+
+        It used to normalize `真系` to `真係` here, which meant a transcript's
+        text depended on which engine had produced it. Normalization now has one
+        owner in the Rust server and runs once per monologue.
+        """
         rec = self._make_recognizer("yue")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|zh|> 真系", timestamp=[[0, 100], [100, 200]])
+            _S(text="<|zh|> 真系", timestamp=[[0, 100], [100, 200]], words=["真", "系"])
         ]
         payload, _ = rec.transcribe("dummy.wav")
         values = [el["value"] for el in payload["monologues"][0]["elements"]]
-        assert values == ["真", "係"]
+        assert values == ["真", "系"]
 
     def test_english_word_tokenization(self) -> None:
         rec = self._make_recognizer("eng")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|en|> hello world", timestamp=[[0, 500], [600, 1000]])
+            _S(
+                text="<|en|> hello world",
+                timestamp=[[0, 500], [600, 1000]],
+                words=["hello", "world"],
+            )
         ]
         payload, timed_words = rec.transcribe("dummy.wav")
         elements = payload["monologues"][0]["elements"]
@@ -128,24 +108,46 @@ class TestTranscribe:
     def test_timed_words_sorted(self) -> None:
         rec = self._make_recognizer("eng")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|en|> hello world", timestamp=[[500, 800], [100, 400]])
+            _S(
+                text="<|en|> hello world",
+                timestamp=[[500, 800], [100, 400]],
+                words=["hello", "world"],
+            )
         ]
         _, timed_words = rec.transcribe("dummy.wav")
         starts = [tw["start_ms"] for tw in timed_words]
         assert starts == [100, 500]
 
-    def test_missing_timestamps(self) -> None:
+    def test_units_and_timestamps_that_disagree_are_refused(self) -> None:
+        # Three units, one timestamp. Pairing by position used to time the
+        # first word and leave the rest silently untimed; admission now
+        # refuses and names both counts.
         rec = self._make_recognizer("eng")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|en|> hello world bye", timestamp=[[0, 200]])
+            _S(
+                text="<|en|> hello world bye",
+                timestamp=[[0, 200]],
+                words=["hello", "world", "bye"],
+            )
+        ]
+        with pytest.raises(BatchalignError, match="3 units but 1 timestamps"):
+            rec.transcribe("dummy.wav")
+
+    def test_paraformer_raw_text_times_characters_not_clauses(self) -> None:
+        # Paraformer timing is per character; each keeps its own span.
+        rec = self._make_recognizer("zho")
+        rec._run_model = lambda _path: [  # type: ignore[method-assign]
+            _S(
+                text="你好，世界。",
+                timestamp=[[0, 100], [100, 200], [9000, 9100], [9100, 9200]],
+                raw_text="你 好 世 界",
+            )
         ]
         payload, timed_words = rec.transcribe("dummy.wav")
         elements = payload["monologues"][0]["elements"]
-        assert len(elements) == 3
-        assert elements[0]["ts"] == 0.0
-        assert elements[1]["ts"] is None
-        assert elements[2]["ts"] is None
-        assert len(timed_words) == 1
+        assert [el["value"] for el in elements] == ["你", "好", "世", "界"]
+        assert elements[-1]["ts"] == 9.1
+        assert [tw["start_ms"] for tw in timed_words] == [0, 100, 9000, 9100]
 
     def test_no_timestamp_key(self) -> None:
         rec = self._make_recognizer("eng")
@@ -158,8 +160,8 @@ class TestTranscribe:
     def test_multiple_segments(self) -> None:
         rec = self._make_recognizer("eng")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|en|> hello", timestamp=[[0, 200]]),
-            _S(text="<|en|> world", timestamp=[[500, 700]]),
+            _S(text="<|en|> hello", timestamp=[[0, 200]], words=["hello"]),
+            _S(text="<|en|> world", timestamp=[[500, 700]], words=["world"]),
         ]
         payload, _ = rec.transcribe("dummy.wav")
         assert len(payload["monologues"]) == 2
@@ -174,19 +176,22 @@ class TestTranscribe:
     def test_zero_duration_word_excluded_from_timed(self) -> None:
         rec = self._make_recognizer("eng")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|en|> hello", timestamp=[[100, 100]])
+            _S(text="<|en|> hello", timestamp=[[100, 100]], words=["hello"])
         ]
         payload, timed_words = rec.transcribe("dummy.wav")
         assert len(payload["monologues"][0]["elements"]) == 1
         assert timed_words == []
 
-    def test_speaker_always_zero(self) -> None:
+    def test_speaker_is_reported_undiarized(self) -> None:
+        # FunASR separates no speakers, so it names none. It used to write 0
+        # here, which no downstream reader could tell apart from a provider's
+        # real first speaker.
         rec = self._make_recognizer("yue")
         rec._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|zh|> 好", timestamp=[[0, 100]])
+            _S(text="<|zh|> 好", timestamp=[[0, 100]], words=["好"])
         ]
         payload, _ = rec.transcribe("dummy.wav")
-        assert payload["monologues"][0]["speaker"] == 0
+        assert payload["monologues"][0]["speaker"] == {"kind": "undiarized"}
 
 
 class TestProtocolSafety:
@@ -246,13 +251,38 @@ class TestProtocolSafety:
         fake_module.AutoModel = FakeAutoModel
         monkeypatch.setitem(sys.modules, "funasr", fake_module)
 
-        rec = FunAudioRecognizer(lang="yue", model="paraformer-zh", device="cuda")
+        # The auxiliary models and their revisions come from the pinned plan
+        # now; they used to be five literals inside `_get_model`, which is how
+        # a model could move without anything recording that it had.
+        rec = FunAudioRecognizer(
+            lang="yue",
+            model="paraformer-zh",
+            device="cuda",
+            model_revision="v2.0.4",
+            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            vad_revision="v2.0.4",
+            punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+            punc_revision="v2.0.4",
+        )
         rec._get_model()
 
         assert seen["model"] == "paraformer-zh"
         assert seen["model_revision"] == "v2.0.4"
+        assert seen["vad_model"] == "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
         assert seen["vad_model_revision"] == "v2.0.4"
-        assert seen["punc_model"] == "ct-punc-c"
+        assert (
+            seen["punc_model"]
+            == "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
+        )
+        assert seen["punc_model_revision"] == "v2.0.4"
+
+    def test_get_model_refuses_paraformer_without_its_auxiliary_models(self) -> None:
+        """The Paraformer branch needs its voice-activity and punctuation
+        models: loading with FunASR's own defaults would silently run models
+        nothing recorded."""
+        rec = FunAudioRecognizer(lang="yue", model="paraformer-zh")
+        with pytest.raises(ValueError, match="voice-activity and punctuation"):
+            rec._get_model()
 
     def test_run_model_suppresses_generate_stdout(self, capsys) -> None:
         class FakeModel:
@@ -276,15 +306,18 @@ class TestProtocolSafety:
 
             def generate(self, **kwargs):
                 self.calls.append(kwargs)
-                return {"text": "<|zh|> 好", "timestamp": [[0, 100]]}
+                return {"text": "好。", "raw_text": "好", "timestamp": [[0, 100]]}
 
-        rec = FunAudioRecognizer(lang="yue", model="paraformer-zh")
+        rec = FunAudioRecognizer(lang="zho", model="paraformer-zh")
         rec._model = fake_model = FakeModel()
 
         segments = rec._run_model("dummy.wav")
 
-        assert fake_model.calls == [{"input": "dummy.wav", "output_timestamp": True}]
-        assert segments == [_S(text="<|zh|> 好", timestamp=[[0, 100]])]
+        # `return_raw_text` is what makes the timing pairable; see FunAsrSegment.
+        assert fake_model.calls == [
+            {"input": "dummy.wav", "output_timestamp": True, "return_raw_text": True}
+        ]
+        assert segments == [_S(text="好。", timestamp=[[0, 100]], raw_text="好")]
 
     def test_run_model_ignores_non_collection_output(self) -> None:
         class FakeModel:

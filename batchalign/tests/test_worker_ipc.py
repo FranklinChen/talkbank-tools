@@ -57,15 +57,43 @@ def test_capabilities_response_with_infer_fields() -> None:
     resp = CapabilitiesResponse(
         commands=["morphotag"],
         free_threaded=False,
-        infer_tasks=[InferTask.MORPHOSYNTAX, InferTask.UTSEG],
+        infer_tasks=[InferTask.MORPHOSYNTAX, InferTask.FA],
+        # Only forced alignment's entry names an engine; the rest are null.
         engine_versions={
-            InferTask.MORPHOSYNTAX: "stanza-1.9.2",
-            InferTask.UTSEG: "stanza-1.9.2",
+            InferTask.MORPHOSYNTAX: None,
+            InferTask.FA: "wave2vec-fa-v1",
         },
     )
     data = json.loads(resp.model_dump_json())
-    assert data["infer_tasks"] == ["morphosyntax", "utseg"]
-    assert data["engine_versions"]["morphosyntax"] == "stanza-1.9.2"
+    assert data["infer_tasks"] == ["morphosyntax", "fa"]
+    assert data["engine_versions"] == {"morphosyntax": None, "fa": "wave2vec-fa-v1"}
+
+
+def test_capabilities_response_reports_an_unnamed_engine_as_null() -> None:
+    """A supported task whose engine the worker cannot name travels as null."""
+    resp = CapabilitiesResponse(
+        commands=[],
+        free_threaded=False,
+        infer_tasks=[InferTask.ASR],
+        engine_versions={InferTask.ASR: None},
+    )
+    data = json.loads(resp.model_dump_json())
+    assert data["engine_versions"] == {"asr": None}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "  ", " stanza-1.9.2", "stanza|1.9.2", "stanza;1.9.2", "stanza]1", "a\nb"],
+)
+def test_capabilities_response_refuses_an_unreportable_engine_name(name: str) -> None:
+    """A name a provenance stamp cannot hold fails here, not at the Rust gate."""
+    with pytest.raises(ValidationError):
+        CapabilitiesResponse(
+            commands=[],
+            free_threaded=False,
+            infer_tasks=[InferTask.FA],
+            engine_versions={InferTask.FA: name},
+        )
 
 
 def test_capabilities_response_missing_infer_fields_is_rejected() -> None:

@@ -15,13 +15,11 @@ use crate::store::{
     FileStatus, Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
     JobLeaseState, JobRuntimeControl, JobScheduleState, JobSourceContext, JobStore, PendingJobFile,
 };
-use crate::worker::InferTask;
 use crate::ws::BROADCAST_CAPACITY;
 
 use super::util::StoreRunnerEventSink;
 use super::{
-    command_requires_chat_infer, infer_task_for_command, record_preflight_media_failures,
-    result_filename_for_command,
+    command_requires_chat_infer, record_preflight_media_failures, result_filename_for_command,
 };
 
 /// Build a minimal paths-mode media job for prevalidation tests.
@@ -92,50 +90,6 @@ fn make_media_job(job_id: &str, source_path: &str) -> Job {
         },
         execution_plan: None,
     }
-}
-
-#[test]
-fn infer_task_mapping_is_stable() {
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Morphotag),
-        InferTask::Morphosyntax
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Utseg),
-        InferTask::Utseg
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Translate),
-        InferTask::Translate
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Coref),
-        InferTask::Coref
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Align),
-        InferTask::Fa
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Transcribe),
-        InferTask::Asr
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Compare),
-        InferTask::Morphosyntax
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Opensmile),
-        InferTask::Opensmile
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Avqi),
-        InferTask::Avqi
-    );
-    assert_eq!(
-        infer_task_for_command(ReleasedCommand::Benchmark),
-        InferTask::Asr
-    );
 }
 
 #[test]

@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
-use crate::api::{EngineVersion, NumSpeakers};
-use crate::cache::{CacheBackend, CacheError, InferenceLease, UtteranceCache};
-use crate::chat_ops::{CacheKey, CacheTaskName};
+use crate::api::NumSpeakers;
+use crate::cache::BuildOwnedNamespace;
+use crate::cache::{CacheError, CacheNamespace, InferenceLease, UtteranceCache, tasks};
+use crate::chat_ops::CacheKey;
 use crate::error::ServerError;
 use crate::params::CachePolicy;
 use crate::types::worker_v2::{SpeakerBackendV2, SpeakerInferenceEvidenceV2, SpeakerSegmentV2};
@@ -106,35 +107,42 @@ struct DerivedSpeakerEvidenceKeyMaterial<'a> {
     normalization_revision: &'a str,
 }
 
-/// Revision identity for speaker evidence, distinct from an ASR engine version.
+/// Revision identity for speaker evidence, distinct from an ASR engine's name.
 ///
-/// The private field prevents the transcribe pipeline from accidentally using
-/// its ASR worker version to scope speaker-model evidence.
+/// The private field, whose only production constructor derives it from the
+/// speaker backend, and the speaker cache task's namespace type keep any other
+/// identity (an ASR engine's included) from scoping speaker-model evidence.
 #[derive(Debug, Clone)]
-pub(crate) struct SpeakerEvidenceModelRevision(EngineVersion);
+pub(crate) struct SpeakerEvidenceModelRevision(BuildOwnedNamespace);
 
 impl SpeakerEvidenceModelRevision {
     pub(crate) fn for_backend(backend: SpeakerBackendV2) -> Self {
-        let revision = match backend {
-            SpeakerBackendV2::PyannoteAi => "pyannote-ai:precision-2".to_owned(),
-            SpeakerBackendV2::Pyannote => format!(
+        Self(match backend {
+            SpeakerBackendV2::PyannoteAi => BuildOwnedNamespace::literal("pyannote-ai:precision-2"),
+            SpeakerBackendV2::Pyannote => BuildOwnedNamespace::derived(format!(
                 "pyannote-local-graph:{}",
                 blake3::hash(LOCAL_PYANNOTE_MODEL_MANIFEST.as_bytes()).to_hex()
-            ),
-            SpeakerBackendV2::Nemo => {
-                format!("nemo:diar_infer_general:ba-{}", env!("CARGO_PKG_VERSION"))
-            }
-        };
-        Self(EngineVersion::from(revision.as_str()))
+            )),
+            SpeakerBackendV2::Nemo => BuildOwnedNamespace::derived(format!(
+                "nemo:diar_infer_general:ba-{}",
+                env!("CARGO_PKG_VERSION")
+            )),
+        })
     }
 
     fn as_str(&self) -> &str {
-        self.0.as_ref()
+        self.0.as_str()
     }
 
     #[cfg(test)]
     fn for_test(label: &str) -> Self {
-        Self(EngineVersion::from(label))
+        Self(BuildOwnedNamespace::derived(label.to_owned()))
+    }
+}
+
+impl CacheNamespace for SpeakerEvidenceModelRevision {
+    fn namespace(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -142,22 +150,28 @@ impl SpeakerEvidenceModelRevision {
 ///
 /// This cannot be substituted with a speaker model revision: changing this
 /// value invalidates only derived segments and deliberately preserves paid raw
-/// evidence.
+/// evidence. The cache enforces that too: its segments task takes this type.
 #[derive(Debug, Clone)]
-struct SpeakerNormalizationRevision(EngineVersion);
+pub(crate) struct SpeakerNormalizationRevision(BuildOwnedNamespace);
+
+impl CacheNamespace for SpeakerNormalizationRevision {
+    fn namespace(&self) -> &str {
+        self.as_str()
+    }
+}
 
 impl SpeakerNormalizationRevision {
     fn current() -> Self {
-        Self(EngineVersion::from(SPEAKER_NORMALIZATION_REVISION))
+        Self(BuildOwnedNamespace::literal(SPEAKER_NORMALIZATION_REVISION))
     }
 
     fn as_str(&self) -> &str {
-        self.0.as_ref()
+        self.0.as_str()
     }
 
     #[cfg(test)]
     fn for_test(label: &str) -> Self {
-        Self(EngineVersion::from(label))
+        Self(BuildOwnedNamespace::derived(label.to_owned()))
     }
 }
 
@@ -255,8 +269,8 @@ impl SpeakerEvidenceRequest {
         let stored_derived = cache
             .get(
                 self.derived_cache_key.as_str(),
-                CacheTaskName::SpeakerDiarizationSegments.as_str(),
-                self.normalization_revision.as_str(),
+                tasks::SPEAKER_DIARIZATION_SEGMENTS,
+                &self.normalization_revision,
             )
             .await?;
         if let Some(stored) = stored_derived {
@@ -273,8 +287,8 @@ impl SpeakerEvidenceRequest {
         let stored_raw = cache
             .get(
                 self.raw_cache_key.as_str(),
-                CacheTaskName::SpeakerDiarizationRawEvidence.as_str(),
-                self.model_revision.as_str(),
+                tasks::SPEAKER_DIARIZATION_RAW_EVIDENCE,
+                &self.model_revision,
             )
             .await?;
         if let Some(stored) = stored_raw {
@@ -314,9 +328,8 @@ impl SpeakerEvidenceRequest {
         cache
             .put(
                 self.raw_cache_key.as_str(),
-                CacheTaskName::SpeakerDiarizationRawEvidence.as_str(),
-                self.model_revision.as_str(),
-                env!("CARGO_PKG_VERSION"),
+                tasks::SPEAKER_DIARIZATION_RAW_EVIDENCE,
+                &self.model_revision,
                 &value,
             )
             .await?;
@@ -332,9 +345,8 @@ impl SpeakerEvidenceRequest {
         cache
             .put(
                 self.derived_cache_key.as_str(),
-                CacheTaskName::SpeakerDiarizationSegments.as_str(),
-                self.normalization_revision.as_str(),
-                env!("CARGO_PKG_VERSION"),
+                tasks::SPEAKER_DIARIZATION_SEGMENTS,
+                &self.normalization_revision,
                 &value,
             )
             .await?;
@@ -607,9 +619,8 @@ impl SpeakerEvidenceCommitPermit {
         cache
             .put(
                 self.request.raw_cache_key.as_str(),
-                CacheTaskName::SpeakerDiarizationRawEvidence.as_str(),
-                self.request.model_revision.as_str(),
-                env!("CARGO_PKG_VERSION"),
+                tasks::SPEAKER_DIARIZATION_RAW_EVIDENCE,
+                &self.request.model_revision,
                 &value,
             )
             .await?;
@@ -698,9 +709,8 @@ async fn store_derived_evidence(
     cache
         .put(
             request.derived_cache_key.as_str(),
-            CacheTaskName::SpeakerDiarizationSegments.as_str(),
-            request.normalization_revision.as_str(),
-            env!("CARGO_PKG_VERSION"),
+            tasks::SPEAKER_DIARIZATION_SEGMENTS,
+            &request.normalization_revision,
             &serde_json::to_value(envelope)?,
         )
         .await?;

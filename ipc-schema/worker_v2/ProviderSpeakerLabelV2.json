@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProviderSpeakerLabelV2",
+  "description": "A provider's own label for one speaker: non-empty, with no surrounding whitespace.",
+  "type": "string",
+  "minLength": 1
+}

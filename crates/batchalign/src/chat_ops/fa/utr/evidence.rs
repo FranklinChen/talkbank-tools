@@ -45,6 +45,15 @@ impl UtrResult {
         }
     }
 
+    /// Whether recovery ran at all. Only the no-untimed-utterances result did
+    /// not; every other result came from matching ASR tokens.
+    pub fn ran(&self) -> bool {
+        match self.alignment {
+            UtrAlignmentEvidence::NotRunNoUntimed => false,
+            UtrAlignmentEvidence::Global { .. } | UtrAlignmentEvidence::TwoPass { .. } => true,
+        }
+    }
+
     /// Number of utterances that received UTR timing.
     pub fn injected(&self) -> usize {
         self.injected

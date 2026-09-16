@@ -25,11 +25,9 @@
 //! reaches the wire.  If a new producer is added that bypasses Python
 //! validation, Rust-side checks must be added to the affected structs.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationSeconds, EngineVersion, LanguageCode3, NumSpeakers, WorkerLanguage};
+use crate::api::{DurationSeconds, LanguageCode3, NumSpeakers, WorkerLanguage};
 use crate::worker::WorkerPid;
 
 string_id!(
@@ -541,35 +539,6 @@ pub struct HelloResponseV2 {
     pub runtime: WorkerRuntimeInfoV2,
 }
 
-/// Request for task capability metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct CapabilitiesRequestV2 {
-    /// Correlation id for the capability lookup.
-    pub request_id: WorkerRequestIdV2,
-}
-
-/// One task capability advertised by a V2 worker.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct TaskCapabilityV2 {
-    /// Task family supported by the worker.
-    pub task: InferenceTaskV2,
-    /// Attachment/input kinds the task can consume.
-    pub accepted_inputs: Vec<WorkerAttachmentKindV2>,
-    /// Whether the task can emit progress events.
-    pub supports_progress_events: bool,
-}
-
-/// Response describing task capabilities for the worker.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct CapabilitiesResponseV2 {
-    /// Correlation id that matches the request.
-    pub request_id: WorkerRequestIdV2,
-    /// Task capabilities advertised by the runtime.
-    pub tasks: Vec<TaskCapabilityV2>,
-    /// Engine version strings keyed by task name.
-    pub engine_versions: BTreeMap<String, EngineVersion>,
-}
-
 /// File-backed prepared audio artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PreparedAudioRefV2 {
@@ -634,13 +603,147 @@ pub struct PreparedAudioInputV2 {
     pub audio_ref_id: WorkerArtifactIdV2,
 }
 
+/// How many speakers a provider is being asked to separate a recording into.
+///
+/// At least two, and the bound is the type's rather than a comment's. One
+/// speaker is not a separation request but a contradiction (submission refuses
+/// it by name), and zero names nobody at all, so neither is a count this can
+/// hold. Because [`ProviderDiarizationV2::for_expected_speakers`] is the only
+/// route from a raw count into `Integrated`, and deserialization runs the same
+/// check, a count of one has no spelling anywhere in this protocol: not in a
+/// constructor, not on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct SeparatedSpeakersV2(u32);
+
+impl SeparatedSpeakersV2 {
+    /// The count, as the number to hand a provider's own parameter.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<NumSpeakers> for SeparatedSpeakersV2 {
+    type Error = TooFewSeparatedSpeakers;
+
+    fn try_from(value: NumSpeakers) -> Result<Self, Self::Error> {
+        if value.0 < 2 {
+            return Err(TooFewSeparatedSpeakers { value: value.0 });
+        }
+        Ok(Self(value.0))
+    }
+}
+
+impl TryFrom<u32> for SeparatedSpeakersV2 {
+    type Error = TooFewSeparatedSpeakers;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::try_from(NumSpeakers(value))
+    }
+}
+
+impl std::fmt::Display for SeparatedSpeakersV2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SeparatedSpeakersV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = u32::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl schemars::JsonSchema for SeparatedSpeakersV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SeparatedSpeakersV2".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 2,
+            "description": "How many speakers a provider is asked to separate a recording into: at least two, because one is not a separation request and zero names nobody.",
+        })
+    }
+}
+
+/// A separation request naming fewer than two speakers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "a diarization request must name at least two speakers, and {value} does not: \
+     one speaker is not a request to separate speakers, and zero names nobody"
+)]
+pub struct TooFewSeparatedSpeakers {
+    /// The count as the caller supplied it.
+    pub value: u32,
+}
+
+/// Whether a provider is being asked to separate speakers, and into how many.
+///
+/// This replaces a bare `num_speakers`, which could not say the one thing the
+/// bridge needs to know when a provider returns a monologue with no speaker:
+/// whether separation was ASKED FOR. Without that, an absent label had to be
+/// given a number, and the number given was zero.
+///
+/// The count lives inside `Integrated` because it is meaningless without it,
+/// and it is at least two because [`SeparatedSpeakersV2`] cannot hold less.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderDiarizationV2 {
+    /// One track is expected, and the provider must not separate speakers.
+    NotRequested,
+    /// The provider separates speakers itself, into this many.
+    Integrated {
+        /// How many speakers the provider is asked to find, at least two.
+        speakers: SeparatedSpeakersV2,
+    },
+}
+
+impl ProviderDiarizationV2 {
+    /// Decide, ONCE, whether a job's expected speaker count asks for
+    /// separation, and build the state that says so.
+    ///
+    /// The only route from a raw count into this type, which is what makes the
+    /// answer a property of the type rather than of whoever happened to build
+    /// it: a count of one or zero is not a separation request at all, and two
+    /// or more is a request for exactly that many. This lived in the transcribe
+    /// pipeline as a free function until 2026-09-16, which left every other
+    /// caller free to assemble `Integrated` from any count it liked, the
+    /// refused count of one included.
+    #[must_use]
+    pub fn for_expected_speakers(num_speakers: NumSpeakers) -> Self {
+        SeparatedSpeakersV2::try_from(num_speakers)
+            .map_or(Self::NotRequested, |speakers| Self::Integrated { speakers })
+    }
+
+    /// Whether the provider was asked to attribute speakers at all.
+    #[must_use]
+    pub const fn is_requested(self) -> bool {
+        matches!(self, Self::Integrated { .. })
+    }
+
+    /// The count to hand the provider's own parameter, if separation was asked
+    /// for. `None` is "do not separate", never "separate into zero".
+    #[must_use]
+    pub const fn requested_speakers(self) -> Option<SeparatedSpeakersV2> {
+        match self {
+            Self::Integrated { speakers } => Some(speakers),
+            Self::NotRequested => None,
+        }
+    }
+}
+
 /// Temporary cloud-provider media input retained during migration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ProviderMediaInputV2 {
     /// Media file path readable by the worker host.
     pub media_path: WorkerArtifactPathV2,
-    /// Expected number of speakers for diarization-aware providers.
-    pub num_speakers: NumSpeakers,
+    /// Whether this provider must separate speakers, and into how many.
+    pub diarization: ProviderDiarizationV2,
 }
 
 /// Previously submitted provider job id.
@@ -675,6 +778,15 @@ pub struct AsrRequestV2 {
     pub lang: WorkerLanguage,
     /// Backend selected by Rust.
     pub backend: AsrBackendV2,
+    /// The exact models the worker must load, resolved from BA3's own manifest
+    /// before dispatch.
+    ///
+    /// The identity travels WITH the plan rather than being discovered after a
+    /// model has loaded, which is what lets a cache key be built without
+    /// loading anything and lets the worker's report be checked against what
+    /// was asked for. The composition is closed per engine, so a Qwen request
+    /// without its aligner cannot be built at all.
+    pub models: super::asr_model::AsrRequestedModelsV2,
     /// Backend-specific input transport.
     pub input: AsrInputV2,
     /// Per-engine configuration extras (e.g. `qwen_model`,
@@ -1063,14 +1175,72 @@ pub struct WhisperChunkSpanV2 {
 // missing the header its siblings carry, so it warned on every clippy run.
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::{NumSpeakers, ProviderDiarizationV2, SeparatedSpeakersV2};
+
+    #[test]
+    fn a_count_below_two_is_not_a_separation_request() {
+        // The contradiction submission refuses, and half the reason this type
+        // exists: a count of one used to reach the provider as a request to
+        // separate, which is what produced a single PAR0 track for a recording
+        // the caller had asked to have separated.
+        for count in [0, 1] {
+            assert_eq!(
+                ProviderDiarizationV2::for_expected_speakers(NumSpeakers(count)),
+                ProviderDiarizationV2::NotRequested,
+            );
+        }
+    }
+
+    #[test]
+    fn two_or_more_expected_speakers_asks_for_exactly_that_many() {
+        let diarization = ProviderDiarizationV2::for_expected_speakers(NumSpeakers(3));
+
+        assert!(diarization.is_requested());
+        assert_eq!(
+            diarization.requested_speakers().map(SeparatedSpeakersV2::get),
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn a_separation_count_below_two_has_no_constructor_and_no_wire_form() {
+        // Both routes, because a type whose constructor refuses what its
+        // deserializer accepts is a label rather than a proof. The wire case is
+        // the one that matters in production: this value arrives from another
+        // process, which no constructor of ours ran in.
+        assert!(SeparatedSpeakersV2::try_from(1u32).is_err());
+        assert!(SeparatedSpeakersV2::try_from(NumSpeakers(0)).is_err());
+
+        let refused = serde_json::from_str::<ProviderDiarizationV2>(
+            r#"{"kind": "integrated", "speakers": 1}"#,
+        );
+        assert!(refused.is_err(), "a wire count of one must be refused");
+
+        let admitted = serde_json::from_str::<ProviderDiarizationV2>(
+            r#"{"kind": "integrated", "speakers": 2}"#,
+        )
+        .expect("two speakers is a separation request");
+        assert_eq!(
+            admitted.requested_speakers().map(SeparatedSpeakersV2::get),
+            Some(2),
+        );
+    }
+
     #[test]
     fn asr_request_extras_accepts_null_missing_and_map() {
         // Python spells "no extras" as explicit null (Optional field in
         // the schema-generated models); Rust must treat null, missing,
         // and {} identically as the empty map.
+        // The pinned composition every ASR request now carries. Held as a raw
+        // literal and spliced in as text: `format!` does not re-read braces
+        // inside an inserted value, so the JSON stays readable instead of being
+        // brace-doubled by hand, which is how a fixture like this silently
+        // becomes malformed. What this test is about is the three spellings of
+        // `extras`, so the models only have to be present and well formed.
+        const MODELS: &str = r#""models": {"engine": "whisper", "asr": {"id": "openai/whisper-large-v3", "revision": {"kind": "commit", "commit": "06f233fe06e710322aca913c1bc4249a0d71fce1"}}}"#;
         for extras_json in ["\"extras\": null,", "\"extras\": {},", ""] {
             let json = format!(
-                "{{ {extras_json} \"kind\": \"asr\", \"lang\": \"eng\",                  \"backend\": \"local_whisper\",                  \"input\": {{\"kind\": \"prepared_audio\", \"audio_ref_id\": \"a-1\"}} }}"
+                "{{ {extras_json} \"kind\": \"asr\", \"lang\": \"eng\", \"backend\": \"local_whisper\", \"input\": {{\"kind\": \"prepared_audio\", \"audio_ref_id\": \"a-1\"}}, {MODELS} }}"
             );
             let request: super::AsrRequestV2 = serde_json::from_str(&json)
                 .unwrap_or_else(|error| panic!("extras form {extras_json:?} rejected: {error}"));
@@ -1111,6 +1281,15 @@ mod tests {
         AsrRequestV2 {
             lang: crate::api::WorkerLanguage::from(LanguageCode3::eng()),
             backend: AsrBackendV2::LocalWhisper,
+            // This crate cannot reach the server's manifest, so the fixture
+            // names the model directly. What it exercises is the decode
+            // budget, not the pin.
+            models: crate::worker_v2::AsrRequestedModelsV2::Whisper {
+                asr: crate::worker_v2::RequestedModelV2 {
+                    id: crate::worker_v2::ModelIdV2::from_static("openai/whisper-large-v3"),
+                    revision: crate::worker_v2::RequestedRevisionV2::Unpinned,
+                },
+            },
             input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
                 audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
             }),

@@ -81,10 +81,12 @@ pub(crate) async fn materialize_submission_job(
                 .map(|path| path_mode_filename_from_source(path.as_str()))
                 .collect::<Result<Vec<_>, _>>()?
         };
+        // Through the one predicate, shared with submission validation, so the
+        // two answers to "is this source a CHAT file" cannot drift apart.
         let has_chat: Vec<bool> = submission
             .source_paths
             .iter()
-            .map(|path| path.as_str().to_ascii_lowercase().ends_with(".cha"))
+            .map(|path| crate::types::request::is_chat_source_name(path.as_str()))
             .collect();
 
         ensure_dir(staging_dir.as_ref(), "creating paths-mode staging dir").await?;

@@ -326,6 +326,26 @@ fn discover_server_inputs_file_only() {
 }
 
 #[test]
+fn discover_server_inputs_keeps_a_file_reached_twice_once() {
+    // A file named on its own and again through its parent directory is
+    // one input; the first occurrence decides its output path.
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("sub").join("a.cha");
+    fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    fs::write(&nested, "@Begin\n@End").unwrap();
+    fs::write(dir.path().join("b.cha"), "@Begin\n@End").unwrap();
+
+    let inputs = vec![nested.clone(), dir.path().to_path_buf()];
+    let (files, outputs) =
+        discover_server_inputs(&inputs, Some(out.path()), InputKind::Chat).unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files.iter().filter(|f| **f == nested).count(), 1);
+    assert!(outputs.contains(&out.path().join("a.cha")));
+    assert!(!outputs.contains(&out.path().join("sub").join("a.cha")));
+}
+
+#[test]
 fn discover_server_inputs_nonexistent_is_error() {
     let inputs = vec![PathBuf::from("/nonexistent/path")];
     let result = discover_server_inputs(&inputs, None, InputKind::Chat);

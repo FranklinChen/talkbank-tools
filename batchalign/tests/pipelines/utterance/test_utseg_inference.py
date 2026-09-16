@@ -9,6 +9,7 @@ import pytest
 
 from batchalign.inference.utseg import (
     UtsegBatchItem,
+    _assemble,
     _leaf_count,
     _parse_tree_indices,
     batch_infer_utseg,
@@ -22,6 +23,28 @@ from batchalign.models.utterance.evidence import (
     UtteranceBoundaryPrediction,
 )
 from batchalign.providers import BatchInferRequest
+
+
+class _SteppingMonotonic:
+    """Deterministic ``time.monotonic`` stub advancing one second per call.
+
+    Every measured item calls it exactly twice, once to start and once to
+    stop, so each item's own elapsed time is exactly one step regardless of
+    how many items the batch holds. That is what makes the timing assertions
+    below a proof of per-item attribution rather than a restatement of an
+    arbitrary number: under the batch-total stamping this module used until
+    2026-09-16, the first item reported the whole batch span and every other
+    item reported zero.
+    """
+
+    def __init__(self, step: float = 1.0) -> None:
+        self._next = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        current = self._next
+        self._next += self._step
+        return current
 
 
 class _FakeTree:
@@ -84,7 +107,11 @@ class TestUtsegModels:
 class TestBatchInferUtseg:
     """Verify the thin Python utseg adapter behavior."""
 
-    def test_short_circuits_invalid_and_single_word_items(self) -> None:
+    def test_short_circuits_invalid_and_single_word_items(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "batchalign.inference.utseg.time.monotonic",
+            _SteppingMonotonic(),
+        )
         calls: list[list[str]] = []
 
         def build_stanza_config(
@@ -104,8 +131,13 @@ class TestBatchInferUtseg:
 
         assert calls == []
         assert response.results[0].result == {"assignments": [0]}
-        assert response.results[0].elapsed_s == 0.0
         assert response.results[1].error == "Invalid batch item"
+        # The short-circuited item is measured like any other item: it did the
+        # work of deciding that one word is one utterance.
+        assert response.results[0].elapsed_s == 1.0
+        # The rejected item never parsed, so no work is attributable to it.
+        # Its zero is the rejection variant speaking, not a measurement.
+        assert response.results[1].elapsed_s == 0.0
 
     def test_builds_single_language_pipeline_and_serializes_trees(
         self, monkeypatch
@@ -115,11 +147,10 @@ class TestBatchInferUtseg:
         # `--utseg-fallback-stanza` on every utseg-invoking subcommand.
         init_kwargs: list[dict[str, Any]] = []
         seen_texts: list[str] = []
-        monotonic = iter([100.0, 104.0])
 
         monkeypatch.setattr(
             "batchalign.inference.utseg.time.monotonic",
-            lambda: next(monotonic),
+            _SteppingMonotonic(),
         )
 
         class _FakePipeline:
@@ -162,7 +193,9 @@ class TestBatchInferUtseg:
         ]
         assert seen_texts == ["I eat cookies"]
         assert response.results[0].result == {"trees": ["(S (NP I eat) (VP cookies))"]}
-        assert response.results[0].elapsed_s == 4.0
+        # This item's own span, not the batch's. Building the Stanza pipeline
+        # happens outside any item's measurement and is charged to no item.
+        assert response.results[0].elapsed_s == 1.0
 
     def test_refuses_when_no_bert_model_and_fallback_not_opted_in(
         self, monkeypatch
@@ -274,11 +307,10 @@ class TestBatchInferUtseg:
         # Multilingual Stanza pipeline is also opt-in, no BERT was loaded here.
         init_kwargs: list[dict[str, Any]] = []
         seen_texts: list[str] = []
-        monotonic = iter([5.0, 9.0])
 
         monkeypatch.setattr(
             "batchalign.inference.utseg.time.monotonic",
-            lambda: next(monotonic),
+            _SteppingMonotonic(),
         )
 
         class _FakeMultilingualPipeline:
@@ -336,14 +368,21 @@ class TestBatchInferUtseg:
         ]
         assert seen_texts == ["good path", "boom now"]
         assert response.results[0].result == {"trees": ["(S good path)"]}
-        assert response.results[0].elapsed_s == 4.0
         assert response.results[1].result == {"trees": []}
+        # Both items report their own equal spans. This is the assertion that
+        # would have caught the old misattribution: it read 4.0 and 0.0.
+        assert response.results[0].elapsed_s == 1.0
+        assert response.results[1].elapsed_s == 1.0
 
     def test_returns_empty_trees_when_no_language_pipeline_is_available(
         self, monkeypatch
     ) -> None:
         # Empty-langs path is reachable only when the operator opted in
         # to the Stanza fallback; otherwise the dispatcher refuses earlier.
+        monkeypatch.setattr(
+            "batchalign.inference.utseg.time.monotonic",
+            _SteppingMonotonic(),
+        )
         response = batch_infer_utseg(
             BatchInferRequest(
                 task="utseg",
@@ -355,7 +394,8 @@ class TestBatchInferUtseg:
         )
 
         assert response.results[0].result == {"trees": []}
-        assert response.results[0].elapsed_s == 0.0
+        # Still this item's own measured span, even though the outcome is empty.
+        assert response.results[0].elapsed_s == 1.0
 
     def test_uses_boundary_model_assignments_when_available(self) -> None:
         class _FakeBoundaryModel:
@@ -367,7 +407,7 @@ class TestBatchInferUtseg:
                 high = BoundaryProbability.from_float(0.9)
                 return UtteranceBoundaryPrediction(
                     model_id="test-boundary-model",
-                    model_revision="test-revision",
+                    model_revision="0123456789abcdef0123456789abcdef01234567",
                     word_evidence=(
                         ClassifiedBoundaryEvidence(
                             raw_action=BoundaryAction.ORDINARY,
@@ -413,7 +453,7 @@ class TestBatchInferUtseg:
             "assignments": [0, 0, 1, 1],
             "boundary_model_evidence": {
                 "model_id": "test-boundary-model",
-                "model_revision": "test-revision",
+                "model_revision": "0123456789abcdef0123456789abcdef01234567",
                 "normalization_revision": "lower-strip-ascii-punctuation-v1",
                 "adjacency_policy_revision": "suppress-earlier-adjacent-nonordinary-v1",
                 "word_evidence": [
@@ -453,7 +493,7 @@ class TestBatchInferUtseg:
                 assert words == ["hello"]
                 return UtteranceBoundaryPrediction(
                     model_id="test-boundary-model",
-                    model_revision="test-revision",
+                    model_revision="0123456789abcdef0123456789abcdef01234567",
                     word_evidence=(ModelShortCircuit(),),
                 )
 
@@ -473,7 +513,7 @@ class TestBatchInferUtseg:
             "assignments": [0],
             "boundary_model_evidence": {
                 "model_id": "test-boundary-model",
-                "model_revision": "test-revision",
+                "model_revision": "0123456789abcdef0123456789abcdef01234567",
                 "normalization_revision": "lower-strip-ascii-punctuation-v1",
                 "adjacency_policy_revision": "suppress-earlier-adjacent-nonordinary-v1",
                 "word_evidence": [{"kind": "model_short_circuit"}],
@@ -502,6 +542,125 @@ class TestBatchInferUtseg:
         assert response.results[0].result is None
         assert response.results[0].error is not None
         assert "deliberate model failure" in response.results[0].error
+
+    def test_boundary_model_timing_is_attributed_to_each_item(
+        self, monkeypatch
+    ) -> None:
+        """Every item carries its own span, and none carries the batch's.
+
+        This is the provenance-bearing path, so a timing written beside an
+        item is a claim about that item. Until 2026-09-16 the whole batch's
+        elapsed time was written onto the first item and every other item
+        reported zero, so the first item's cost was overstated by all the
+        others and every other item's was simply wrong.
+        """
+        monkeypatch.setattr(
+            "batchalign.inference.utseg.time.monotonic",
+            _SteppingMonotonic(),
+        )
+
+        class _FakeBoundaryModel:
+            def predict_boundary_evidence(
+                self, words: list[str]
+            ) -> UtteranceBoundaryPrediction:
+                low = BoundaryProbability.from_float(0.1)
+                return UtteranceBoundaryPrediction(
+                    model_id="test-boundary-model",
+                    model_revision="0123456789abcdef0123456789abcdef01234567",
+                    word_evidence=tuple(
+                        ClassifiedBoundaryEvidence(
+                            raw_action=BoundaryAction.ORDINARY,
+                            applied_action=BoundaryAction.ORDINARY,
+                            boundary_probability=low,
+                        )
+                        for _ in words
+                    ),
+                )
+
+        response = batch_infer_utseg(
+            BatchInferRequest(
+                task="utseg",
+                lang="eng",
+                items=[
+                    {"words": ["one", "two"], "text": "one two"},
+                    {"words": ["three", "four"], "text": "three four"},
+                    {"words": ["five", "six"], "text": "five six"},
+                ],
+            ),
+            lambda langs: (_ for _ in ()).throw(
+                AssertionError(f"unexpected Stanza load: {langs}")
+            ),
+            utterance_boundary_model=_FakeBoundaryModel(),
+        )
+
+        # Three equal spans. The old stamping produced [7.0, 0.0, 0.0] here.
+        assert [result.elapsed_s for result in response.results] == [1.0, 1.0, 1.0]
+
+    def test_a_failing_item_is_reported_at_its_own_position(self, monkeypatch) -> None:
+        """The failure lands at the index that produced it, with its own time.
+
+        The index travels with the work rather than being restated at the
+        write, so a middle item's failure cannot be recorded against the
+        first item's evidence.
+        """
+        monkeypatch.setattr(
+            "batchalign.inference.utseg.time.monotonic",
+            _SteppingMonotonic(),
+        )
+
+        class _SecondItemFails:
+            def predict_boundary_evidence(
+                self, words: list[str]
+            ) -> UtteranceBoundaryPrediction:
+                if words == ["bad", "item"]:
+                    raise ValueError("deliberate model failure")
+                return UtteranceBoundaryPrediction(
+                    model_id="test-boundary-model",
+                    model_revision="0123456789abcdef0123456789abcdef01234567",
+                    word_evidence=tuple(
+                        ClassifiedBoundaryEvidence(
+                            raw_action=BoundaryAction.ORDINARY,
+                            applied_action=BoundaryAction.ORDINARY,
+                            boundary_probability=BoundaryProbability.from_float(0.1),
+                        )
+                        for _ in words
+                    ),
+                )
+
+        response = batch_infer_utseg(
+            BatchInferRequest(
+                task="utseg",
+                lang="eng",
+                items=[
+                    {"words": ["good", "one"], "text": "good one"},
+                    {"words": ["bad", "item"], "text": "bad item"},
+                    {"words": ["good", "two"], "text": "good two"},
+                ],
+            ),
+            lambda langs: (_ for _ in ()).throw(
+                AssertionError(f"unexpected Stanza load: {langs}")
+            ),
+            utterance_boundary_model=_SecondItemFails(),
+        )
+
+        assert response.results[0].error is None
+        assert response.results[1].error is not None
+        assert "deliberate model failure" in response.results[1].error
+        assert response.results[2].error is None
+        # The failing item is measured too: it spent real time failing.
+        assert [result.elapsed_s for result in response.results] == [1.0, 1.0, 1.0]
+
+    def test_assemble_refuses_a_batch_with_an_unreached_position(self) -> None:
+        """An unreached position raises instead of reporting a plausible result.
+
+        The previous shape pre-filled the result list with an empty-trees
+        default and overwrote it by index, so a position that no branch
+        reached was indistinguishable from a successful empty segmentation.
+        """
+        with pytest.raises(RuntimeError) as exc_info:
+            _assemble(2, [], [])
+
+        assert "positions [0, 1]" in str(exc_info.value)
 
 
 class TestUtsegTreeHelpers:

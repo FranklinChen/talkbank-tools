@@ -13,6 +13,7 @@ import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import partial
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError, model_validator
@@ -23,6 +24,7 @@ from batchalign.worker._pipeline_cache import (
     PipelineLookup,
     retokenize_key,
 )
+from batchalign.worker._types_v2 import MorphosyntaxPipelineV2
 
 if TYPE_CHECKING:
     from batchalign.inference._tokenizer_realign import TokenizerContext
@@ -333,7 +335,14 @@ UD_DEPREL_ALIASES: dict[str, str] = {
 
 
 class UdWord(BaseModel, extra="allow"):
-    """A single UD word/token: mirrors Rust ``UdWord`` in types.rs."""
+    """A single UD word/token: mirrors Rust ``UdWord`` in types.rs.
+
+    Fills defaults for what Stanza omits, and nothing else. It does NOT repair
+    relations: a validator can only return itself, so a repair made here could
+    be reported nowhere, which is how relation rewrites came to exist only as
+    log lines. That work belongs to ``_repaired_relation`` below, which hands
+    back the repair as a value, and to ``RepairedSentence``, which carries it.
+    """
 
     id: int | list[int] | float
     text: str
@@ -350,64 +359,6 @@ class UdWord(BaseModel, extra="allow"):
     def _default_lemma_to_text(self) -> UdWord:
         if not self.lemma and not isinstance(self.id, list):
             self.lemma = self.text
-        return self
-
-    @model_validator(mode="after")
-    def _sanitize_pad_deprel(self) -> UdWord:
-        if self.deprel.startswith("<") and self.deprel.endswith(">"):
-            L.warning(
-                "Stanza emitted deprel=%r for word %r, replacing with 'dep'",
-                self.deprel,
-                self.text,
-            )
-            self.deprel = "dep"
-        return self
-
-    @model_validator(mode="after")
-    def _normalize_deprel_to_ud(self) -> UdWord:
-        """Force the relation HEAD into the Universal Dependencies closed set.
-
-        Stanza does not guarantee UD-conformant labels. Its Italian model
-        emits ``iob`` (verified against stanza 1.13.0 on "attenzione ."),
-        which is not a UD relation; UD defines ``iobj``. Passing it through
-        wrote ``2|1|IOB`` into ``%gra`` across the published corpora, where it
-        went undetected for months because nothing on either side validated
-        the label: CLAN CHECK does not check relations at all, and chatter
-        only gained the rule (E761) in v0.4.0.
-
-        Only the HEAD is closed. UD defines SUBTYPES as open and
-        language-specific, and the corpora legitimately use many
-        (``nmod:poss``, ``acl:relcl``, ``flat:foreign``), so the subtype is
-        preserved verbatim and never validated.
-
-        An unrecognised head degrades to ``dep``, a real UD relation, rather
-        than reaching the transcript. Silent pass-through is exactly how the
-        original defect escaped.
-        """
-        head, sep, subtype = self.deprel.partition(":")
-        lowered = head.lower()
-        if lowered in UD_RELATIONS:
-            if head != lowered:
-                self.deprel = lowered + sep + subtype
-            return self
-
-        replacement = UD_DEPREL_ALIASES.get(lowered)
-        if replacement is not None:
-            L.warning(
-                "Stanza emitted non-UD deprel=%r for word %r, normalizing to %r",
-                self.deprel,
-                self.text,
-                replacement,
-            )
-            self.deprel = replacement + sep + subtype
-            return self
-
-        L.warning(
-            "Stanza emitted unrecognized deprel=%r for word %r, replacing with 'dep'",
-            self.deprel,
-            self.text,
-        )
-        self.deprel = "dep"
         return self
 
 
@@ -499,17 +450,155 @@ def _is_bogus_lemma(text: str, lemma: str) -> bool:
     return text_has_letters and lemma_all_punct
 
 
-def validate_ud_words(sents: list[list[UdWordRaw]]) -> None:
-    """Validate and normalize every token through the UdWord model.
+class RelationRepairKind(StrEnum):
+    """Why a relation Stanza produced is not the relation we apply.
 
-    Mutates *sents* in place.
+    Closed, and the same four names the Rust side knows
+    (``UdRelationRepairKindV2``): a rewrite must be named here before it can be
+    reported, so none reaches a transcript under a name its reader does not
+    know.
     """
-    for sent in sents:
-        for word_idx in range(len(sent)):
-            raw = sent[word_idx]
+
+    PAD_RELATION = "pad_relation"
+    """A padding label (``<PAD>``, ``<UNK>``), which is no relation at all."""
+    RELATION_CASE = "relation_case"
+    """A UD relation in the wrong case (``NSUBJ``), lowercased."""
+    RELATION_ALIAS = "relation_alias"
+    """A known non-UD spelling of a UD relation (``iob`` for ``iobj``)."""
+    UNKNOWN_RELATION = "unknown_relation"
+    """No UD relation and no known equivalent, degraded to ``dep``."""
+
+
+@dataclass(frozen=True, slots=True)
+class RelationRepair:
+    """One relation rewrite, as a value a caller can count and attribute.
+
+    Carries the word and both relations, not just a kind: once the analysis is
+    injected, the relation Stanza produced exists nowhere, so this is the only
+    record of what was changed and where.
+
+    Refuses the two things a repair cannot be, so nothing downstream re-checks
+    either: a rewrite to something that is not a UD relation, and a rewrite
+    that changed nothing. Both would be defects in this module rather than
+    facts about an utterance, and a stamp counting them would overstate what
+    happened to the transcript.
+    """
+
+    kind: RelationRepairKind
+    word: str
+    from_relation: str
+    to_relation: str
+
+    def __post_init__(self) -> None:
+        if self.from_relation == self.to_relation:
+            raise ValueError(
+                f"a repair must change the relation, but {self.from_relation!r} "
+                f"was recorded as repaired to itself"
+            )
+        head, _, _ = self.to_relation.partition(":")
+        if head not in UD_RELATIONS:
+            raise ValueError(
+                f"a repair must produce a UD relation, but {self.to_relation!r} "
+                f"has head {head!r}, which is not one"
+            )
+
+    def wire(self) -> JSONObject:
+        """The repair as the Rust side reads it (``UdRelationRepairV2``)."""
+        return {
+            "kind": self.kind.value,
+            "word": self.word,
+            "from_relation": self.from_relation,
+            "to_relation": self.to_relation,
+        }
+
+
+def _repair(
+    kind: RelationRepairKind, word: str, from_relation: str, to_relation: str
+) -> tuple[str, RelationRepair]:
+    """Narrate one repair and build it. The narration is no longer the record."""
+    L.warning(
+        "morphotag: Stanza emitted deprel=%r for word %r, applying %r (%s)",
+        from_relation,
+        word,
+        to_relation,
+        kind.value,
+    )
+    return to_relation, RelationRepair(
+        kind=kind, word=word, from_relation=from_relation, to_relation=to_relation
+    )
+
+
+def _repaired_relation(deprel: str, word: str) -> tuple[str, RelationRepair | None]:
+    """The relation to apply for *word*, and the repair if one was needed.
+
+    Total, and the ONE place a relation is rewritten. Stanza does not
+    guarantee UD-conformant labels: its Italian model emits ``iob`` (verified
+    against stanza 1.13.0 on "attenzione ."), which is not a UD relation,
+    while UD defines ``iobj``. Passing it through wrote ``2|1|IOB`` into
+    ``%gra`` across the published corpora, where it went undetected for months
+    because nothing on either side validated the label: CLAN CHECK does not
+    check relations at all, and chatter only gained the rule (E761) in v0.4.0.
+
+    Only the HEAD is closed. UD defines SUBTYPES as open and
+    language-specific, and the corpora legitimately use many (``nmod:poss``,
+    ``acl:relcl``, ``flat:foreign``), so the subtype is preserved verbatim and
+    never validated.
+
+    Returning the repair rather than applying it silently is the point. An
+    unrecognised head still degrades to ``dep``, a real UD relation, rather
+    than reaching the transcript, but the degradation is now a value the
+    caller carries to the server, which counts it into the file's provenance.
+    """
+    if deprel.startswith("<") and deprel.endswith(">"):
+        return _repair(RelationRepairKind.PAD_RELATION, word, deprel, "dep")
+
+    head, sep, subtype = deprel.partition(":")
+    lowered = head.lower()
+    if lowered in UD_RELATIONS:
+        if head == lowered:
+            return deprel, None
+        return _repair(
+            RelationRepairKind.RELATION_CASE, word, deprel, lowered + sep + subtype
+        )
+
+    replacement = UD_DEPREL_ALIASES.get(lowered)
+    if replacement is not None:
+        return _repair(
+            RelationRepairKind.RELATION_ALIAS, word, deprel, replacement + sep + subtype
+        )
+
+    return _repair(RelationRepairKind.UNKNOWN_RELATION, word, deprel, "dep")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RepairedSentence:
+    """One Stanza sentence, validated and with its relations repaired.
+
+    THE REPAIR IS THE CONSTRUCTOR, and it is the only one. This type is built
+    from raw Stanza words and from nothing else, so a repaired sentence cannot
+    exist without the repair having run, the step cannot be skipped, and no
+    caller can mint one that claims an empty repair list beside words nothing
+    checked. That is what lets ``_analysis`` take the repairs from the
+    sentence rather than from a caller who could pass another sentence's.
+
+    It replaces a validator that returned ``None`` and mutated its argument in
+    place, which left no proof it had run: the pipeline called it for months
+    while ``PAD`` and ``IOB`` flowed into the corpora, and nothing in a
+    signature could have said so.
+    """
+
+    words: tuple[JSONObject, ...]
+    repairs: tuple[RelationRepair, ...]
+
+    def __init__(self, raw_words: list[UdWordRaw]) -> None:
+        words: list[JSONObject] = []
+        repairs: list[RelationRepair] = []
+        for raw in raw_words:
             raw_id = raw.get("id")
+            # Copied rather than coerced in place: Stanza's MWT ranges arrive
+            # as tuples, and the caller's document is not ours to rewrite.
             if isinstance(raw_id, tuple):
-                raw["id"] = list(raw_id)
+                raw = {**raw, "id": list(raw_id)}
 
             validated = UdWord.model_validate(raw)
 
@@ -523,7 +612,15 @@ def validate_ud_words(sents: list[list[UdWordRaw]]) -> None:
                 )
                 validated.lemma = validated.text
 
-            sent[word_idx] = validated.model_dump()
+            relation, repair = _repaired_relation(validated.deprel, validated.text)
+            if repair is not None:
+                validated.deprel = relation
+                repairs.append(repair)
+
+            words.append(validated.model_dump())
+
+        object.__setattr__(self, "words", tuple(words))
+        object.__setattr__(self, "repairs", tuple(repairs))
 
 
 # ---------------------------------------------------------------------------
@@ -594,28 +691,172 @@ tiers.
 """
 
 
-def _finalized(
-    results: list[InferResponse | None],
+_NO_STANZA_VERSION_ERROR = (
+    "morphosyntax cannot name the Stanza version that would analyze this item; "
+    "refusing to report an analysis without its model identity"
+)
+"""Failure for an item whose analysis could not name its model."""
+
+
+_NO_WORDS_RESULT: JSONObject = {"kind": "no_words"}
+"""The one legitimately empty outcome: an utterance with no words.
+
+It has no morphology, which is a fact about the utterance rather than a
+failure, and no model ran on it, so it names none. It used to be an empty
+analysis stamped with the batch's Stanza version, which provenance then
+counted as that model having analyzed something.
+"""
+
+
+def _pipeline_variant(
+    *, lang_code: LanguageCode, mandarin_retokenize: bool
+) -> MorphosyntaxPipelineV2:
+    """Which procedure analyzes one language group.
+
+    The value decides the procedure as well as naming it: the PyCantonese
+    override below runs exactly when this says Cantonese, so the reported
+    variant and the executed one cannot drift apart.
+    """
+    if mandarin_retokenize:
+        return MorphosyntaxPipelineV2.MANDARIN_RETOKENIZE
+    if lang_code == "yue":
+        return MorphosyntaxPipelineV2.CANTONESE_PYCANTONESE_POS
+    return MorphosyntaxPipelineV2.STANDARD
+
+
+def _analysis(
+    sentence: RepairedSentence,
     *,
-    elapsed_s: float | None,
-) -> BatchInferResponse:
+    lang: LanguageCode,
+    stanza_version: str | None,
+    pipeline: MorphosyntaxPipelineV2,
+) -> InferResponse:
+    """One analyzed item, carrying the model identity every analysis names.
+
+    Takes the repaired sentence, not raw words and a repair list: the type
+    pairs them, so an analysis cannot report one sentence's words beside
+    another's repairs, nor claim repairs for words that were never repaired.
+
+    Built as the wire's tagged ``analyzed`` shape
+    (``MorphosyntaxAnalyzedItemV2``) directly rather than through the pydantic
+    model: this runs once per utterance, and validating every Stanza sentence
+    a second time would cost more than the whole response is worth. The Rust
+    bridge parses the item into its tagged type either way.
+
+    With no Stanza version there is no honest identity, so the item fails.
+    """
+    if stanza_version is None:
+        return InferResponse(error=_NO_STANZA_VERSION_ERROR, elapsed_s=0.0)
+    return InferResponse(
+        result={
+            "kind": "analyzed",
+            "raw_sentences": [list(sentence.words)],
+            "model": {
+                "stanza_version": stanza_version,
+                "lang": lang,
+                "pipeline": pipeline.value,
+            },
+            "repairs": [repair.wire() for repair in sentence.repairs],
+        },
+        elapsed_s=0.0,
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class _TimedItem:
+    """One item's own response beside the elapsed time of that item's own work.
+
+    There is no constructor that ACCEPTS a duration: [`measure`] is the only
+    route to a value of this type, and it times the call it wraps. A batch
+    total therefore has no signature to travel through, which is exactly what
+    the old ``settled[0] = InferResponse(..., elapsed_s=batch_total)`` line
+    had. Same shape, and the same reason, as ``_TimedItem`` in
+    ``batchalign/inference/utseg.py``.
+    """
+
+    outcome: InferResponse
+    elapsed_s: float
+
+    @classmethod
+    def measure(cls, work: Callable[[], InferResponse]) -> _TimedItem:
+        """Run one item's own work and attribute exactly that item's time."""
+        started_at = time.monotonic()
+        outcome = work()
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "outcome", outcome)
+        object.__setattr__(instance, "elapsed_s", time.monotonic() - started_at)
+        return instance
+
+    @property
+    def response(self) -> InferResponse:
+        """Lower this item's own outcome and its own timing onto the wire."""
+        return InferResponse(
+            result=self.outcome.result,
+            error=self.outcome.error,
+            elapsed_s=self.elapsed_s,
+        )
+
+
+def _analyzed_item(
+    item: StanzaInput,
+    sentence: list[JSONObject],
+    *,
+    drop_terminator: bool,
+    apply_pyc_pos: bool,
+    lang: LanguageCode,
+    stanza_version: str | None,
+    pipeline: MorphosyntaxPipelineV2,
+) -> InferResponse:
+    """One item's own post-Stanza work, as a single call that can be timed.
+
+    Everything here is attributable to THIS item: taking back the terminator
+    cue we appended, the Cantonese POS override, the relation repair and the
+    analysis. The Stanza call itself is deliberately not, because it runs once
+    per language group over the joined text of every item in that group, so
+    its cost is a fact about the group rather than about any one utterance.
+    """
+    sent = item.without_terminator(sentence) if drop_terminator else sentence
+    if apply_pyc_pos:
+        sent = _override_pos_with_pycantonese(sent)
+    return _analysis(
+        RepairedSentence(sent),
+        lang=lang,
+        stanza_version=stanza_version,
+        pipeline=pipeline,
+    )
+
+
+def _finalized(results: list[InferResponse | None]) -> BatchInferResponse:
     """Settle every item's decision into the batch response.
 
     ``None`` means "no path decided this item" and becomes an error (see
-    ``_UNDECIDED_ERROR``). ``elapsed_s`` is stamped on the first item only,
-    which is the batch-level timing convention the Rust side reads; ``None``
-    leaves the timings alone, for the early return that did no work.
+    ``_UNDECIDED_ERROR``).
+
+    Nothing is stamped onto an item here. Every response that reports a
+    duration got it from ``_TimedItem.measure``, which timed that item's own
+    work, and the rest report 0.0 because no work is attributable to them: an
+    item whose payload never parsed, an utterance with no words, and every item
+    of a language group that failed before per-item work began.
+
+    Until 2026-09-16 this function took the batch's total elapsed time and
+    wrote it onto ``results[0]``. That inflated the first item by every other
+    item's work, left every other item at 0.0, and made both indistinguishable
+    from an item that genuinely took no measurable time, inside
+    provenance-bearing evidence. The docstring used to justify it as "the
+    batch-level timing convention the Rust side reads"; checked 2026-09-16,
+    nothing reads it. The Rust control plane measures the whole response itself
+    in ``worker_execute::execute_request_v2``, and
+    ``normalize_morphosyntax_result`` never looks at the per-item field. The
+    batch total is a fact about the batch, so it is reported where a batch fact
+    belongs, this module's log line, and it is no longer a parameter any caller
+    can hand to an item.
     """
-    settled = [
-        r if r is not None else InferResponse(error=_UNDECIDED_ERROR, elapsed_s=0.0)
-        for r in results
-    ]
-    if settled and elapsed_s is not None:
-        first = settled[0]
-        settled[0] = InferResponse(
-            result=first.result, error=first.error, elapsed_s=elapsed_s
-        )
-    return BatchInferResponse(results=settled)
+    return BatchInferResponse(
+        results=[
+            r if r is not None else InferResponse(error=_UNDECIDED_ERROR, elapsed_s=0.0)
+            for r in results
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -691,9 +932,12 @@ def batch_infer_morphosyntax(
     # `_finalized`.
     results: list[InferResponse | None] = [None] * n
 
-    # The ONE legitimately empty analysis: an utterance with no words has no
-    # morphology, and that is a fact about the utterance rather than a failure.
-    no_words_result: JSONObject = {"sentences": []}
+    # The version every analyzed item names as its model, resolved once
+    # through the worker's one accessor. Imported here rather than at module
+    # load so this module stays importable without the worker state.
+    from batchalign.worker._types import _state
+
+    stanza_version = _state.stanza_version()
 
     by_lang: dict[LanguageCode, list[StanzaInput]] = {}
     for i, item in enumerate(items):
@@ -701,7 +945,7 @@ def batch_infer_morphosyntax(
             results[i] = InferResponse(error="Invalid batch item", elapsed_s=0.0)
             continue
         if not item.words:
-            results[i] = InferResponse(result=no_words_result, elapsed_s=0.0)
+            results[i] = InferResponse(result=_NO_WORDS_RESULT, elapsed_s=0.0)
             continue
 
         words = list(item.words)
@@ -723,7 +967,7 @@ def batch_infer_morphosyntax(
         )
 
     if not by_lang:
-        return _finalized(results, elapsed_s=None)
+        return _finalized(results)
 
     for lang_code, lang_items in by_lang.items():
         indices = [item.item_index for item in lang_items]
@@ -823,6 +1067,12 @@ def batch_infer_morphosyntax(
             inputs=lang_items,
             lang_code=lang_code,
         )
+        # Decided after the retokenize fallback above, so a Mandarin group
+        # whose retokenize pipeline failed to load reports the standard
+        # procedure it actually ran.
+        pipeline = _pipeline_variant(
+            lang_code=lang_code, mandarin_retokenize=use_retok_pipeline
+        )
 
         try:
             with _maybe_lock():
@@ -830,16 +1080,6 @@ def batch_infer_morphosyntax(
                     doc = entry.nlp(combined)
 
             sents = doc.to_dict()
-
-            # Validate and normalize BEFORE anything consumes the result.
-            #
-            # This call is the whole point of the validators above, and its
-            # absence is why they were dead code: `validate_ud_words` and its
-            # `<PAD>` sanitizer were unit-tested for months while `PAD` and
-            # `IOB` flowed into the published corpora, because `doc.to_dict()`
-            # went straight into the response. Stanza does not promise
-            # UD-conformant labels, so nothing downstream may assume it.
-            validate_ud_words(sents)
 
             if len(sents) != len(indices):
                 # Stanza returned a different number of sentences than the
@@ -861,24 +1101,34 @@ def batch_infer_morphosyntax(
                 # (deprel, head) and lemma, only upos is replaced.
                 # Applied to ALL Cantonese morphotag, not just retokenize,
                 # because the POS accuracy problem affects all Cantonese output.
-                apply_pyc_pos = lang_code in ("yue",)
+                apply_pyc_pos = (
+                    pipeline is MorphosyntaxPipelineV2.CANTONESE_PYCANTONESE_POS
+                )
                 # Both decisions are fixed for the whole language group.
                 drop_terminator = _drops_appended_terminator(mode)
 
                 for i, idx in enumerate(indices):
-                    # The terminator was a cue for the model, not content, so
-                    # it leaves here rather than travelling on to `%mor`.
-                    sent = (
-                        lang_items[i].without_terminator(sents[i])
-                        if drop_terminator
-                        else sents[i]
-                    )
-                    if apply_pyc_pos:
-                        sent = _override_pos_with_pycantonese(sent)
-                    results[idx] = InferResponse(
-                        result={"raw_sentences": [sent]},
-                        elapsed_s=0.0,
-                    )
+                    # Measured as it runs, so the duration this item reports is
+                    # the one it earned. `_analyzed_item` keeps the terminator
+                    # strip and the relation repair on the only route to a
+                    # response: Stanza does not promise UD-conformant labels,
+                    # and for months nothing on the production path checked,
+                    # because `doc.to_dict()` went straight into the response
+                    # while the validators sat unit-tested and uncalled, and
+                    # `PAD` and `IOB` reached the published corpora. A step the
+                    # type system requires cannot be dropped again.
+                    results[idx] = _TimedItem.measure(
+                        partial(
+                            _analyzed_item,
+                            lang_items[i],
+                            sents[i],
+                            drop_terminator=drop_terminator,
+                            apply_pyc_pos=apply_pyc_pos,
+                            lang=lang_code,
+                            stanza_version=stanza_version,
+                            pipeline=pipeline,
+                        )
+                    ).response
         except Exception as e:
             # The narration stays, but it is no longer the only place the fact
             # goes: a log line is where lost information looks like it was
@@ -899,6 +1149,9 @@ def batch_infer_morphosyntax(
             completed_so_far = sum(1 for r in results if r is not None)
             progress_callback(completed_so_far, n)
 
+    # The batch total is a fact about the batch, so it is reported where a
+    # batch fact belongs: this log line. It is deliberately written onto no
+    # item, because no item performed it.
     elapsed = time.monotonic() - t0
     L.info("batch_infer morphosyntax: %d items, %.3fs", n, elapsed)
-    return _finalized(results, elapsed_s=elapsed)
+    return _finalized(results)

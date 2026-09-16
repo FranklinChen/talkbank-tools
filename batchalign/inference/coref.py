@@ -1,6 +1,10 @@
 """Stanza coreference inference: sentences -> coref chains.
 
 Pure inference, no CHAT, no caching, no pipeline.
+
+Each resolved item names the engine that resolved it, so the Rust server
+derives coref provenance from the responses it applies rather than from a
+worker-wide report taken before dispatch.
 """
 
 from __future__ import annotations
@@ -15,8 +19,38 @@ from batchalign.providers import (
     BatchInferResponse,
     InferResponse,
 )
+from batchalign.worker._types import reported_engine_name
 
 L = logging.getLogger("batchalign.worker")
+
+_COREF_PACKAGE = "ontonotes-singletons_roberta-large-lora"
+"""The Stanza coreference package this producer loads."""
+
+
+def coref_engine() -> str | None:
+    """The coreference model identity this worker runs, or ``None``.
+
+    ``stanza-<version>/<package>``: the installed Stanza release plus the
+    coreference package the pipeline is built with (``_COREF_PACKAGE``, the
+    same constant ``batch_infer_coref`` passes to ``stanza.Pipeline``), so a
+    stamp names the model that resolved the chains and not only the library.
+    ``None`` when no Stanza version can be named. Admitted by
+    ``reported_engine_name``, so a name that would break a stamp raises.
+    Shared by the producer and the capability report, which spell it one way.
+    """
+    from batchalign.worker._types import _state
+
+    stanza_engine = _state.stanza_engine()
+    if stanza_engine is None:
+        return None
+    return reported_engine_name(f"{stanza_engine}/{_COREF_PACKAGE}")
+
+
+_NO_COREF_ENGINE_ERROR = (
+    "coref cannot name the Stanza version that would resolve this document; "
+    "refusing to report a resolution without its engine identity"
+)
+"""Failure for a document whose resolution could not name its engine."""
 
 
 class CorefBatchItem(BaseModel):
@@ -54,16 +88,32 @@ class CorefRawResponse(BaseModel):
 
 
 def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
-    """Batch Stanza coref inference: sentences -> CorefRawResponse.
+    """Batch Stanza coref inference: sentences -> structured chain annotations.
 
     Each item is one complete document (list of sentences, each a list of words).
     Pipeline is lazily initialized and reused across documents in the batch.
+
+    Each item becomes one of:
+
+    - ``{"kind": "resolved", "annotations": [...], "engine": "stanza-<version>/<package>"}``
+    - ``{"kind": "no_sentences"}`` for a document with no sentences, which
+      never reached the model and so names no engine
+    - an item ``error`` when the payload is invalid, the engine cannot be
+      named, or Stanza raised. A raise used to become an EMPTY annotation
+      list, which is indistinguishable on the wire from a document that
+      genuinely has no coreference chains, so the file was written without
+      its ``%xcoref`` tiers and reported as a success.
     """
     t0 = time.monotonic()
     n = len(req.items)
     results: list[InferResponse] = []
 
     import stanza
+
+    # The identity every resolved item reports: the coreference model this
+    # batch builds its pipeline with. Resolved once, because neither the
+    # installed Stanza nor the package can change mid-batch.
+    engine = coref_engine()
 
     pipeline: stanza.Pipeline | None = None
 
@@ -76,11 +126,12 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
 
         if not item.sentences:
             results.append(
-                InferResponse(
-                    result=CorefRawResponse(annotations=[]).model_dump(),
-                    elapsed_s=0.0,
-                )
+                InferResponse(result={"kind": "no_sentences"}, elapsed_s=0.0)
             )
+            continue
+
+        if engine is None:
+            results.append(InferResponse(error=_NO_COREF_ENGINE_ERROR, elapsed_s=0.0))
             continue
 
         try:
@@ -101,7 +152,7 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
                 pipeline = stanza.Pipeline(
                     lang="en",
                     processors="tokenize, coref",
-                    package={"coref": "ontonotes-singletons_roberta-large-lora"},
+                    package={"coref": _COREF_PACKAGE},
                     tokenize_pretokenized=True,
                 )
 
@@ -145,18 +196,17 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
 
             results.append(
                 InferResponse(
-                    result=CorefRawResponse(annotations=annotations).model_dump(),
+                    result={
+                        "kind": "resolved",
+                        **CorefRawResponse(annotations=annotations).model_dump(),
+                        "engine": engine,
+                    },
                     elapsed_s=0.0,
                 )
             )
         except Exception as e:
             L.warning("Coref infer failed for item %d: %s", item_idx, e)
-            results.append(
-                InferResponse(
-                    result=CorefRawResponse(annotations=[]).model_dump(),
-                    elapsed_s=0.0,
-                )
-            )
+            results.append(InferResponse(error=f"Coref failed: {e}", elapsed_s=0.0))
 
     elapsed = time.monotonic() - t0
     if results:

@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-16 03:36 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -396,12 +396,13 @@ flowchart TD
     subgraph postprocess ["Rust post-processing: process_raw_asr()"]
         direction TB
         p1[1. Compound merging] --> p2[2. Timed word extraction\nseconds → milliseconds]
-        p2 --> p3[3. Multi-word splitting\ntimestamp interpolation]
+        p2 --> p2check{lang=yue?}
+        p2check -->|Yes| p2d["2d. Cantonese normalization\nonce per monologue\nOpenCC + domain replacements"]
+        p2check -->|No| p3
+        p2d --> p3
+        p3[3. Multi-word splitting\ntimestamp interpolation]
         p3 --> p4[4. Number expansion\ndigits → word form]
-        p4 --> p4check{lang=yue?}
-        p4check -->|Yes| p4b["4b. Cantonese normalization\nOpenCC + domain replacements"]
-        p4check -->|No| p5
-        p4b --> p5[5. Long-turn splitting\nchunk at >300 words]
+        p4 --> p5[5. Long-turn splitting\nchunk at >300 words]
         p5 --> p6[6. Retokenization\npunctuation-based utterance splitting]
     end
 
@@ -410,7 +411,7 @@ flowchart TD
     speaker_apply -->|No| utseg_check{"with_utseg?\ndefault: true"}
     project --> utseg_check
 
-    utseg_check -->|Yes| run_utseg[process_utseg\nBERT-based re-segmentation]
+    utseg_check -->|Yes| run_utseg[process_utseg_with_evidence\nBERT-based re-segmentation]
     utseg_check -->|No| build_chat
 
     run_utseg --> build_chat["build_chat → ChatFile AST\nHeaders, participants, %wor tiers"]
@@ -596,7 +597,7 @@ flowchart TD
     found -->|No| fail[Report file error]
     found -->|Yes| morph[process_morphosyntax\nmain transcript only]
     pair --> parse_gold[parse_lenient raw gold\n→ gold AST]
-    morph --> parse_main[parse_lenient morphotagged main\n→ main AST]
+    morph --> parse_main[MorphotaggedMain::from_proof\n→ the judged main document\n(never re-parsed from text)]
     parse_main --> bundle[compare()\nconform + local window search + local DP\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
     parse_gold --> bundle
     bundle --> released[GoldProjectedCompareMaterializer\nproject_gold_structurally()]
@@ -705,7 +706,7 @@ flowchart TD
 
     skip_cache --> miss
     miss --> infer[Worker returns raw ML output]
-    infer --> cache_put[Store result in cache\nKey includes engine_version]
+    infer --> cache_put[Store result in cache\nRow written under the task's namespace]
     cache_put --> inject_fresh[Inject fresh result into AST]
 
     inject_cached --> done([Continue pipeline])

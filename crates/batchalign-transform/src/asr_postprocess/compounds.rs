@@ -72,8 +72,8 @@ mod tests {
     fn elem(value: &str, ts: f64, end_ts: f64) -> AsrElement {
         AsrElement {
             value: AsrRawText::new(value),
-            ts: AsrTimestampSecs(ts),
-            end_ts: AsrTimestampSecs(end_ts),
+            ts: AsrTimestampSecs::Observed(ts),
+            end_ts: AsrTimestampSecs::Observed(end_ts),
             kind: AsrElementKind::Text,
         }
     }

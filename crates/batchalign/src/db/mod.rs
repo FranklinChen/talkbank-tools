@@ -39,6 +39,16 @@ pub struct JobDB {
 }
 
 impl JobDB {
+    /// Exercise persistence/recovery with real migrations but no filesystem state.
+    #[cfg(test)]
+    pub(crate) async fn in_memory_for_test() -> Result<Self, ServerError> {
+        let pool = SqlitePoolOptions::new().max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true))
+            .await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
+        Ok(Self { pool, db_path: PathBuf::from(":memory:") })
+    }
+
     /// Open (or create) the job database and run migrations.
     pub async fn open(db_dir: Option<&Path>) -> Result<Self, ServerError> {
         let layout = RuntimeLayout::from_env();

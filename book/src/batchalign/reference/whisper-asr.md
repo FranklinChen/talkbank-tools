@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-15 12:12 EDT
 
 ## Overview
 
@@ -16,7 +16,7 @@ Whisper is used in three distinct roles within batchalign:
 Each role loads a separate model instance.  In a full `align` pipeline, two
 Whisper models may be loaded simultaneously (FA + UTR).
 
-## ASR Engines
+## ASR engines
 
 **Rev.AI is the production default** -- the Whisper variants are local
 alternatives for when a commercial API is not wanted.  Two of them run in a
@@ -137,16 +137,23 @@ across every language; the model id is wired at
 There is no per-language fine-tune table on this engine.
 
 Per-language fine-tunes are opt-in via the separate `--asr-engine
-whisper_hub` backend. The resolver lives at
-`batchalign/models/resolve.py::_RESOLVER["whisper_hub"]` and is
-seeded reactively, one entry at a time, with dated provenance comments
-(today the only seeded entry is `mal → thennal/whisper-medium-ml`).
-Absent languages raise `WhisperHubModelNotFoundError` directing the
-user to pass an explicit `model_id` via `--engine-overrides`. See
+whisper_hub` backend. A planned job resolves the model from
+`crates/batchalign/src/model_manifest.rs::WHISPER_HUB_DEFAULTS`, which pins
+each default to an exact hub commit and is seeded reactively, one entry at a
+time, with dated provenance comments (today the only seeded entry is
+`mal → thennal/whisper-medium-ml`). A language with no entry there is refused
+at planning with `WhisperHubHasNoDefaultModel`, directing the user to pass an
+explicit `model_id` via `--engine-overrides`. See
 [Whisper Hub ASR](whisper-hub-asr.md).
 
 `whisper_rs` resolves its model from `BATCHALIGN_WHISPER_RS_MODEL` when set,
-otherwise ggml-large-v3 fetched once via hf-hub.
+which runs it unpinned. Without that variable it fetches
+`ggerganov/whisper.cpp/ggml-large-v3.bin` at the exact repository commit this
+build pins (`NATIVE_WHISPER_REVISION` in
+`crates/batchalign/src/model_manifest.rs`), and weights that resolve from any
+other commit are refused with `NativeWhisperRevisionMismatch` rather than run:
+the transcript's stamp would otherwise name a revision that did not produce it,
+and nothing downstream could detect the substitution.
 
 ## Auto-Detect Mode (`--lang auto`)
 
@@ -231,12 +238,18 @@ Two UTR engines exist:
 - Whisper UTR loads via `load_whisper_asr()` in
   `batchalign/inference/asr.py:119` and reuses the `WhisperASRHandle`
   type.
-- The same `openai/whisper-large-v2` checkpoint is used for every
-  language, UTR engines are not language-keyed in BA3 (see
+- The same stock checkpoint is used for every language: `openai/whisper-large-v3`,
+  pinned to an exact hub commit in
+  `crates/batchalign/src/model_manifest.rs`. UTR engines are not
+  language-keyed in BA3 (see
   [Language Code Resolution](language-code-resolution.md)
   §"Model Resolution (UTR)"). Per-language fine-tunes for UTR are
   not wired in the current resolver.
-- Results cached by audio file identity (BLAKE3 of path + size).
+- Results cached by audio file identity (BLAKE3 of path + size), under a
+  namespace naming the UTR engine AND the models it pinned, so changing any of
+  those models makes the older rows unreadable instead of silently reusable. A
+  plan with any floating model is ineligible for the cache and neither reads
+  nor writes it.
 - Hands timed words to `batchalign_core.add_utterance_timing` (Rust).
 
 ### Rev.AI UTR (alternative)
@@ -278,7 +291,7 @@ with the Whisper backend):
 | Component        | Model                        | Approx. Memory |
 |------------------|------------------------------|----------------|
 | FA (Whisper)     | `openai/whisper-large-v2`    | ~3 GB          |
-| UTR (`--utr-engine whisper`) | `openai/whisper-large-v2` | ~3 GB |
+| UTR (`--utr-engine whisper`) | `openai/whisper-large-v3` (pinned) | ~3 GB |
 
 Switching UTR to Rev.AI (`--utr-engine rev`) avoids the second model
 load entirely. The ASR `transcribe` command loads one Whisper model
@@ -294,7 +307,7 @@ use, not at CLI startup.
 | ASR (`--asr-engine whisper`, all languages) | `openai/whisper-large-v3` | large-v3 |
 | ASR (`--asr-engine whisper_hub`, opt-in fine-tunes) | per `_RESOLVER["whisper_hub"]` or `--engine-overrides model_id` | varies |
 | FA                                          | `openai/whisper-large-v2` | large-v2 |
-| UTR (`--utr-engine whisper`, all languages) | `openai/whisper-large-v2` | large-v2 |
+| UTR (`--utr-engine whisper`, all languages) | `openai/whisper-large-v3`, pinned to an exact commit | large-v3 |
 
 ## Implications for whisper.cpp Migration
 

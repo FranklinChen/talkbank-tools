@@ -8,11 +8,8 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-import pycountry
-
 from batchalign.config import config_read
 from batchalign.errors import ConfigError
-from batchalign.inference._domain_types import LanguageCode
 
 L = logging.getLogger("batchalign.hk")
 
@@ -30,51 +27,10 @@ _ASR_ENV_KEYS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Cantonese normalization: delegated to Rust (batchalign_core)
-# ---------------------------------------------------------------------------
-
-
-def normalize_cantonese_text(text: str) -> str:
-    """Apply HK normalization: simplified→HK traditional + domain replacements.
-
-    Delegates to ``batchalign_core.normalize_cantonese()`` (pure Rust, embedded
-    OpenCC rules + Aho-Corasick replacement table).
-    """
-    import batchalign_core
-
-    return batchalign_core.normalize_cantonese(text)
-
-
-def normalize_cantonese_token(token: str, lang: LanguageCode) -> str:
-    """Normalize a token if the language is Cantonese."""
-    if lang != "yue":
-        return token
-    return normalize_cantonese_text(token)
-
-
-def normalize_cantonese_char_tokens(text: str) -> list[str]:
-    """Return per-character Cantonese tokens for timestamp alignment.
-
-    Delegates to ``batchalign_core.cantonese_char_tokens()`` (pure Rust).
-    """
-    import batchalign_core
-
-    return batchalign_core.cantonese_char_tokens(text)
-
-
-def provider_lang_code(lang: LanguageCode) -> str:
-    """Convert ISO-639-3 code to provider-specific code."""
-    if lang == "yue":
-        return "yue"
-    try:
-        match = pycountry.languages.get(alpha_3=lang)
-        alpha2 = getattr(match, "alpha_2", None)
-        if isinstance(alpha2, str) and alpha2:
-            return alpha2
-    except Exception:
-        pass
-    return lang
+# Cantonese normalization does not live here, or anywhere in Python. It has one
+# owner, ``AlignedNormalization`` in ``batchalign-transform``, which the Rust
+# server applies once per monologue. These helpers used to expose the Rust
+# normalization to Python, where nothing in production called them.
 
 
 def read_asr_config(

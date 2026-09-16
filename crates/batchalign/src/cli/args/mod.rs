@@ -53,7 +53,10 @@ pub struct CommonOpts {
     pub output: Option<std::path::PathBuf>,
 
     /// Read input file paths from a text file (one per line).
-    #[arg(long)]
+    ///
+    /// Conflicts with positional paths: the list is the whole input set, so
+    /// accepting both would mean silently dropping one of them.
+    #[arg(long, conflicts_with = "paths")]
     pub file_list: Option<std::path::PathBuf>,
 
     /// Treat all paths as inputs and modify in-place.
@@ -345,7 +348,13 @@ impl CommonOpts {
                 // Display-only in the job record; the real auto-detect
                 // signal is `DiarizeOptions::expected_speakers` (None =
                 // auto), carried through the typed options channel.
-                num_speakers: a.num_speakers.unwrap_or(1),
+                //
+                // The fallback is a DISPLAY placeholder for a job whose count
+                // is to be detected, never an instruction to a diarizer: a
+                // diarization count of one has no representation
+                // (`DiarizationSpeakerCount`), and this field is not the
+                // channel that reaches the backend.
+                num_speakers: a.num_speakers.map_or(1, |count| count.get()),
                 input_kind: InputKind::Media,
             },
             // Caller-contract invariant: this method is only called

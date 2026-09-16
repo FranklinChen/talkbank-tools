@@ -5,12 +5,13 @@ from __future__ import annotations
 from batchalign.inference._domain_types import LanguageCode
 
 _RESOLVER: dict[str, dict[LanguageCode, str]] = {
-    "utterance": {
-        "eng": "talkbank/CHATUtterance-en",
-        "cmn": "talkbank/CHATUtterance-zh_CN",
-        "zho": "talkbank/CHATUtterance-zh_CN",
-        "yue": "PolyU-AngelChanLab/Cantonese-Utterance-Segmentation",
-    },
+    # The ``utterance`` family is deliberately absent. The utterance-boundary
+    # model a language loads is named by the Rust manifest
+    # (``model_manifest::UTSEG_BOUNDARY_MODELS``) and sent to this worker with
+    # the spawn, because an id must be known BEFORE a load in order to pin its
+    # revision. A copy here could only disagree with that one, and the copy was
+    # the half that decided which model actually loaded.
+    #
     # Per-language default HF model_id for the ``whisper_hub`` ASR engine.
     # Entries are added reactively from empirical evaluation, not
     # speculatively, and each one carries a dated provenance comment so

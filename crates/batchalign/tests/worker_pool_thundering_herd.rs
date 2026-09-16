@@ -32,7 +32,6 @@
 use crate::common;
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use batchalign::api::LanguageCode3;
 use batchalign::host_facts::PerProfile;
@@ -40,6 +39,7 @@ use batchalign::worker::pool::WorkerPool;
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::pool_dispatch::{count_successes, echo_pool_config, launch_oversubscribed_dispatches};
 use common::resolve_python;
+use crate::live_deadline::HarnessBudget;
 use serde_json::json;
 
 const MAX_TOTAL: usize = 4;
@@ -84,7 +84,7 @@ async fn stress_oversubscribe_does_not_storm_global_cap_rejections() {
     let outcomes = launch_oversubscribed_dispatches(
         &pool,
         MAX_TOTAL + EXTRA,
-        Duration::from_secs(60),
+        HarnessBudget::OversubscribedEchoDispatch.as_duration(),
         |i| langs[i % langs.len()].clone(),
         |lang, _| BatchInferRequest {
             task: InferTask::Morphosyntax,

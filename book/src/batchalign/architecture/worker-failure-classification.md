@@ -356,6 +356,19 @@ property: a bootstrap-class failure cannot reach the retry loop's
 `continue` branch, so a deterministic failure stops at the first
 attempt instead of echoing through three.
 
+### A retained provider response whose language was not admitted
+
+A Rev.AI response that was retained but whose language could not be resolved is
+carried as its own typed failure,
+`ServerError::UnresolvedAsrLanguage(RetainedRevLanguageRejection)`, rather than
+folded into a validation message. It answers **502**, because the provider's
+evidence was unusable rather than the client's input malformed, and its body
+carries `diagnostic_key` and `admission: "rejected_unresolved_language"`
+alongside the message, so a caller can act on the rejection instead of parsing
+prose. `classify_server_error` puts it in `ProviderTerminal`, which the
+matcher above excludes: the retry would retain the same response and need the
+same explicit language decision, so it is not attempted automatically.
+
 ### How `kind` flows from wire to category
 
 ```mermaid

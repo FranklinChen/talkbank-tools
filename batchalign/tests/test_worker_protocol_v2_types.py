@@ -21,8 +21,6 @@ from pydantic import BaseModel, ValidationError
 from batchalign.worker._types_v2 import (
     AsrElementV2,
     AvqiResultPayloadV2,
-    CapabilitiesRequestV2,
-    CapabilitiesResponseV2,
     ExecuteRequestV2,
     ExecuteResponseV2,
     ExecuteSuccessV2,
@@ -40,8 +38,6 @@ from batchalign.worker._types_v2 import (
 _SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "hello_request": HelloRequestV2,
     "hello_response": HelloResponseV2,
-    "capabilities_request": CapabilitiesRequestV2,
-    "capabilities_response": CapabilitiesResponseV2,
     "execute_request": ExecuteRequestV2,
     "execute_response": ExecuteResponseV2,
     "progress_event": ProgressEventV2,

@@ -10,6 +10,7 @@ use crate::compare::{
     CompareMaterializedOutputs, is_gold_file, process_compare_morphotagged_main,
     template_gold_path_for,
 };
+use crate::dispatch_language::JobLanguage;
 use crate::planning::{self, JobPlan};
 use crate::recipe_runner::materialize::MaterializedArtifactRole;
 use crate::recipe_runner::recipe::RecipeStageId;
@@ -31,6 +32,8 @@ struct ExecutionContext<'a> {
     pub(crate) gateway: &'a dyn WorkerGateway,
     pub(crate) mwt: &'a MwtDict,
     pub(crate) should_merge_abbrev: bool,
+    /// The job's resolved language, proven by the router's one resolution.
+    pub(crate) job_language: &'a JobLanguage,
 }
 
 /// Stage executor interface used by the new execution kernel.
@@ -147,6 +150,7 @@ pub(crate) async fn dispatch_compare_job(
     gateway: &dyn WorkerGateway,
     mwt: &MwtDict,
     should_merge_abbrev: bool,
+    job_language: &JobLanguage,
 ) -> Result<(), crate::error::ServerError> {
     let plan = match planning::build_job_plan(job) {
         Ok(plan) => plan,
@@ -181,6 +185,7 @@ pub(crate) async fn dispatch_compare_job(
         gateway,
         mwt,
         should_merge_abbrev,
+        job_language,
     };
     ExecutionKernel::new(Box::new(CompareStageExecutor))
         .run(&plan, &ctx)
@@ -192,7 +197,10 @@ struct CompareExecutionState {
     file_index: usize,
     main_text: Option<String>,
     gold_text: Option<String>,
-    morphotagged_main: Option<String>,
+    /// Morphotag's PROOF of the main transcript, carried between the two
+    /// stages rather than its bytes, so the comparison stage continues in the
+    /// document the gate judged and has no text to re-parse.
+    morphotagged_main: Option<crate::pipeline::post_validate::PostValidated>,
     outputs: Option<CompareMaterializedOutputs>,
     consolidated_metrics: Option<ConsolidatedCompareMetricsRow>,
 }
@@ -284,20 +292,18 @@ impl StageExecutor for CompareStageExecutor {
                         "compare morphosyntax stage ran before input read".into(),
                     )
                 })?;
-                // Job-level fallback only: real per-file language
-                // resolution lives inside `collect_payloads`;
-                // this is just the worker-pool / label key. Logged when
-                // the sentinel fires so misrouting is auditable.
-                let fallback_lang = crate::api::LanguageCode3::eng();
-                let lang = ctx.job.dispatch.lang.as_resolved().unwrap_or_else(|| {
-                    tracing::warn!(
-                        job_id = %ctx.job.identity.job_id,
-                        "compare morphotag stage: no resolved job-level \
-                         language; using `eng` as worker-pool fallback. \
-                         Per-file resolution derives from file headers.",
-                    );
-                    &fallback_lang
-                });
+                // The worker-pool / label key: the job's own resolved
+                // language, handed to this dispatch rather than recovered from
+                // the snapshot. Real per-file resolution still lives inside
+                // `collect_payloads`.
+                //
+                // This was `as_resolved().unwrap_or_else(|| eng)`: a silent
+                // English default behind a `warn!`, which is the same shape as
+                // the check that made coref undispatchable, with the opposite
+                // failure mode. Compare is a job-level command, so a
+                // `JobLanguage` exists for it by construction and there is no
+                // absent case left to default.
+                let lang = ctx.job_language.code();
                 state.morphotagged_main = Some(
                     ctx.gateway
                         .morphotag_for_compare(
@@ -312,7 +318,11 @@ impl StageExecutor for CompareStageExecutor {
             }
             RecipeStageId::CompareAlign => {
                 state.lifecycle(ctx).stage(FileStage::Comparing).await;
-                let morphotagged_main = state.morphotagged_main.as_deref().ok_or_else(|| {
+                // TAKEN, not borrowed: the proof is consumed by the comparison
+                // it feeds, so a second CompareAlign on the same state reports
+                // the stage-order error rather than comparing a document that
+                // has already been compared.
+                let morphotagged_main = state.morphotagged_main.take().ok_or_else(|| {
                     crate::error::ServerError::Validation(
                         "compare alignment stage ran before morphosyntax".into(),
                     )
@@ -573,8 +583,17 @@ mod tests {
             _lang: &crate::api::LanguageCode3,
             _mwt: &MwtDict,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
-            Ok(chat_text.to_string())
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
+            // A GATED proof over the double's own text, which is what the real
+            // gateway returns: the production implementation runs the gate, so
+            // a double standing in for it upstream must carry the same kind of
+            // proof or the comparison stage would be exercising a seam that
+            // does not exist.
+            Ok(crate::pipeline::post_validate::PostValidated::for_test(
+                chat_text,
+                crate::api::ReleasedCommand::Morphotag,
+            ))
         }
 
         async fn morphotag_single(
@@ -612,7 +631,6 @@ mod tests {
         async fn coref_batch(
             &self,
             _files: &[crate::text_batch::TextBatchFileInput],
-            _lang: &crate::api::LanguageCode3,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> crate::text_batch::TextBatchFileResults {
             unreachable!("compare tests do not call coref_batch")
@@ -685,12 +703,25 @@ mod tests {
             _tx,
         ));
         let host = DispatchHostContext::from_store(store);
+        // Built through the one constructor rather than assembled here, so the
+        // test exercises the real resolution: compare is a job-level command,
+        // and this is the language its snapshot carries. Bound to a `let`
+        // because the context borrows it.
+        let resolved = crate::dispatch_language::DispatchLanguage::resolve(
+            ReleasedCommand::Compare,
+            &LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
+        )
+        .expect("compare submits a resolved language");
+        let crate::dispatch_language::DispatchLanguage::Job(job_language) = resolved else {
+            panic!("compare is a job-level command")
+        };
         let ctx = ExecutionContext {
             job: &snapshot,
             host: &host,
             gateway: &FakeGateway,
             mwt: &MwtDict::default(),
             should_merge_abbrev: false,
+            job_language: &job_language,
         };
 
         ExecutionKernel::new(Box::new(CompareStageExecutor))

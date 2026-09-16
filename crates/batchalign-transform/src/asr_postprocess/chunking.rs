@@ -3,11 +3,14 @@ use super::{
     PreparedMonologueChunk, SpeakerIndex, cleanup,
 };
 
-/// Stages 4b-5b: Cantonese normalization, long turn splitting, and
-/// pause-based splitting.
+/// Stages 5-5b: long turn splitting and pause-based splitting.
 ///
 /// Takes words that have already been through number expansion and
 /// produces speaker-attributed chunks ready for retokenization.
+///
+/// Cantonese normalization used to run here, as stage 4b, per word. It now runs
+/// once per monologue in [`super::prepare_words_pre_expansion`], before the
+/// multi-word split.
 pub fn finalize_words_to_chunks(
     words: Vec<AsrWord>,
     speaker: SpeakerIndex,
@@ -18,8 +21,7 @@ pub fn finalize_words_to_chunks(
 
 /// Snapshot-aware variant of [`finalize_words_to_chunks`].
 ///
-/// Populates `after_cantonese_norm` (only for `yue`) and
-/// `after_long_turn_split` when `snapshot` is `Some`. `None` is the
+/// Populates `after_long_turn_split` when `snapshot` is `Some`. `None` is the
 /// zero-overhead default.
 pub fn finalize_words_to_chunks_with_snapshot(
     words: Vec<AsrWord>,
@@ -27,17 +29,7 @@ pub fn finalize_words_to_chunks_with_snapshot(
     lang: &str,
     mut snapshot: Option<&mut AsrPipelineSnapshot>,
 ) -> Vec<PreparedMonologueChunk> {
-    // Stage 4b: Cantonese normalization (simplified→HK traditional + domain replacements)
-    // CANTONESE-SPECIFIC BOUNDARY: Only applied when lang == "yue".
-    let mut words = if lang == "yue" {
-        let normalized = normalize_cantonese_words(words);
-        if let Some(ref mut s) = snapshot {
-            s.after_cantonese_norm = Some(normalized.clone());
-        }
-        normalized
-    } else {
-        words
-    };
+    let mut words = words;
 
     // 2026-04-23 English transcribe-pipeline corrections, the two
     // **per-word** rules (I-cap, title-period strip) must run
@@ -100,20 +92,6 @@ pub fn split_prepared_chunk_by_assignments(
     } else {
         split_chunks
     }
-}
-
-/// Normalize Cantonese text in all words (simplified→HK traditional + domain replacements).
-///
-/// CANTONESE-SPECIFIC FEATURE: This function is only called when `lang == "yue"` (line 31).
-/// It applies domain-specific Cantonese normalization via `super::cantonese::normalize_cantonese`.
-fn normalize_cantonese_words(words: Vec<AsrWord>) -> Vec<AsrWord> {
-    words
-        .into_iter()
-        .map(|w| AsrWord {
-            text: w.text.map(super::cantonese::normalize_cantonese),
-            ..w
-        })
-        .collect()
 }
 
 /// Split a word list into chunks of at most [`MAX_TURN_LEN`].

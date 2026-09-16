@@ -158,10 +158,57 @@ pub(crate) fn find_mor_line_for(chat: &str, at_s_text: &str) -> Option<String> {
     None
 }
 
+/// What a provenance stamp's timestamp reads as in a golden snapshot.
+const PINNED_STAMP_TIMESTAMP: &str = "<timestamp>";
+
+/// Pin the wall-clock timestamp of every provenance stamp in `chat`.
+///
+/// A stamp records what ran (command, engines, options that shape the output)
+/// and when it ran. A golden snapshot must hold the first and never the
+/// second, or it changes on every run and can never be accepted. Each line is
+/// read by `extract_provenance`, the same codec the writer uses, so only a
+/// real stamp is touched and a malformed one fails the test instead of being
+/// masked. The timestamp is the stamp's closing section, so it is replaced as
+/// the exact suffix the codec read back, not found by a pattern.
+pub(crate) fn pin_provenance_timestamps(chat: &str) -> String {
+    let mut pinned = String::with_capacity(chat.len());
+    for line in chat.lines() {
+        let entries = batchalign::provenance::extract_provenance(line)
+            .unwrap_or_else(|stamp| panic!("golden output carries an unparseable stamp: {stamp}"));
+        match entries.as_slice() {
+            [] => pinned.push_str(line),
+            [entry] => {
+                let written = format!("{}]", entry.timestamp);
+                let Some(head) = line.strip_suffix(&written) else {
+                    panic!(
+                        "stamp {line:?} does not close with the timestamp it was read with, \
+                         {:?}",
+                        entry.timestamp
+                    );
+                };
+                pinned.push_str(head);
+                pinned.push_str(PINNED_STAMP_TIMESTAMP);
+                pinned.push(']');
+            }
+            several => panic!("one line read as {} stamps: {line:?}", several.len()),
+        }
+        pinned.push('\n');
+    }
+    if !chat.ends_with('\n') {
+        pinned.pop();
+    }
+    pinned
+}
+
+/// Snapshot a golden output, with provenance timestamps pinned (see
+/// [`pin_provenance_timestamps`]).
 macro_rules! assert_golden_snapshot {
     ($name:expr, $value:expr) => {
         insta::with_settings!({snapshot_path => "../snapshots"}, {
-            insta::assert_snapshot!($name, $value);
+            insta::assert_snapshot!(
+                $name,
+                crate::ml_golden::golden::helpers::pin_provenance_timestamps($value)
+            );
         });
     };
 }

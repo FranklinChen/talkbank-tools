@@ -82,7 +82,9 @@ async fn error_compare_missing_gold_companion_fails_cleanly() {
         error.contains("gold")
             || error.contains("No such file")
             || error.contains("failed to read"),
-        "compare missing-gold failure should mention the missing companion, got: {error}"
+        "compare missing-gold failure should mention the missing companion, got: {error} \
+         (job-level error: {:?})",
+        final_info.error
     );
     assert!(
         !expected_chat.exists(),

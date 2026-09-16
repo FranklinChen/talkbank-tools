@@ -1,7 +1,7 @@
 # Server Mode
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-09-16 09:47 EDT
 
 Batchalign includes a built-in HTTP server managed by `batchalign3 serve ...`.
 Ordinary local processing commands can still run inline, but when
@@ -17,6 +17,33 @@ loopback daemon so warm workers survive across commands. `--no-server` and
 - Local-daemon and auto-detected loopback-server paths use shared-filesystem `paths_mode` for local-audio commands such as `align`, `transcribe`, `benchmark`, `opensmile`, and `avqi`.
 - Explicit `--server` always stays on content mode, even when the URL is `localhost`.
 
+## Build identity check
+
+Before it submits anything, the CLI reads the server's `/health` and compares
+its `build_hash` with the CLI's own build identity. This applies to every
+server the CLI submits to: an explicit `--server`, the local daemon, and a
+loopback server it detects. If the server reports another build, or no build
+at all, the command is refused before any job is submitted, so no work runs,
+and it exits with code `5` (server/job lifecycle error). The message names
+both builds and the remedy: restart that server with this build (on its host,
+`batchalign3 serve stop`, then `batchalign3 serve start`) and run the command
+again.
+
+A server left running across an upgrade would otherwise produce results with
+the older build's engines and fixes, which the CLI would then write as if this
+build had produced them. Earlier builds only printed a warning and ran the job
+anyway.
+
+The same rule governs REUSE, not only submission. When the CLI finds a
+manually started server on the port that server published, it reads that
+server's `/health` before adopting it: on this build the server is reused, and
+on another build, or one reporting no build at all, the command is refused
+there with the same message and the same exit code `5`. Earlier builds printed
+a warning at that point and reused the server anyway, leaving the refusal to
+happen later at submission. A server that answers nothing recognizable is not
+reused either; the CLI falls through to its own daemon path, which probes the
+configured port and reports what holds it.
+
 ## Backend model
 
 The server now has a single **local in-process control plane**.
@@ -24,6 +51,7 @@ The server now has a single **local in-process control plane**.
 - There is no Temporal backend and no backend-selection config.
 - Job detail surfaces still report `control_plane.backend`, but the only released value is `local`.
 - On restart, in-flight work from the old process does **not** continue running in place. Recovery reloads queued/interrupted work from SQLite and re-dispatches resumable jobs when the server comes back up.
+- A recovered file that had finished is named by that command's primary output artifact, with that artifact's content type, rather than by the input file it was produced from. The persisted file-status rows name inputs, not artifacts, so a recovered result would otherwise be offered under the wrong name.
 
 ## Start a server
 

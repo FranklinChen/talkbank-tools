@@ -241,6 +241,12 @@ of those inline bullets.
 
 When CHAT-text `utseg` splits an utterance that already has a `%wor` tier, BA3
 first asks Chatter to bind the pair under the named word-membership policy.
+Which main-tier words hold a `%wor` slot is Chatter's own
+`WorSlotMembershipPolicy` (`FilteredLexicalV1`), asked per word through
+`WorSlotMembershipPolicy::admits` rather than restated beside the splitter's
+walk, so the splitter and the timing binding cannot come to disagree about the
+count they are comparing. A replaced word is admitted by its ORIGINAL, as the
+projection admits it.
 Equal counts admit lexical corroboration; only canonical token-for-token
 correspondence admits partitioning. Thus, a same-count main-tier edit cannot
 silently give an old word's timing to a different child. If every retained
@@ -252,9 +258,23 @@ If `%wor` is absent, count-drifted, lexically uncorroborated, empty for a
 retained child, or has even one untimed or non-positive word interval, BA3 does
 not mix exact child hulls with guessed spans. Count or lexical drift drops the
 stale `%wor` tier entirely. Incomplete timing after safe partitioning keeps the
-partitioned word bullets but selects the parent-only main-tier timing state:
-earlier children have no main-tier bullet and the original parent bullet, if
-present, stays on the last child.
+partitioned word bullets but selects the parent-only main-tier timing state, and
+in that state **no child receives a main-tier bullet**.
+
+The parent bullet is not carried onto one of them, because it does not measure
+any of them. It measures the whole parent: its start is where the first child
+began and its end is where the last one finished, and nothing observed the
+boundary in between. Giving it to the last child would say that child began when
+the parent did, a time nobody measured and one the earlier children are the
+evidence against. Until 2026-09-16 BA3 did exactly that, so a split utterance
+with no usable `%wor` produced a final child whose span silently claimed the
+whole parent's duration.
+
+The one case where the parent bullet still travels is a split that kept a single
+child, which holds the parent's whole content and therefore genuinely has the
+parent's start and end. That happens when the assignment vector names more
+groups than there are words to fill them, which is separately reported as a
+misalignment bug.
 
 The implementation follows Chatter's explicit state transitions:
 `WorTimingBinding::CountMatched` →
@@ -275,10 +295,10 @@ flowchart LR
     K -->|"lexical drift"| D
     R --> T{"Every retained child has<br/>complete positive timings"}
     T -->|"yes"| Q["WorTimingSequence::Complete"]
-    T -->|"no"| P["ParentOnlyMainTiming"]
+    T -->|"no"| P["SplitMainTimingEvidence::ParentOnly"]
     Q --> H["Complete child hulls"]
     H --> O["Child main-tier bullets"]
-    P --> L["Only last child may retain parent bullet"]
+    P --> L["No child bullet: the parent span<br/>measures none of them"]
 ```
 
 This policy concerns timing projection after a boundary has already been
@@ -349,6 +369,10 @@ are not counted.
   `should_align_replaced_word_in_pho_sin()`
 - **%wor tier model**: `talkbank-model/src/model/dependent_tier/wor.rs`,
   `WorWord`, `WorTier`, serialization
+- **%wor slot membership**: `talkbank-model/src/alignment/`,
+  `WorSlotMembershipPolicy` and its `admits()` method, public precisely so a
+  per-content-item count in an utterance splitter can ask it instead of
+  spelling the rule out again
 - **%wor generation from AST**:
   `talkbank-model/src/model/content/main_tier.rs`,
   `generate_wor_tier()`, `collect_wor_items_content()` (uses `walk_words`)

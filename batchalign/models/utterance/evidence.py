@@ -9,11 +9,21 @@ incorrectly.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import assert_never
 
 _PROBABILITY_SCALE = 1_000_000
+
+_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+"""A hub commit, the only shape a boundary-model revision can take.
+
+The model is loaded from a pinned snapshot, so its revision is always the exact
+commit the resolver verified on disk. Checking the shape here means a fixture
+cannot smuggle a placeholder like ``"test-revision"`` into evidence that Rust
+would then have to refuse at the wire.
+"""
 
 
 class UtteranceNormalizationRevision(str, Enum):
@@ -172,7 +182,7 @@ class UtteranceBoundaryPrediction:
     """Provenance-bearing immutable account parallel to original input words."""
 
     model_id: str
-    model_revision: str | None
+    model_revision: str
     word_evidence: tuple[WordBoundaryEvidence, ...]
     normalization_revision: UtteranceNormalizationRevision = (
         UTTERANCE_NORMALIZATION_REVISION
@@ -184,8 +194,11 @@ class UtteranceBoundaryPrediction:
     def __post_init__(self) -> None:
         if not self.model_id:
             raise ValueError("utterance boundary model id must not be empty")
-        if self.model_revision == "":
-            raise ValueError("utterance boundary model revision must not be empty")
+        if not _COMMIT_PATTERN.match(self.model_revision):
+            raise ValueError(
+                "utterance boundary model revision must be a 40-character hub "
+                f"commit, got {self.model_revision!r}"
+            )
         classified = [
             (word_index, item)
             for word_index, item in enumerate(self.word_evidence)

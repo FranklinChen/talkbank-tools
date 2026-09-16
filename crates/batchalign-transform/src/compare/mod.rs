@@ -22,6 +22,7 @@ mod materialize;
 mod metrics;
 mod model;
 mod plan;
+mod pos;
 mod serialize;
 
 pub use self::artifact::{
@@ -32,8 +33,9 @@ pub use self::artifact::{
     ValidatedProducedRun, ValidatedTranscriptionPlan,
 };
 pub use self::cross_mode::{
-    AlignmentPairResult, AlignmentTokenDifference, MorphotagDifference, MorphotagPairResult,
-    MorphotagTokenDifference, PairFailureReason, PairOutcome, TimingDistribution,
+    AlignmentPairResult, AlignmentTokenDifference, LexicalMismatchCount, MorphotagDifference,
+    MorphotagPairResult, MorphotagTokenDifference, PairFailureReason, PairOutcome,
+    TimingDistribution, TokenTiming, TokenTimingState, WorSlotDrift,
     compare_validated_alignment_plan, compare_validated_morphotag_plan,
     compare_validated_transcription_pairs,
 };

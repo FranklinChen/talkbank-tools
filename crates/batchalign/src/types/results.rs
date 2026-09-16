@@ -32,8 +32,9 @@ pub(crate) struct FaResult {
     pub(crate) group_evidence: Vec<FaGroupEvidence>,
     /// Selected forced-alignment engine.
     pub(crate) engine: String,
-    /// Build/model revision used for cache identity.
-    pub(crate) engine_version: String,
+    /// The FA engine the selected worker reported: the namespace every cache
+    /// row and evidence envelope of this run was read and written under.
+    pub(crate) cache_namespace: crate::engine_reports::FaCacheNamespace,
     /// Decisions made while injecting and enforcing final timing invariants.
     pub(crate) decisions: Vec<FaDecisionTrace>,
     /// Numeric monotonicity effects corresponding to the generic decisions.
@@ -84,13 +85,13 @@ impl FaResult {
         chat_file: ChatFile,
         gap_healing: WordGapHealing,
         engine: &str,
-        engine_version: &str,
+        cache_namespace: &crate::engine_reports::FaCacheNamespace,
     ) -> Result<Self, MediaTimingError> {
         Ok(Self {
             output: FaOutput::processed(chat_file)?,
             group_evidence: Vec::new(),
             engine: engine.to_owned(),
-            engine_version: engine_version.to_owned(),
+            cache_namespace: cache_namespace.clone(),
             decisions: Vec::new(),
             timing_decisions: Vec::new(),
             gap_healing,
@@ -131,7 +132,7 @@ impl FaResult {
         FaTimelineTrace {
             evidence_schema_version: crate::types::traces::CURRENT_FA_EVIDENCE_SCHEMA_VERSION,
             engine: self.engine,
-            engine_version: self.engine_version,
+            engine_version: self.cache_namespace.name().to_string(),
             groups,
             evidence_sources,
             cache_keys,
@@ -176,8 +177,8 @@ pub fn snapshot_into_pipeline_trace(snapshot: AsrPipelineSnapshot) -> AsrPipelin
             .iter()
             .map(|e| AsrTokenTrace {
                 value: e.value.as_str().to_owned(),
-                ts: DurationSeconds(e.ts.as_f64()),
-                end_ts: DurationSeconds(e.end_ts.as_f64()),
+                ts: e.ts.as_f64().map(DurationSeconds),
+                end_ts: e.end_ts.as_f64().map(DurationSeconds),
                 token_type: format!("{:?}", e.kind).to_lowercase(),
             })
             .collect(),
@@ -265,6 +266,29 @@ mod fa_result_tests {
     use super::*;
 
     #[test]
+    fn asr_trace_preserves_missing_and_zero_endpoints() {
+        use batchalign_transform::asr_postprocess::{
+            AsrElement, AsrElementKind, AsrRawText, AsrTimestampSecs,
+        };
+        let snapshot = AsrPipelineSnapshot {
+            raw_elements: vec![AsrElement {
+                value: AsrRawText::new("hello"),
+                ts: AsrTimestampSecs::Absent,
+                end_ts: AsrTimestampSecs::Observed(0.0),
+                kind: AsrElementKind::Text,
+            }],
+            ..Default::default()
+        };
+        let trace = snapshot_into_pipeline_trace(snapshot);
+        let json = serde_json::to_value(&trace).unwrap();
+        assert!(json["raw_tokens"][0]["ts"].is_null());
+        assert_eq!(json["raw_tokens"][0]["end_ts"], 0.0);
+        let decoded: AsrPipelineTrace = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.raw_tokens[0].ts, None);
+        assert_eq!(decoded.raw_tokens[0].end_ts, Some(DurationSeconds(0.0)));
+    }
+
+    #[test]
     fn processed_output_consumes_unlinked_before_the_text_boundary() {
         let input = "@UTF8\n@Begin\n@Languages:\teng\n\
 @Participants:\tCHI Target_Child\n\
@@ -279,7 +303,7 @@ mod fa_result_tests {
             chat_file,
             WordGapHealing::PreserveMeasured,
             "test_engine",
-            "test-build",
+            &crate::engine_reports::FaCacheNamespace::for_test("test-build"),
         )
         .expect("timed output has one usable @Media declaration");
         let output = batchalign_transform::serialize::to_chat_string(result.output.as_chat_file());

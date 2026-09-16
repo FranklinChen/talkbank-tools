@@ -6,7 +6,7 @@ import io
 import json
 import logging
 from contextlib import redirect_stdout
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from batchalign.inference._domain_types import LanguageCode
@@ -18,14 +18,23 @@ L = logging.getLogger("batchalign.hk.funaudio")
 
 @dataclass
 class FunAsrSegment:
-    """Parsed output from one FunASR model segment.
+    """Parsed output from one FunASR result.
 
     FunASR returns raw dicts: this type captures the fields we use and
     validates at the boundary so downstream code never touches raw dicts.
+
+    ``timestamp`` holds one ``[start_ms, end_ms]`` entry per recognized unit,
+    and the units live in a checkpoint-specific list that Rust pairs it with
+    (``funasr_projection`` in batchalign-pyo3): SenseVoice's ``words``, or
+    Paraformer's pre-punctuation ``raw_text`` (requested with
+    ``return_raw_text=True``). Paraformer's ``text`` is punctuated and
+    space-free, so it cannot be split back into units.
     """
 
     text: str
     timestamp: list[list[int | float]] = field(default_factory=list)
+    words: list[str] | None = None
+    raw_text: str | None = None
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> FunAsrSegment:
@@ -34,7 +43,14 @@ class FunAsrSegment:
         timestamps = raw.get("timestamp")
         if not isinstance(timestamps, list):
             timestamps = []
-        return cls(text=text, timestamp=timestamps)
+        words = raw.get("words")
+        raw_text = raw.get("raw_text")
+        return cls(
+            text=text,
+            timestamp=timestamps,
+            words=[str(word) for word in words] if isinstance(words, list) else None,
+            raw_text=raw_text if isinstance(raw_text, str) else None,
+        )
 
 
 class FunAudioRecognizer:
@@ -45,11 +61,34 @@ class FunAudioRecognizer:
         lang: LanguageCode = "yue",
         model: str = "FunAudioLLM/SenseVoiceSmall",
         device: str = "cpu",
+        *,
+        model_path: str | None = None,
+        model_revision: str | None = None,
+        vad_model: str | None = None,
+        vad_model_path: str | None = None,
+        vad_revision: str | None = None,
+        punc_model: str | None = None,
+        punc_revision: str | None = None,
     ) -> None:
-        """Store language/model configuration and defer model loading until first use."""
+        """Store language/model configuration and defer model loading until first use.
+
+        The worker fills the keyword arguments from the pinned plan, and the
+        two branches need different things because the two hubs behave
+        differently. The Hugging Face branch gets LOCAL PATHS, because FunASR's
+        HF download drops the revision it is handed and would otherwise fetch
+        whatever the hub currently serves. The ModelScope branch gets ids and
+        tags, which it does honour. All ``None`` is the direct-caller path.
+        """
         self.lang = lang
         self.model_name = model
         self.device = device
+        self.model_path = model_path
+        self.model_revision = model_revision
+        self.vad_model = vad_model
+        self.vad_model_path = vad_model_path
+        self.vad_revision = vad_revision
+        self.punc_model = punc_model
+        self.punc_revision = punc_revision
         self._model: Any | None = None
 
     def _get_model(self) -> Any:
@@ -96,10 +135,14 @@ class FunAudioRecognizer:
 
         with redirect_stdout(io.StringIO()):
             if "paraformer" not in self.model_name:
+                # SenseVoice, on Hugging Face. Both the checkpoint and its
+                # voice-activity model are passed as resolved local paths, so
+                # FunASR loads exactly what the plan pinned rather than
+                # re-resolving a name against the live hub.
                 self._model = AutoModel(
-                    model=self.model_name,
+                    model=self.model_path or self.model_name,
                     output_timestamps=True,
-                    vad_model="fsmn-vad",
+                    vad_model=self.vad_model_path or self.vad_model or "fsmn-vad",
                     vad_kwargs={"max_single_segment_time": 30000},
                     device=self.device,
                     hub="hf",
@@ -113,14 +156,43 @@ class FunAudioRecognizer:
                     merge_length_s=15,
                 )
             else:
-                self._model = AutoModel(
-                    model=self.model_name,
-                    model_revision="v2.0.4",
-                    vad_model="fsmn-vad",
-                    vad_model_revision="v2.0.4",
-                    punc_model="ct-punc-c",
-                    punc_model_revision="v2.0.4",
-                )
+                # Paraformer, on ModelScope, which DOES honour the revisions
+                # it is given. The auxiliary models and their tags come from
+                # the plan; they used to be five literals here, which is how a
+                # model could move without anything recording that it had.
+                # ``model_revision`` alone may be absent, for a checkpoint the
+                # manifest does not pin.
+                if not (
+                    self.vad_model
+                    and self.vad_revision
+                    and self.punc_model
+                    and self.punc_revision
+                ):
+                    raise ValueError(
+                        "the Paraformer composition needs its voice-activity and "
+                        "punctuation models with their revisions; the worker "
+                        "supplies them from the pinned plan"
+                    )
+                # The checkpoint's own revision is passed only when the plan
+                # pinned one. It used to fall back to the branch name
+                # ``master``, which names a moving head rather than a release:
+                # nothing had asked for that branch, and the registry records
+                # this member's revision as not exposed, so the substitution
+                # reached no provenance and a checkpoint could move between two
+                # runs that report the same identity. An unpinned checkpoint is
+                # a real state (a user may name a Paraformer this build does
+                # not pin, which the manifest types as floating), so the honest
+                # load asks for no revision instead of inventing one.
+                paraformer_kwargs: dict[str, Any] = {
+                    "model": self.model_path or self.model_name,
+                    "vad_model": self.vad_model,
+                    "vad_model_revision": self.vad_revision,
+                    "punc_model": self.punc_model,
+                    "punc_model_revision": self.punc_revision,
+                }
+                if self.model_revision is not None:
+                    paraformer_kwargs["model_revision"] = self.model_revision
+                self._model = AutoModel(**paraformer_kwargs)
 
         emit_download_event(
             stage="downloading_funaudio_asr_complete",
@@ -128,19 +200,16 @@ class FunAudioRecognizer:
         )
         return self._model
 
-    @staticmethod
-    def _clean_segment_text(text: str) -> str:
-        """Delegate FunASR text cleanup to the shared Rust helper."""
-        import batchalign_core
-
-        return batchalign_core.clean_funaudio_segment_text(text)
-
     def _run_model(self, source_path: str) -> list[FunAsrSegment]:
         """Invoke FunASR and parse output into typed segments."""
         model = self._get_model()
         with redirect_stdout(io.StringIO()):
             if "paraformer" in self.model_name:
-                output = model.generate(input=source_path, output_timestamp=True)
+                # `raw_text` is the only Paraformer field whose tokens are
+                # parallel to `timestamp`; see `FunAsrSegment`.
+                output = model.generate(
+                    input=source_path, output_timestamp=True, return_raw_text=True
+                )
             else:
                 output = model.generate(
                     input=source_path,
@@ -182,11 +251,7 @@ class FunAudioRecognizer:
         segments = self._run_model(source_path)
         projection = json.loads(
             batchalign_core.funaudio_segments_to_asr(
-                [
-                    {"text": segment.text, "timestamp": segment.timestamp}
-                    for segment in segments
-                ],
-                self.lang,
+                [asdict(segment) for segment in segments],
             )
         )
         monologues: list[AsrMonologue] = projection["monologues"]

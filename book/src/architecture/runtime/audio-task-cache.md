@@ -1,7 +1,7 @@
 # Audio-Task Cache
 
 **Status:** Current
-**Last updated:** 2026-08-31 07:54 EDT
+**Last updated:** 2026-09-16 03:36 EDT
 
 Batchalign caches **audio-task results** (forced alignment, UTR ASR, raw Rev
 transcript evidence, dedicated transcribe speaker evidence, and media
@@ -139,7 +139,25 @@ already known.
 - **`SqliteBackend`**: persistent storage via SQLite WAL mode for
   concurrent read/write safety.
 - **`UtteranceCache`**: public entry point, wraps
-  `Box<dyn CacheBackend>`.
+  `Box<dyn CacheBackend>`. Its reads and writes are typed: each takes a
+  `CacheTask<N>` constant from `cache::tasks`, which fixes the namespace type
+  `N` that task's rows use, and a value of that sealed `CacheNamespace` type.
+  A task cannot be handed another task's namespace, and the constants can only
+  be made in the cache module. `UtteranceCache` deliberately does not
+  implement the string-keyed `CacheBackend` trait itself, since that would be a
+  route around the pairing.
+
+The typed tasks:
+
+| Task constant | Namespace type | Namespace bytes |
+|---|---|---|
+| `FORCED_ALIGNMENT`, `FORCED_ALIGNMENT_RAW_EVIDENCE` | `FaCacheNamespace` | the FA engine name the worker reported, byte for byte |
+| `UTR_ASR` | `UtrAsrCacheNamespace` | `utr-asr-v1:<UTR engine wire name>:<composition>` then one `\|<role>=<id>@<revision>` per model |
+| `REV_ASR_EVIDENCE` | `RevAsrModelRevision` | the Rev provider revision |
+| `SPEAKER_DIARIZATION_RAW_EVIDENCE` | `SpeakerEvidenceModelRevision` | the speaker model revision |
+| `SPEAKER_DIARIZATION_SEGMENTS` | `SpeakerNormalizationRevision` | the local normalization revision |
+
+The layers:
 
 | Layer | Implementation | Capacity | Eviction |
 |---|---|---|---|
@@ -153,9 +171,9 @@ multiple files via `JoinSet` + `Semaphore`).
 ```mermaid
 flowchart TD
     subgraph "Read path"
-        r_start(["get(key, task, engine_version)"])
+        r_start(["get(key, task, namespace)"])
         r_moka{"moka\nhot lookup"}
-        r_verify{"task + engine_version\nmatch HotEntry?"}
+        r_verify{"task + namespace\nmatch HotEntry?"}
         r_cold["SqliteBackend.get()"]
         r_promote["Promote: insert\ninto moka hot"]
         r_hit(["Return cached data"])
@@ -171,7 +189,7 @@ flowchart TD
     end
 
     subgraph "Write path (write-through)"
-        w_start(["put(key, task, engine_version, data)"])
+        w_start(["put(key, task, namespace, data)"])
         w_sqlite["SqliteBackend.put()\n(authoritative)"]
         w_moka["moka.insert()\n(hot copy)"]
         w_start --> w_sqlite --> w_moka
@@ -185,16 +203,24 @@ flowchart TD
     end
 ```
 
-- **Read path**: check moka → on hit, verify task + engine_version
+- **Read path**: check moka → on hit, verify task + namespace
   match → on mismatch or miss, fall through to SQLite → promote cold
   hits to moka.
 - **Write path**: write to SQLite first (authoritative), then insert
   into moka. Write-through, not write-back, no data loss on crash.
 - **Delete path**: invalidate moka first, then delete from SQLite.
 
-The moka key is the bare BLAKE3 hash string. Task and engine_version
-are stored inside the hot entry and checked on read, matching the
-SQLite schema where `key` is the primary key.
+The moka key is the bare BLAKE3 hash string. Task and namespace are
+stored inside the hot entry and checked on read, matching the SQLite
+schema where `key` is the primary key.
+
+The backend is reached through a sealed namespace API:
+`get<N: CacheNamespace>` and `put<N: CacheNamespace>` in
+`crates/batchalign/src/cache/mod.rs`. Each task constant is a
+`CacheTask<N>` paired with the namespace type its rows are written under
+(forced alignment with `FaCacheNamespace`, UTR ASR with
+`UtrAsrCacheNamespace`, and so on), so passing one task's identity to
+another task does not compile.
 
 ### Database location
 
@@ -286,8 +312,8 @@ cleanly, but no code writes or reads entries under those task names.
 | Task | Key components |
 |---|---|
 | Forced alignment | audio identity + time window + words + gap-healing policy + engine |
-| UTR ASR (full-file) | `"utr_asr"` + audio identity + lang |
-| UTR ASR (segment) | `"utr_asr_segment"` + audio identity + start_ms + end_ms + lang |
+| UTR ASR (full-file) | `"utr_asr_v2"` + UTR engine + audio identity + lang |
+| UTR ASR (segment) | `"utr_asr_segment_v2"` + UTR engine + audio identity + start_ms + end_ms + lang |
 | Raw dedicated-speaker evidence | schema + source-byte digest + preparation revision + backend + expected speakers + model revision |
 | Derived speaker segments | raw-evidence fingerprint + normalization revision |
 | Raw Rev ASR evidence | schema + provider-media digest + requested language + expected speakers + request-policy revision + model revision |
@@ -341,9 +367,13 @@ Raw Rev evidence invalidation is independent of those four columns:
 | Change Rev request-policy/model revision | Miss |
 | Use `--override-media-cache` | Refresh |
 
-\* UTR cache keys do not include engine name, but engine_version
-scoping at the SQLite/moka layer catches model upgrades (the entry's
-stored engine_version must match the current one).
+\* UTR cache keys include the UTR engine's wire name, and every UTR ASR entry is
+stored under a namespace naming that engine AND the models it ran, which must
+match on read. Changing any pinned model lands in a different namespace, so
+entries produced by other weights miss instead of being reused. A plan whose
+models are not all pinned gets no namespace at all and is neither read nor
+written: an unpinned model cannot promise a stored row came from the same
+weights, and a cache hit is only sound when it can.
 
 **Key insight:** UTR cache keys are audio-only (no transcript text),
 so editing the transcript does not invalidate ASR results, correct
@@ -351,23 +381,65 @@ because UTR re-derives timing from the same audio. FA cache keys
 include transcript text, so only groups whose words changed need to
 re-run forced alignment.
 
-## Engine Version Scoping
+## Cache Namespace Scoping
 
-Each cache entry is scoped to an **engine version** string (e.g.,
-Whisper version, `"wave2vec-fa-mms-{torchaudio_version}"`). Upgrading
-a model automatically invalidates stale entries because lookups
-require an exact version match.
+Each cache entry is scoped to its task's **namespace**, and a lookup must
+present the matching namespace type to reach it. The two namespaces are not
+the same kind of thing. Forced alignment is scoped by the engine version its
+worker reported (for example `"wave2vec-fa-mms-{torchaudio_version}"`), which
+is known only after a worker answers. UTR ASR is scoped by the pinned plan
+identity, which is known before dispatch without loading a model at all.
+Upgrading a model changes the namespace, so stale entries become unreachable
+by construction rather than being fetched and then rejected on a version
+comparison.
 
-Engine version strings are reported by Python workers at startup via
-the `capabilities` IPC response. The Rust server stores them in
-`AppState::engine_versions` and looks up the per-task version when
-constructing `PipelineServices`.
+Engine identities are reported by Python workers through the `capabilities`
+IPC response, one entry per advertised task: a name, or null when the worker
+supports the task but has not named the engine. The pool admits the report
+once (`WorkerPool::record_capabilities`, into `WorkerEngineReports` in
+`crates/batchalign/src/engine_reports.rs`), and forced alignment, the one stage
+that namespaces cache rows by a reported engine, reads its identity through a
+typed constructor that refuses a null report. There is no pipeline-wide engine
+version: `PipelineServices` carries only the worker pool and the cache.
 
-The FA pipeline uses its own engine_version for both FA cache entries
-and UTR ASR cache entries. This means upgrading the FA model
-invalidates UTR ASR cache entries too, even though UTR uses the ASR
-worker, design choice to keep the FA pipeline's `PipelineServices`
-consistent across its sub-stages.
+Forced alignment caches under `FaCacheNamespace`, exactly the string the FA
+worker reported, carried beside the shared services in `FaServices`. The same
+typed value travels through cache lookups and writes, cached-group admission
+(`FaCacheGroupAdmission`), raw evidence admission and replay
+(`FaRawEvidence::admit_requested`, `ReplayableFaRawEvidence::decode`), derived
+timing admission, and the result (`FaResult::cache_namespace`), so none of
+them compares against a different string. UTR ASR caches under
+`UtrAsrCacheNamespace` (`cache/mod.rs`), the only namespace type the `UTR_ASR`
+task accepts. Its one constructor, `for_pinned_plan`, takes the engine together
+with the composition the plan pinned and returns a `UtrAsrCacheEligibility`:
+either `Pinned`, carrying the namespace, or `Floating`, carrying nothing. The
+namespace bytes are the engine's wire name followed by the models, for example
+
+```text
+utr-asr-v1:whisper_utr:whisper|asr=openai/whisper-large-v3@06f233fe06e710322aca913c1bc4249a0d71fce1
+utr-asr-v1:rev_utr:rev|provider=revai@asynchronous-transcript-v1
+```
+
+The engine name alone said only WHICH engine produced a row, never which
+weights it produced it with, so a row written before a checkpoint moved was
+indistinguishable from one written after. Naming the models makes that
+distinction structural.
+
+`Floating` is a closed state rather than an absent namespace, so both recovery
+paths have to say what they do when a plan cannot be cached: the lookup reports
+the same miss a deliberately skipped cache produces, and the store is a no-op.
+Neither reaches for a placeholder namespace, which would silently pool
+different weights under one key.
+
+The `utr-asr-v1:` prefix is deliberately unchanged. W1 already moved this
+namespace once in this build, and folding the model identity into that same
+prefix keeps the release at ONE recompute rather than two. Older entries, both
+those from builds that keyed UTR ASR under the FA engine's version and those
+keyed by engine name alone, do not match the new bytes, so they miss and the
+next run recomputes and stores them. That is also why no legacy reader exists
+or is needed for cached `AsrResponse` rows: a namespace move makes unreadable
+rows unreachable by construction, rather than leaving old shapes to be parsed
+by a compatibility path that must then be kept true forever.
 
 Speaker evidence deliberately does not accept that generic ASR/FA engine
 version. `SpeakerEvidenceModelRevision` is a distinct newtype with private
@@ -577,12 +649,12 @@ flowchart TD
 ```
 
 - **Full-file mode**: caches the entire `AsrResponse` with key
-  `BLAKE3("utr_asr|{audio_identity}|{lang}")`. Default for
+  `BLAKE3("utr_asr_v2|{utr_engine}|{audio_identity}|{lang}")`. Default for
   mostly-untimed files or short audio.
 - **Partial-window mode**: activates when >50% of utterances are
   timed and the audio exceeds 60 seconds. Each untimed window is
   extracted via ffmpeg and cached independently with key
-  `BLAKE3("utr_asr_segment|{audio_identity}|{start_ms}|{end_ms}|{lang}")`.
+  `BLAKE3("utr_asr_segment_v2|{utr_engine}|{audio_identity}|{start_ms}|{end_ms}|{lang}")`.
   Avoids processing already-timed regions on the first run. After
   the first run, the full-file cache makes the distinction moot.
 

@@ -1,22 +1,68 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TranslationItemResultV2",
-  "description": "One translation item result returned by Python.",
-  "type": "object",
-  "properties": {
-    "error": {
-      "description": "Optional per-item runtime error.",
-      "type": [
-        "string",
-        "null"
+  "description": "One translation item result returned by Python.\n\nA tagged union: a translation always names the engine that produced it.",
+  "oneOf": [
+    {
+      "description": "The engine translated the item.",
+      "type": "object",
+      "properties": {
+        "engine": {
+          "description": "The translation engine that produced it.",
+          "$ref": "#/$defs/ReportedEngineName"
+        },
+        "kind": {
+          "type": "string",
+          "const": "translated"
+        },
+        "raw_translation": {
+          "description": "Raw model translation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "raw_translation",
+        "engine"
       ]
     },
-    "raw_translation": {
-      "description": "Raw model translation when inference succeeded.",
-      "type": [
-        "string",
-        "null"
+    {
+      "description": "The item's text was blank, so no engine ran.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "blank_input"
+        }
+      },
+      "required": [
+        "kind"
       ]
+    },
+    {
+      "description": "The item failed; the file it belongs to fails with this message.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "Operator-facing failure message.",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "failed"
+        }
+      },
+      "required": [
+        "kind",
+        "error"
+      ]
+    }
+  ],
+  "$defs": {
+    "ReportedEngineName": {
+      "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
     }
   }
 }

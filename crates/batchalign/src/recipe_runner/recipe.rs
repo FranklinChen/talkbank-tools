@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::ReleasedCommand;
 use crate::runner::util::FileStage;
 
 /// How a command recipe owns execution.
@@ -91,6 +92,51 @@ impl RecipeStageId {
             Self::RunCompareRecipe => "run_compare_recipe",
             Self::SerializeChat => "serialize_chat",
             Self::MaterializeOutputs => "materialize_outputs",
+        }
+    }
+}
+
+/// Which provenance stamp, if any, a recipe stage writes into its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StageProvenance {
+    /// The stage writes no stamp.
+    None,
+    /// The stage stamps its output as this command.
+    Stamps(ReleasedCommand),
+    /// The stage runs this command's whole recipe, and so writes whatever
+    /// that recipe stamps.
+    RunsRecipeOf(ReleasedCommand),
+}
+
+impl RecipeStageId {
+    /// The stamp this stage writes.
+    ///
+    /// Exhaustive, so a new stage must say whether it stamps. What the no-op
+    /// write gate sets aside for a job is derived from this through the
+    /// catalog (`commands_stamped_by`), never listed by hand. `BuildChat`
+    /// stamps `transcribe` for both transcribe recipes: `transcribe_s` writes
+    /// the same `transcribe` stamp.
+    pub(crate) const fn provenance(self) -> StageProvenance {
+        match self {
+            Self::BuildChat => StageProvenance::Stamps(ReleasedCommand::Transcribe),
+            Self::UtteranceSegmentation => StageProvenance::Stamps(ReleasedCommand::Utseg),
+            Self::Morphosyntax => StageProvenance::Stamps(ReleasedCommand::Morphotag),
+            Self::ForcedAlignment => StageProvenance::Stamps(ReleasedCommand::Align),
+            Self::RunTranscribeRecipe => StageProvenance::RunsRecipeOf(ReleasedCommand::Transcribe),
+            Self::RunCompareRecipe => StageProvenance::RunsRecipeOf(ReleasedCommand::Compare),
+            Self::PlanWorkUnits
+            | Self::ReadChatInputs
+            | Self::ReadReferenceInputs
+            | Self::ResolveAudio
+            | Self::AsrInfer
+            | Self::SpeakerDiarization
+            | Self::AsrPostprocess
+            | Self::BatchInfer
+            | Self::CompareAlign
+            | Self::CompareMetrics
+            | Self::MediaAnalysis
+            | Self::SerializeChat
+            | Self::MaterializeOutputs => StageProvenance::None,
         }
     }
 }

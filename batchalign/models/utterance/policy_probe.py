@@ -134,7 +134,7 @@ class ModelIdentity:
     """Stable identity shared by every admitted prediction in one report."""
 
     model_id: str
-    revision: str | None
+    revision: str
 
 
 @dataclass(frozen=True, slots=True)

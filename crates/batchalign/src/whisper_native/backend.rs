@@ -152,7 +152,19 @@ pub(super) fn transcribe_impl(
         "whisper-native: done"
     );
 
-    Ok(WhisperChunkResultV2 { lang, text, chunks })
+    Ok(WhisperChunkResultV2 {
+        lang,
+        text,
+        chunks,
+        // Built from the file this run actually loaded, not from a constant:
+        // the path may be the auto-fetched default or one the host named, and
+        // the result must say which weights produced it either way.
+        model: crate::model_manifest::native_whisper_identity(&cfg.model_path, cfg.source).map_err(
+            |error| WhisperNativeError::ModelIdentity {
+                reason: error.to_string(),
+            },
+        )?,
+    })
 }
 
 /// One table, both directions: canonical ISO 639-3 (TalkBank internal)
@@ -265,7 +277,7 @@ mod tests {
 
     #[test]
     fn lang_map_unknown_returns_error() {
-        let bogus = LanguageCode3("xxx".to_owned());
+        let bogus = LanguageCode3::try_new("xxx").expect("xxx is three ASCII letters");
         let err = lang_to_iso2(&bogus).unwrap_err();
         assert!(matches!(err, WhisperNativeError::UnsupportedLanguage(_)));
     }

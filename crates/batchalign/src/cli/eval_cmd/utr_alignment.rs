@@ -12,23 +12,7 @@ use crate::chat_ops::fa::utr::{
 };
 use crate::cli::args::{UtrAlignmentEvalArgs, UtrAlignmentParticipation};
 use crate::cli::error::CliError;
-
-#[derive(Debug, Serialize)]
-struct InputIdentity {
-    path: String,
-    bytes: usize,
-    blake3: String,
-}
-
-impl InputIdentity {
-    fn of(path: &Path, bytes: &[u8]) -> Self {
-        Self {
-            path: path.display().to_string(),
-            bytes: bytes.len(),
-            blake3: blake3::hash(bytes).to_hex().to_string(),
-        }
-    }
-}
+use crate::cli::eval_cmd::InputIdentity;
 
 #[derive(Debug, Serialize)]
 struct UtrAlignmentReport {
@@ -108,7 +92,7 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
     };
     let report = UtrAlignmentReport {
         schema_version: 2,
-        build: crate::cli::build_hash(),
+        build: crate::build_hash(),
         chat: InputIdentity::of(&args.chat, &chat_bytes),
         tokens: InputIdentity::of(&args.tokens, &token_bytes),
         match_mode,

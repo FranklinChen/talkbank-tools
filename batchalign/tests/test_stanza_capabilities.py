@@ -58,17 +58,13 @@ _FIXTURE_RESOURCES = {
 
 
 def build_fixture_table():
-    return build_stanza_capability_table_from_resources(
-        _FIXTURE_RESOURCES,
-        stanza_version="test-stanza",
-    )
+    return build_stanza_capability_table_from_resources(_FIXTURE_RESOURCES)
 
 
 def test_table_is_non_empty():
     """Fixture resources should produce a non-empty capability table."""
     table = build_fixture_table()
     assert set(table.languages) >= {"eng", "fra", "jpn", "nld", "spa"}
-    assert table.stanza_version == "test-stanza"
 
 
 def test_english_has_constituency():

@@ -116,7 +116,13 @@ pub struct AsrPipelineTrace {
     pub after_multiword_split: Vec<TimedWordTrace>,
     /// Stage 4: after number expansion.
     pub after_number_expand: Vec<TimedWordTrace>,
-    /// Stage 4b: after Cantonese normalization (only if lang=yue).
+    /// Stage 2d: after Cantonese normalization (only if lang=yue).
+    ///
+    /// Normalization runs once per monologue, before the multi-word split, so
+    /// this sits between `after_timing_extract` and `after_multiword_split`
+    /// even though the field is listed after `after_number_expand` for wire
+    /// compatibility. It ran per word after number expansion (as stage 4b)
+    /// until 2026-09-16.
     pub after_cantonese_norm: Option<Vec<TimedWordTrace>>,
     /// Stage 5: after long-turn splitting (nested by turn).
     pub after_long_turn_split: Vec<Vec<TimedWordTrace>>,
@@ -130,10 +136,10 @@ pub struct AsrPipelineTrace {
 pub struct AsrTokenTrace {
     /// Token text.
     pub value: String,
-    /// Start time in seconds.
-    pub ts: DurationSeconds,
-    /// End time in seconds.
-    pub end_ts: DurationSeconds,
+    /// Provider start time in seconds; null when no endpoint was supplied.
+    pub ts: Option<DurationSeconds>,
+    /// Provider end time in seconds; null when no endpoint was supplied.
+    pub end_ts: Option<DurationSeconds>,
     /// Token type ("text", "punctuation", etc.).
     pub token_type: String,
 }
@@ -193,7 +199,9 @@ pub struct FaTimelineTrace {
     /// Forced-alignment engine selected for this run.
     #[serde(default)]
     pub engine: String,
-    /// Build/model revision used in cache identity for this run.
+    /// The FA engine name the selected worker reported after FA loaded
+    /// (`FaCacheNamespace`), byte for byte: the namespace this run's FA
+    /// cache rows and evidence envelopes are written and admitted under.
     #[serde(default)]
     pub engine_version: String,
     /// Utterance groups for batched FA.

@@ -1,7 +1,7 @@
 # Type-Driven Design
 
 **Status:** Current
-**Last updated:** 2026-08-31 08:28 EDT
+**Last updated:** 2026-09-15 18:27 EDT
 
 Batchalign uses Rust's type system to encode domain invariants at compile time. This document catalogs the patterns in use, explains when to reach for each one, and records the serde techniques that keep the wire format stable while the internal types evolve.
 
@@ -44,7 +44,9 @@ All generated types use `#[serde(transparent)]`: the wire format stays as bare s
 | `LanguageSpec` | enum | `crates/batchalign-types/src/domain.rs` | `Auto` or `Resolved(LanguageCode3)`: language at job boundary |
 | `DisplayPath` | `String` | `crates/batchalign-types/src/domain.rs` | Display-oriented file path within a job (`"sample.cha"`, `"subdir/sample.cha"`) |
 | `NodeId` | `String` | `crates/batchalign-types/src/domain.rs` | Server/fleet node identity |
-| `EngineVersion` | `String` | `crates/batchalign-types/src/domain.rs` | ML engine version for cache keying |
+| `BuildOwnedNamespace` | `Cow<'static, str>` | `crates/batchalign/src/cache/mod.rs` | The one representation behind the cache namespace and revisions this build owns: `UtrAsrCacheNamespace`, `RevAsrModelRevision`, `SpeakerEvidenceModelRevision` and `SpeakerNormalizationRevision`. Built as a literal (`const fn literal`) or derived from literals and files compiled into the binary (`derived`). Each wrapper keeps its own newtype, so a cache task constant still refuses one where another belongs. It replaced `EngineVersion`, a worker-version type deleted from `batchalign-types` once nothing used it |
+| `StampSafeText` | `Cow<'static, str>` | `crates/batchalign-types/src/domain.rs` | Text that cannot change a provenance stamp's structure. Refuses blank text, surrounding whitespace (`StampSafeText::WHITESPACE`, the Unicode `White_Space` set) and the stamp structure characters (`StampSafeText::STAMP_STRUCTURE`: vertical bar, semicolon, closing bracket, newline, carriage return), with `InvalidStampSafeText`. Routes in: `TryFrom` (also serde), `const fn from_static` (a literal checked at compile time inside `const { }`) and `join` with a `StampJoiner` (`Concat`, `Plus`, `Colon`, `At`). Its JSON Schema `pattern` is generated from the same two lists. Provenance's `StampFieldValue` wraps it |
+| `ReportedEngineName` | `StampSafeText` | `crates/batchalign-types/src/domain.rs` | An engine identity a worker reported, in a capability report or on a result. A wrapper over `StampSafeText`; the only constructor is `TryFrom`, shared by deserialization, which applies the `StampSafeText` check; there is no infallible `From` |
 | `CorrelationId` | `String` | `crates/batchalign-types/src/domain.rs` | Cross-service tracing ID |
 | `NumSpeakers` | `u32` | `crates/batchalign-types/src/domain.rs` | Speaker count for diarization |
 | `DurationSeconds` | `f64` | `crates/batchalign-types/src/domain.rs` | Duration in seconds |
@@ -52,7 +54,7 @@ All generated types use `#[serde(transparent)]`: the wire format stays as bare s
 | `DurationMs` | `u64` | `crates/batchalign-types/src/domain.rs` | Duration in milliseconds |
 | `MemoryMb` | `u64` | `crates/batchalign-types/src/domain.rs` | Memory amount in megabytes |
 | `WorkerPid` | `u32` | `crates/batchalign-types/src/worker.rs` | OS process ID |
-| `AsrTimestampSecs` | `f64` | `crates/batchalign-transform/src/asr_postprocess/asr_types.rs` | Raw ASR provider timestamp (seconds) |
+| `AsrTimestampSecs` | enum | `crates/batchalign-transform/src/asr_postprocess/asr_types.rs` | An ASR provider's endpoint in seconds: `Observed(f64)`, including a real zero, or `Absent`. Serialized untagged, so it crosses the wire as a number or as `null`; an absent endpoint becomes an untimed word rather than time zero |
 | `SpeakerIndex` | `usize` | `crates/batchalign-transform/src/asr_postprocess/asr_types.rs` | Zero-based speaker index in a recording |
 
 **When to use:** Any `String` or number that identifies a domain concept. If a parameter name is needed to understand what the type represents, it should be a newtype.

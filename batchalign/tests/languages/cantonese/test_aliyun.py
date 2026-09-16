@@ -87,7 +87,10 @@ class TestAliyunRunnerSentenceParsing:
         assert runner._results[0].words[0].text == "你"
         assert runner._results[1].words[0].text == "好"
 
-    def test_word_defaults(self) -> None:
+    def test_a_word_without_times_carries_absence_not_zero(self) -> None:
+        # `0` is a legal time. Defaulting the two bounds to it made a word
+        # Aliyun sent untimed indistinguishable from one it placed in the first
+        # millisecond of the recording.
         runner = self._make_runner()
         message = json.dumps(
             {"payload": {"words": [{"text": "test"}], "result": "test"}}
@@ -95,8 +98,8 @@ class TestAliyunRunnerSentenceParsing:
         runner._on_sentence_end(message)
         word = runner._results[0].words[0]
         assert word.text == "test"
-        assert word.startTime == 0
-        assert word.endTime == 0
+        assert word.startTime is None
+        assert word.endTime is None
 
     def test_on_error_raises(self) -> None:
         runner = self._make_runner()
@@ -142,6 +145,32 @@ class TestAliyunProjection:
         assert response.monologues[0].elements[0].ts == 0.0
         assert response.monologues[0].elements[0].end_ts == 0.2
 
+    def test_a_word_missing_a_bound_reaches_chat_untimed_never_at_zero(self) -> None:
+        """The provider-boundary half of the same fact, through Rust.
+
+        A word with no start must arrive with NO timing at all. Before the
+        admission it arrived as a span beginning at 0 ms, which is a real time
+        and passed every downstream check.
+        """
+        response = _project_results(
+            [
+                AliyunSentenceResult(
+                    words=[
+                        AliyunWord(text="你", startTime=None, endTime=200),
+                        AliyunWord(text="好", startTime=300, endTime=None),
+                        AliyunWord(text="嗎", startTime=400, endTime=600),
+                    ],
+                    sentence_text="你好嗎",
+                )
+            ]
+        )
+
+        elements = response.monologues[0].elements
+        assert [element.value for element in elements] == ["你", "好", "嗎"]
+        assert elements[0].ts is None and elements[0].end_ts is None
+        assert elements[1].ts is None and elements[1].end_ts is None
+        assert elements[2].ts == 0.4 and elements[2].end_ts == 0.6
+
     def test_project_results_tokenizes_sentence_fallback_in_rust(self) -> None:
         response = _project_results(
             [
@@ -152,10 +181,13 @@ class TestAliyunProjection:
             ]
         )
 
+        # Split per character, and normalized nowhere: the sentence fallback
+        # reports Aliyun's own characters, and the server normalizes the
+        # monologue once, later.
         assert [element.value for element in response.monologues[0].elements] == [
             "真",
-            "係",
-            "啊",
+            "系",
+            "呀",
         ]
         assert all(
             element.ts is None and element.end_ts is None

@@ -41,10 +41,10 @@ use serde::{Deserialize, Serialize};
 use talkbank_model::Span;
 use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::alignment::helpers::TierDomain;
-use talkbank_model::alignment::helpers::{WordItem, counts_for_tier, walk_words};
+use talkbank_model::alignment::helpers::{WordItem, walk_words};
 use talkbank_model::alignment::{
-    WorTimingBinding, WorTimingCorrespondence, WorTimingSequence, assess_wor_timing_sequence,
-    bind_wor_timing, corroborate_wor_timing,
+    WorSlotMembershipPolicy, WorTimingBinding, WorTimingCorrespondence, WorTimingSequence,
+    assess_wor_timing_sequence, bind_wor_timing, corroborate_wor_timing,
 };
 use talkbank_model::model::ChatFileLines;
 use talkbank_model::model::dependent_tier::wor::WorItem;
@@ -623,15 +623,69 @@ struct CompletePerChildMainTiming {
     bullets: Vec<Bullet>,
 }
 
-/// The conservative fallback when complete word timing is unavailable.
-struct ParentOnlyMainTiming {
-    bullet: Option<Bullet>,
+/// Who the parent's measured span can still describe after a split.
+///
+/// A module of its own, with a private field, so [`SoleChildSpan::claim`] is
+/// the ONLY route to a value: the rule cannot be restated, or forgotten, at the
+/// place the bullet is finally written.
+mod parent_span {
+    use super::{Bullet, Utterance};
+
+    /// The parent's measured span, admitted because one child kept all of it.
+    ///
+    /// Holding a value is a proof that the span still measures the utterance it
+    /// is about to be written onto.
+    pub(super) struct SoleChildSpan(Bullet);
+
+    impl SoleChildSpan {
+        /// Admit the parent's span only when the split kept a SINGLE child.
+        ///
+        /// A parent bullet measures the whole parent utterance: its start is
+        /// where the first child began and its end is where the last one
+        /// finished. Nothing measured the boundary between them. So when
+        /// several children partition the parent, the parent's span is no
+        /// child's span, and writing it onto the last child claims that child
+        /// began when the parent did, which is a time nobody observed and
+        /// which the earlier children are themselves the evidence against.
+        /// An unmeasured span gets no representation here rather than a
+        /// plausible one.
+        ///
+        /// A single child is the remaining case, and there the span is still
+        /// exact: that child holds the parent's whole content, so the parent's
+        /// own start and end are its start and end. It arises when the
+        /// assignment vector names more groups than there are words to fill,
+        /// which [`validate_utseg_response`] reports as a misalignment bug;
+        /// the timing is right either way.
+        ///
+        /// [`validate_utseg_response`]: super::validate_utseg_response
+        pub(super) fn claim(
+            children: &[(usize, Utterance)],
+            parent_bullet: Option<Bullet>,
+        ) -> Option<Self> {
+            match children {
+                [_] => parent_bullet.map(Self),
+                _ => None,
+            }
+        }
+
+        /// The admitted span, consumed so it is written exactly once.
+        pub(super) fn into_bullet(self) -> Bullet {
+            self.0
+        }
+    }
 }
+
+use parent_span::SoleChildSpan;
 
 /// Mutually exclusive timing evidence available after an utterance split.
 enum SplitMainTimingEvidence {
+    /// Every kept child's own `%wor` words were timed, so each child has a
+    /// measured hull of its own.
     CompletePerChild(CompletePerChildMainTiming),
-    ParentOnly(ParentOnlyMainTiming),
+    /// No complete per-child evidence. The parent's span travels only while it
+    /// still measures a child, which [`SoleChildSpan`] decides; otherwise no
+    /// child receives a main-tier bullet.
+    ParentOnly(Option<SoleChildSpan>),
 }
 
 /// Derive one enclosing hull only when every `%wor` word is timed.
@@ -662,30 +716,27 @@ fn split_main_timing_evidence(
     children: &[(usize, Utterance)],
     parent_bullet: Option<Bullet>,
 ) -> SplitMainTimingEvidence {
-    let Some(per_group) = partitioned_wor else {
-        return SplitMainTimingEvidence::ParentOnly(ParentOnlyMainTiming {
-            bullet: parent_bullet,
-        });
-    };
-    let Some(bullets) = children
-        .iter()
-        .map(|(group_idx, child)| {
-            per_group
-                .get(*group_idx)
-                .and_then(|wor| complete_wor_timing_hull(&child.main, wor))
-        })
-        .collect::<Option<Vec<_>>>()
-    else {
-        return SplitMainTimingEvidence::ParentOnly(ParentOnlyMainTiming {
-            bullet: parent_bullet,
-        });
-    };
-    if bullets.is_empty() {
-        return SplitMainTimingEvidence::ParentOnly(ParentOnlyMainTiming {
-            bullet: parent_bullet,
-        });
+    // One route into the complete state: a partitioned tier, a hull for EVERY
+    // kept child, and at least one child. The three refusals used to be three
+    // early returns that each named the fallback, which is how the fallback
+    // came to be spelled out three times over.
+    let complete = partitioned_wor.and_then(|per_group| {
+        children
+            .iter()
+            .map(|(group_idx, child)| {
+                per_group
+                    .get(*group_idx)
+                    .and_then(|wor| complete_wor_timing_hull(&child.main, wor))
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|bullets| !bullets.is_empty())
+    });
+    match complete {
+        Some(bullets) => {
+            SplitMainTimingEvidence::CompletePerChild(CompletePerChildMainTiming { bullets })
+        }
+        None => SplitMainTimingEvidence::ParentOnly(SoleChildSpan::claim(children, parent_bullet)),
     }
-    SplitMainTimingEvidence::CompletePerChild(CompletePerChildMainTiming { bullets })
 }
 
 /// The retrace this content node is, in EITHER spelling, or `None`.
@@ -736,37 +787,153 @@ fn as_retrace(item: &UtteranceContent) -> Option<&Retrace> {
     }
 }
 
-/// Compute the child-group assignment for each main-tier word that is
-/// `%wor`-eligible.
+/// A total assignment of top-level content items to the children of a split.
+mod content_groups {
+    use super::{UtteranceContent, as_retrace};
+
+    /// Which child each top-level content item travels with, for EVERY item.
+    ///
+    /// This replaced a `Vec<Option<usize>>` that stayed partial after its
+    /// fills, so both of its readers ended in `unwrap_or(0)`: an item whose
+    /// group was unknown was quietly handed to the FIRST child, which is a
+    /// measured-looking answer nobody measured. Here the fill IS the
+    /// constructor, its seed is the first word's own group rather than a
+    /// zero, and each stored entry is a plain `usize`, so no unknown survives
+    /// construction for a reader to default.
+    pub(super) struct ContentItemGroups {
+        /// One group index per content item, in content order.
+        by_content: Vec<usize>,
+        /// One past the highest group index `by_content` can name. Every entry
+        /// indexes a collection sized from this, by construction.
+        group_count: usize,
+    }
+
+    impl ContentItemGroups {
+        /// Assign every content item to a child, or report that this
+        /// assignment splits nothing.
+        ///
+        /// `None` is the one answer covering all three ways there is nothing
+        /// to split: no assignments, no extracted words, or every word
+        /// assigned to the same child. A `Some` therefore proves the
+        /// assignment names at least two distinct children, and the caller
+        /// hands back the parent untouched on `None` rather than rebuilding
+        /// it from its own parts.
+        pub(super) fn assign(
+            content_items: &[UtteranceContent],
+            word_to_content: &[usize],
+            assignments: &[usize],
+        ) -> Option<Self> {
+            let (&first_group, rest) = assignments.split_first()?;
+            if word_to_content.is_empty() || rest.iter().all(|&group| group == first_group) {
+                return None;
+            }
+
+            // Direct assignment, first writer wins: a content item holding
+            // several extracted words takes the group of its first word.
+            let mut partial: Vec<Option<usize>> = vec![None; content_items.len()];
+            for (word_idx, &content_idx) in word_to_content.iter().enumerate() {
+                if word_idx < assignments.len() && partial[content_idx].is_none() {
+                    partial[content_idx] = Some(assignments[word_idx]);
+                }
+            }
+
+            // A retrace marker binds FORWARD to the repeated/corrected material it
+            // points at: `<X> [/] Y` is one unit where X was abandoned and Y is the
+            // retry, so a retrace content node must travel with the following kept
+            // word's group. Retraced words are not counted in the Mor word domain, so
+            // retrace nodes get no direct assignment above; the generic back-fill
+            // below would attach them to the PRECEDING word, stranding them as a
+            // dangling `[/]` when the split boundary falls between the retrace and its
+            // material (real BA3 utseg output stranded retraces this way across the
+            // UMICH SNL corpus). Pre-assign each un-grouped retrace node the group of
+            // the next already-grouped content item; if none follows (a legitimately
+            // utterance-final retrace), leave it for the back-fill.
+            // Regression: `utseg_split_does_not_strand_retrace`.
+            for idx in 0..partial.len() {
+                if partial[idx].is_some() || as_retrace(&content_items[idx]).is_none() {
+                    continue;
+                }
+                if let Some(next_group) = partial[idx + 1..].iter().find_map(|group| *group) {
+                    partial[idx] = Some(next_group);
+                }
+            }
+
+            // One back-fill pass, seeded with the first extracted word's own
+            // group. The seed is what makes this total, and it is evidence
+            // rather than a default: an item sitting before the first grouped
+            // one is punctuation or a marker, and it travels with the child
+            // holding the utterance's first word, which is the group the model
+            // chose for that word. Everything after a grouped item travels
+            // with the most recent one, as before. The separate forward-fill
+            // pass that used to repair leading `None`s is what the seed
+            // replaces.
+            let mut last_group = first_group;
+            let by_content = partial
+                .into_iter()
+                .map(|slot| {
+                    if let Some(group) = slot {
+                        last_group = group;
+                    }
+                    last_group
+                })
+                .collect();
+
+            Some(Self {
+                by_content,
+                // Every stored entry came from `assignments`, so the highest
+                // assignment bounds them all.
+                group_count: rest.iter().copied().fold(first_group, usize::max) + 1,
+            })
+        }
+
+        /// Each content item's group, in content order: one entry per item.
+        pub(super) fn in_content_order(&self) -> impl Iterator<Item = usize> + '_ {
+            self.by_content.iter().copied()
+        }
+
+        /// One past the highest group any item names.
+        pub(super) fn group_count(&self) -> usize {
+            self.group_count
+        }
+    }
+}
+
+use content_groups::ContentItemGroups;
+
+/// The `%wor` slot-membership policy this module's decisions travel through.
 ///
-/// "Eligible" is chatter's `%wor` slot rule (`WorSlotMembershipPolicy::
-/// FilteredLexicalV1`): untranscribed words (`xxx`/`yyy`/`www`),
-/// phonological fragments (`&+`), and nonwords (`&~`) are excluded; fillers
-/// (`&-`) are included. The returned Vec has one entry per eligible word, in
-/// main-tier order; entries are child-group indices.
+/// Named once, and taken from chatter rather than restated. The doc on
+/// [`WorSlotMembershipPolicy::admits`] says the method is public precisely so
+/// that a per-content-item count in an utterance splitter can ask it instead
+/// of spelling the rule out beside its own walk; this module is one of the
+/// two trees that doc names, and this is the deletion it describes.
+const WOR_SLOT_POLICY: WorSlotMembershipPolicy = WorSlotMembershipPolicy::FilteredLexicalV1;
+
+/// Compute the child-group assignment for each main-tier word that occupies a
+/// `%wor` slot.
 ///
-/// Implementation: walk each content item on its own with the `%wor` walker
-/// and admit exactly what `WorMainTierProjection::from_main` admits (a word,
-/// or a replaced word's original, that `counts_for_tier` accepts for `%wor`).
-/// The projection itself is only constructible from a whole `MainTier`, so
-/// a per-item count has to restate its admission rule; the rule is named
-/// here so the two cannot drift silently.
+/// Which words those are is [`WOR_SLOT_POLICY`]'s answer, asked per word. A
+/// replaced word is admitted by its ORIGINAL, as the projection admits it.
+///
+/// The returned Vec has one entry per admitted word, in main-tier order;
+/// entries are child-group indices. The walk is per content item because that
+/// is what pairs a word with the group its item travels with, which is also
+/// why this cannot be `WorMainTierProjection` itself: that is constructible
+/// only from a whole `MainTier`, and it reports slots rather than the content
+/// items they came from.
 fn wor_eligible_word_groups(
     content_items: &[UtteranceContent],
-    content_item_group: &[Option<usize>],
+    content_groups: &ContentItemGroups,
 ) -> Vec<usize> {
     let mut groups = Vec::new();
-    for (content_idx, item) in content_items.iter().enumerate() {
-        let group = content_item_group[content_idx].unwrap_or(0);
+    for (item, group) in content_items.iter().zip(content_groups.in_content_order()) {
         walk_words(
             std::slice::from_ref(item),
             Some(TierDomain::Wor),
             &mut |word| {
                 let admitted = match word {
-                    WordItem::Word(word) => counts_for_tier(word, TierDomain::Wor),
-                    WordItem::ReplacedWord(replaced) => {
-                        counts_for_tier(&replaced.word, TierDomain::Wor)
-                    }
+                    WordItem::Word(word) => WOR_SLOT_POLICY.admits(word),
+                    WordItem::ReplacedWord(replaced) => WOR_SLOT_POLICY.admits(&replaced.word),
                     WordItem::Separator(_) => false,
                 };
                 if admitted {
@@ -786,84 +953,27 @@ pub fn split_utterance(utt: Utterance, assignments: &[usize]) -> Vec<Utterance> 
     let content_items = &utt.main.content.content;
     let word_to_content = build_word_to_content_map(content_items);
 
-    if assignments.is_empty() || word_to_content.is_empty() {
+    // One refusal for every way this assignment splits nothing, and a `Some`
+    // that carries a group for every content item. What this replaced was
+    // three early returns followed by a partial map that each of its two
+    // readers had to finish with `unwrap_or(0)`.
+    let Some(content_groups) =
+        ContentItemGroups::assign(content_items, &word_to_content, assignments)
+    else {
         return vec![utt];
-    }
+    };
 
-    let first = assignments[0];
-    if assignments.iter().all(|&a| a == first) {
-        return vec![utt];
-    }
-
-    let num_content_items = content_items.len();
-    let mut content_item_group: Vec<Option<usize>> = vec![None; num_content_items];
-
-    for (word_idx, &content_idx) in word_to_content.iter().enumerate() {
-        if word_idx < assignments.len() && content_item_group[content_idx].is_none() {
-            content_item_group[content_idx] = Some(assignments[word_idx]);
-        }
-    }
-
-    // A retrace marker binds FORWARD to the repeated/corrected material it points
-    // at: `<X> [/] Y` is one unit where X was abandoned and Y is the retry, so a
-    // retrace content node must travel with the following kept word's group.
-    // Retraced words are not counted in the Mor word domain, so retrace nodes get
-    // no direct assignment above; the generic back-fill below would attach them to
-    // the PRECEDING word, stranding them as a dangling `[/]` when the split
-    // boundary falls between the retrace and its material (real BA3 utseg output
-    // stranded retraces this way across the UMICH SNL corpus). Pre-assign each
-    // un-grouped retrace node the group of the next already-grouped content item;
-    // if none follows (a legitimately utterance-final retrace), leave it for the
-    // generic back-fill. Regression: `utseg_split_does_not_strand_retrace`.
-    for idx in 0..num_content_items {
-        if content_item_group[idx].is_some() || as_retrace(&content_items[idx]).is_none() {
-            continue;
-        }
-        if let Some(next_group) = content_item_group[idx + 1..].iter().find_map(|g| *g) {
-            content_item_group[idx] = Some(next_group);
-        }
-    }
-
-    // Back-fill unassigned items
-    let mut last_group: Option<usize> = None;
-    for group in content_item_group.iter_mut() {
-        if group.is_some() {
-            last_group = *group;
-        } else {
-            *group = last_group;
-        }
-    }
-    // Forward-fill remaining None at the start
-    let mut next_group: Option<usize> = None;
-    for group in content_item_group.iter_mut().rev() {
-        if group.is_some() {
-            next_group = *group;
-        } else {
-            *group = next_group;
-        }
-    }
-
-    let max_group = assignments.iter().copied().max().unwrap_or(0);
-
-    let mut groups: Vec<Vec<UtteranceContent>> = vec![Vec::new(); max_group + 1];
-    for (content_idx, item) in content_items.iter().enumerate() {
-        if content_item_group[content_idx].is_none() {
-            tracing::warn!(
-                content_idx,
-                "content item has no group assignment, defaulting to group 0"
-            );
-        }
-        let group_id = content_item_group[content_idx].unwrap_or(0);
-        if group_id <= max_group {
-            groups[group_id].push(item.clone());
-        }
+    let mut groups: Vec<Vec<UtteranceContent>> = vec![Vec::new(); content_groups.group_count()];
+    for (item, group_id) in content_items.iter().zip(content_groups.in_content_order()) {
+        groups[group_id].push(item.clone());
     }
 
     let speaker = &utt.main.speaker;
     // Capture the parent's main-tier bullet before consuming `utt`. Complete
     // partitioned `%wor` evidence supersedes it with one exact hull per child;
-    // otherwise the conservative fallback keeps this parent span on the last
-    // child only.
+    // otherwise it travels only when the split kept a single child, the one
+    // case where it still measures the utterance it would be written onto.
+    // See `SoleChildSpan::claim`.
     let parent_bullet = utt.main.content.bullet.clone();
 
     // Capture the rest of the parent's main-tier metadata so each child
@@ -880,7 +990,6 @@ pub fn split_utterance(utt: Utterance, assignments: &[usize]) -> Vec<Utterance> 
     // Compute per-child %wor item lists only when the parent tier is count-
     // matched and lexically corroborated against the typed main tier. None
     // means absent or stale evidence (graceful drop).
-    let num_groups = max_group + 1;
     let partitioned_wor = utt
         .dependent_tiers
         .iter()
@@ -897,8 +1006,8 @@ pub fn split_utterance(utt: Utterance, assignments: &[usize]) -> Vec<Utterance> 
             Some(wor)
         })
         .and_then(|wor| {
-            let main_groups = wor_eligible_word_groups(content_items, &content_item_group);
-            partition_wor_tier(&utt.main, wor, &main_groups, num_groups)
+            let main_groups = wor_eligible_word_groups(content_items, &content_groups);
+            partition_wor_tier(&utt.main, wor, &main_groups, content_groups.group_count())
         });
 
     // Track (original_group_idx, utterance) so we can later look up the
@@ -1014,11 +1123,15 @@ pub fn split_utterance(utt: Utterance, assignments: &[usize]) -> Vec<Utterance> 
                 child.main.content.bullet = Some(bullet);
             }
         }
-        SplitMainTimingEvidence::ParentOnly(ParentOnlyMainTiming { bullet }) => {
-            if let Some(bullet) = bullet
-                && let Some((_, last)) = result.last_mut()
+        SplitMainTimingEvidence::ParentOnly(span) => {
+            // `claim` admits a span only when the split kept ONE child, so this
+            // writes the parent's own measurement back onto the utterance that
+            // still holds all of its content, and writes nothing at all when
+            // several children partition it.
+            if let Some(span) = span
+                && let Some((_, sole_child)) = result.last_mut()
             {
-                last.main.content.bullet = Some(bullet);
+                sole_child.main.content.bullet = Some(span.into_bullet());
             }
         }
     }
@@ -1297,25 +1410,34 @@ mod tests {
         }
     }
 
-    /// REGRESSION: the parent's main-tier timing bullet must not be silently
-    /// dropped when an utterance is split.
+    /// A split never hands a child a span nobody measured.
     ///
-    /// The utseg pipeline produced bullet-less output across 854/885 MOST
-    /// corpus files on 2026-04-26 because `split_utterance` constructed each
-    /// child's `MainTier` fresh via `MainTier::new(...)`, which sets
-    /// `TierContent.bullet = None`, without copying `utt.main.content.bullet`
-    /// from the parent. The aggregate signal: 223,277 → 152,192 bullets
-    /// (−31.8%) corpus-wide. Files whose only timing came from to-be-split
-    /// utterances ended up with no timing at all and tripped E544
-    /// (@Media-linkage assertion).
+    /// The parent bullet measures the WHOLE parent: `1000_5000` below covers
+    /// all seven words. The split puts three words in one child and four in
+    /// the other, and nothing observed where the first ended and the second
+    /// began. Writing `1000_5000` onto the second child says that child began
+    /// at 1000, while the first child's own three words are the evidence that
+    /// it did not.
     ///
-    /// Conservative invariant tested here: at least one child of a split
-    /// must carry the parent's bullet. We attach it to the LAST child
-    /// the original utterance ended at the bullet's end timestamp, and
-    /// the last child of the split contains the last words and ends at
-    /// that same end timestamp.
+    /// This replaces `utseg_split_preserves_parent_bullet_on_last_child`,
+    /// whose expectation was the defect rather than the fix. That test came
+    /// from a real regression (2026-04-26): `split_utterance` built each
+    /// child's `MainTier` with `MainTier::new(...)`, which sets
+    /// `TierContent.bullet = None`, so every child lost the parent's timing,
+    /// 854 of 885 MOST corpus files ended with none at all (223,277 to
+    /// 152,192 bullets, -31.8%), and files whose only timing came from
+    /// to-be-split utterances tripped E544. The repair restored a bullet by
+    /// giving one child a span that was never that child's, which is a
+    /// fabricated measurement. The original regression is pinned where the
+    /// evidence actually exists, by
+    /// `utseg_split_derives_each_child_main_bullet_from_partitioned_wor`:
+    /// with `%wor` timing, every child keeps its own measured hull.
+    ///
+    /// Both halves are asserted here on purpose. An implementation that never
+    /// writes a parent bullet passes the first; one that always writes it
+    /// passes the second; only the rule itself passes both.
     #[test]
-    fn utseg_split_preserves_parent_bullet_on_last_child() {
+    fn utseg_split_gives_no_child_a_span_that_was_never_measured() {
         // Bullet syntax: NAK-delimited "start_end" appended after the
         // terminator. \u{15} is NAK (0x15). Real example from MOST:
         // `*PAR0: ... . 0_668430` (the 0_668430 is the bullet).
@@ -1325,39 +1447,40 @@ mod tests {
             *CHI:\tI eat cookies and he likes cake . \u{15}1000_5000\u{15}\n\
             @End\n";
         let chat = parse_chat(chat_text);
-        let utt = get_utterance(&chat, 0).clone();
+        let parent = get_utterance(&chat, 0).clone();
 
         // Sanity-check the fixture: the parent utterance carries a bullet.
         assert!(
-            utt.main.content.bullet.is_some(),
+            parent.main.content.bullet.is_some(),
             "fixture pre-condition: parent must have a bullet"
         );
-        let parent_bullet = utt.main.content.bullet.as_ref().unwrap().clone();
 
-        // Split into two children: words 0-2 → child 0, words 3-6 → child 1.
-        let result = split_utterance(utt, &[0, 0, 0, 1, 1, 1, 1]);
-        assert_eq!(result.len(), 2, "expected 2 children from the split");
+        // Seven words across two children: the parent's span describes the
+        // pair, and neither one of them.
+        let split = split_utterance(parent.clone(), &[0, 0, 0, 1, 1, 1, 1]);
+        assert_eq!(split.len(), 2, "expected 2 children from the split");
+        for (index, child) in split.iter().enumerate() {
+            assert!(
+                child.main.content.bullet.is_none(),
+                "child {index} must carry no main-tier bullet: nothing measured its \
+                 span. Output: {}",
+                child.to_chat_string()
+            );
+        }
 
-        // The LAST child must carry the parent's bullet (same start_ms /
-        // end_ms). The earlier children may have no bullet, we simply
-        // don't know their per-child timing without realignment, and we
-        // refuse to fabricate one.
-        let last_child_bullet = &result.last().unwrap().main.content.bullet;
-        assert!(
-            last_child_bullet.is_some(),
-            "last child of a split must inherit the parent's bullet \
-             (got None: parent timing was dropped). Output: {}",
-            result.last().unwrap().to_chat_string()
-        );
-        let last = last_child_bullet.as_ref().unwrap();
-        assert_eq!(
-            last.timing.start_ms, parent_bullet.timing.start_ms,
-            "last child's bullet start must equal parent's"
-        );
-        assert_eq!(
-            last.timing.end_ms, parent_bullet.timing.end_ms,
-            "last child's bullet end must equal parent's"
-        );
+        // One child, because the assignment vector names a group that no word
+        // fills. That child holds all seven words, so the parent's own
+        // measurement is its measurement and still travels.
+        let sole = split_utterance(parent, &[0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(sole.len(), 1, "the empty group is dropped");
+        let kept = sole[0]
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .expect("a sole child holds the parent's whole content, and its span");
+        assert_eq!(kept.timing.start_ms, 1000);
+        assert_eq!(kept.timing.end_ms, 5000);
     }
 
     /// %wor partitioning: when a parent has %wor with timing for every
@@ -1482,9 +1605,17 @@ mod tests {
     }
 
     /// A single missing `%wor` timing keeps the split out of the complete
-    /// per-child state. Do not mix exact child hulls with guessed spans.
+    /// per-child state, and then NEITHER child gets a main-tier bullet.
+    ///
+    /// This fixture is its own evidence that the old expectation was wrong.
+    /// The parent bullet is `24000_30000`; the second child's words are
+    /// `almost anniversary`, and the one timing `%wor` still carries for them
+    /// starts at 27455. The parent-only fallback used to write `24000_30000`
+    /// onto that child, so its main tier claimed it began at 24000 while the
+    /// dependent tier beside it recorded 27455. A span contradicted by the
+    /// timing evidence in its own utterance was never a measurement.
     #[test]
-    fn utseg_split_uses_parent_only_when_partitioned_wor_timing_is_incomplete() {
+    fn utseg_split_drops_parent_timing_when_partitioned_wor_timing_is_incomplete() {
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
             @Participants:\tPAR Participant\n\
             @ID:\teng|test|PAR|||||Participant|||\n\
@@ -1498,18 +1629,14 @@ mod tests {
         let result = split_utterance(parent, &[0, 0, 1, 1]);
 
         assert_eq!(result.len(), 2);
-        assert!(
-            result[0].main.content.bullet.is_none(),
-            "partial timing must not create a first-child hull"
-        );
-        let fallback = result[1]
-            .main
-            .content
-            .bullet
-            .as_ref()
-            .expect("parent-only fallback must preserve the enclosing anchor");
-        assert_eq!(fallback.timing.start_ms, 24_000);
-        assert_eq!(fallback.timing.end_ms, 30_000);
+        for (index, child) in result.iter().enumerate() {
+            assert!(
+                child.main.content.bullet.is_none(),
+                "child {index} must carry no main-tier bullet: partial timing measures \
+                 neither child's span. Output: {}",
+                child.to_chat_string()
+            );
+        }
     }
 
     /// %wor partitioning falls back to dropping the tier when item counts
@@ -1571,18 +1698,20 @@ mod tests {
                 "child {i} must not inherit timing from a lexically stale %wor tier"
             );
         }
-        assert!(
-            result[0].main.content.bullet.is_none(),
-            "stale word timing cannot establish a first-child hull"
-        );
-        let fallback = result[1]
-            .main
-            .content
-            .bullet
-            .as_ref()
-            .expect("the last child must preserve the parent timing fallback");
-        assert_eq!(fallback.timing.start_ms, 0);
-        assert_eq!(fallback.timing.end_ms, 4_000);
+        // Dropping the stale tier leaves nothing that measured either child, so
+        // neither gets a main-tier bullet. This asserted that the last child
+        // kept the parent's `0_4000` until 2026-09-16. That span covers all four
+        // words; the split puts `I eat` in one child and `the cookies` in the
+        // other, so writing it onto the second one claims that child began at 0,
+        // when the first child's own words are the evidence that it did not.
+        for (index, child) in result.iter().enumerate() {
+            assert!(
+                child.main.content.bullet.is_none(),
+                "child {index} must carry no main-tier bullet: stale word timing \
+                 measured neither child's span. Output: {}",
+                child.to_chat_string()
+            );
+        }
     }
 
     /// %mor and %gra are dropped on split. Their analysis depends on

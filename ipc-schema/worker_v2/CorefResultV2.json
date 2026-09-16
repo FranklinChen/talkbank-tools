@@ -69,26 +69,70 @@
     },
     "CorefItemResultV2": {
       "description": "One coreference item result returned by Python.",
-      "type": "object",
-      "properties": {
-        "annotations": {
-          "description": "Structured sparse annotations when inference succeeded.",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/$defs/CorefAnnotationV2"
-          }
+      "oneOf": [
+        {
+          "description": "The engine resolved the document.",
+          "type": "object",
+          "properties": {
+            "annotations": {
+              "description": "Structured sparse annotations (empty when no chains were found).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CorefAnnotationV2"
+              }
+            },
+            "engine": {
+              "description": "The coreference engine that produced them.",
+              "$ref": "#/$defs/ReportedEngineName"
+            },
+            "kind": {
+              "type": "string",
+              "const": "resolved"
+            }
+          },
+          "required": [
+            "kind",
+            "annotations",
+            "engine"
+          ]
         },
-        "error": {
-          "description": "Optional per-item runtime error.",
-          "type": [
-            "string",
-            "null"
+        {
+          "description": "The document had no sentences, so no engine ran.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "no_sentences"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The item failed; the file it belongs to fails with this message.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "Operator-facing failure message.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
           ]
         }
-      }
+      ]
+    },
+    "ReportedEngineName": {
+      "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
     }
   }
 }

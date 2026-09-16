@@ -793,6 +793,7 @@ mod tests {
                 error_codes: None,
                 error_line: None,
                 bug_report_id: None,
+                stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
                 next_eligible_at: None,
@@ -862,6 +863,7 @@ mod tests {
             error_codes: None,
             error_line: None,
             bug_report_id: None,
+            stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
             next_eligible_at: None,
@@ -1043,11 +1045,63 @@ mod tests {
         assert_eq!(mwt["gonna"], vec!["going", "to"]);
     }
 
+    /// A server of another build, or one reporting no build, is refused with
+    /// a typed error naming both builds and the restart remedy; this build's
+    /// own server is accepted.
     #[test]
-    fn capability_check_allows_test_echo() {
+    fn a_server_of_another_build_is_refused_before_submission() {
+        use crate::cli::error::{CliError, ServerBuild};
+
+        let health = |build: &str| {
+            serde_json::from_value::<crate::api::HealthResponse>(serde_json::json!({
+                "status": "ok",
+                "version": "test-server",
+                "node_id": "test-node",
+                "capabilities": ["morphotag"],
+                "workers_available": 1,
+                "job_slots_available": 1,
+                "build_hash": build,
+            }))
+            .expect("health fixture")
+        };
+        let url = "http://127.0.0.1:8001";
+
+        super::super::refuse_foreign_server_build(url, &health(crate::build_hash()))
+            .expect("this build's server is accepted");
+
+        for (reported, expected) in [
+            (
+                "0.0.1-other-1",
+                ServerBuild::Reported("0.0.1-other-1".to_owned()),
+            ),
+            ("", ServerBuild::Unreported),
+        ] {
+            let error = super::super::refuse_foreign_server_build(url, &health(reported))
+                .expect_err("another build is refused");
+            let message = error.to_string();
+            assert!(
+                matches!(
+                    &error,
+                    CliError::ServerBuildMismatch { server_build, client_build, .. }
+                        if *server_build == expected && client_build == crate::build_hash()
+                ),
+                "{error:?}"
+            );
+            assert_eq!(error.exit_code(), CliError::EXIT_SERVER);
+            assert!(message.contains("serve stop"), "{message}");
+        }
+    }
+
+    #[test]
+    fn capability_check_accepts_only_the_command_name() {
         use crate::ReleasedCommand;
 
         let caps = vec!["test-echo".to_string()];
+        assert!(!super::super::server_supports_command(
+            &caps,
+            ReleasedCommand::Morphotag
+        ));
+        let caps = vec!["morphotag".to_string()];
         assert!(super::super::server_supports_command(
             &caps,
             ReleasedCommand::Morphotag
@@ -1163,6 +1217,7 @@ mod tests {
             error_codes: None,
             error_line: None,
             bug_report_id: None,
+            stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
             next_eligible_at: None,
@@ -1184,6 +1239,7 @@ mod tests {
                 error_codes: None,
                 error_line: None,
                 bug_report_id: None,
+                stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
                 next_eligible_at: None,
@@ -1200,6 +1256,7 @@ mod tests {
                 error_codes: None,
                 error_line: None,
                 bug_report_id: None,
+                stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
                 next_eligible_at: None,

@@ -44,7 +44,13 @@ from batchalign.inference.qwen_forced_alignment import (
     resolve_qwen_language,
 )
 
-from ._asr_types import AsrElement, AsrGenerationPayload, AsrMonologue, TimedWord
+from ._asr_types import (
+    AsrElement,
+    AsrGenerationPayload,
+    AsrMonologue,
+    TimedWord,
+    undiarized_speaker,
+)
 from ._qwen_chunking import (
     SAMPLE_RATE,
     AudioChunk,
@@ -227,10 +233,20 @@ class QwenRecognizer:
         lang: LanguageCode = "yue",
         model_id: str = "Qwen/Qwen3-ASR-1.7B-hf",
         device: str = "cpu",
+        *,
+        model_path: str | None = None,
+        aligner_path: str | None = None,
     ) -> None:
         self.lang = lang
         self.model_id = model_id
         self.device = device
+        # Where the weights actually come from. ``None`` means "resolve the id
+        # yourself", which is the direct-caller path; the worker passes
+        # snapshots it already materialized at the pinned revisions. Kept
+        # separate from ``model_id`` so the checkpoint check and the log line
+        # still name the model rather than a cache path.
+        self.model_path = model_path
+        self.aligner_path = aligner_path
         self._model: LoadedQwen | None = None
         # Both resolved at construction so an unsupported language or a
         # stale checkpoint id surfaces at worker startup rather than on the
@@ -274,8 +290,8 @@ class QwenRecognizer:
             dtype = torch.float32
 
         self._model = LoadedQwen.load(
-            model_id=self.model_id,
-            aligner_id=QWEN_FORCED_ALIGNER_MODEL_ID,
+            model_id=self.model_path or self.model_id,
+            aligner_id=self.aligner_path or QWEN_FORCED_ALIGNER_MODEL_ID,
             device=self.device,
             dtype=dtype,
         )
@@ -513,6 +529,12 @@ class QwenRecognizer:
                     )
                 )
 
-        monologues: list[AsrMonologue] = [AsrMonologue(speaker=0, elements=elements)]
+        # Qwen3-ASR emits no speaker diarization (see this class's docstring),
+        # so the payload SAYS so rather than claiming speaker zero. BA3's
+        # downstream diarization stage attributes speakers when one is asked
+        # for.
+        monologues: list[AsrMonologue] = [
+            AsrMonologue(speaker=undiarized_speaker(), elements=elements)
+        ]
         payload: AsrGenerationPayload = AsrGenerationPayload(monologues=monologues)
         return payload, timed_words

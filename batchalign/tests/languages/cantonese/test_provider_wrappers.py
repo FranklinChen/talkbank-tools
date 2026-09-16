@@ -13,16 +13,37 @@ from batchalign.inference.asr import (
     AsrBatchItem,
     AsrElement,
     AsrMonologue,
+    AttributedSpeaker,
     MonologueAsrResponse,
 )
 from batchalign.worker._types import BatchInferRequest, InferTask
+from batchalign.worker._types_v2 import (
+    NotRequestedDiarizationV2,
+    ProviderDiarizationV2,
+)
+
+
+def _item(diarization: ProviderDiarizationV2 | None = None) -> AsrBatchItem:
+    """One provider ASR item, defaulting to the no-separation request.
+
+    The default lives HERE, in the tests' own helper, rather than on the model:
+    these tests are about payload handling, and the model has to keep making
+    every caller say what it asked the provider for.
+    """
+    return AsrBatchItem(
+        audio_path="clip.wav",
+        lang="yue",
+        diarization=(
+            diarization if diarization is not None else NotRequestedDiarizationV2()
+        ),
+    )
 
 
 def _valid_request() -> BatchInferRequest:
     return BatchInferRequest(
         task=InferTask.ASR,
         lang="yue",
-        items=[AsrBatchItem(audio_path="clip.wav", lang="yue").model_dump()],
+        items=[_item().model_dump()],
     )
 
 
@@ -31,7 +52,7 @@ def _valid_response(lang: str = "yue") -> MonologueAsrResponse:
         lang=lang,
         monologues=[
             AsrMonologue(
-                speaker=1,
+                speaker=AttributedSpeaker(label="1"),
                 elements=[
                     AsrElement(value="好", ts=0.0, end_ts=0.2, type="text"),
                     AsrElement(value="   ", ts=None, end_ts=None, type="text"),
@@ -55,7 +76,8 @@ class _FakeFunRecognizer:
             {
                 "monologues": [
                     {
-                        "speaker": 1,
+                        # FunASR separates no speakers, so it names none.
+                        "speaker": {"kind": "undiarized"},
                         "elements": [
                             {"value": "好", "ts": 0.0, "end_ts": 0.2, "type": "text"},
                             {
@@ -76,16 +98,17 @@ class _FakeFunRecognizer:
 class _FakeTencentRecognizer:
     error: Exception | None = None
 
-    def transcribe(self, _audio_path: str, num_speakers: int = 0):
+    def transcribe(self, _audio_path: str, diarization: ProviderDiarizationV2):
         if self.error is not None:
             raise self.error
-        return [{"speaker_count": num_speakers}]
+        return [{"diarization": diarization.kind}]
 
     def monologues(self, _details):
         return {
             "monologues": [
                 {
-                    "speaker": 1,
+                    # Tencent does separate speakers, so it names one.
+                    "speaker": {"kind": "attributed", "label": "1"},
                     "elements": [
                         {"value": "好", "ts": 0.0, "end_ts": 0.2, "type": "text"},
                         {"value": "   ", "ts": None, "end_ts": None, "type": "text"},
@@ -99,8 +122,29 @@ def test_load_funaudio_asr_applies_engine_overrides(monkeypatch) -> None:
     created: dict[str, object] = {}
 
     class FakeRecognizer:
-        def __init__(self, *, lang: str, model: str, device: str) -> None:
-            created.update({"lang": lang, "model": model, "device": device})
+        def __init__(
+            self,
+            *,
+            lang: str,
+            model: str,
+            device: str,
+            model_path: str | None = None,
+            model_revision: str | None = None,
+            vad_model: str | None = None,
+            vad_model_path: str | None = None,
+            vad_revision: str | None = None,
+            punc_model: str | None = None,
+            punc_revision: str | None = None,
+        ) -> None:
+            created.update(
+                {
+                    "lang": lang,
+                    "model": model,
+                    "device": device,
+                    "model_path": model_path,
+                    "vad_model_path": vad_model_path,
+                }
+            )
 
     monkeypatch.setattr(funaudio_asr, "FunAudioRecognizer", FakeRecognizer)
     monkeypatch.setattr(funaudio_asr, "_recognizer", None)
@@ -110,10 +154,15 @@ def test_load_funaudio_asr_applies_engine_overrides(monkeypatch) -> None:
         {"funaudio_model": "custom-model", "funaudio_device": "cuda"},
     )
 
+    # A direct caller passes no pin, and the loader must not invent one: the
+    # engine overrides still decide the checkpoint, and the resolved-snapshot
+    # arguments stay absent.
     assert created == {
         "lang": "yue",
         "model": "custom-model",
         "device": "cuda",
+        "model_path": None,
+        "vad_model_path": None,
     }
 
 
@@ -172,15 +221,13 @@ def test_funaudio_transcribe_to_monologues_requires_loaded_recognizer(
     monkeypatch.setattr(funaudio_asr, "_recognizer", None)
 
     with pytest.raises(RuntimeError, match="not initialized"):
-        funaudio_asr._transcribe_to_monologues(AsrBatchItem(audio_path="clip.wav"))
+        funaudio_asr._transcribe_to_monologues(_item())
 
 
 def test_infer_funaudio_asr_v2_filters_blank_elements(monkeypatch) -> None:
     monkeypatch.setattr(funaudio_asr, "_recognizer", _FakeFunRecognizer())
 
-    response = funaudio_asr.infer_funaudio_asr_v2(
-        AsrBatchItem(audio_path="clip.wav", lang="yue")
-    )
+    response = funaudio_asr.infer_funaudio_asr_v2(_item())
 
     assert response.lang == "yue"
     assert [element.value for element in response.monologues[0].elements] == ["好"]
@@ -198,14 +245,26 @@ def test_load_tencent_asr_stores_recognizer(monkeypatch) -> None:
     created: dict[str, object] = {}
 
     class FakeRecognizer:
-        def __init__(self, *, lang: str, config=None) -> None:
-            created.update({"lang": lang, "config": config})
+        def __init__(self, *, lang: str, engine_model_type: str, config=None) -> None:
+            created.update(
+                {
+                    "lang": lang,
+                    "engine_model_type": engine_model_type,
+                    "config": config,
+                }
+            )
 
     monkeypatch.setattr(tencent_asr, "TencentRecognizer", FakeRecognizer)
 
-    tencent_asr.load_tencent_asr("yue", None, config={"cfg": True})
+    tencent_asr.load_tencent_asr(
+        "yue", engine_model_type="16k_zh_large", config={"cfg": True}
+    )
 
-    assert created == {"lang": "yue", "config": {"cfg": True}}
+    assert created == {
+        "lang": "yue",
+        "engine_model_type": "16k_zh_large",
+        "config": {"cfg": True},
+    }
     assert tencent_asr._lang == "yue"
 
 
@@ -251,15 +310,13 @@ def test_tencent_transcribe_to_monologues_requires_loaded_recognizer(
     monkeypatch.setattr(tencent_asr, "_recognizer", None)
 
     with pytest.raises(RuntimeError, match="not initialized"):
-        tencent_asr._transcribe_to_monologues(AsrBatchItem(audio_path="clip.wav"))
+        tencent_asr._transcribe_to_monologues(_item())
 
 
 def test_infer_tencent_asr_v2_filters_blank_elements(monkeypatch) -> None:
     monkeypatch.setattr(tencent_asr, "_recognizer", _FakeTencentRecognizer())
 
-    response = tencent_asr.infer_tencent_asr_v2(
-        AsrBatchItem(audio_path="clip.wav", lang="yue")
-    )
+    response = tencent_asr.infer_tencent_asr_v2(_item())
 
     assert response.lang == "yue"
     assert [element.value for element in response.monologues[0].elements] == ["好"]
@@ -273,7 +330,7 @@ def test_infer_aliyun_asr_v2_delegates_to_single_item_helper(monkeypatch) -> Non
         lambda _path: expected,
     )
 
-    response = aliyun_asr.infer_aliyun_asr_v2(AsrBatchItem(audio_path="clip.wav"))
+    response = aliyun_asr.infer_aliyun_asr_v2(_item())
 
     assert response == expected
 

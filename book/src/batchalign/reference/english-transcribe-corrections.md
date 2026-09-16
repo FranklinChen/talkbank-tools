@@ -105,7 +105,7 @@ flowchart TD
     A["AsrOutput\n(raw provider tokens)"]
     B["prepare_words_pre_expansion:\nstages 1-3"]
     C["strip_english_title_periods_on_elements\n⚠ BEFORE stage 3"]
-    D["finalize_words_to_chunks:\nstages 4b-5b"]
+    D["finalize_words_to_chunks:\nstages 5-5b"]
     E["apply_english_transcribe_rules_pre_retokenize\n(I-cap + title-period safety net)"]
     F["utterances_from_prepared_chunks:\nstage 6 (retokenize by punct)"]
     G["finalize_utterances:\nstages 7-8 + apply_english_transcribe_rules_post_retokenize\n(utterance-initial cap)"]

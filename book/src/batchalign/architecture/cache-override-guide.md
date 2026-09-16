@@ -1,7 +1,7 @@
 # Cache Policy Guide
 
 **Status:** Current
-**Last updated:** 2026-08-30 19:35 EDT
+**Last updated:** 2026-09-15 19:40 EDT
 
 When fixing a bug or changing behavior, ask two questions: **does the run need
 fresh inference (`--override-media-cache`), or must it prove that reusable
@@ -60,8 +60,9 @@ run on every invocation.
 
 | Stage | Inside/Outside | Code |
 |-------|---------------|------|
-| Full-file key: `BLAKE3(utr_asr \| audio_identity \| lang)` | Boundary | `chat_ops/fa/utr.rs` |
-| Segment key: `BLAKE3(utr_asr_segment \| audio_identity \| start_ms \| end_ms \| lang)` | Boundary | `chat_ops/fa/utr.rs` |
+| Full-file key: `BLAKE3(utr_asr_v2 \| UTR engine \| audio_identity \| lang)` | Boundary | `chat_ops/fa/utr.rs` |
+| Segment key: `BLAKE3(utr_asr_segment_v2 \| UTR engine \| audio_identity \| start_ms \| end_ms \| lang)` | Boundary | `chat_ops/fa/utr.rs` |
+| Namespace: `utr-asr-v1:<UTR engine>:<composition>` then one `\|<role>=<id>@<revision>` per model (`UtrAsrCacheNamespace`, the only namespace type `cache::tasks::UTR_ASR` accepts), the UTR engine's own and its pinned models, never the FA engine's. A plan that is not fully pinned is `Floating` and is neither read nor written | Boundary | `cache/mod.rs` |
 | ASR inference → `Vec<AsrTimingToken>` | **Inside** | Python `asr.py` |
 | Global Hirschberg DP alignment (words ↔ ASR tokens) | Outside | `runner/dispatch/utr.rs` |
 | Utterance bullet injection | Outside | `runner/dispatch/utr.rs` |
@@ -98,11 +99,11 @@ FA refresh must not change UTR evidence reuse.
 | Post-processing logic (injection, bullet computation, %wor generation, retokenization after cache, terminator patching) | **No** | Runs after cache retrieval, cached value is still correct |
 | Cache key computation | **No** | Old entries become orphans (different key = automatic miss). New keys miss and re-infer. |
 | Word extraction logic (changes which words are sent to the model) | **Yes** | Cached result was computed from different input words |
-| ML model/engine code (Python worker) | **Automatic** if `engine_version` changes; **Yes** if version string unchanged | Engine version scoping handles model upgrades transparently |
+| ML model/engine code (Python worker) | **Automatic** for FA if the reported FA engine identity changes; **Yes** if the identity string is unchanged, and for a UTR model change within one UTR engine | FA rows are namespaced by the reported FA engine (`FaCacheNamespace`); UTR ASR rows by the UTR engine, which does not yet distinguish model revisions |
 | Serialization format of legacy FA/UTR derived values | **Usually no** | Normal mode may treat an unreadable derived value as work to recompute; required mode refuses the unresolved group. |
 | Serialization format of raw Rev/speaker evidence | **No automatic refresh** | Corruption fails closed so local damage cannot authorize a paid call. Change the schema/revision deliberately. |
 | Parse logic (changes how CHAT is parsed before extraction) | **Depends** | If extraction produces different words → yes (different key). If same words → no. |
-| Pre-cache text normalization (e.g., `preprocess_for_translate`) | **Yes** | Key is computed from normalized text; same key now maps to wrong cached result |
+| Pre-cache text normalization (e.g., the script rendering in `TranslationSource::render`) | **Yes** | Key is computed from normalized text; same key now maps to wrong cached result |
 
 ## Worked Example: The Bullet-Shrinking Bug
 

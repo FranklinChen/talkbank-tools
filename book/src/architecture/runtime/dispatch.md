@@ -1,7 +1,7 @@
 # Dispatch and Execution
 
 **Status:** Current
-**Last updated:** 2026-08-31 07:13 EDT
+**Last updated:** 2026-09-15 19:40 EDT
 
 How a job moves from the CLI to a running command: the four CLI
 dispatch targets, the workflow families that organize commands, the
@@ -55,7 +55,10 @@ shared models.
 
 If daemon startup is unavailable but a loopback server is already
 listening on the configured port, the CLI reuses it before falling
-back to direct inline execution.
+back to direct inline execution. Reuse is subject to the same
+build-identity check as submission: a server reporting another build,
+or no build at all, is refused rather than reused. See
+[Server Mode](../../batchalign/user-guide/server-mode.md#build-identity-check).
 
 ### 4. Direct local host
 
@@ -161,8 +164,11 @@ followed by `build_chat()` to construct the initial AST.
 generic loop:
 
 1. Pair each primary transcript with `FILE.gold.cha`.
-2. Morphotag the main transcript only.
-3. Parse the morphotagged main and raw gold into `ChatFile` ASTs.
+2. Morphotag the main transcript only, and carry morphotag's own
+   post-validation proof rather than its bytes.
+3. Parse the gold companion leniently into a `ChatFile` AST. The main side is
+   already the document that proof carries, and is never serialized and read
+   back.
 4. Build a `ComparisonBundle` with main/gold compare views, structural
    word matches, and metrics.
 5. Materialize the released main output or an internal AST-first gold
@@ -219,7 +225,7 @@ ASR inference → post-processing → CHAT assembly → utseg → morphosyntax
 ```
 
 Each step is a separate workflow call (`process_transcribe` →
-`process_utseg` → `process_morphosyntax`). Between steps, CHAT text
+`process_utseg_with_evidence` → `process_morphosyntax`). Between steps, CHAT text
 is serialized and re-parsed, each step operates on a different
 version of the file. `benchmark` follows the same composition style
 at the workflow level by chaining `transcribe` then `compare`, while
@@ -274,7 +280,7 @@ pub(crate) struct CatalogEntry {
     pub capability_kind: CommandCapabilityKind,
     pub io_profile: CommandIoProfile,
     pub runner_dispatch_kind: RunnerDispatchKind,
-    pub capabilities: CapabilityPlan,   // primary infer task + any others
+    pub capabilities: CapabilityPlan,   // the one advertised infer task, and the surface
     pub output_policy: OutputPolicy,
     pub recipe: &'static Recipe,
 }
@@ -355,7 +361,6 @@ Module map:
 | `coref.rs` | Coreference execution stage |
 | `translate.rs` | Translation execution stage |
 | `utseg.rs` | Utterance segmentation execution stage |
-| `simple_batched_text.rs` | Shared batched-text execution for utseg/translate/coref |
 | `text_io.rs` | CHAT file read/write for text-based commands |
 | `worker_gateway.rs` | `WorkerGateway` trait + live implementation over the worker pool |
 

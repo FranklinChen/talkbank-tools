@@ -96,6 +96,17 @@ pub(crate) fn default_num_speakers() -> NumSpeakers {
     NumSpeakers(1)
 }
 
+/// Whether one submitted source names a CHAT transcript.
+///
+/// The ONE answer to that question at the submission boundary, shared with
+/// [`crate::submission::materialize_submission_job`], which derives each file's
+/// `has_chat` flag from the same strings. Two spellings of this predicate can
+/// disagree, and the obvious second spelling does: `Path::extension()` returns
+/// `None` for a file named exactly `.cha`, where this returns `true`.
+pub(crate) fn is_chat_source_name(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".cha")
+}
+
 impl JobSubmission {
     /// Validate submission constraints (paths_mode, command consistency).
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -114,13 +125,41 @@ impl JobSubmission {
         // check: an unimplemented engine is wrong for every language, and a
         // language-shaped message would send the operator hunting the wrong
         // thing.
-        self.validate_asr_engine_implemented()?;
-        if let CommandOptions::Transcribe(options) | CommandOptions::TranscribeS(options) = &self.options {
+        self.validate_asr_selection()?;
+        if let CommandOptions::Transcribe(options) | CommandOptions::TranscribeS(options) =
+            &self.options
+        {
             if options.auto_speakers && options.effective_asr_engine() != AsrEngineName::RevAi {
-                return Err(ValidationError("automatic speaker counts currently require the Rev.AI ASR engine".into()));
+                return Err(ValidationError(
+                    "automatic speaker counts currently require the Rev.AI ASR engine".into(),
+                ));
             }
             if !options.auto_speakers && self.num_speakers.0 == 0 {
-                return Err(ValidationError("expected speaker count must be positive; use auto_speakers for inference".into()));
+                return Err(ValidationError(
+                    "expected speaker count must be positive; use auto_speakers for inference"
+                        .into(),
+                ));
+            }
+            // Franklin's ruling, 2026-09-15: a diarization speaker count is
+            // either exactly N (N at least 2) or automatic, for every diarizer.
+            //
+            // Refused rather than quietly treated as automatic. Asking to
+            // SEPARATE speakers while asserting the recording has one is a
+            // contradiction, not a request for detection, and silently
+            // detecting would do something other than what was asked. What it
+            // used to do was obey: the count reached the diarizer, which
+            // returned one track, which is why `--diarization enabled` runs
+            // came back with a single PAR0 and the two ml_golden
+            // "surfaces multiple speakers" tests failed.
+            if options.diarize && !options.auto_speakers && self.num_speakers.0 == 1 {
+                return Err(ValidationError(
+                    "diarization was requested with a speaker count of 1, which asks a \
+                     diarizer to separate speakers in a recording asserted to have one. \
+                     Pass the real count (2 or more); or omit diarization, for a \
+                     single-speaker recording; or pass auto_speakers to have the count \
+                     inferred, where the ASR engine supports it."
+                        .into(),
+                ));
             }
         }
 
@@ -130,6 +169,10 @@ impl JobSubmission {
         // pipeline code from ever observing an invalid combination, and
         // makes the dashboard / job record show honest values.
         self.validate_lang_command_pairing()?;
+
+        // Reject a source whose KIND the command cannot consume, while the
+        // filename is still in hand to name in the message.
+        self.validate_source_kinds()?;
 
         // Validate language support for engines the command will use.
         self.validate_language_support()?;
@@ -187,21 +230,31 @@ impl JobSubmission {
     /// The verdict comes from `AsrBackend::try_from_engine`, the same total
     /// function dispatch uses, and the alternatives are derived from it as
     /// well, so this message and the runtime cannot disagree about what works.
-    fn validate_asr_engine_implemented(&self) -> Result<(), ValidationError> {
+    ///
+    /// An engine that runs is then asked for the checkpoint it reads from its
+    /// override key (`AsrBackend::admit_checkpoint`, the admission the
+    /// transcribe plan repeats at dispatch). Provenance records that checkpoint
+    /// byte for byte, so one that is not stamp-safe text is refused here,
+    /// before the job is queued, rather than failing the job after ASR ran.
+    fn validate_asr_selection(&self) -> Result<(), ValidationError> {
         use crate::transcribe::AsrBackend;
 
         let Some(engine) = self.selected_asr_engine() else {
             return Ok(());
         };
-        let Err(refusal) = AsrBackend::try_from_engine(&engine) else {
-            return Ok(());
-        };
-
-        let alternatives: Vec<&str> = AsrBackend::implemented_engine_names().collect();
-        Err(ValidationError(format!(
-            "{refusal}. Use --asr-engine with one of: {}.",
-            alternatives.join(", ")
-        )))
+        match AsrBackend::try_from_engine(&engine) {
+            Ok(backend) => backend
+                .admit_checkpoint(&self.options.common().engine_overrides.extras)
+                .map(|_checkpoint| ())
+                .map_err(|refusal| ValidationError(refusal.to_string())),
+            Err(refusal) => {
+                let alternatives: Vec<&str> = AsrBackend::implemented_engine_names().collect();
+                Err(ValidationError(format!(
+                    "{refusal}. Use --asr-engine with one of: {}.",
+                    alternatives.join(", ")
+                )))
+            }
+        }
     }
 
     /// Reject cache flag combinations that would ask one task to both reuse
@@ -259,12 +312,18 @@ impl JobSubmission {
     /// must never carry `PerFile`; if they do, something downstream of
     /// the CLI built a malformed `JobSubmission`.
     fn validate_lang_command_pairing(&self) -> Result<(), ValidationError> {
-        use crate::api::ReleasedCommand;
+        use crate::dispatch_language::{CommandLanguageSource, language_source};
         use crate::types::domain::LanguageSpec;
 
+        // Read from the ONE owner of this question rather than restating it.
+        // This predicate used to be a `matches!` over three command names here
+        // AND an `as_resolved()` check in each dispatcher, and the two
+        // spellings disagreed: submission required coref to arrive as
+        // `PerFile`, while coref's dispatch refused anything that was not a
+        // resolved code, so every coref job was admitted and then refused.
         let is_per_file_command = matches!(
-            self.command,
-            ReleasedCommand::Morphotag | ReleasedCommand::Translate | ReleasedCommand::Coref,
+            language_source(self.command),
+            CommandLanguageSource::PerFile
         );
 
         match (&self.lang, is_per_file_command) {
@@ -283,6 +342,73 @@ impl JobSubmission {
             }
             (LanguageSpec::Auto | LanguageSpec::Resolved(_), false) => Ok(()),
         }
+    }
+
+    /// Every source filename this submission names, in submission order.
+    ///
+    /// Paths mode sends filesystem paths; content mode sends inline CHAT
+    /// payloads and media filenames. Both are sources, and the distinction
+    /// does not matter to the question asked below.
+    fn submitted_source_names(&self) -> impl Iterator<Item = &str> {
+        self.source_paths
+            .iter()
+            .map(|path| path.as_str())
+            .chain(self.files.iter().map(|file| file.filename.as_ref()))
+            .chain(self.media_files.iter().map(String::as_str))
+    }
+
+    /// Refuse a CHAT transcript submitted to a command whose sources are
+    /// recordings, while the filename is still in hand to name.
+    ///
+    /// Benchmark is the case this was written for: its planner makes EVERY
+    /// discovered input an audio work unit and derives the gold transcript
+    /// beside it by replacing the extension, so a `.cha` submitted as a source
+    /// became a work unit whose "audio" was a transcript and whose gold was
+    /// itself. Nothing downstream noticed, and the file was handed to
+    /// `ensure_wav`, which hands it to ffmpeg.
+    ///
+    /// Keyed on the PLANNER, and deliberately only on this one.
+    ///
+    /// The narrow claim is the true one: `PlannerKind::BenchmarkPairs` makes
+    /// every discovered input a recording AND derives that recording's gold
+    /// companion by replacing its extension. A `.cha` under that planner is
+    /// therefore its own gold, which is a contradiction no other command's
+    /// planner can produce. It is not keyed on "does this command take audio":
+    /// `align` and `speaker_identify` are `PlannerKind::AudioInputs` and
+    /// `CommandIoProfile::PathsModeAudio` yet consume CHAT, so neither field
+    /// answers that question.
+    ///
+    /// A generalized version of this check, over every command whose declared
+    /// [`CommandSourceKind`] is `Media`, was written and then withdrawn. It is
+    /// not sound here: this repository's server tests drive `transcribe`
+    /// against the test-echo worker using CHAT fixtures, in both submission
+    /// modes (content-mode `files` and paths-mode `source_paths`), because
+    /// test-echo echoes content. Refusing a CHAT source for every media
+    /// command broke 45 tests in `cli_integration_suite`. So a `.cha` reaching
+    /// `ensure_wav` through `transcribe` or the media-analysis commands
+    /// (`opensmile`, `avqi`, `diarize`) is NOT closed by this check; see the
+    /// benchmark developer page for what is left open and why.
+    ///
+    /// [`CommandSourceKind`]: crate::recipe_runner::command_spec::CommandSourceKind
+    fn validate_source_kinds(&self) -> Result<(), ValidationError> {
+        use crate::recipe_runner::command_spec::PlannerKind;
+
+        if crate::command_model::command_spec(self.command).planner != PlannerKind::BenchmarkPairs {
+            return Ok(());
+        }
+
+        for name in self.submitted_source_names() {
+            if is_chat_source_name(name) {
+                return Err(ValidationError(format!(
+                    "command '{}' takes media recordings as its sources, but {name:?} is a CHAT \
+                     transcript. Submit only the recording; benchmark finds each recording's \
+                     gold transcript beside it by replacing the extension, so the gold must not \
+                     be passed as an input.",
+                    self.command
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn validate_language_support(&self) -> Result<(), ValidationError> {
@@ -345,13 +471,18 @@ impl JobSubmission {
             )));
         }
 
-        // Commands that use Stanza: morphotag, utseg, coref, compare
+        // Commands that use Stanza AND carry a job-level language to check.
+        //
+        // Morphotag and coref are NOT listed, and listing them was dead code:
+        // both are per-file commands, so `validate_lang_command_pairing` above
+        // has already required them to be `LanguageSpec::PerFile`, and the
+        // `let lang = ...` match at the top of this function returns early for
+        // `PerFile`. Their arms could therefore never be reached. Their
+        // languages are checked per file instead, against each file's own
+        // `@Languages:` header, which is the only honest place to check them.
         let uses_stanza = matches!(
             &self.options,
-            CommandOptions::Morphotag(_)
-                | CommandOptions::Utseg(_)
-                | CommandOptions::Coref(_)
-                | CommandOptions::Compare(_)
+            CommandOptions::Utseg(_) | CommandOptions::Compare(_)
         );
         if uses_stanza && !is_stanza_supported_language(lang)? {
             return Err(ValidationError(format!(
@@ -958,6 +1089,84 @@ mod tests {
         }
     }
 
+    /// A benchmark submission naming `source_paths` as its inputs.
+    fn benchmark_submission(source_paths: Vec<&str>) -> JobSubmission {
+        JobSubmission {
+            command: ReleasedCommand::Benchmark,
+            lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+            num_speakers: NumSpeakers(1),
+            files: vec![],
+            media_files: vec![],
+            media_mapping: Default::default(),
+            media_subdir: Default::default(),
+            source_dir: Default::default(),
+            options: CommandOptions::Benchmark(crate::options::BenchmarkOptions {
+                common: CommonOptions::default(),
+                asr_engine: AsrEngineName::Whisper,
+                wor: true.into(),
+                merge_abbrev: false.into(),
+            }),
+            paths_mode: true,
+            output_paths: source_paths
+                .iter()
+                .map(|_| batchalign_types::paths::ClientPath::from("/tmp/out.cha"))
+                .collect(),
+            source_paths: source_paths.into_iter().map(Into::into).collect(),
+            display_names: vec![],
+            debug_traces: false,
+            before_paths: vec![],
+        }
+    }
+
+    /// The ordinary shape: benchmark is given recordings.
+    #[test]
+    fn benchmark_accepts_audio_sources() {
+        benchmark_submission(vec!["/corpus/session.mp3"])
+            .validate()
+            .expect("benchmark takes audio sources");
+    }
+
+    /// RED FIRST: a CHAT transcript submitted to `benchmark` is refused HERE,
+    /// while its name can still be quoted back.
+    ///
+    /// It used to be accepted. Benchmark's planner makes every discovered input
+    /// a recording and derives the gold transcript beside it by replacing the
+    /// extension, so a submitted `.cha` became a work unit whose audio was the
+    /// transcript and whose gold was itself; the pipeline then passed the
+    /// transcript to `ensure_wav`, which passes it to ffmpeg. The gold is
+    /// derived, never submitted, so naming it is a category error rather than a
+    /// second input.
+    #[test]
+    fn benchmark_refuses_a_chat_source_and_names_it() {
+        let error = benchmark_submission(vec!["/corpus/session.mp3", "/corpus/session.cha"])
+            .validate()
+            .expect_err("a CHAT file is not a benchmark source");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("session.cha"),
+            "the refusal must name the file that was passed: {message}"
+        );
+        assert!(
+            message.contains("benchmark"),
+            "the refusal must name the command: {message}"
+        );
+    }
+
+    /// The refusal is scoped to benchmark's planner, which is the only one
+    /// that derives a gold companion from the source. Every CHAT-consuming
+    /// command still takes `.cha` sources, which is what stops this check from
+    /// being a blanket extension rule.
+    #[test]
+    fn a_chat_consuming_command_still_accepts_chat_sources() {
+        let mut submission = morphotag_submission();
+        submission.source_paths = vec!["/corpus/session.cha".into()];
+        submission.output_paths = vec!["/corpus/out/session.cha".into()];
+        submission
+            .validate()
+            .expect("morphotag consumes CHAT sources");
+    }
+
     // --- RED: known-broken (engine, language) pair deny-list -----------------
     //
     // As of 2026-04-22, Rev.AI's Malayalam (lang=ml / iso3=mal) ASR is
@@ -1009,12 +1218,105 @@ mod tests {
     #[test]
     fn auto_speakers_refuses_unsupported_engine_at_submission() {
         let mut submission = transcribe_submission("eng", AsrEngineName::Whisper);
-        let CommandOptions::Transcribe(options) = &mut submission.options else { panic!("transcribe") };
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("transcribe")
+        };
         options.auto_speakers = true;
-        assert!(submission.validate().expect_err("unsupported automatic count").to_string().contains("automatic speaker counts"));
-        let CommandOptions::Transcribe(options) = &mut submission.options else { panic!("transcribe") };
+        assert!(
+            submission
+                .validate()
+                .expect_err("unsupported automatic count")
+                .to_string()
+                .contains("automatic speaker counts")
+        );
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("transcribe")
+        };
         options.asr_engine = AsrEngineName::RevAi;
-        submission.validate().expect("Rev automatic count is supported");
+        submission
+            .validate()
+            .expect("Rev automatic count is supported");
+    }
+
+    /// Diarization with a speaker count of one is refused at SUBMISSION.
+    ///
+    /// Franklin's ruling, 2026-09-15: a diarization count is exactly N (N at
+    /// least 2) or automatic. One is neither. It is refused rather than quietly
+    /// read as automatic, because asking to separate speakers while asserting
+    /// there is one speaker is a contradiction, and inferring the count would
+    /// do something other than what was asked.
+    ///
+    /// What it used to do was obey. The count reached the diarizer, which
+    /// returned a single track, which is why diarized runs produced one `PAR0`
+    /// and the two ml_golden "surfaces multiple speakers" tests failed with the
+    /// very count they submitted.
+    #[test]
+    fn diarization_with_a_count_of_one_is_refused_at_submission() {
+        let mut submission = transcribe_submission("eng", AsrEngineName::Whisper);
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("the helper builds transcribe options")
+        };
+        options.diarize = true;
+
+        // The helper submits one speaker, which is the contradiction.
+        let message = submission
+            .validate()
+            .expect_err("separating the speakers of a one-speaker recording is not a request")
+            .to_string();
+        assert!(message.contains("speaker count of 1"), "{message}");
+        // Every remedy the operator actually has, named.
+        assert!(message.contains("2 or more"), "{message}");
+        assert!(message.contains("omit diarization"), "{message}");
+        assert!(message.contains("auto_speakers"), "{message}");
+
+        submission.num_speakers = NumSpeakers(2);
+        submission
+            .validate()
+            .expect("two speakers is a question a diarizer can answer");
+
+        // One speaker and no diarization is ordinary single-speaker
+        // transcription, and stays legal: the refusal is about the PAIR.
+        submission.num_speakers = NumSpeakers(1);
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("the helper builds transcribe options")
+        };
+        options.diarize = false;
+        submission
+            .validate()
+            .expect("a single-speaker transcription asks nothing of a diarizer");
+    }
+
+    /// A checkpoint the selected engine reads is recorded in provenance byte
+    /// for byte, so one that is not stamp-safe text is refused when the
+    /// options are parsed, before the job is queued. The same override on an
+    /// engine that reads no checkpoint is not the engine's to refuse.
+    #[test]
+    fn submission_refuses_a_checkpoint_provenance_could_not_record() {
+        use crate::types::engines::FUNAUDIO_MODEL_OVERRIDE_KEY;
+
+        // English: the checkpoint is refused before any language check, and
+        // Rev.AI (the second half) supports it.
+        let mut submission = transcribe_submission("eng", AsrEngineName::HkFunaudio);
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("transcribe")
+        };
+        options.common.engine_overrides.extras.insert(
+            FUNAUDIO_MODEL_OVERRIDE_KEY.to_owned(),
+            "paraformer | zh".to_owned(),
+        );
+        let message = submission
+            .validate()
+            .expect_err("unrecordable checkpoint")
+            .to_string();
+        assert!(message.contains(FUNAUDIO_MODEL_OVERRIDE_KEY), "{message}");
+
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("transcribe")
+        };
+        options.asr_engine = AsrEngineName::RevAi;
+        submission
+            .validate()
+            .expect("Rev reads no FunAudio checkpoint");
     }
 
     /// Guard rail: the deny-list must not over-reject. `eng` + Rev.AI is the

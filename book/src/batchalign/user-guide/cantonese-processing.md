@@ -1,7 +1,7 @@
 # Cantonese Engines
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-16 01:41 EDT
 
 Batchalign includes alternative ASR and forced alignment engines for Cantonese.
 These are built-in modules shipped in the base package, selected with the
@@ -136,9 +136,76 @@ Chinese to Traditional Chinese. This normalization:
 2. **Domain-specific corrections** via a 31-entry replacement table for
    Cantonese character variants (e.g., 系→係, 呀→啊, 中意→鍾意)
 
-Normalization is built into the Rust extension (`batchalign_core`) and runs
-automatically during ASR post-processing for `lang=yue`. No additional Python
-dependencies (like OpenCC) are required.
+It runs in the Rust server during ASR post-processing for `lang=yue`, once per
+speaker monologue, before anything splits the words. No configuration, no
+additional Python dependencies (like OpenCC), and nothing engine-specific: the
+ASR engines report their own characters and the server normalizes them, so the
+same recording reads the same whether it was transcribed by FunASR, Tencent,
+Aliyun, Qwen or Whisper. Until 2026-09-16 some engines normalized their own
+output and others did not, which is why older Cantonese transcripts from Qwen
+and Whisper may still carry simplified characters; re-running them corrects it.
+
+Two consequences worth knowing:
+
+- **Phrases are converted, not characters in isolation.** The whole monologue is
+  converted in one pass, so a replacement that spans two words (`真` `系` to
+  `真` `係`) still applies even though the engines report one word per
+  character.
+- **A run that could not be normalized fails the file, with both character
+  counts in the message.** Handing each word back its own characters requires
+  the count to be unchanged; a transcript whose words silently moved onto
+  different characters would carry wrong timings and look correct. No input
+  measured so far does this (191,125 strings checked, none changed length), so
+  this is a guard rather than something to expect.
+
+## An empty transcript is a failure, not a result
+
+A Cantonese run that recognizes nothing now fails and names the stage that came
+up empty, instead of completing with a transcript of headers and no utterances.
+Three stages can each end with no words, and they mean different things:
+
+- **the ASR engine returned no words at all.** Nothing downstream ran, so
+  normalization is not implicated: it only executes when there are words to
+  normalize. Check that the engine has a Cantonese model and that `--lang yue`
+  reached it.
+- **post-processing kept no utterance** from the words the engine returned.
+- **CHAT assembly kept no utterance line.** The words were all terminators or
+  separators. This is the shape a provider produces when it returns only CJK
+  sentence marks: each `。` becomes a bare `.`, and an utterance of nothing but
+  a terminator has no content to write.
+
+Until 2026-09-16 the first of these produced a completed job and an empty file.
+
+## What a cloud provider does not send
+
+Tencent and Aliyun both document every field of a result as nullable, and their
+SDKs leave an attribute as `None` when the service omits it. Batchalign treats
+those absences as facts rather than as zeros:
+
+- **A word the provider did not time arrives untimed.** It appears in the
+  transcript with no timing bullet of its own rather than at the start of its
+  segment. Previously a missing offset read as `0`, which is a real time, so
+  the word claimed a position the provider never gave it.
+- **A Tencent segment with no `StartMs` leaves every word in it untimed**,
+  because the per-word offsets are relative to that start and locate nothing
+  without it. Previously the whole segment was placed at the beginning of the
+  recording.
+- **A word with no text refuses the file**, naming the segment and word.
+  Previously it became an empty string and was dropped silently, so a word the
+  service failed to return left no trace at all.
+- **A field of the wrong type refuses the file**, as does a time that is
+  negative, inverted, or far larger than any recording (the shape a provider
+  returning an absolute timestamp would produce).
+
+A refusal names the provider, the position and the fault, for example
+`invalid Tencent ASR output at segment 3 word 7: Word is absent`. Re-run the
+file after the provider issue is resolved; batchalign does not guess a value in
+order to finish.
+
+Aliyun performs no speaker separation, and the FunASR engines do not produce
+speaker labels either, so their output is one undiarized track. Use
+`--diarization enabled` (see [transcribe](commands/transcribe.md)) when speaker
+attribution is needed with those engines.
 
 ## Engine Details
 
@@ -168,8 +235,19 @@ dependencies (like OpenCC) are required.
   to swap to a different FunASR model (e.g. a Paraformer variant); the
   loader's downstream code branches on whether the chosen model name
   contains `paraformer`.
+- Which checkpoint you name changes what the transcript records. This build
+  pins the default SenseVoice checkpoint and its voice-activity model, and
+  pins the Paraformer checkpoint together with the voice-activity and
+  punctuation models it loads; the stamp's `asr_model=` names every one of
+  them with its revision. A checkpoint this build does not pin loads anyway
+  and is recorded at the revision the worker reports for it, so an override
+  never leaves the transcript naming the engine alone.
 - VAD (Voice Activity Detection) built in via `fsmn-vad`
-- Per-character Cantonese tokenization for timestamp alignment
+- Timestamps are paired with FunASR's OWN units, never with a retokenization of
+  the display surface: SenseVoice's `words`, which FunASR builds in lockstep
+  with its `timestamp` array, and Paraformer's pre-punctuation `raw_text`,
+  which holds one whitespace token per timestamp. The unit and timestamp counts
+  must agree before anything is paired
 
 ### Qwen3-ASR
 

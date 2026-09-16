@@ -30,6 +30,7 @@ use batchalign::worker::handle::{WorkerConfig, WorkerHandle};
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask, WorkerProfile};
 use common::resolve_python;
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use serde_json::{Value, json};
 
 macro_rules! require_python {
@@ -486,7 +487,7 @@ async fn multi_file_job_produces_per_file_results() {
     assert_eq!(info.total_files, 3);
 
     // Poll until complete.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(&info.job_id));
     loop {
         let resp = client
             .get(format!("{base_url}/jobs/{}", info.job_id))
@@ -500,11 +501,7 @@ async fn multi_file_job_produces_per_file_results() {
         ) {
             break;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "job did not finish within 60s"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        deadline.keep_waiting(ProgressSnapshot::job(&job)).await;
     }
 
     // Verify all 3 files have individual results.

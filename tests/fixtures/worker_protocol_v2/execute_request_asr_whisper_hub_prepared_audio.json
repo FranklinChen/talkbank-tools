@@ -8,6 +8,15 @@
     "input": {
       "kind": "prepared_audio",
       "audio_ref_id": "audio-ref-whisper-hub-0001"
+    },
+    "models": {
+      "engine": "whisper",
+      "asr": {
+        "id": "openai/whisper-large-v3",
+        "revision": {
+          "kind": "unpinned"
+        }
+      }
     }
   },
   "attachments": [

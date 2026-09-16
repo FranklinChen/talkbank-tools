@@ -56,7 +56,6 @@ def test_utseg_config_builder_includes_constituency_for_english(monkeypatch):
                 )
             },
             iso3_to_alpha2={"eng": "en"},
-            stanza_version="test-stanza",
         ),
     )
 

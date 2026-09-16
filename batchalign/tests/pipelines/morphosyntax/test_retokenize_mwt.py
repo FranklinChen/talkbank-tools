@@ -355,8 +355,7 @@ def _run_v2_morphosyntax(nlp, ctx, tmp_path, *, retokenize, request_id):
     assert response.result is not None, "V2 response should have a result payload"
     items = response.result.items
     assert len(items) == 1
-    assert items[0].error is None, f"Item error: {items[0].error}"
-    assert items[0].raw_sentences is not None
+    assert items[0].kind == "analyzed", f"Item: {items[0]}"
 
     first_sent = items[0].raw_sentences[0]
     first_token = first_sent[0]

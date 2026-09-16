@@ -8,10 +8,9 @@
 
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::api::{ChatText, EngineVersion, LanguageCode3};
+use crate::api::{ChatText, LanguageCode3};
 use crate::chat_ops::ChatFile;
 use crate::types::worker_v2::{
     UtsegAdjacencyPolicyRevisionV2, UtsegBoundaryModelEvidenceV2, UtsegItemResultV2,
@@ -32,12 +31,12 @@ use batchalign_transform::utseg::{
 /// through the pipeline is future follow-up work; the data is already
 /// typed and available to any caller that calls `collect_utseg_payloads`
 /// directly.
-fn collect_utseg_batch_items(chat_file: &ChatFile) -> Vec<(usize, UtsegBatchItem)> {
+pub(crate) fn collect_utseg_batch_items(chat_file: &ChatFile) -> Vec<(usize, UtsegBatchItem)> {
     collect_utseg_payloads(chat_file).batch_items
 }
 use batchalign_transform::utseg_compute;
 use batchalign_transform::validate::ValidityLevel;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
@@ -46,25 +45,7 @@ use crate::pipeline::PipelineServices;
 use crate::pipeline::text_infer::{
     TextBatchHooks, TextPipelineHooks, run_text_batch_pipeline, run_text_pipeline,
 };
-use crate::text_batch::{
-    TextBatchFileInput, TextBatchFileResults, TextBatchOperation, TextBatchWorkflow,
-    TextBatchWorkflowRequest, TextPerFileWorkflowRequest,
-};
-
-/// Command-specific parameters for the utseg workflow family.
-///
-/// No `Default`: a caller must state its cancellation posture explicitly
-/// (a real token or a named `NotWired` reason), never inherit a silent
-/// zero-value stand-in.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct UtsegWorkflowParams<'a> {
-    /// Operator opt-in to the legacy Stanza constituency-parser
-    /// fallback when no language-specific TalkBank BERT utseg model is
-    /// configured. Set by the `--utseg-fallback-stanza` CLI flag.
-    pub fallback_policy: UtsegFallbackPolicy,
-    /// The job's cancellation token, when this dispatch has one.
-    pub cancellation: Cancellation<'a>,
-}
+use crate::text_batch::{EngineItemFailure, ItemFailure, TextBatchFileInput, TextBatchFileResults};
 
 /// How admitted utterance-boundary decisions enter the local transform.
 ///
@@ -130,7 +111,10 @@ impl TranscribeUtsegExecution {
 }
 
 /// Closed local post-inference policy recorded with every rederived decision.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+///
+/// Deserializable because a retained evidence artifact records it and the
+/// replay reads it back (`crate::utseg_evidence::AdmittedUtsegEvidence`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LocalUtsegDecisionPolicyRevision {
     AdjacencyOnlyV1,
@@ -138,13 +122,97 @@ pub(crate) enum LocalUtsegDecisionPolicyRevision {
 }
 
 /// Complete receipt for a locally rederived boundary-model decision.
-#[derive(Debug, Clone, Serialize)]
+///
+/// A receipt claims that one closed local policy, applied to these worker
+/// assignments, produced the applicable assignments it travels with. Because it
+/// can also be read back from an artifact, that claim is checked wherever a
+/// receipt joins a prediction: see [`Self::check_explains`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LocalUtsegDecisionReceipt {
     revision: LocalUtsegDecisionPolicyRevision,
     worker_adjacency_policy_revision: UtsegAdjacencyPolicyRevisionV2,
     local_adjacency_policy_revision: UtsegAdjacencyPolicyRevisionV2,
     worker_assignments: Vec<usize>,
     suppressed_split_before_word_indices: Vec<usize>,
+}
+
+impl LocalUtsegDecisionReceipt {
+    /// Prove this receipt explains `evidence` and `response`.
+    ///
+    /// Recomputed, never trusted, and through the same owner that performed the
+    /// original reapplication: the worker's declared policy must reproduce the
+    /// worker assignments the receipt records, the evidence must declare the
+    /// local policy the receipt names (reapplication stamps it there), and
+    /// replaying that local policy must reproduce both the applicable
+    /// assignments and the exact suppressions claimed. A receipt describing some
+    /// other decision therefore cannot travel with an admitted prediction.
+    fn check_explains(
+        &self,
+        evidence: &UtsegBoundaryModelEvidenceV2,
+        response: &UtsegResponse,
+    ) -> Result<(), String> {
+        if evidence.adjacency_policy_revision != self.local_adjacency_policy_revision {
+            return Err(format!(
+                "local utterance-boundary receipt names the {:?} adjacency policy, but its \
+                 evidence declares {:?}",
+                self.local_adjacency_policy_revision, evidence.adjacency_policy_revision
+            ));
+        }
+        if self.worker_assignments.len() != evidence.word_evidence.len() {
+            return Err(format!(
+                "local utterance-boundary receipt records {} worker assignments for {} \
+                 evidence words",
+                self.worker_assignments.len(),
+                evidence.word_evidence.len()
+            ));
+        }
+
+        // Reapplication recomputes applied actions from the RAW actions, which
+        // it never changes, so replaying the worker's own policy must give the
+        // worker's own assignments back.
+        let (_, worker_side) = evidence
+            .reapply_adjacency_policy(self.worker_adjacency_policy_revision)
+            .into_parts();
+        if worker_side != self.worker_assignments {
+            return Err(
+                "local utterance-boundary receipt records worker assignments that the worker's \
+                 own declared policy does not produce"
+                    .to_owned(),
+            );
+        }
+
+        let reapplied = evidence.reapply_adjacency_policy(self.local_adjacency_policy_revision);
+        let (applicable, suppressed) = match self.revision {
+            LocalUtsegDecisionPolicyRevision::AdjacencyOnlyV1 => {
+                let (_, assignments) = reapplied.into_parts();
+                (assignments, Vec::new())
+            }
+            LocalUtsegDecisionPolicyRevision::AdjacencyPreserveExactRetracesV1 => {
+                let (_, assignments, suppressed) = reapplied
+                    .protect_splits_before(
+                        &self.suppressed_split_before_word_indices,
+                        &self.worker_assignments,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into_parts();
+                (assignments, suppressed)
+            }
+        };
+        if applicable != response.assignments {
+            return Err(
+                "local utterance-boundary receipt does not reproduce the assignments it \
+                 accompanies"
+                    .to_owned(),
+            );
+        }
+        if suppressed != self.suppressed_split_before_word_indices {
+            return Err(
+                "local utterance-boundary receipt claims suppressions its own policy does not make"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Complete post-CHAT utseg request whose evidence destination is mandatory.
@@ -163,87 +231,15 @@ pub(crate) struct EvidenceRetainingUtsegRequest<'a> {
     pub(crate) cancellation: Cancellation<'a>,
 }
 
-/// Typed workflow operation for utseg.
-pub(crate) struct UtsegOperation;
-
-/// Trait-oriented workflow wrapper for utseg.
-pub(crate) type UtsegWorkflow = TextBatchWorkflow<UtsegOperation>;
-
-#[async_trait]
-impl TextBatchOperation for UtsegOperation {
-    type Shared<'a>
-        = PipelineServices<'a>
-    where
-        Self: 'a;
-
-    type Params<'a>
-        = UtsegWorkflowParams<'a>
-    where
-        Self: 'a;
-
-    async fn run_single(
-        chat_text: ChatText<'_>,
-        lang: &LanguageCode3,
-        shared: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> Result<String, ServerError> {
-        run_utseg_impl(
-            chat_text.as_ref(),
-            lang,
-            shared.pool,
-            shared.cache,
-            shared.engine_version,
-            params.fallback_policy.is_allowed(),
-            params.cancellation,
-        )
-        .await
-    }
-
-    async fn run_batch(
-        files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
-        shared: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> TextBatchFileResults {
-        run_utseg_batch_impl(
-            files,
-            lang,
-            shared.pool,
-            params.fallback_policy.is_allowed(),
-            params.cancellation,
-        )
-        .await
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Per-file utseg processing
 // ---------------------------------------------------------------------------
-
-/// Process a single CHAT file through the utseg pipeline.
-///
-/// Returns the serialized CHAT text with utterances split as needed.
-pub async fn process_utseg(
-    chat_text: &str,
-    lang: &LanguageCode3,
-    pool: &WorkerPool,
-    cache: &crate::cache::UtteranceCache,
-    engine_version: &EngineVersion,
-    allow_stanza_fallback: bool,
-    cancellation: Cancellation<'_>,
-) -> Result<String, ServerError> {
-    UtsegWorkflow::new()
-        .run_per_file(TextPerFileWorkflowRequest {
-            chat_text: ChatText::from(chat_text),
-            lang,
-            shared: PipelineServices::new(pool, cache, engine_version),
-            params: UtsegWorkflowParams {
-                fallback_policy: allow_stanza_fallback.into(),
-                cancellation,
-            },
-        })
-        .await
-}
+//
+// The single-file entry point and the workflow trait implementation that
+// reached it are gone: every utseg job runs through the batch path (the
+// dispatcher hands the gateway one file per call for durability), and
+// transcribe reaches the per-file pipeline directly through
+// `process_utseg_with_evidence`, which is the only caller that needs it.
 
 /// Process CHAT while durably retaining the exact post-CHAT segmentation
 /// evidence requested for a transcribe experiment.
@@ -271,7 +267,6 @@ pub(crate) async fn process_utseg_with_evidence(
             let trace = crate::utseg_evidence::UtsegEvidenceTrace::from_predictions(
                 crate::utseg_evidence::UtsegEvidencePhase::PostChat,
                 lang.as_ref(),
-                services.engine_version.as_ref(),
                 requests,
                 predictions,
             )
@@ -285,50 +280,6 @@ pub(crate) async fn process_utseg_with_evidence(
                 })?;
             Ok(())
         },
-    )
-    .await
-}
-
-/// Infer utterance-boundary assignments for pretokenized word batches.
-///
-/// Per-item engine/network/model failures collapse into a single typed
-/// ``ServerError::Validation`` carrying the rendered list of failing
-/// items (via ``TextWorkflowFileError::item_errors``). Callers that
-/// only need a flat success-or-fail signal can rely on this; callers
-/// that need per-item attribution (the cross-file pipeline driver)
-/// call ``infer_batch`` directly.
-pub async fn infer_utseg_assignments(
-    pool: &WorkerPool,
-    lang: &LanguageCode3,
-    items: &[UtsegBatchItem],
-    allow_stanza_fallback: bool,
-    cancellation: Cancellation<'_>,
-) -> Result<Vec<UtsegResponse>, ServerError> {
-    infer_utseg_predictions(pool, lang, items, allow_stanza_fallback, cancellation)
-        .await
-        .map(|predictions| {
-            predictions
-                .into_iter()
-                .map(AdmittedUtsegPrediction::into_response)
-                .collect()
-        })
-}
-
-/// Infer utterance boundaries while retaining the typed source/evidence state.
-pub(crate) async fn infer_utseg_predictions(
-    pool: &WorkerPool,
-    lang: &LanguageCode3,
-    items: &[UtsegBatchItem],
-    allow_stanza_fallback: bool,
-    cancellation: Cancellation<'_>,
-) -> Result<Vec<AdmittedUtsegPrediction>, ServerError> {
-    infer_utseg_predictions_with_policy(
-        pool,
-        lang,
-        items,
-        allow_stanza_fallback,
-        UtsegDecisionPolicy::WorkerDeclared,
-        cancellation,
     )
     .await
 }
@@ -369,43 +320,10 @@ pub(crate) async fn process_utseg_batch(
     files: &[TextBatchFileInput],
     lang: &LanguageCode3,
     pool: &WorkerPool,
-    cache: &crate::cache::UtteranceCache,
-    engine_version: &EngineVersion,
     allow_stanza_fallback: bool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    UtsegWorkflow::new()
-        .run_batch_files(TextBatchWorkflowRequest {
-            files,
-            lang,
-            shared: PipelineServices::new(pool, cache, engine_version),
-            params: UtsegWorkflowParams {
-                fallback_policy: allow_stanza_fallback.into(),
-                cancellation,
-            },
-        })
-        .await
-}
-
-async fn run_utseg_impl(
-    chat_text: &str,
-    lang: &LanguageCode3,
-    pool: &WorkerPool,
-    cache: &crate::cache::UtteranceCache,
-    engine_version: &EngineVersion,
-    allow_stanza_fallback: bool,
-    cancellation: Cancellation<'_>,
-) -> Result<String, ServerError> {
-    run_utseg_impl_observed(
-        chat_text,
-        lang,
-        PipelineServices::new(pool, cache, engine_version),
-        allow_stanza_fallback,
-        UtsegDecisionPolicy::WorkerDeclared,
-        cancellation,
-        |_, _| Ok(()),
-    )
-    .await
+    run_utseg_batch_impl(files, lang, pool, allow_stanza_fallback, cancellation).await
 }
 
 async fn run_utseg_impl_observed<Observe>(
@@ -431,6 +349,7 @@ where
             collect: collect_utseg_batch_items,
             integrate: integrate_admitted_assignments,
             apply: apply_utseg_results,
+            provenance: crate::provenance::utseg_provenance,
         },
         // The generic pipeline's `infer` signature doesn't carry
         // command-specific state, so capture the operator opt-in (and
@@ -471,35 +390,34 @@ async fn run_utseg_batch_impl(
             command: crate::api::ReleasedCommand::Utseg,
             validity: ValidityLevel::StructurallyComplete,
             collect: collect_utseg_batch_items,
-            apply: apply_utseg_file,
+            apply: apply_utseg_predictions,
+            provenance: crate::provenance::utseg_provenance,
         },
+        // The batch keeps the admitted predictions rather than projecting them
+        // to bare responses: the evidence they carry is what names the
+        // boundary model in this file's stamp.
         async move |pool, items, lang| {
-            infer_batch(pool, items, lang, allow_stanza_fallback, cancellation).await
+            infer_admitted_batch(pool, items, lang, allow_stanza_fallback, cancellation).await
         },
     )
     .await
 }
 
-/// Apply utseg responses for one file, skipping items with a
-/// length-mismatched assignment vector.
-fn apply_utseg_file(
+/// Apply one file's admitted predictions.
+///
+/// There is no length check here, and no "keeping original" branch: admission
+/// (`admit_worker_item`) refuses any prediction whose assignments are not
+/// parallel to the request words, so a mismatched vector has no route to this
+/// point. The branch that used to warn and drop the utterance was unreachable,
+/// which meant a defect it claimed to handle would have shown up as silently
+/// unsegmented output rather than as the failure admission already produces.
+fn apply_utseg_predictions(
     chat_file: &mut ChatFile,
     items: &[(usize, UtsegBatchItem)],
-    responses: &[UtsegResponse],
+    predictions: &[AdmittedUtsegPrediction],
 ) {
     let mut assignment_map: HashMap<usize, Vec<usize>> = HashMap::new();
-    for ((utt_ordinal, item), resp) in items.iter().zip(responses.iter()) {
-        if resp.assignments.len() == item.words.len() {
-            assignment_map.insert(*utt_ordinal, resp.assignments.clone());
-        } else {
-            warn!(
-                utterance = utt_ordinal,
-                expected = item.words.len(),
-                got = resp.assignments.len(),
-                "utseg assignment length mismatch, keeping original"
-            );
-        }
-    }
+    integrate_admitted_assignments(&mut assignment_map, items, predictions);
     if !assignment_map.is_empty() {
         apply_utseg_results(chat_file, &assignment_map);
     }
@@ -561,21 +479,34 @@ impl AdmittedUtsegPrediction {
         }
     }
 
-    /// Deliberately project an admitted prediction onto the legacy transform
-    /// response. Evidence-aware callers retain the enum instead.
-    fn into_response(self) -> UtsegResponse {
+    /// Restate an admitted boundary-model prediction as one whose applicable
+    /// assignments were rederived locally, from the receipt retained with it.
+    ///
+    /// Consumes the admitted value rather than taking its parts, so a receipt
+    /// cannot be attached to assignments and evidence that were never admitted,
+    /// and the receipt must first prove it explains them
+    /// ([`LocalUtsegDecisionReceipt::check_explains`]). A receipt can be
+    /// deserialized from an artifact, so this transition treats one as a claim
+    /// to check rather than a label to copy.
+    pub(crate) fn with_local_decision(
+        self,
+        receipt: LocalUtsegDecisionReceipt,
+    ) -> Result<Self, String> {
         match self {
-            Self::BoundaryModelWorkerDeclared {
-                response,
-                evidence: _,
+            Self::BoundaryModelWorkerDeclared { response, evidence } => {
+                receipt.check_explains(&evidence, &response)?;
+                Ok(Self::BoundaryModelLocallyReapplied {
+                    response,
+                    evidence,
+                    receipt,
+                })
             }
-            | Self::BoundaryModelLocallyReapplied {
-                response,
-                evidence: _,
-                receipt: _,
+            Self::BoundaryModelLocallyReapplied { .. } => {
+                Err("cannot record a second local utterance-boundary decision".to_owned())
             }
-            | Self::UnobservedAssignments { response }
-            | Self::Constituency { response } => response,
+            Self::UnobservedAssignments { .. } | Self::Constituency { .. } => Err(
+                "a local utterance-boundary decision requires boundary-model evidence".to_owned(),
+            ),
         }
     }
 
@@ -659,58 +590,48 @@ impl AdmittedUtsegPrediction {
     }
 }
 
-/// Validate one raw worker item before it can become an applicable response.
-fn admit_worker_item(
+/// What produced one set of assignments, before they have been admitted.
+///
+/// The single shape both routes into [`admit_prediction`] narrow to: a live
+/// worker result (classified by [`admit_worker_item`]) and a retained evidence
+/// artifact (classified by [`crate::utseg_evidence::AdmittedUtsegEvidence`]).
+/// One shape means one copy of the parallel-vector and consistency checks, so
+/// evidence read back from disk is admitted exactly as the worker's own answer
+/// was rather than trusted because it is on disk.
+pub(crate) enum UtsegPredictionOrigin<'a> {
+    /// A boundary model, with its per-word evidence.
+    BoundaryModel(&'a UtsegBoundaryModelEvidenceV2),
+    /// A worker that returned assignments without naming their source.
+    UnnamedWorker,
+    /// Stanza constituency trees, already projected to assignments.
+    Constituency,
+}
+
+/// Admit `assignments` as applicable to `request`, given what produced them.
+///
+/// The only constructor of an [`AdmittedUtsegPrediction`]. Everything the type
+/// promises is established here: one group per request word, boundary evidence
+/// parallel to those words, and applied actions and assignments that agree with
+/// the policy the evidence declares. A caller cannot reach the type without
+/// passing through this function, so there is no route that skips a check.
+pub(crate) fn admit_prediction(
     request: &UtsegBatchItem,
-    result: &UtsegItemResultV2,
+    assignments: Vec<usize>,
+    origin: UtsegPredictionOrigin<'_>,
 ) -> Result<AdmittedUtsegPrediction, String> {
-    if let Some(error) = &result.error {
-        if result.assignments.is_some()
-            || result.trees.is_some()
-            || result.boundary_model_evidence.is_some()
-        {
-            return Err("utseg V2 returned an error together with a success payload".to_owned());
-        }
-        return Err(error.clone());
-    }
-
-    let response = match (&result.assignments, &result.trees) {
-        (Some(_), Some(_)) => {
-            return Err(
-                "utseg V2 returned both direct assignments and constituency trees".to_owned(),
-            );
-        }
-        (None, None) => {
-            if result.boundary_model_evidence.is_some() {
-                return Err(
-                    "utseg V2 returned boundary evidence without direct assignments".to_owned(),
-                );
-            }
-            return Err("utseg V2 returned no assignments, no trees, and no error".to_owned());
-        }
-        (Some(assignments), None) => UtsegResponse {
-            assignments: assignments.clone(),
-        },
-        (None, Some(trees)) => UtsegResponse {
-            assignments: utseg_compute::compute_assignments(trees, request.words.len()),
-        },
-    };
-
-    if response.assignments.len() != request.words.len() {
+    if assignments.len() != request.words.len() {
         return Err(format!(
             "utseg V2 returned {} assignments for {} request words",
-            response.assignments.len(),
+            assignments.len(),
             request.words.len()
         ));
     }
+    let response = UtsegResponse { assignments };
 
-    match (&result.assignments, &result.boundary_model_evidence) {
-        (Some(_), Some(evidence)) => {
+    match origin {
+        UtsegPredictionOrigin::BoundaryModel(evidence) => {
             if evidence.model_id.is_empty() {
                 return Err("utseg V2 boundary evidence has an empty model id".to_owned());
-            }
-            if evidence.model_revision.as_deref() == Some("") {
-                return Err("utseg V2 boundary evidence has an empty model revision".to_owned());
             }
             if evidence.word_evidence.len() != request.words.len() {
                 return Err(format!(
@@ -727,45 +648,84 @@ fn admit_worker_item(
                 evidence: evidence.clone(),
             })
         }
-        (Some(_), None) => Ok(AdmittedUtsegPrediction::UnobservedAssignments { response }),
-        (None, None) => Ok(AdmittedUtsegPrediction::Constituency { response }),
-        (None, Some(_)) => {
-            Err("utseg V2 returned boundary evidence with constituency trees".to_owned())
+        UtsegPredictionOrigin::UnnamedWorker => {
+            Ok(AdmittedUtsegPrediction::UnobservedAssignments { response })
+        }
+        UtsegPredictionOrigin::Constituency => {
+            Ok(AdmittedUtsegPrediction::Constituency { response })
         }
     }
 }
 
-/// Send batch items to a worker for constituency inference via batched
-/// `execute_v2`.
+/// Validate one raw worker item before it can become an applicable response.
+///
+/// Classifies the worker's mutually exclusive success payloads into one
+/// [`UtsegPredictionOrigin`] and hands the result to [`admit_prediction`],
+/// which owns every check that follows.
+fn admit_worker_item(
+    request: &UtsegBatchItem,
+    result: &UtsegItemResultV2,
+) -> Result<AdmittedUtsegPrediction, String> {
+    if let Some(error) = &result.error {
+        if result.assignments.is_some()
+            || result.trees.is_some()
+            || result.boundary_model_evidence.is_some()
+        {
+            return Err("utseg V2 returned an error together with a success payload".to_owned());
+        }
+        return Err(error.clone());
+    }
+
+    let (assignments, origin) = match (
+        &result.assignments,
+        &result.trees,
+        &result.boundary_model_evidence,
+    ) {
+        (Some(_), Some(_), _) => {
+            return Err(
+                "utseg V2 returned both direct assignments and constituency trees".to_owned(),
+            );
+        }
+        (None, None, Some(_)) => {
+            return Err(
+                "utseg V2 returned boundary evidence without direct assignments".to_owned(),
+            );
+        }
+        (None, None, None) => {
+            return Err("utseg V2 returned no assignments, no trees, and no error".to_owned());
+        }
+        (None, Some(_), Some(_)) => {
+            return Err("utseg V2 returned boundary evidence with constituency trees".to_owned());
+        }
+        (Some(assignments), None, Some(evidence)) => (
+            assignments.clone(),
+            UtsegPredictionOrigin::BoundaryModel(evidence),
+        ),
+        (Some(assignments), None, None) => {
+            (assignments.clone(), UtsegPredictionOrigin::UnnamedWorker)
+        }
+        (None, Some(trees), None) => (
+            utseg_compute::compute_assignments(trees, request.words.len()),
+            UtsegPredictionOrigin::Constituency,
+        ),
+    };
+
+    admit_prediction(request, assignments, origin)
+}
+
+/// Dispatch and admit a batch without erasing its inference-source state.
 ///
 /// `allow_stanza_fallback` propagates the operator opt-in
 /// (`--utseg-fallback-stanza`) to the worker so it can engage the
 /// legacy Stanza constituency-parser fallback when no
 /// language-specific BERT utseg model is configured.
-async fn infer_batch(
-    pool: &WorkerPool,
-    items: &[(usize, UtsegBatchItem)],
-    lang: &LanguageCode3,
-    allow_stanza_fallback: bool,
-    cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<UtsegResponse, String>>, ServerError> {
-    Ok(
-        infer_admitted_batch(pool, items, lang, allow_stanza_fallback, cancellation)
-            .await?
-            .into_iter()
-            .map(|result| result.map(AdmittedUtsegPrediction::into_response))
-            .collect(),
-    )
-}
-
-/// Dispatch and admit a batch without erasing its inference-source state.
 async fn infer_admitted_batch(
     pool: &WorkerPool,
     items: &[(usize, UtsegBatchItem)],
     lang: &LanguageCode3,
     allow_stanza_fallback: bool,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<AdmittedUtsegPrediction, String>>, ServerError> {
+) -> Result<Vec<Result<AdmittedUtsegPrediction, EngineItemFailure>>, ServerError> {
     infer_admitted_batch_with_policy(
         pool,
         items,
@@ -784,7 +744,7 @@ async fn infer_admitted_batch_with_policy(
     allow_stanza_fallback: bool,
     decision_policy: UtsegDecisionPolicy,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<AdmittedUtsegPrediction, String>>, ServerError> {
+) -> Result<Vec<Result<AdmittedUtsegPrediction, EngineItemFailure>>, ServerError> {
     let payload_items: Vec<_> = items.iter().map(|(_, item)| item.clone()).collect();
     let artifacts = PreparedArtifactRuntimeV2::new("utseg_v2").map_err(|error| {
         ServerError::Validation(format!(
@@ -823,16 +783,21 @@ async fn infer_admitted_batch_with_policy(
     let mut admitted = Vec::with_capacity(result.items.len());
     for (i, item_result) in result.items.iter().enumerate() {
         admitted.push(
-            admit_worker_item(&items[i].1, item_result).and_then(|prediction| {
-                prediction.apply_decision_policy(&items[i].1, lang, decision_policy)
-            }),
+            admit_worker_item(&items[i].1, item_result)
+                .and_then(|prediction| {
+                    prediction.apply_decision_policy(&items[i].1, lang, decision_policy)
+                })
+                // Everything refused here is the worker's own answer about
+                // this item: a refusal will repeat if the same result comes
+                // back, which is what the terminal class means.
+                .map_err(ItemFailure::EngineReported),
         );
     }
 
     Ok(admitted)
 }
 
-fn integrate_admitted_assignments(
+pub(crate) fn integrate_admitted_assignments(
     assignment_map: &mut HashMap<usize, Vec<usize>>,
     misses: &[(usize, UtsegBatchItem)],
     predictions: &[AdmittedUtsegPrediction],
@@ -846,10 +811,16 @@ fn integrate_admitted_assignments(
 mod tests {
     use super::*;
     use crate::types::worker_v2::{
-        BoundaryProbabilityMicrosV2, UtsegAdjacencyPolicyRevisionV2, UtsegBoundaryActionV2,
-        UtsegBoundaryModelEvidenceV2, UtsegItemResultV2, UtsegNormalizationRevisionV2,
-        UtsegWordBoundaryEvidenceV2,
+        BoundaryProbabilityMicrosV2, HubCommitV2, UtsegAdjacencyPolicyRevisionV2,
+        UtsegBoundaryActionV2, UtsegBoundaryModelEvidenceV2, UtsegItemResultV2,
+        UtsegNormalizationRevisionV2, UtsegWordBoundaryEvidenceV2,
     };
+
+    /// A commit-shaped revision for fixtures; the type admits nothing else.
+    fn test_commit() -> HubCommitV2 {
+        HubCommitV2::try_from("0123456789abcdef0123456789abcdef01234567")
+            .expect("valid fixture commit")
+    }
 
     #[test]
     fn disabled_transcribe_utseg_has_no_reachable_model_pass() {
@@ -883,7 +854,7 @@ mod tests {
             trees: None,
             boundary_model_evidence: Some(UtsegBoundaryModelEvidenceV2 {
                 model_id: "talkbank/utterance-boundary".to_owned(),
-                model_revision: Some("revision-1".to_owned()),
+                model_revision: test_commit(),
                 normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
                 adjacency_policy_revision:
                     UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
@@ -1005,6 +976,86 @@ mod tests {
         assert_eq!(admitted.response().assignments, vec![0, 1]);
     }
 
+    /// The check must accept exactly what the local policy itself produces, or
+    /// the replay could not read back evidence this build wrote.
+    #[test]
+    fn a_receipt_the_local_policy_produced_is_accepted() {
+        let mut result = boundary_result(2);
+        let evidence = result
+            .boundary_model_evidence
+            .as_mut()
+            .expect("fixture has evidence");
+        evidence.word_evidence[0] = UtsegWordBoundaryEvidenceV2::Classified {
+            raw_action: UtsegBoundaryActionV2::PeriodBoundary,
+            applied_action: UtsegBoundaryActionV2::Ordinary,
+            boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(900_000)
+                .expect("probability"),
+        };
+        evidence.word_evidence[1] = UtsegWordBoundaryEvidenceV2::Classified {
+            raw_action: UtsegBoundaryActionV2::CapitalizedOnset,
+            applied_action: UtsegBoundaryActionV2::CapitalizedOnset,
+            boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(800_000)
+                .expect("probability"),
+        };
+        result.assignments = Some(vec![0, 0]);
+        let request = two_word_request();
+        let reapplied = admit_worker_item(&request, &result)
+            .expect("baseline evidence")
+            .apply_decision_policy(
+                &request,
+                &LanguageCode3::eng(),
+                UtsegDecisionPolicy::ReapplyBoundaryModel(
+                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
+                ),
+            )
+            .expect("candidate replay");
+        let AdmittedUtsegPrediction::BoundaryModelLocallyReapplied {
+            response,
+            evidence,
+            receipt,
+        } = reapplied
+        else {
+            panic!("the candidate policy produces a locally reapplied prediction")
+        };
+
+        // Exactly what the evidence reader reconstructs from a retained
+        // artifact: the admitted parts, then the receipt reattached.
+        let reconstructed = AdmittedUtsegPrediction::BoundaryModelWorkerDeclared {
+            response,
+            evidence,
+        }
+        .with_local_decision(receipt)
+        .expect("a receipt this policy produced must be accepted");
+        assert!(matches!(
+            reconstructed,
+            AdmittedUtsegPrediction::BoundaryModelLocallyReapplied { .. }
+        ));
+    }
+
+    /// RED FIRST (review item 4): a receipt is a claim, not a label, and it can
+    /// arrive from an artifact where nothing checked it. One that does not
+    /// explain the evidence it travels with must never become a prediction.
+    #[test]
+    fn a_receipt_that_does_not_explain_its_evidence_is_refused() {
+        let admitted =
+            admit_worker_item(&two_word_request(), &boundary_result(2)).expect("baseline evidence");
+        let error = admitted
+            .with_local_decision(LocalUtsegDecisionReceipt {
+                revision: LocalUtsegDecisionPolicyRevision::AdjacencyOnlyV1,
+                worker_adjacency_policy_revision:
+                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
+                // The fixture's evidence declares the nonordinary policy, so a
+                // receipt naming a different local policy explains nothing.
+                local_adjacency_policy_revision:
+                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
+                worker_assignments: vec![0, 1],
+                suppressed_split_before_word_indices: Vec::new(),
+            })
+            .expect_err("an unexplained receipt must be refused");
+
+        assert!(error.contains("adjacency policy"), "{error}");
+    }
+
     #[test]
     fn candidate_policy_refuses_constituency_output_without_raw_actions() {
         let prediction = AdmittedUtsegPrediction::Constituency {
@@ -1062,7 +1113,7 @@ mod tests {
             trees: None,
             boundary_model_evidence: Some(UtsegBoundaryModelEvidenceV2 {
                 model_id: "model".into(),
-                model_revision: Some("revision".into()),
+                model_revision: test_commit(),
                 normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
                 adjacency_policy_revision:
                     UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,

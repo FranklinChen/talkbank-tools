@@ -9,13 +9,20 @@ expression: resp
     {
       "filename": "01DM.cha",
       "content": "@UTF8\n@Begin\n*CHI:\thello .\n@End",
-      "content_type": "chat"
+      "content_type": "chat",
+      "provenance": {
+        "kind": "parsed",
+        "entries": []
+      }
     },
     {
       "filename": "02DM.cha",
       "content": "",
       "content_type": "chat",
-      "error": "Pipeline error: unknown language"
+      "error": "Pipeline error: unknown language",
+      "provenance": {
+        "kind": "not_read"
+      }
     }
   ]
 }

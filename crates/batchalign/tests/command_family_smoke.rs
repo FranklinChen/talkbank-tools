@@ -30,11 +30,13 @@ use batchalign::options::{
 };
 use common::test_server_fixture::acquire_test_server_session;
 
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
+
 use batchalign::api::JobSubmission;
 
 /// Poll until a job reaches a terminal state (completed, failed, cancelled).
 async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -> JobInfo {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+    let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(job_id));
     loop {
         let resp = client
             .get(format!("{base_url}/jobs/{job_id}"))
@@ -51,12 +53,7 @@ async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -
         ) {
             return info;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Job {job_id} did not finish within 60s (status: {:?})",
-            info.status
-        );
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        deadline.keep_waiting(ProgressSnapshot::job(&info)).await;
     }
 }
 

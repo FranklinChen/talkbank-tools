@@ -1,6 +1,5 @@
 //! Direct local execution host layered over the shared execution engine.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,7 +35,7 @@ pub struct DirectHost {
     runner: DirectExecutionHost,
     jobs_dir: PathBuf,
     bug_reports_dir: PathBuf,
-    capabilities: Vec<String>,
+    capabilities: crate::capability::WorkerCapabilitySnapshot,
 }
 
 impl DirectHost {
@@ -44,25 +43,12 @@ impl DirectHost {
         &self,
         command: crate::api::ReleasedCommand,
     ) -> Result<(), ServerError> {
-        if self
-            .capabilities
-            .iter()
-            .any(|capability| capability == command.as_ref())
-        {
+        if self.capabilities.serves(command) {
             return Ok(());
         }
-
-        let supported = self
-            .capabilities
-            .iter()
-            .filter(|capability| capability.as_str() != "test-echo")
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
         Err(ServerError::UnknownCommand(format!(
             "Unknown command: {command}. Valid commands: {:?}",
-            supported
+            self.capabilities.command_names()
         )))
     }
 
@@ -87,11 +73,13 @@ impl DirectHost {
                 .await
                 .map_err(|error| ServerError::Validation(format!("cache init failed: {error}")))?,
         );
-        let execution_runtime = workers.resolve_execution_runtime(cache)?;
-        let capabilities = execution_runtime.capability_snapshot.capabilities.clone();
+        let crate::worker_setup::ResolvedExecutionRuntime {
+            capability_snapshot: capabilities,
+            engine,
+        } = workers.resolve_execution_runtime(cache);
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
         let store = Arc::new(JobStore::new(config, None, tx));
-        let runner = DirectExecutionHost::new(store.clone(), execution_runtime.engine);
+        let runner = DirectExecutionHost::new(store.clone(), engine);
 
         Ok(Self {
             store,
@@ -103,8 +91,8 @@ impl DirectHost {
     }
 
     /// Return the released command surface available to this host.
-    pub fn capabilities(&self) -> &[String] {
-        &self.capabilities
+    pub fn capabilities(&self) -> &[crate::api::ReleasedCommand] {
+        self.capabilities.commands()
     }
 
     /// Materialize and submit one direct job without running it yet.

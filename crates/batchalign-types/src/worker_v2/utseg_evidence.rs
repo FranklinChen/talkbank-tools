@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::asr_model::HubCommitV2;
+
 /// Closed label vocabulary emitted by the TalkBank utterance-boundary model.
 ///
 /// Names describe model semantics instead of exposing classifier label indices,
@@ -126,11 +128,18 @@ pub enum UtsegWordBoundaryEvidenceV2 {
 /// model identity needed to interpret or reproduce it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct UtsegBoundaryModelEvidenceV2 {
-    /// HuggingFace model identifier selected by the resolver.
+    /// HuggingFace model identifier the control plane pinned.
     pub model_id: String,
-    /// Exact HuggingFace revision when the loaded config exposes one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_revision: Option<String>,
+    /// The exact revision the worker loaded, and never anything else.
+    ///
+    /// Required, and a [`HubCommitV2`] rather than a string: the boundary model
+    /// is resolved from a pinned snapshot whose commit is read off the
+    /// directory on disk, so a worker that cannot say which revision it loaded
+    /// refuses instead of reporting one. It was `Option<String>` while the
+    /// model loaded by NAME and the revision was scraped from
+    /// `config._commit_hash`, which could simply be absent; nothing downstream
+    /// could distinguish "no revision" from "a revision nobody recorded".
+    pub model_revision: HubCommitV2,
     /// Exact lexical-normalization semantics applied before inference.
     pub normalization_revision: UtsegNormalizationRevisionV2,
     /// Exact raw-to-applied adjacency-policy semantics.
@@ -411,6 +420,12 @@ impl UtsegBoundaryModelEvidenceV2 {
 mod tests {
     use super::*;
 
+    /// A commit-shaped revision for fixtures. The type admits nothing else, so
+    /// a fixture cannot carry a placeholder like `"revision-1"` any more.
+    fn commit() -> HubCommitV2 {
+        HubCommitV2::try_from("0123456789abcdef0123456789abcdef01234567").expect("valid commit")
+    }
+
     #[test]
     fn probability_refuses_values_above_the_unit_interval() {
         let result = serde_json::from_str::<BoundaryProbabilityMicrosV2>("1000001");
@@ -425,7 +440,7 @@ mod tests {
         let probability = BoundaryProbabilityMicrosV2::try_from(900_000).expect("probability");
         let evidence = UtsegBoundaryModelEvidenceV2 {
             model_id: "model".into(),
-            model_revision: Some("revision".into()),
+            model_revision: commit(),
             normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
             adjacency_policy_revision:
                 UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
@@ -464,7 +479,7 @@ mod tests {
         let probability = BoundaryProbabilityMicrosV2::try_from(900_000).expect("probability");
         let evidence = UtsegBoundaryModelEvidenceV2 {
             model_id: "model".into(),
-            model_revision: Some("revision".into()),
+            model_revision: commit(),
             normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
             adjacency_policy_revision:
                 UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
@@ -506,7 +521,7 @@ mod tests {
         let probability = BoundaryProbabilityMicrosV2::try_from(900_000).expect("probability");
         let evidence = UtsegBoundaryModelEvidenceV2 {
             model_id: "model".into(),
-            model_revision: Some("revision".into()),
+            model_revision: commit(),
             normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
             adjacency_policy_revision:
                 UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,

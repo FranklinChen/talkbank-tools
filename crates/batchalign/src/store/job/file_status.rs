@@ -59,6 +59,9 @@ impl Job {
         file_status.progress_total = None;
         file_status.progress_stage = None;
         if let Some(result) = result {
+            // The stamp decision belongs to the FILE, not to one of its
+            // artifacts: it says what the command recorded about this run.
+            file_status.stamp = result.stamp;
             self.execution.results.push(FileResultEntry {
                 filename: result.filename,
                 content_type: result.content_type,

@@ -10,26 +10,20 @@ from __future__ import annotations
 from batchalign.models.resolve import resolve
 
 
-class TestResolveUtterance:
-    """Existing utterance-segmentation entries: guard rails for regressions."""
+class TestResolveUtteranceIsGone:
+    """The utterance family no longer lives here.
 
-    def test_utterance_eng_returns_chatutterance_en(self) -> None:
-        assert resolve("utterance", "eng") == "talkbank/CHATUtterance-en"
+    The boundary model a language loads is named by the Rust manifest and sent
+    with the worker spawn, because an id must be known BEFORE a load in order
+    to pin its revision. This asserts the copy is actually gone rather than
+    merely unused: an entry that reappeared here would be a second answer to
+    the question the manifest already answers, and the worker would load from
+    it again.
+    """
 
-    def test_utterance_zho_returns_chatutterance_zh_cn(self) -> None:
-        assert resolve("utterance", "zho") == "talkbank/CHATUtterance-zh_CN"
-
-    def test_utterance_yue_returns_cantonese_model(self) -> None:
-        assert (
-            resolve("utterance", "yue")
-            == "PolyU-AngelChanLab/Cantonese-Utterance-Segmentation"
-        )
-
-    def test_utterance_cmn_returns_chatutterance_zh_cn(self) -> None:
-        assert resolve("utterance", "cmn") == "talkbank/CHATUtterance-zh_CN"
-
-    def test_utterance_unknown_lang_returns_none(self) -> None:
-        assert resolve("utterance", "xyz") is None
+    def test_utterance_family_is_not_resolved_here(self) -> None:
+        assert resolve("utterance", "eng") is None
+        assert resolve("utterance", "yue") is None
 
 
 class TestResolveWhisperHub:

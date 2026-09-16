@@ -15,7 +15,8 @@ use crate::chat_ops::CacheKey;
 use crate::error::{MissingRequiredEvidence, MissingSpeakerEvidence, ServerError};
 use crate::params::CachePolicy;
 use crate::types::worker_v2::{
-    ProtocolErrorCodeV2, SpeakerBackendV2, SpeakerInferenceEvidenceV2, SpeakerSegmentV2,
+    ProtocolErrorCodeV2, ProviderDiarizationV2, SpeakerBackendV2, SpeakerInferenceEvidenceV2,
+    SpeakerSegmentV2,
 };
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::asr_request_v2::{
@@ -194,10 +195,21 @@ async fn infer_asr_via_worker_v2(
     let artifacts = PreparedArtifactRuntimeV2::new("asr_v2").map_err(|error| {
         ServerError::Validation(format!("failed to create ASR V2 artifact runtime: {error}"))
     })?;
+    // The pin is resolved HERE rather than by each caller: this function
+    // already holds the backend, the language and the overrides the manifest
+    // reads, so deriving it once keeps one owner and stops two call sites from
+    // pinning differently for the same job.
+    let models = crate::model_manifest::resolve_asr_models(
+        worker_mode.as_v2_backend(),
+        params.lang.as_resolved(),
+        params.extras,
+    )
+    .map_err(|error| ServerError::Validation(error.to_string()))?;
     let request = build_asr_request_v2(
         artifacts.store(),
         AsrBuildInputV2 {
             ids: &PreparedAsrRequestIdsV2::fresh(),
+            models: &models,
             input: match worker_mode {
                 // Fine-tune HF Whisper shares the prepared-audio wire shape
                 // with stock Whisper: Rust owns media decoding, the worker
@@ -214,7 +226,9 @@ async fn infer_asr_via_worker_v2(
                 | AsrWorkerMode::HkFunaudioV2
                 | AsrWorkerMode::HkQwenV2 => AsrInputSourceV2::ProviderMedia {
                     media_path: params.audio_path,
-                    num_speakers: params.num_speakers,
+                    diarization: ProviderDiarizationV2::for_expected_speakers(
+                        params.num_speakers,
+                    ),
                 },
             },
             lang: worker_lang,
@@ -234,8 +248,16 @@ async fn infer_asr_via_worker_v2(
         .await
         .map_err(ServerError::Worker)?;
 
-    parse_asr_response_v2(&response, fallback_lang)
-        .map_err(|error| ServerError::Validation(format!("ASR V2 response parse failed: {error}")))
+    // The pin stays in scope across the dispatch on purpose: it is the half
+    // this side is entitled to assert, and the admission inside the parse
+    // compares it with the half the worker reported.
+    parse_asr_response_v2(
+        &response,
+        fallback_lang,
+        &models,
+        worker_mode.as_v2_backend(),
+    )
+    .map_err(|error| ServerError::Validation(format!("ASR V2 response parse failed: {error}")))
 }
 
 /// Call the live V2 Python worker path for dedicated speaker diarization on a

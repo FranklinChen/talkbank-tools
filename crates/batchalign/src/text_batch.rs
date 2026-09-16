@@ -5,11 +5,7 @@
 //! like `utseg`, `translate`, and `coref` while still allowing each command to
 //! keep its own orchestration internals.
 
-use std::marker::PhantomData;
-
-use async_trait::async_trait;
-
-use crate::api::{ChatText, DisplayPath, LanguageCode3};
+use crate::api::{DisplayPath, FileStampOutcome};
 use crate::error::ServerError;
 use crate::pipeline::post_validate::{PostValidated, PostValidationFailure};
 use crate::scheduling::FailureCategory;
@@ -24,20 +20,99 @@ use crate::scheduling::FailureCategory;
 /// items failed.
 pub(crate) const MAX_ITEM_ERROR_SAMPLES: usize = 5;
 
+/// Why one item of a worker batch failed.
+///
+/// Typed rather than a bare string, because the two cases are different news
+/// for the control plane and a string can say neither: an engine that reported
+/// a failure has given its verdict on that item, while a result with nothing
+/// to apply is an answer a re-run can change. Each variant states its own
+/// category, so a new one has to decide rather than inherit.
+/// Generic in the command's own failure, so a command that has none cannot
+/// represent one: `S` is [`std::convert::Infallible`] for utseg, coref and
+/// morphotag, whose only per-item failure is the engine's own report, and a
+/// command-specific type (translate's empty translation) where one exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ItemFailure<S> {
+    /// The engine reported this item's failure; its message travels verbatim
+    /// (for example `"Translation failed: ConnectionResetError(...)"`).
+    EngineReported(String),
+    /// A failure this command defines, which the command's own type describes.
+    Command(S),
+}
+
+/// The per-item failure of a command whose only failure is the engine's own.
+///
+/// `Infallible` has no value, so `Command` is uninhabited here: utseg, coref
+/// and morphotag cannot construct a translate-shaped failure, and a match on
+/// one needs no arm for it.
+pub(crate) type EngineItemFailure = ItemFailure<std::convert::Infallible>;
+
+impl<S: std::fmt::Display> std::fmt::Display for ItemFailure<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EngineReported(message) => f.write_str(message),
+            Self::Command(failure) => failure.fmt(f),
+        }
+    }
+}
+
 /// One per-item failure from a worker batch.
 ///
 /// `item_index` is the position within the originating file's payload
-/// list (0-based). `message` is the engine's error string captured
-/// verbatim from the Python worker (e.g. ``"Translation failed:
-/// ConnectionResetError(...)"``); a typed split into
-/// network/model/protocol classes is deferred until we have a
-/// downstream consumer that distinguishes them.
+/// list (0-based).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ItemError {
+pub(crate) struct ItemError<S> {
     /// Position in the originating file's payload list.
     pub item_index: usize,
-    /// Verbatim engine error string.
+    /// What went wrong with this item.
+    pub failure: ItemFailure<S>,
+}
+
+/// One failure as the file-level error carries it: rendered, because the
+/// file-level error outlives the command's own failure type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ItemErrorSample {
+    /// Position in the originating file's payload list.
+    pub item_index: usize,
+    /// What went wrong, rendered.
     pub message: String,
+}
+
+/// The failures of one file, at least one.
+///
+/// A file is reported as failed only when something actually failed, and that
+/// is this type's invariant rather than a check each call site repeats: the
+/// constructor is the only route in, and it refuses an empty list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ItemFailures<S>(Vec<ItemError<S>>);
+
+impl<S: std::fmt::Display> ItemFailures<S> {
+    /// The failures of one file, or `None` when nothing failed.
+    pub(crate) fn new(failures: Vec<ItemError<S>>) -> Option<Self> {
+        (!failures.is_empty()).then_some(Self(failures))
+    }
+
+    /// The single failure of a file whose whole document is one item (coref).
+    pub(crate) fn of_one(failure: ItemError<S>) -> Self {
+        Self(vec![failure])
+    }
+
+    /// How many items failed.
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The first `MAX_ITEM_ERROR_SAMPLES` failures, rendered.
+    fn samples(self) -> Vec<ItemErrorSample> {
+        self.0
+            .into_iter()
+            .take(MAX_ITEM_ERROR_SAMPLES)
+            .map(|error| ItemErrorSample {
+                item_index: error.item_index,
+                message: error.failure.to_string(),
+            })
+            .collect()
+    }
 }
 
 /// Per-file error emitted by a text workflow after file identity is
@@ -92,7 +167,7 @@ pub(crate) enum TextWorkflowFileError {
         /// index. Display renders these inline with the total count
         /// so the user sees a representative slice without overflowing
         /// the log.
-        samples: Vec<ItemError>,
+        samples: Vec<ItemErrorSample>,
     },
 }
 
@@ -123,7 +198,13 @@ impl TextWorkflowFileError {
             // everything, memory pressure and retryable provider failures
             // included.
             Self::Categorised(category, _) => *category,
-            // Per-item engine failures come from the provider by definition.
+            // Per-item failures come from the provider, and every class we
+            // have is the provider's settled answer about that item: an engine
+            // that reported a failure, or one that returned a result with
+            // nothing to apply. The same request produces the same answer, so
+            // telling the control plane to expect a different one would only
+            // buy another full run. A class that genuinely could differ on a
+            // retry would have to say so here.
             Self::ItemErrors { .. } => FailureCategory::ProviderTerminal,
         }
     }
@@ -145,19 +226,19 @@ impl TextWorkflowFileError {
         )
     }
 
-    /// Construct one per-item workflow error from a list of failing
-    /// items.
+    /// Construct one per-item workflow error from the failures of a file.
     ///
-    /// Caller passes the full list; this constructor caps the inline
-    /// samples to ``MAX_ITEM_ERROR_SAMPLES`` while preserving the
-    /// total count.
-    pub(crate) fn item_errors(command: &'static str, failures: Vec<ItemError>) -> Self {
+    /// Caller passes every failure; this constructor caps the inline samples
+    /// to ``MAX_ITEM_ERROR_SAMPLES`` while preserving the total count.
+    pub(crate) fn item_errors<S: std::fmt::Display>(
+        command: &'static str,
+        failures: ItemFailures<S>,
+    ) -> Self {
         let total = failures.len();
-        let samples = failures.into_iter().take(MAX_ITEM_ERROR_SAMPLES).collect();
         Self::ItemErrors {
             command,
             total,
-            samples,
+            samples: failures.samples(),
         }
     }
 }
@@ -200,31 +281,32 @@ impl From<PostValidationFailure> for TextWorkflowFileError {
 /// ``TextWorkflowFileError`` directly so callers can choose whether
 /// to attribute it to one file (in single-file flows) or wrap it in
 /// ``ServerError`` (in API-boundary flows).
-pub(crate) fn unwrap_per_item_results<R>(
+pub(crate) fn unwrap_per_item_results<R, S: std::fmt::Display>(
     command: &'static str,
-    item_results: Vec<Result<R, String>>,
+    item_results: Vec<Result<R, ItemFailure<S>>>,
 ) -> Result<Vec<R>, TextWorkflowFileError> {
-    let mut failures: Vec<ItemError> = Vec::new();
+    let mut failures: Vec<ItemError<S>> = Vec::new();
     let mut successes: Vec<R> = Vec::with_capacity(item_results.len());
     for (idx, r) in item_results.into_iter().enumerate() {
         match r {
             Ok(r) => successes.push(r),
-            Err(message) => failures.push(ItemError {
+            Err(failure) => failures.push(ItemError {
                 item_index: idx,
-                message,
+                failure,
             }),
         }
     }
-    if failures.is_empty() {
-        Ok(successes)
-    } else {
-        Err(TextWorkflowFileError::item_errors(command, failures))
+    // The constructor decides whether anything failed: there is no separate
+    // emptiness check here to disagree with it.
+    match ItemFailures::new(failures) {
+        None => Ok(successes),
+        Some(failures) => Err(TextWorkflowFileError::item_errors(command, failures)),
     }
 }
 
 /// Render the inline summary for ``ItemErrors``: command, total
 /// failed, then up to ``MAX_ITEM_ERROR_SAMPLES`` samples.
-fn format_item_errors(command: &str, total: usize, samples: &[ItemError]) -> String {
+fn format_item_errors(command: &str, total: usize, samples: &[ItemErrorSample]) -> String {
     let suffix = if total > samples.len() {
         format!(" (showing first {} of {})", samples.len(), total)
     } else {
@@ -247,6 +329,9 @@ fn format_item_errors(command: &str, total: usize, samples: &[ItemError]) -> Str
 /// Named per-file outcome for one text workflow batch.
 #[derive(Debug, Clone)]
 pub(crate) struct TextBatchFileResult {
+    /// What the command decided about stamping this file with provenance.
+    /// Carried to the writer, which records it on the file's status.
+    pub stamp: FileStampOutcome,
     /// Stable file identity for this output or error.
     pub filename: DisplayPath,
     /// File-local workflow outcome.
@@ -270,6 +355,21 @@ impl TextBatchFileResult {
     /// [`PostValidated`] for the full enumeration of routes to that proof.
     pub(crate) fn ok(filename: impl Into<DisplayPath>, output: PostValidated) -> Self {
         Self {
+            stamp: FileStampOutcome::Unrecorded,
+            filename: filename.into(),
+            result: Ok(output),
+        }
+    }
+
+    /// Construct one successful named file result, recording what the command
+    /// decided about stamping it.
+    pub(crate) fn ok_stamped(
+        filename: impl Into<DisplayPath>,
+        output: PostValidated,
+        stamp: FileStampOutcome,
+    ) -> Self {
+        Self {
+            stamp,
             filename: filename.into(),
             result: Ok(output),
         }
@@ -281,6 +381,8 @@ impl TextBatchFileResult {
         error: impl Into<TextWorkflowFileError>,
     ) -> Self {
         Self {
+            // A failed file is never written, so no stamp decision exists.
+            stamp: FileStampOutcome::Unrecorded,
             filename: filename.into(),
             result: Err(error.into()),
         }
@@ -314,97 +416,13 @@ impl TextBatchFileInput {
     }
 }
 
-/// Borrowed request bundle for one per-file text workflow execution.
-pub(crate) struct TextPerFileWorkflowRequest<'a, Shared, Params> {
-    /// CHAT text to process.
-    pub chat_text: ChatText<'a>,
-    /// Primary language shaping the text workflow.
-    pub lang: &'a LanguageCode3,
-    /// Shared context owned by the workflow family.
-    pub shared: Shared,
-    /// Command-specific parameters for this execution.
-    pub params: Params,
-}
-
-/// Borrowed request bundle for one cross-file text workflow execution.
-pub(crate) struct TextBatchWorkflowRequest<'a, Shared, Params> {
-    /// Files and their CHAT text payloads.
-    pub files: &'a [TextBatchFileInput],
-    /// Primary language shaping the text workflow.
-    pub lang: &'a LanguageCode3,
-    /// Shared context owned by the workflow family.
-    pub shared: Shared,
-    /// Command-specific parameters shared across the batch.
-    pub params: Params,
-}
-
-/// Command-specific behavior for a Rust-owned text workflow family.
-#[async_trait]
-pub(crate) trait TextBatchOperation {
-    /// Shared context threaded through this workflow family.
-    type Shared<'a>: Send
-    where
-        Self: 'a;
-
-    /// Command-specific parameters threaded through the workflow.
-    type Params<'a>: Send
-    where
-        Self: 'a;
-
-    /// Run the command for one CHAT file.
-    async fn run_single(
-        chat_text: ChatText<'_>,
-        lang: &LanguageCode3,
-        shared: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> Result<String, ServerError>;
-
-    /// Run the command over a batch of CHAT files.
-    async fn run_batch(
-        files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
-        shared: Self::Shared<'_>,
-        params: Self::Params<'_>,
-    ) -> TextBatchFileResults;
-}
-
-/// Generic wrapper around one [`TextBatchOperation`] implementation.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct TextBatchWorkflow<O>(PhantomData<O>);
-
-impl<O> TextBatchWorkflow<O> {
-    /// Construct the zero-sized workflow wrapper.
-    pub(crate) const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<O> TextBatchWorkflow<O>
-where
-    O: TextBatchOperation + Send + Sync + 'static,
-{
-    /// Run one per-file text workflow.
-    pub(crate) async fn run_per_file<'a>(
-        &self,
-        request: TextPerFileWorkflowRequest<'a, O::Shared<'a>, O::Params<'a>>,
-    ) -> Result<String, ServerError> {
-        O::run_single(
-            request.chat_text,
-            request.lang,
-            request.shared,
-            request.params,
-        )
-        .await
-    }
-
-    /// Run one cross-file text workflow.
-    pub(crate) async fn run_batch_files<'a>(
-        &self,
-        request: TextBatchWorkflowRequest<'a, O::Shared<'a>, O::Params<'a>>,
-    ) -> TextBatchFileResults {
-        O::run_batch(request.files, request.lang, request.shared, request.params).await
-    }
-}
+// The per-file workflow request, the cross-file workflow request, the
+// `TextBatchOperation` trait and the `TextBatchWorkflow` wrapper used to live
+// here. Every text command runs as a batch (the dispatchers hand the gateway
+// one file at a time where per-file language or durability requires it), so
+// the per-file half had no caller at all, and what was left was a one-method
+// trait plus a zero-sized wrapper that forwarded to it. Each command's batch
+// entry point now calls its own implementation directly.
 
 #[cfg(test)]
 mod tests {
@@ -424,10 +442,12 @@ mod tests {
     fn a_per_item_provider_failure_stays_provider_terminal_through_server_error() {
         let items = TextWorkflowFileError::item_errors(
             "translate",
-            vec![ItemError {
+            ItemFailures::of_one(ItemError {
                 item_index: 0,
-                message: "Translation failed: ConnectionResetError(54)".to_string(),
-            }],
+                failure: EngineItemFailure::EngineReported(
+                    "Translation failed: ConnectionResetError(54)".to_string(),
+                ),
+            }),
         );
         assert_eq!(items.category(), FailureCategory::ProviderTerminal);
 
@@ -454,21 +474,70 @@ mod tests {
         assert_eq!(e.category(), FailureCategory::Validation);
     }
 
-    /// The converse, so the new variant cannot silently re-categorise the
-    /// one that keeps its own answer: per-item engine failures stay
-    /// `ProviderTerminal` because they come from the provider by definition.
+    /// A command-specific failure, standing in for a real one (translate's
+    /// empty translation) so this module's tests need not reach into a
+    /// command's own types.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestCommandFailure;
+
+    impl std::fmt::Display for TestCommandFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the engine returned nothing usable")
+        }
+    }
+
+    /// An engine's own failure is terminal for the file: the same request gets
+    /// the same answer.
     #[test]
     fn item_failures_stay_provider_terminal() {
         assert_eq!(
             TextWorkflowFileError::item_errors(
                 "translate",
-                vec![ItemError {
+                ItemFailures::of_one(ItemError {
                     item_index: 0,
-                    message: "boom".into(),
-                }],
+                    failure: EngineItemFailure::EngineReported("boom".into()),
+                }),
             )
             .category(),
             FailureCategory::ProviderTerminal
+        );
+    }
+
+    /// A command's own failure is terminal too, and the operator reads what it
+    /// said. Calling it retryable would tell the control plane to expect a
+    /// different answer to an identical request.
+    #[test]
+    fn a_command_failure_is_terminal_and_visible() {
+        let failures = ItemFailures::new(vec![
+            ItemError {
+                item_index: 0,
+                failure: ItemFailure::Command(TestCommandFailure),
+            },
+            ItemError {
+                item_index: 1,
+                failure: ItemFailure::EngineReported("429 Too Many Requests".into()),
+            },
+        ])
+        .expect("two failures");
+        let error = TextWorkflowFileError::item_errors("translate", failures);
+        assert_eq!(error.category(), FailureCategory::ProviderTerminal);
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("the engine returned nothing usable"),
+            "the command failure must be visible to the operator, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("429 Too Many Requests"),
+            "the engine's own words must survive too, got: {rendered}"
+        );
+    }
+
+    /// Nothing failed, so no failure value exists to report.
+    #[test]
+    fn no_failures_cannot_become_a_file_failure() {
+        assert_eq!(
+            ItemFailures::<std::convert::Infallible>::new(Vec::new()),
+            None
         );
     }
 
@@ -498,6 +567,10 @@ mod tests {
             (
                 ServerError::Persistence("disk full".into()),
                 FailureCategory::System,
+            ),
+            (
+                ServerError::EmptyTranscription(crate::error::EmptyTranscription::Asr),
+                FailureCategory::Validation,
             ),
             (ServerError::Cancelled, FailureCategory::Cancelled),
         ];
@@ -534,16 +607,21 @@ mod tests {
     fn item_errors_renders_command_and_total() {
         let e = TextWorkflowFileError::item_errors(
             "translate",
-            vec![
+            ItemFailures::new(vec![
                 ItemError {
                     item_index: 0,
-                    message: "Translation failed: ConnectionResetError".into(),
+                    failure: EngineItemFailure::EngineReported(
+                        "Translation failed: ConnectionResetError".into(),
+                    ),
                 },
                 ItemError {
                     item_index: 3,
-                    message: "Translation failed: 429 Too Many Requests".into(),
+                    failure: EngineItemFailure::EngineReported(
+                        "Translation failed: 429 Too Many Requests".into(),
+                    ),
                 },
-            ],
+            ])
+            .expect("two failures"),
         );
         let msg = e.to_string();
         assert!(
@@ -558,13 +636,16 @@ mod tests {
 
     #[test]
     fn item_errors_caps_inline_samples_but_preserves_total() {
-        let failures: Vec<ItemError> = (0..10)
+        let failures: Vec<ItemError<std::convert::Infallible>> = (0..10)
             .map(|i| ItemError {
                 item_index: i,
-                message: format!("err {i}"),
+                failure: EngineItemFailure::EngineReported(format!("err {i}")),
             })
             .collect();
-        let e = TextWorkflowFileError::item_errors("morphotag", failures);
+        let e = TextWorkflowFileError::item_errors(
+            "morphotag",
+            ItemFailures::new(failures).expect("ten failures"),
+        );
         match &e {
             TextWorkflowFileError::ItemErrors { total, samples, .. } => {
                 assert_eq!(*total, 10);

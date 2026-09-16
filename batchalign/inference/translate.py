@@ -1,6 +1,10 @@
 """Translation inference: text -> translated text.
 
 Pure inference, no CHAT, no caching, no pipeline.
+
+Each item's result names the engine that translated it, so the Rust server
+derives translate provenance from the responses it applies rather than from a
+worker-wide report taken before dispatch.
 """
 
 from __future__ import annotations
@@ -8,6 +12,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ValidationError
 
@@ -17,6 +22,7 @@ from batchalign.providers import (
     BatchInferResponse,
     InferResponse,
 )
+from batchalign.worker._types import reported_engine_name
 
 L = logging.getLogger("batchalign.worker")
 
@@ -27,10 +33,28 @@ class TranslateBatchItem(BaseModel):
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedTranslation:
+    """The translation engine one worker loaded, as ONE value.
+
+    ``backend`` selects request pacing, ``engine`` is the identity every
+    translated item reports, and ``translate`` runs the model. The loader
+    builds all three together; they used to be three separate worker-state
+    fields, so an engine name could outlive the backend it described.
+    ``engine`` is admitted by ``reported_engine_name`` on construction.
+    """
+
+    backend: TranslationBackend
+    engine: str
+    translate: Callable[[str, str], str]
+
+    def __post_init__(self) -> None:
+        reported_engine_name(self.engine)
+
+
 def batch_infer_translate(
     req: BatchInferRequest,
-    translate_fn: Callable[[str, str], str],
-    backend: TranslationBackend,
+    translation: LoadedTranslation,
 ) -> BatchInferResponse:
     """Batch translation inference: text -> translation.
 
@@ -38,13 +62,17 @@ def batch_infer_translate(
     ----------
     req : BatchInferRequest
         Batch of TranslateBatchItem payloads.
-    translate_fn : callable
-        Function ``(text, src_lang) -> str`` that performs translation.
-    backend : TranslationBackend
-        Which translation engine is active; Google requires rate limiting.
-    """
-    _translate = translate_fn
+    translation : LoadedTranslation
+        The loaded engine: its callable, its reported identity, and the
+        backend whose rate limits this loop honours.
 
+    Each item becomes one of:
+
+    - ``{"kind": "translated", "raw_translation": ..., "engine": ...}``
+    - ``{"kind": "blank_input"}`` for whitespace-only text, which was never
+      sent to the engine and so names none
+    - an item ``error`` when the payload is invalid or the engine raised
+    """
     t0 = time.monotonic()
     src_lang = req.lang if req.lang else "eng"
 
@@ -57,22 +85,23 @@ def batch_infer_translate(
             continue
 
         if not item.text.strip():
-            results.append(
-                InferResponse(
-                    result={"raw_translation": ""},
-                    elapsed_s=0.0,
-                )
-            )
+            # Its own outcome rather than an empty translation: nothing was
+            # translated, so there is no engine to name.
+            results.append(InferResponse(result={"kind": "blank_input"}, elapsed_s=0.0))
             continue
 
         try:
             # Text arrives pre-processed from Rust (Chinese space removal etc.).
             # Return raw translation output, Rust handles post-processing.
-            translated = _translate(item.text, src_lang)
+            translated = translation.translate(item.text, src_lang)
 
             results.append(
                 InferResponse(
-                    result={"raw_translation": translated},
+                    result={
+                        "kind": "translated",
+                        "raw_translation": translated,
+                        "engine": translation.engine,
+                    },
                     elapsed_s=0.0,
                 )
             )
@@ -82,9 +111,9 @@ def batch_infer_translate(
                 InferResponse(error=f"Translation failed: {e}", elapsed_s=0.0)
             )
 
-        if backend == TranslationBackend.GOOGLE:
+        if translation.backend == TranslationBackend.GOOGLE:
             time.sleep(1.5)
-        elif backend == TranslationBackend.TENCENT:
+        elif translation.backend == TranslationBackend.TENCENT:
             # Tencent TMT's standard free-tier QPS limit is 5 req/sec
             # for ``TextTranslate``; a tight loop hits
             # ``RequestLimitExceeded``. 0.2s/req caps us at ≤5 QPS.

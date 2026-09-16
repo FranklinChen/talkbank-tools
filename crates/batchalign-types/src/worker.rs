@@ -43,7 +43,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationSeconds, LanguageCode3, WorkerLanguage};
+use crate::api::{DurationSeconds, LanguageCode3, ReportedEngineName, WorkerLanguage};
 
 // ---------------------------------------------------------------------------
 // Domain newtypes (worker-specific)
@@ -121,9 +121,9 @@ pub struct WorkerCapabilities {
     /// Compatibility-only command list reported by the worker.
     ///
     /// Rust no longer trusts this field for released command availability and
-    /// instead derives the command surface from `infer_tasks +
-    /// engine_versions`. Test-echo still uses it for direct worker CLI
-    /// coverage.
+    /// instead derives the command surface from `infer_tasks`: a command is
+    /// advertised when every infer task its recipe needs is supported.
+    /// Test-echo still uses it for direct worker CLI coverage.
     pub commands: Vec<String>,
     /// Whether the worker is running on free-threaded Python (3.14t+).
     /// When `true`, the server uses thread workers with shared models
@@ -132,9 +132,20 @@ pub struct WorkerCapabilities {
     pub free_threaded: bool,
     /// Tasks supported by the `infer` op.
     pub infer_tasks: Vec<InferTask>,
-    /// Engine version strings by task (e.g. `{"morphosyntax": "stanza-1.9.2"}`).
-    /// Used by the server to match cache entries to the correct engine version.
-    pub engine_versions: BTreeMap<String, String>,
+    /// One entry per advertised task: forced alignment's engine name (e.g.
+    /// `{"fa": "wave2vec-fa-v1"}`), or `null` before an FA model has loaded,
+    /// and `null` for every other task, whose engine is named on the results
+    /// it returns instead. A worker never sends a guessed name or `"unknown"`.
+    ///
+    /// Keyed by [`InferTask`] (its snake_case wire names) and valued by the
+    /// validated [`ReportedEngineName`], so an unknown task key, a blank name
+    /// or a name carrying a provenance separator fails at deserialization. The
+    /// server's capability gate
+    /// (`batchalign::engine_reports::WorkerEngineReports::admit`) then admits
+    /// this map and `infer_tasks` into one typed per-task value, refusing a
+    /// task advertised without an entry, an entry for an unadvertised task, or
+    /// a name for any task but forced alignment.
+    pub engine_versions: BTreeMap<InferTask, Option<ReportedEngineName>>,
     /// Per-language Stanza processor availability.
     ///
     /// Key is ISO-639-3 code (e.g. "eng", "nld"); value lists available
@@ -316,15 +327,30 @@ mod tests {
             free_threaded: false,
             infer_tasks: vec![InferTask::Morphosyntax, InferTask::Utseg],
             engine_versions: BTreeMap::from([
-                ("morphosyntax".into(), "stanza-1.9.2".into()),
-                ("utseg".into(), "stanza-1.9.2".into()),
+                (
+                    InferTask::Morphosyntax,
+                    Some(ReportedEngineName::try_from("stanza-1.9.2")?),
+                ),
+                // A supported task whose engine the worker cannot name.
+                (InferTask::Utseg, None),
             ]),
             stanza_capabilities: BTreeMap::new(),
         };
         let json = serde_json::to_string(&caps)?;
+        assert!(json.contains(r#""utseg":null"#), "{json}");
         let back: WorkerCapabilities = serde_json::from_str(&json)?;
         assert_eq!(caps, back);
         Ok(())
+    }
+
+    /// An unknown task key or a blank engine name is refused where the report
+    /// is read, before any admission code sees it.
+    #[test]
+    fn worker_capabilities_refuse_unknown_task_keys_and_blank_names() {
+        let unknown_key = r#"{"commands":[],"free_threaded":false,"infer_tasks":[],"engine_versions":{"parsing":"x"}}"#;
+        assert!(serde_json::from_str::<WorkerCapabilities>(unknown_key).is_err());
+        let blank = r#"{"commands":[],"free_threaded":false,"infer_tasks":["fa"],"engine_versions":{"fa":" "}}"#;
+        assert!(serde_json::from_str::<WorkerCapabilities>(blank).is_err());
     }
 
     #[test]

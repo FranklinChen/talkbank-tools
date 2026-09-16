@@ -539,8 +539,6 @@ pub(super) async fn record_preflight_media_failures(
 mod tests {
     use super::*;
 
-    use std::collections::BTreeMap;
-
     use async_trait::async_trait;
     use tokio::sync::broadcast;
 
@@ -653,19 +651,13 @@ mod tests {
             test_echo: true,
             ..Default::default()
         }));
-        pool.start_background_tasks();
+        let _ = pool.start_background_tasks();
         let cache = Arc::new(
             UtteranceCache::sqlite(Some(tempdir.join("cache")))
                 .await
                 .expect("open utterance cache"),
         );
-        let engine = ExecutionEngine::new(RunnerExecutionContext::new(
-            pool,
-            cache,
-            Vec::new(),
-            BTreeMap::new(),
-            true,
-        ));
+        let engine = ExecutionEngine::new(RunnerExecutionContext::new(pool, cache, true));
         ServerExecutionHost::new(store, engine, Arc::new(UnreachableOrchestrator))
     }
 

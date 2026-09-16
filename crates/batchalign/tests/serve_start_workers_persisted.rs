@@ -36,6 +36,7 @@
 )]
 
 use crate::cli_common;
+use crate::live_deadline::CliRunBudget;
 
 use batchalign::api::{FilePayload, JobInfo, JobSubmission, NumSpeakers, ReleasedCommand};
 use batchalign::api::{LanguageCode3, LanguageSpec};
@@ -88,7 +89,7 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
             "--config",
             harness.server_config_path().to_str().unwrap(),
         ])
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(CliRunBudget::DaemonStart.as_duration())
         .output()
         .expect("start daemon");
 

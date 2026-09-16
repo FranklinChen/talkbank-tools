@@ -89,6 +89,25 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             SpeakerResultV2,
             MorphosyntaxResultV2,
             MorphosyntaxItemResultV2,
+            MorphosyntaxModelIdentityV2,
+            // The relation repairs an analyzed item carries. Registered as
+            // named types, not left to appear only as `$defs`, for the same
+            // reason as the model identity: the Python conformance test reads
+            // these FILES, so a type with no file of its own is a contract
+            // Python is never checked against.
+            UdRelationRepairV2,
+            UdRelationRepairKindV2,
+            // Pinned ASR model identity. Registered as named types rather than
+            // left to appear only as `$defs` inside the request and result
+            // schemas, because the Python conformance test reads these FILES:
+            // an identity type with no file of its own is a contract Python is
+            // never checked against.
+            AsrRequestedModelsV2,
+            AsrModelIdentityV2,
+            RequestedModelV2,
+            LoadedModelV2,
+            RequestedRevisionV2,
+            ObservedRevisionV2,
             UtsegResultV2,
             UtsegItemResultV2,
             TranslationResultV2,
@@ -120,6 +139,13 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             AsrElementV2,
             AsrElementKindV2,
             AsrMonologueV2,
+            // Speaker attribution: a provider's own label, or an explicit
+            // "this engine separates nobody". Registered as named types so the
+            // Python conformance test reads them as files, the same reason the
+            // model-identity types are registered.
+            SpeakerAttributionV2,
+            ProviderSpeakerLabelV2,
+            ProviderDiarizationV2,
             IndexedWordTimingV2,
             WhisperChunkSpanV2,
             WhisperTokenTimingV2,
@@ -140,9 +166,6 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             // Handshake
             HelloRequestV2,
             HelloResponseV2,
-            CapabilitiesRequestV2,
-            CapabilitiesResponseV2,
-            TaskCapabilityV2,
             ShutdownRequestV2,
             WorkerRuntimeInfoV2,
         );

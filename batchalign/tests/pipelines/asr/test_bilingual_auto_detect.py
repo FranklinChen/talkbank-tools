@@ -75,6 +75,7 @@ class TestBilingualAutoDetect:
             iso3_to_language_name,
             load_whisper_asr,
         )
+        from batchalign.worker._types_v2 import NotRequestedDiarizationV2
 
         language = iso3_to_language_name("auto")
         assert language == "auto"
@@ -85,7 +86,11 @@ class TestBilingualAutoDetect:
             language="auto",
         )
 
-        item = AsrBatchItem(audio_path=str(CLIP_WAV), lang="auto")
+        item = AsrBatchItem(
+            audio_path=str(CLIP_WAV),
+            lang="auto",
+            diarization=NotRequestedDiarizationV2(),
+        )
         response = _infer_whisper(model, item)
 
         assert isinstance(response, WhisperChunksAsrResponse)
@@ -111,6 +116,7 @@ class TestBilingualAutoDetect:
             _infer_whisper,
             load_whisper_asr,
         )
+        from batchalign.worker._types_v2 import NotRequestedDiarizationV2
 
         model = load_whisper_asr(
             model="openai/whisper-large-v3",
@@ -118,7 +124,11 @@ class TestBilingualAutoDetect:
             language="english",
         )
 
-        item = AsrBatchItem(audio_path=str(CLIP_WAV), lang="eng")
+        item = AsrBatchItem(
+            audio_path=str(CLIP_WAV),
+            lang="eng",
+            diarization=NotRequestedDiarizationV2(),
+        )
         response = _infer_whisper(model, item)
 
         text = response.text

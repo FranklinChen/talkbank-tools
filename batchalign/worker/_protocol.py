@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from batchalign.inference._domain_types import TcpPort
+    from batchalign.worker._registry import WorkerRegistryEntry
 
 from batchalign.worker._protocol_ops import (
     PendingProtocolRequest,
@@ -66,6 +67,50 @@ def _registry_ownership_from_env() -> tuple[str, str, int | None]:
     except ValueError:
         server_pid = None
     return ("server_owned", server_instance_id, server_pid)
+
+
+def _build_identity_from_env() -> str | None:
+    """The spawning server's build identity, or ``None`` when none was given.
+
+    The Rust server sets ``BATCHALIGN_BUILD_IDENTITY`` on every daemon it
+    spawns and refuses to adopt a registry daemon whose identity differs from
+    its own, since a daemon from another build may speak a different wire
+    contract. The value is kept byte for byte; an unset or blank variable is
+    ``None``, a daemon whose build nobody vouched for.
+    """
+    value = os.environ.get("BATCHALIGN_BUILD_IDENTITY")
+    if value is None or not value.strip():
+        return None
+    return value
+
+
+def _registry_entry(host: str, port: TcpPort) -> WorkerRegistryEntry:
+    """The registry entry this TCP daemon advertises itself under.
+
+    One constructor for both serve loops, which used to spell the same
+    eleven-line construction twice.
+    """
+    from batchalign.worker._registry import WorkerRegistryEntry
+    from batchalign.worker._types import _state
+
+    bootstrap = _state.bootstrap
+    ownership, owner_server_instance_id, owner_server_pid = (
+        _registry_ownership_from_env()
+    )
+    return WorkerRegistryEntry(
+        pid=os.getpid(),
+        host=host,
+        port=port,
+        profile=bootstrap.profile.value if bootstrap and bootstrap.profile else "",
+        lang=bootstrap.lang if bootstrap else "eng",
+        build_identity=_build_identity_from_env(),
+        engine_overrides=json.dumps(bootstrap.engine_overrides)
+        if bootstrap and bootstrap.engine_overrides
+        else "",
+        ownership=ownership,
+        owner_server_instance_id=owner_server_instance_id,
+        owner_server_pid=owner_server_pid,
+    )
 
 
 # Bootstrap-vs-request stdout discipline.
@@ -657,12 +702,7 @@ def _serve_tcp(
     Registers itself in ``workers.json`` on startup and removes itself on
     shutdown.
     """
-    from batchalign.worker._registry import (
-        WorkerRegistryEntry,
-        register_worker,
-        unregister_worker,
-    )
-    from batchalign.worker._types import _state
+    from batchalign.worker._registry import register_worker, unregister_worker
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -670,24 +710,7 @@ def _serve_tcp(
     server_sock.listen(1)
     actual_port = server_sock.getsockname()[1]
 
-    bootstrap = _state.bootstrap
-    ownership, owner_server_instance_id, owner_server_pid = (
-        _registry_ownership_from_env()
-    )
-    entry = WorkerRegistryEntry(
-        pid=os.getpid(),
-        host=host,
-        port=actual_port,
-        profile=bootstrap.profile.value if bootstrap and bootstrap.profile else "",
-        lang=bootstrap.lang if bootstrap else "eng",
-        engine_overrides=json.dumps(bootstrap.engine_overrides)
-        if bootstrap and bootstrap.engine_overrides
-        else "",
-        ownership=ownership,
-        owner_server_instance_id=owner_server_instance_id,
-        owner_server_pid=owner_server_pid,
-    )
-    register_worker(entry, registry_path=registry_path)
+    register_worker(_registry_entry(host, actual_port), registry_path=registry_path)
 
     _print_ready_tcp(host, actual_port)
     logger.info("TCP worker listening on %s:%d (sequential)", host, actual_port)
@@ -717,12 +740,7 @@ def _serve_tcp_concurrent(
     Same as ``_serve_tcp()`` but dispatches requests to a thread pool for
     concurrent GPU inference within each connection.
     """
-    from batchalign.worker._registry import (
-        WorkerRegistryEntry,
-        register_worker,
-        unregister_worker,
-    )
-    from batchalign.worker._types import _state
+    from batchalign.worker._registry import register_worker, unregister_worker
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -730,24 +748,7 @@ def _serve_tcp_concurrent(
     server_sock.listen(1)
     actual_port = server_sock.getsockname()[1]
 
-    bootstrap = _state.bootstrap
-    ownership, owner_server_instance_id, owner_server_pid = (
-        _registry_ownership_from_env()
-    )
-    entry = WorkerRegistryEntry(
-        pid=os.getpid(),
-        host=host,
-        port=actual_port,
-        profile=bootstrap.profile.value if bootstrap and bootstrap.profile else "",
-        lang=bootstrap.lang if bootstrap else "eng",
-        engine_overrides=json.dumps(bootstrap.engine_overrides)
-        if bootstrap and bootstrap.engine_overrides
-        else "",
-        ownership=ownership,
-        owner_server_instance_id=owner_server_instance_id,
-        owner_server_pid=owner_server_pid,
-    )
-    register_worker(entry, registry_path=registry_path)
+    register_worker(_registry_entry(host, actual_port), registry_path=registry_path)
 
     _print_ready_tcp(host, actual_port)
     logger.info(

@@ -6,8 +6,8 @@ use crate::chat_ops::morphosyntax_ops::{
     apply_pos_hint_evidence, clear_morphosyntax, collect_payloads, collect_pos_hints,
     declared_languages, l2, remove_empty_morphosyntax_placeholders, validate_mor_alignment,
 };
-use crate::chat_ops::nlp::UdResponse;
 use crate::chat_ops::{ChatFile, LanguageCode};
+use crate::morphosyntax::identity::{AdmittedMorphosyntaxResponse, AppliedAnalyses};
 use crate::morphosyntax::{MorphotagDisposition, infer_batch};
 use crate::pipeline::post_validate::PostValidated;
 use crate::{api::LanguageCode3, error::ServerError, pipeline::PipelineServices};
@@ -75,8 +75,16 @@ pub(super) struct Collected {
 }
 pub(super) struct Inferred {
     work: InferenceWork,
+    /// What the workers reported about the admitted responses, before any L2
+    /// re-analysis.
+    applied: AppliedAnalyses,
 }
-pub(super) struct Applied;
+/// Applied, carrying what every analysis that reached the document reported:
+/// the models, which the provenance comment names, and the relation repairs
+/// made inside them, which it counts.
+pub(super) struct Applied {
+    applied: AppliedAnalyses,
+}
 
 /// The terminal phase: the document is finished AND its bytes have passed the
 /// post-validation gate.
@@ -215,11 +223,13 @@ impl Analysis<Collected> {
         self.with_responses(responses)
     }
 
-    /// Admit the worker boundary once, retaining payloads with their responses.
+    /// Admit the worker boundary once, retaining payloads with their responses
+    /// and what the workers reported about them.
     pub(super) fn with_responses(
         self,
-        responses: Vec<UdResponse>,
+        responses: Vec<AdmittedMorphosyntaxResponse>,
     ) -> Result<Analysis<Inferred>, ServerError> {
+        let (responses, applied) = AppliedAnalyses::take_applied(responses);
         let batch = MatchedMorphosyntaxResponses::new(self.state.items, responses)
             .map_err(|error| ServerError::Validation(error.to_string()))?;
         let work = if batch.items().is_empty() {
@@ -233,7 +243,7 @@ impl Analysis<Collected> {
         Ok(Analysis {
             chat: self.chat,
             language: self.language,
-            state: Inferred { work },
+            state: Inferred { work, applied },
         })
     }
 }
@@ -243,7 +253,8 @@ impl Analysis<Inferred> {
         mut self,
         options: &RunOptions<'_>,
     ) -> Result<Analysis<Applied>, ServerError> {
-        match self.state.work {
+        let Inferred { work, mut applied } = self.state;
+        match work {
             InferenceWork::NoWork => {}
             InferenceWork::Responses { batch, hints } => {
                 let deferred = if options.l2.should_analyze() {
@@ -262,13 +273,15 @@ impl Analysis<Inferred> {
                         ServerError::Validation(format!("Result injection failed: {e}"))
                     })?;
                 if !deferred.is_empty() {
-                    crate::morphosyntax::dispatch_secondary_l2(
-                        &mut self.chat,
-                        &deferred,
-                        options.services,
-                        "single-file",
-                    )
-                    .await;
+                    applied.extend(
+                        crate::morphosyntax::dispatch_secondary_l2(
+                            &mut self.chat,
+                            &deferred,
+                            options.services,
+                            "single-file",
+                        )
+                        .await,
+                    );
                 }
                 if let HintPlan::Captured(evidence) = hints {
                     let outcome = apply_pos_hint_evidence(
@@ -286,7 +299,7 @@ impl Analysis<Inferred> {
         Ok(Analysis {
             chat: self.chat,
             language: self.language,
-            state: Applied,
+            state: Applied { applied },
         })
     }
 }
@@ -311,11 +324,22 @@ impl Analysis<Applied> {
         options: &RunOptions<'_>,
     ) -> Result<Analysis<PostChecked>, ServerError> {
         batchalign_transform::decisions::strip_decision_tiers(&mut self.chat);
+        if let Some(count) = self.state.applied.repair_count() {
+            // The file-level report no worker can make: a worker sees one
+            // batch, not the document these relations belong to. The stamp
+            // below carries the count into the file itself; this line is the
+            // operator's copy, and neither is the only record any more.
+            warn!(
+                repairs = count.get(),
+                tally = %self.state.applied.repair_tally(),
+                lang = %self.language.api,
+                "Stanza relations repaired before injection"
+            );
+        }
         let provenance = crate::provenance::morphotag_provenance(
-            self.language.api.as_ref(),
-            options.services.engine_version.as_ref(),
+            &self.language.api,
+            &self.state.applied,
             options.tokenization == TokenizationMode::StanzaRetokenize,
-            false,
         );
         crate::provenance::inject_provenance(&mut self.chat, &provenance);
         remove_empty_morphosyntax_placeholders(&mut self.chat);

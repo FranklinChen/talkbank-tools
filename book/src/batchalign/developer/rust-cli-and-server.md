@@ -1,7 +1,7 @@
 # Rust CLI and Server
 
 **Status:** Current
-**Last updated:** 2026-09-05 03:20 EDT
+**Last updated:** 2026-09-15 18:27 EDT
 
 This page covers the Rust control plane that powers `batchalign3`: the CLI
 client, the HTTP server, and how to extend them.
@@ -310,16 +310,33 @@ wire format between CLI and server.
 **`crates/batchalign/src/recipe_runner/catalog.rs`**: declare the
 `CatalogEntry`. That is the whole registration.
 
-`crates/batchalign/src/runner/policy.rs` answers `infer_task_for_command()` and
-`command_requires_chat_infer()` straight off that entry. Both are total: a
+`crates/batchalign/src/runner/policy.rs` answers
+`command_requires_chat_infer()` straight off that entry. It is total: a
 `ReleasedCommand` always has an entry (pinned by
-`recipe_runner::catalog::tests::every_released_command_has_a_spec`), so neither
-returns an `Option` for callers to unwrap.
+`recipe_runner::catalog::tests::every_released_command_has_a_spec`), so it
+returns no `Option` for callers to unwrap.
 
-The server's capability gate (`validate_infer_capability_gate()` in
-`crates/batchalign/src/capability.rs`) cross-checks the worker's advertised
-`infer_tasks` against each entry's `capabilities.primary_infer_task`: a command
-is advertised only when a worker reports the task it is advertised from.
+Availability reads two different facts at two moments:
+
+1. `command_supported()` in `crates/batchalign/src/capability.rs`: the
+   worker's admitted report (admitted once, in
+   `WorkerPool::record_capabilities()`) advertises the entry's
+   `capabilities.primary_infer_task`. This alone decides what `/health`
+   advertises and which submissions are accepted, from any report, including
+   one a lazily loading worker gave before loading anything. It is the only
+   availability rule in that module, beside `WorkerCapabilitySnapshot`.
+2. At dispatch (`runner/routing.rs`),
+   `WorkerPool::ensure_command_capabilities()` loads the command's task on the
+   selected worker (`ensure_task`) and returns `LoadedCapabilities`: the task
+   it loaded and the report taken after that load. Routing runs step 1 again
+   against that report. Then the forced-alignment dispatch arm, and only that
+   arm, reads the FA engine with `FaCacheNamespace::from_loaded`
+   (`engine_reports.rs`), because every FA cache row is namespaced by it. It
+   refuses a report taken after a different task loaded (`LoadedAnotherTask`),
+   an engine still unnamed after the load (`UnreportedAfterLoad`) and a worker
+   that does not support FA (`NotSupported`). No catalog field declares this
+   requirement; the arm that reads the namespace is the only place that says
+   so.
 
 The critical implementation rule is that **startup capability state is not
 authoritative for execution**. The current server intentionally allows an
@@ -327,15 +344,15 @@ optimistic cold-start snapshot so app creation does not have to spawn a
 dedicated probe worker. Execution then resolves a **live capability snapshot**
 before it trusts infer-task gating:
 
-- `resolve_worker_capability_snapshot()` in `crates/batchalign/src/state.rs`
-  prefers worker-pool detected capabilities over the startup placeholder
-- `run_job()` in `crates/batchalign/src/runner/mod.rs` now forces a
-  command-appropriate live probe through
-  `WorkerPool::ensure_command_capabilities_with_overrides()` before rejecting an
-  infer-only command
-- `WorkerPool::discover_from_registry()` now also publishes a detected snapshot
-  when startup finds healthy TCP registry daemons, so registry-only deployments
-  do not start with `infer_tasks = []`
+- `WorkerCapabilitySnapshot::resolve()` in `crates/batchalign/src/capability.rs`
+  prefers the pool's first admitted report over the startup view of every
+  released command
+- the router (`runner/routing.rs`) forces a command-appropriate live probe
+  through `WorkerPool::ensure_command_capabilities()`, which returns the
+  selected key's admitted report, before applying the availability rule
+- `WorkerPool::discover_from_registry()` admits the report probed from a
+  healthy TCP registry daemon under that daemon's worker key, so
+  registry-only deployments do not start with `infer_tasks = []`
 
 This split is deliberate. It avoids the old failure mode where lazy startup said
 "we will discover capabilities later" but the first real `morphotag` or
@@ -346,12 +363,37 @@ connection at a time. Registry discovery therefore probes capabilities on the
 same `TcpWorkerHandle` it already opened for the discovery health check, instead
 of trying to race a second connection.
 
+A checked-out TCP handle is a `TcpCheckout` (`worker/pool/dispatch.rs`), which
+owns the handle and its group slot together. When the exchange ends, the
+handle goes back to its group unless `WorkerError::worker_after_failure()`
+(`worker/error.rs`) answers `Retire`. Only `WorkerResponse`, `Bootstrap`,
+`MemoryGuard`, `NoWorker` and `PoolShuttingDown` leave the worker reusable;
+every other error (a dead process, a protocol or I/O failure,
+`CapabilitiesRefused`, and the rest) retires the handle. Retiring drops the
+handle, which closes the connection, and releases the slot; a checkout dropped
+without finishing (a cancelled exchange) does the same, because a half-read
+stream could hand a later exchange a stale reply. The daemon itself is left
+running and is adopted again by the next registry sweep.
+
+A worker whose capability report was refused is never pooled, on any path: a
+spawned worker is shut down, a registry GPU daemon is disconnected, a TCP
+handle is dropped, a checked-out worker is taken out of its group, and
+registry discovery (`worker/pool/discovery.rs`) does not integrate it.
+
 The registry layer now also carries explicit daemon ownership metadata:
 
 - `external` daemons are preserved on routine shutdown
 - `server_owned` daemons are tagged with `server_instance_id` and `server_pid`
 - shutdown only retires daemons owned by the current server instance
 - discovery skips foreign live owners and reaps stale foreign owned daemons
+- discovery refuses, without reaping it or removing its entry, a daemon whose
+  entry names another build or no build. Entries carry `build_identity`, which
+  the daemon reads from `BATCHALIGN_BUILD_IDENTITY`, set by the server's daemon
+  spawner and by `batchalign3 worker start`. The logged refusal names the
+  remedy: `batchalign3 worker stop`, then `batchalign3 worker start` with this
+  build. Each sweep's refusals are listed in `/health` under
+  `refused_registry_workers` (see
+  [Observability](../architecture/observability.md#refused-registry-daemons))
 
 That ownership model is the durable fix for the old orphan-daemon/kill-all
 whackamole around server-spawned TCP workers.
@@ -363,13 +405,19 @@ for details.
 
 ### 5. Server-side dispatch shape
 
-Route the command to its orchestrator in the appropriate dispatch module under
+`crates/batchalign/src/runner/routing.rs` matches the catalog's
+`RunnerDispatchKind` exhaustively. Batched text commands (`morphotag`,
+`utseg`, `translate`, `coref`, `compare`) are routed by name in
+`dispatch_batched_text_command()` to the recipe-owned modules under
+`crates/batchalign/src/execution/` (`morphotag/`, `utseg.rs`, `translate.rs`,
+`coref.rs`, and `kernel.rs` for compare); a new text command needs an arm
+there. Every other kind goes to its module under
 `crates/batchalign/src/runner/dispatch/`:
-- `infer_batched.rs`: `dispatch_batched_infer()` for text-only commands (cross-file batching)
 - `fa_pipeline.rs`: `dispatch_fa_infer()` for per-file forced alignment
 - `transcribe_pipeline.rs`: `dispatch_transcribe_infer()` for audio-to-CHAT generation
 - `benchmark_pipeline.rs`: `dispatch_benchmark_infer()` for transcribe + compare composition
-- `media_analysis_v2.rs`: `dispatch_media_analysis_v2()` for opensmile/avqi
+- `media_analysis_v2.rs`: `dispatch_media_analysis_v2()` for opensmile/avqi/diarize
+- `speaker_identity_pipeline.rs`: `dispatch_speaker_identity()` for speaker identification
 
 **Recipe-driven execution (new model):** Compare has been migrated from
 `runner/dispatch/` to the recipe-driven `execution/` kernel. New commands

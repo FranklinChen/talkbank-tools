@@ -32,6 +32,16 @@ impl WorkerPool {
             self.current_server_instance_id(),
         )
         .await;
+        // Every daemon this sweep refused is recorded, replacing the previous
+        // sweep's list, so `/health` shows daemons that are alive but not
+        // adopted, and why.
+        self.record_refused_registry_workers(
+            discovery
+                .refused
+                .iter()
+                .map(registry::ForeignBuildDaemon::to_refused_registry_worker)
+                .collect(),
+        );
         let discovered = discovery.workers;
 
         if discovered.is_empty() {
@@ -43,7 +53,7 @@ impl WorkerPool {
 
         // Integrate GPU workers into the shared GPU worker map.
         // Non-GPU TCP workers are tracked in a separate TCP worker map.
-        for worker in &discovered {
+        for mut worker in discovered {
             let target = WorkerTarget::profile(worker.profile);
             let key = match WorkerKey::from_registry_json(
                 target,
@@ -62,6 +72,22 @@ impl WorkerPool {
                     continue;
                 }
             };
+            // The one worker discovery probed carries its report; it is
+            // admitted here, under the key it will be dispatched by. A refused
+            // report means the worker is not used, so it is not integrated;
+            // the refusal is that key's recorded admission, which `/health`
+            // lists.
+            if let Some(caps) = worker.capabilities.take()
+                && let Err(error) = self.record_capabilities(&key, caps)
+            {
+                warn!(
+                    profile = %worker.entry.profile,
+                    lang = %worker.entry.lang,
+                    %error,
+                    "Registry worker's capability report was refused; not integrating it"
+                );
+                continue;
+            }
             if target.is_concurrent() {
                 let info = TcpWorkerInfo {
                     host: worker.entry.host.clone(),
@@ -157,18 +183,6 @@ impl WorkerPool {
                     }
                 }
             }
-        }
-
-        if self.lazy_capabilities.get().is_none()
-            && let Some(caps) = discovery.detected_capabilities
-        {
-            info!(
-                infer_tasks = ?caps.infer_tasks,
-                engine_versions = ?caps.engine_versions,
-                stanza_languages = caps.stanza_capabilities.len(),
-                "Recorded detected worker capabilities from registry discovery"
-            );
-            self.record_capabilities(caps);
         }
 
         count

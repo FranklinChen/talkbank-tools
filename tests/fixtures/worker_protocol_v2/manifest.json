@@ -9,14 +9,6 @@
       "file": "hello_response.json"
     },
     {
-      "schema": "capabilities_request",
-      "file": "capabilities_request.json"
-    },
-    {
-      "schema": "capabilities_response",
-      "file": "capabilities_response.json"
-    },
-    {
       "schema": "execute_request",
       "file": "execute_request_asr_prepared_audio.json"
     },

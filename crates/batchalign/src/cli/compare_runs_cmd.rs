@@ -20,8 +20,20 @@ use super::args::{
 };
 use super::error::CliError;
 
-const REPORT_SCHEMA: u32 = 1;
-const ALGORITHM_VERSION: u32 = 1;
+/// The report envelope's shape, including the serialized rows it carries.
+///
+/// Bumped to 2 on 2026-09-16: an alignment row's `left_timing` / `right_timing`
+/// changed from a nullable timing object to a tagged timing STATE that names
+/// why an untimed token has no timing.
+const REPORT_SCHEMA: u32 = 2;
+/// What the comparison COMPUTED, which is part of a comparison's identity.
+///
+/// Bumped alongside the schema above, and this is the load-bearing half. Pair
+/// results are cached under a `comparison_id` derived from this constant, so
+/// leaving it at 1 would serve rows in the old shape out of an earlier run's
+/// cache, and the columns added beside them would read as empty cells rather
+/// than as a mismatch. A cache hit is not a correctness certificate.
+const ALGORITHM_VERSION: u32 = 2;
 
 pub(super) fn run(args: &CompareRunsArgs) -> Result<(), CliError> {
     match &args.action {
@@ -447,8 +459,10 @@ fn atomic_csv(path: &Path, records: &[Value], subject: &str) -> Result<(), CliEr
                     "utterance",
                     "token",
                     "text",
+                    "left_timing_state",
                     "left_start_ms",
                     "left_end_ms",
+                    "right_timing_state",
                     "right_start_ms",
                     "right_end_ms",
                     "start_delta_ms",
@@ -472,8 +486,10 @@ fn atomic_csv(path: &Path, records: &[Value], subject: &str) -> Result<(), CliEr
                             num(row, "utterance"),
                             num(row, "token"),
                             text(row, "text"),
+                            pointer_text(row, "/left_timing/state"),
                             pointer(row, "/left_timing/start_ms"),
                             pointer(row, "/left_timing/end_ms"),
+                            pointer_text(row, "/right_timing/state"),
                             pointer(row, "/right_timing/start_ms"),
                             pointer(row, "/right_timing/end_ms"),
                             scalar(row, "start_delta_ms"),
@@ -551,6 +567,18 @@ fn pointer(value: &Value, path: &str) -> String {
         .map(Value::to_string)
         .unwrap_or_default()
 }
+/// A STRING at a JSON pointer, unquoted.
+///
+/// [`pointer`] renders through `Value::to_string`, which is right for a number
+/// and wrong for a string: it would write `"timed"` into the cell, quotes
+/// included.
+fn pointer_text(value: &Value, path: &str) -> String {
+    value
+        .pointer(path)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let parent = path.parent().ok_or_else(|| {
         CliError::InvalidArgument(format!("output path has no parent: {}", path.display()))
@@ -566,7 +594,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod csv_shape_tests {
-    use super::{differs, rate, wer_numerator};
+    use super::{differs, pointer, pointer_text, rate, wer_numerator};
     use serde_json::json;
 
     /// The CSV readers must track the producer's serialized shape.
@@ -605,5 +633,36 @@ mod csv_shape_tests {
         // the producer: a rate of 0 would read as perfect agreement.
         let empty_left = json!({ "words": { "left": 0, "right": 1 } });
         assert_eq!(rate(&empty_left, "1".to_string()), "");
+    }
+
+    /// An alignment row's timing columns are read out of the TAGGED state.
+    ///
+    /// The millisecond columns keep resolving for a timed token, because the
+    /// state is internally tagged and `start_ms` / `end_ms` sit beside the tag
+    /// rather than under a further level. The state column is what an untimed
+    /// token now carries in place of three empty cells and no reason.
+    #[test]
+    fn alignment_timing_columns_are_read_from_the_tagged_state() {
+        let timed = json!({ "left_timing": { "state": "timed", "start_ms": 10, "end_ms": 20 } });
+        assert_eq!(pointer_text(&timed, "/left_timing/state"), "timed");
+        assert_eq!(pointer(&timed, "/left_timing/start_ms"), "10");
+        assert_eq!(pointer(&timed, "/left_timing/end_ms"), "20");
+
+        let drifted = json!({
+            "left_timing": { "state": "wor_tier_drifted", "wor_slots": 3, "main_words": 4 }
+        });
+        assert_eq!(
+            pointer_text(&drifted, "/left_timing/state"),
+            "wor_tier_drifted"
+        );
+        assert_eq!(
+            pointer(&drifted, "/left_timing/start_ms"),
+            "",
+            "an untimed token has no start; the state column is where it says why"
+        );
+
+        // `pointer` would have quoted it, which is why the state has a reader
+        // of its own.
+        assert_eq!(pointer(&timed, "/left_timing/state"), "\"timed\"");
     }
 }

@@ -201,6 +201,47 @@ impl CommandFamily {
     }
 }
 
+/// What kind of source file one command consumes.
+///
+/// DECLARED AND PINNED, BUT NOT YET READ IN PRODUCTION: it states a real
+/// per-command fact that a reader would otherwise reconstruct, and an unpinned
+/// declared field reads as authoritative while nothing would notice it going
+/// wrong. Its pin test is `every_command_declares_its_source_kind`.
+///
+/// It survives the deletion of `CapabilityPlan::additional_infer_tasks`, which
+/// had the same "declared but unread" standing, because the two are not the
+/// same case. That one restated something the stage recipes already declare and
+/// could only ever have been checked against the wrong worker; this one is
+/// derivable from nothing else in the entry, as the paragraphs below spell out.
+///
+/// Submission validation deliberately does NOT key on it. Refusing a CHAT
+/// source for every `Media` command is not sound in this repository: the
+/// server tests drive `transcribe` with CHAT fixtures against the test-echo
+/// worker, in both submission modes, so that rule breaks 45 tests in
+/// `cli_integration_suite`. `JobSubmission::validate_source_kinds` keys on
+/// `PlannerKind::BenchmarkPairs` instead, which is the narrow case that is
+/// genuinely contradictory.
+///
+/// It is NOT derivable from the two fields that look like they should carry
+/// it:
+///
+/// - `PlannerKind::AudioInputs` covers `align` and `speaker_identify`, whose
+///   sources are CHAT transcripts with the media resolved beside them. The
+///   planner says how work units are PAIRED, not what may arrive.
+/// - `CommandIoProfile::PathsModeAudio` means "needs shared-filesystem audio
+///   access", which is also true of those same two.
+///
+/// A source check keyed to either one therefore answers a different question,
+/// and can only be made to work by naming one planner by hand. That was the
+/// first shape of the benchmark fix, and naming a single planner was the tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandSourceKind {
+    /// The command's sources are CHAT transcripts.
+    Chat,
+    /// The command's sources are media recordings.
+    Media,
+}
+
 /// Which planner shape owns source discovery for a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlannerKind {
@@ -226,6 +267,27 @@ pub(crate) enum CapabilitySurface {
 }
 
 /// Worker-capability requirements for one released command.
+///
+/// ONE task, not a list. A second field, `additional_infer_tasks`, listed the
+/// tasks a recipe was said to reach after the first. It was deleted on
+/// 2026-09-16, and deleted rather than promoted into a per-stage admission
+/// check, because nothing could have read it correctly: a later stage does not
+/// run on the worker this plan admitted. The command's worker is keyed on
+/// `primary_infer_task` alone (`WorkerTarget::for_command_with_mode`, and
+/// `WorkerPool::ensure_command_capabilities`, which loads exactly that one
+/// task), while a later stage goes back to the pool and derives its OWN key
+/// from its OWN request. The speaker stage of `transcribe_s` is therefore
+/// served by a speaker worker, about which the admitted ASR worker's report
+/// says nothing, so checking the list here would have refused jobs on the
+/// evidence of the wrong worker.
+///
+/// What a recipe reaches is already declared, stage by stage, in its `Recipe`,
+/// and `Recipe::new` validates that declaration in a `const` context. The
+/// deleted field was a hand-written second copy of it, and it had already
+/// drifted from the fact it claimed to state: `transcribe` declared no further
+/// tasks while its recipe reaches Speaker, Utseg and Morphosyntax, and
+/// `transcribe_s` declared Speaker while its recipe reaches the other two as
+/// well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CapabilityPlan {
     /// The infer task the command is ADVERTISED from: the one whose presence in
@@ -235,16 +297,6 @@ pub(crate) struct CapabilityPlan {
     /// infer task" is a fact about the type rather than a runtime `expect` on
     /// `infer_tasks.first()`, which is what it was until 2026-07-29.
     pub primary_infer_task: InferTask,
-    /// Further infer tasks the recipe reaches somewhere after the first.
-    ///
-    /// Declared but not yet read: capability advertisement keys off the primary
-    /// task alone, exactly as it did when this was one `infer_tasks` slice and
-    /// only `.first()` was consumed. Kept because it states a real fact about
-    /// the recipe (transcribe_s also needs Speaker, benchmark also needs
-    /// Morphosyntax) that a reader would otherwise have to reconstruct from the
-    /// stage list. Widening advertisement to include these would change what
-    /// `/health` reports, so it is a deliberate decision, not a cleanup.
-    pub additional_infer_tasks: &'static [InferTask],
     /// Whether the released command is recipe-owned or composed.
     pub surface: CapabilitySurface,
 }
@@ -337,6 +389,8 @@ pub(crate) struct CatalogEntry {
     pub family: CommandFamily,
     /// Planner shape used to derive work units.
     pub planner: PlannerKind,
+    /// What kind of source file this command consumes.
+    pub source_kind: CommandSourceKind,
     /// Whether the command is advertised straight from one infer task or
     /// synthesized by the server from lower-level capability.
     pub capability_kind: CommandCapabilityKind,

@@ -20,10 +20,10 @@ import pytest
 # Assumption 1: FunASR/SenseVoice outputs per-character tokens for Cantonese
 # =============================================================================
 #
-# batchalign3's FunASR bridge (`_funaudio_common.py`) calls
-# `cantonese_char_tokens()` in Rust, which splits text into per-character tokens.
-# This is by design, FunASR returns raw text, and batchalign3 splits into
-# characters for timestamp alignment. The result is per-character main tier words.
+# FunASR reports one unit per Han character and batchalign3 keeps that
+# granularity all the way to the main tier, so a Cantonese transcript arrives
+# one character per word. The tokenization the pipeline applies to such text is
+# exactly "one character per token", which is what `list(text)` spells here.
 # =============================================================================
 
 
@@ -33,14 +33,11 @@ class TestClaim1_FunASR_PerCharacter:
     def test_funasr_cantonese_produces_per_char_tokens(self) -> None:
         """FunASR Cantonese transcription splits into individual characters.
 
-        The Rust bridge `cantonese_char_tokens()` normalizes and splits CJK text
-        into one token per character. This is the root of the word segmentation
-        problem that --retokenize addresses.
+        This is the root of the word segmentation problem that --retokenize
+        addresses.
         """
-        import batchalign_core
-
         # Simulates FunASR output: "故事係好" (a story is good)
-        tokens = batchalign_core.cantonese_char_tokens("故事係好")
+        tokens = list("故事係好")
         assert tokens == ["故", "事", "係", "好"], (
             "Each CJK character should be a separate token, "
             "this is the per-character problem that --retokenize solves"
@@ -52,9 +49,7 @@ class TestClaim1_FunASR_PerCharacter:
         '故事' (story) is one word but FunASR processing splits it into '故' and '事'.
         This makes word count, MLU, and POS tagging unreliable.
         """
-        import batchalign_core
-
-        tokens = batchalign_core.cantonese_char_tokens("故事")
+        tokens = list("故事")
         assert len(tokens) == 2, "A two-character word should become 2 tokens"
         assert tokens == ["故", "事"]
 
@@ -64,9 +59,7 @@ class TestClaim1_FunASR_PerCharacter:
         '我想食嘢' (I want to eat something), 4 characters, should be 2-3 words
         but FunASR produces 4 single-char tokens.
         """
-        import batchalign_core
-
-        tokens = batchalign_core.cantonese_char_tokens("我想食嘢")
+        tokens = list("我想食嘢")
         assert all(len(t) == 1 for t in tokens), (
             "Every token should be a single character, "
             "this is the per-character problem"
@@ -109,7 +102,7 @@ class TestClaim2_Tencent_WordSegmented:
 
         rec = TencentRecognizer.__new__(TencentRecognizer)
         rec.lang_code = "yue"
-        rec.provider_lang = "yue"
+        rec.engine_model_type = "16k_zh_large"
 
         # Simulate Tencent returning multi-character segmented words
         result_detail = [

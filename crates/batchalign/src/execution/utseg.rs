@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tracing::warn;
 
+use crate::dispatch_language::JobLanguage;
 use crate::planning;
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage};
@@ -37,6 +38,7 @@ pub(crate) async fn dispatch_utseg_job(
     host: &DispatchHostContext,
     gateway: Arc<dyn WorkerGateway>,
     should_merge_abbrev: bool,
+    job_language: &JobLanguage,
     allow_stanza_fallback: bool,
 ) -> Result<(), crate::error::ServerError> {
     let plan = planning::build_job_plan(job).map_err(|error| {
@@ -57,17 +59,15 @@ pub(crate) async fn dispatch_utseg_job(
             .await;
     }
 
-    // No silent eng fallback. Utseg requires a concrete ISO language
-    // submission validation accepts `Resolved(_)`; if anything else slipped
-    // through, surface a typed error rather than tag every output with
-    // English.
-    let lang = job.dispatch.lang.as_resolved().cloned().ok_or_else(|| {
-        crate::error::ServerError::Validation(format!(
-            "utseg requires `--lang <iso3>`; got '{}'. Re-submit with an \
-             explicit language (e.g. `--lang eng`).",
-            job.dispatch.lang,
-        ))
-    })?;
+    // The language is handed in, not asked for. Utseg is a job-level command
+    // ([`crate::dispatch_language`]), so the router resolved its language once
+    // and a `JobLanguage` exists only because that resolution succeeded. This
+    // used to be an `as_resolved().ok_or_else(...)` check here, one of several
+    // copies of the same question; coref's copy of it could never pass.
+    //
+    // Each spawned per-file task owns its own clone (the `JoinSet` requires
+    // `'static`), so the code is cloned in the loop below rather than bound
+    // here and cloned again.
 
     // Bounded-parallelism per-file dispatch. Same shape as
     // `fa_pipeline.rs`: Semaphore caps the number of concurrent file
@@ -103,7 +103,7 @@ pub(crate) async fn dispatch_utseg_job(
             }
         };
         let gateway_for_task = Arc::clone(&gateway);
-        let lang = lang.clone();
+        let lang = job_language.code().clone();
         let host_for_task = host.clone();
         let job_for_task = job.clone();
         let plan_for_task = Arc::clone(&plan);
@@ -188,7 +188,8 @@ mod tests {
             _lang: &LanguageCode3,
             _mwt: &MwtDict,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
             unreachable!()
         }
 
@@ -241,7 +242,6 @@ mod tests {
         async fn coref_batch(
             &self,
             _files: &[TextBatchFileInput],
-            _lang: &LanguageCode3,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             unreachable!()
@@ -315,6 +315,21 @@ mod tests {
         )))
     }
 
+    /// The language utseg's dispatch is handed, built through the one
+    /// constructor rather than assembled here, so these tests exercise the
+    /// real resolution instead of a shape it would refuse.
+    fn job_language() -> JobLanguage {
+        let resolved = crate::dispatch_language::DispatchLanguage::resolve(
+            ReleasedCommand::Utseg,
+            &LanguageSpec::Resolved(LanguageCode3::eng()),
+        )
+        .expect("utseg submits a resolved language");
+        let crate::dispatch_language::DispatchLanguage::Job(language) = resolved else {
+            panic!("utseg is a job-level command")
+        };
+        language
+    }
+
     /// Per-file dispatch: each file produces its own gateway call, never
     /// pooled across files. Two files → two gateway calls of size 1 each.
     /// This is the property that gives utseg incremental writeback and
@@ -331,6 +346,7 @@ mod tests {
             &host,
             Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
             false,
+            &job_language(),
             false,
         )
         .await
@@ -353,9 +369,16 @@ mod tests {
         let gateway = Arc::new(FakeUtsegGateway::default());
         let job = utseg_snapshot(temp.path(), true);
 
-        dispatch_utseg_job(&job, &host, gateway as Arc<dyn WorkerGateway>, true, false)
-            .await
-            .expect("utseg dispatch");
+        dispatch_utseg_job(
+            &job,
+            &host,
+            gateway as Arc<dyn WorkerGateway>,
+            true,
+            &job_language(),
+            false,
+        )
+        .await
+        .expect("utseg dispatch");
 
         let output = std::fs::read_to_string(temp.path().join("output").join("a.cha")).unwrap();
         assert!(output.contains("*PAR:\tFBI ."));

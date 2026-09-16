@@ -1,7 +1,7 @@
 # Tracing and Debugging
 
 **Status:** Current
-**Last updated:** 2026-08-30 19:40 EDT
+**Last updated:** 2026-09-15 07:21 EDT
 
 This document describes the tracing and debugging strategy across the
 batchalign3 stack: Rust (batchalign-core PyO3 bridge), Rust (CLI and server
@@ -327,7 +327,7 @@ For a transcribe job on `sample.wav` with `--debug-dir /tmp/debug`:
   sample_rev_evidence.json       # Rev media/request/cache/projection causal record
   sample_speaker_evidence.json   # Speaker request/cache/projection causal record
   sample.turns.json              # Exact normalized dedicated-speaker segments
-  sample_asr_response.json       # Raw ASR tokens + timestamps from Whisper/Rev.AI
+  sample_asr_response.json       # ASR tokens + timestamps as the server received them
   sample_pre_chat_utseg_evidence.json
                                  # Exact words, assignments, model, policy evidence
   sample_post_asr.cha            # CHAT after assembly (before utseg)
@@ -367,6 +367,32 @@ renamed into place. On Unix, the containing directory is synchronized too.
 When the submitted filename includes directories, the evidence filename adds
 a short digest of that full identity after `sample`; this keeps equal basenames
 from distinct corpus branches separate.
+
+### What "raw" means for ASR artifacts
+
+`*_asr_response.json` records the tokens as the server received them. For
+engines hosted in the Python worker (FunASR SenseVoice and Paraformer,
+Tencent, Aliyun, Qwen) that is AFTER the worker's provider adapter, which has
+already removed markup, dropped punctuation units and paired each unit with
+its own timestamp (see the FunASR section of the ASR token pipeline page). It
+is not the engine's untouched output. Rev differs: its provider-shaped
+transcript is retained in the Rev evidence cache (see the transcribe guide).
+
+### Environment-variable ASR dumps
+
+Two older diagnostics are enabled by environment variables instead of
+`--debug-dir`. The transcribe pipeline reads them in the process that runs
+it, which is the server, so set them in the server's environment rather than
+the client shell.
+
+| Variable | Writes | On failure |
+| --- | --- | --- |
+| `BA3_DUMP_ASR_PIPELINE=/path/file.json` | `AsrPipelineTrace`: the worker's tokens, the words after each post-processing stage, and the final utterances. A raw token's `ts` and `end_ts` are written as `null` when the provider supplied no such endpoint, so a consumer has to handle a missing bound rather than reading a zero that was never reported | Serialization and write failures are ignored |
+| `BA3_DUMP_UTTERANCES=/path/file.json` | The post-processed utterances handed to CHAT construction | The file fails with a typed diagnostic error |
+
+Each names a single path, so a multi-file job overwrites it once per file
+and only the last file's dump survives. Prefer `--debug-dir`, which names
+artifacts per input.
 
 ### Always-on error logging (no `--debug-dir` needed)
 

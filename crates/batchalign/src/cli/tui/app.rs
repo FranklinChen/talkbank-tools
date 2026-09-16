@@ -529,6 +529,7 @@ mod tests {
             error_codes: None,
             error_line: None,
             bug_report_id: None,
+            stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
             next_eligible_at: None,

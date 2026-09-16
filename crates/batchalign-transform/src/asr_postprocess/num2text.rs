@@ -7,6 +7,9 @@
 //! Also handles currency-prefixed numbers (e.g. "$12" → "twelve dollars").
 //!
 //! The expansion chain:
+//! 0. Portuguese indicator ordinals (`54ª`, `1.º`, `54.ºs`) → gendered ordinal
+//!    words via `ordinal_por`; English suffix ordinals and decades via
+//!    `ordinal_year_eng`
 //! 1. Strip recognized currency prefix/suffix → expand digits → append currency word
 //! 2. If not all digits → return as-is
 //! 3. If Chinese/Japanese/Cantonese → `num2chinese`
@@ -17,6 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use super::num2chinese::{ChineseScript, num2chinese};
+use super::ordinal_por::OrdinalTokenExpansion;
 
 /// Detected expansion mode for one digit-bearing token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +85,17 @@ const PERCENT_WORD_BY_LANG: &[(&str, &str)] = &[
     ("yue", "百分"),
 ];
 
+/// Em-dash and en-dash, as named `\u{...}` constants.
+///
+/// ASR output carries either where a hyphen belongs, so both are normalized
+/// to ASCII `-` before number expansion. Written as escapes rather than raw
+/// characters because a raw dash in source is always a house-rule violation,
+/// even when it is functional data; the escape also survives mechanical dash
+/// sweeps intact. Visible to sibling modules so the frozen expansion
+/// baseline can write the same characters as JSON escapes.
+pub(super) const EM_DASH: char = '\u{2014}';
+pub(super) const EN_DASH: char = '\u{2013}';
+
 /// Language-specific CHAT word for the percent symbol.
 ///
 /// Returns the per-language word to substitute when `%` is stripped from an
@@ -88,16 +103,6 @@ const PERCENT_WORD_BY_LANG: &[(&str, &str)] = &[
 /// reasonable default (typically eng) rather than panicking on unmapped
 /// languages: the goal is that the CHAT output is never worse than it
 /// would have been without the normalizer.
-/// Em-dash and en-dash, as named `\u{...}` constants.
-///
-/// ASR output carries either where a hyphen belongs, so both are normalized
-/// to ASCII `-` before number expansion. Written as escapes rather than raw
-/// characters because a raw dash in source is always a house-rule violation,
-/// even when it is functional data; the escape also survives mechanical dash
-/// sweeps intact.
-const EM_DASH: char = '\u{2014}';
-const EN_DASH: char = '\u{2013}';
-
 pub fn language_percent_word(lang: &str) -> Option<&'static str> {
     let lower = lang.to_lowercase();
     PERCENT_WORD_BY_LANG
@@ -183,6 +188,7 @@ fn try_expand_currency(word: &str, lang: &str) -> Option<String> {
 /// - Pure digit strings ("42" → "forty-two")
 /// - Dash-separated digit groups ("21-22" → "twenty-one twenty-two")
 /// - Currency-prefixed numbers ("$12" → "twelve dollars")
+/// - Portuguese indicator ordinals ("54ª" → "quinquagésima quarta")
 ///
 /// Returns the original string if expansion is not possible.
 ///
@@ -190,6 +196,18 @@ fn try_expand_currency(word: &str, lang: &str) -> Option<String> {
 /// * `word` - The word to potentially expand.
 /// * `lang` - ISO 639-3 language code.
 pub fn expand_number(word: &str, lang: &str) -> String {
+    // Portuguese indicator ordinals carry grammatical gender and number in
+    // the token itself, which no cardinal table can express, so they are
+    // settled first. A recognized ordinal with no rendering stays exactly as
+    // written: the policy for every expansion this module cannot perform, so
+    // CHAT validation reports the digits (E220) rather than a guessed word.
+    match super::ordinal_por::expand_ordinal_token(word, lang) {
+        OrdinalTokenExpansion::Expanded(words) => return words,
+        OrdinalTokenExpansion::OutOfRange(_) => return word.to_string(),
+        OrdinalTokenExpansion::NotOrdinal => {}
+    }
+
+
     // English ordinal/decade suffix handling. ASR engines emit these
     // as `"3rd"` / `"1950s"` style tokens; non-English ASR rarely
     // produces suffix-form ordinals (the convention is local), so

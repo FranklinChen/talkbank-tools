@@ -72,11 +72,14 @@
 //! - [`requests`]: request envelopes, task payloads, shared enums, newtypes
 //! - [`responses`]: result types, execute response, progress events
 //! - [`utseg_evidence`]: closed utterance-boundary evidence vocabulary
+//! - [`asr_model`]: pinned ASR model identity, requested and observed
 
+pub mod asr_model;
 pub mod requests;
 pub mod responses;
 pub mod utseg_evidence;
 
+pub use asr_model::*;
 pub use requests::*;
 pub use responses::*;
 pub use utseg_evidence::*;

@@ -1,10 +1,41 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-15 20:20 EDT
 
 Add English translations to non-English CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only, no audio involved.
+
+## What gets translated
+
+What was spoken. Each utterance is sent as every word the speaker produced, in
+order, followed by the utterance's terminator, so a question is translated as a
+question. Retraced words (`<I like> [/]`) and filled pauses (`&-um`, sent as
+`um`) are included, which is what batchalign2 did; a word the transcriber
+replaced (`hafta [: have to]`) is sent as the replacement.
+
+Left out, because they are not words a translator can read: `0`-prefixed
+omissions (recorded as not said), `&~` nonwords, `&+` fragments, and the
+untranscribed markers `xxx` / `yyy` / `www`. An utterance that produced no words
+at all is not sent and gets no `%xtra` tier.
+
+Only punctuation an ordinary reader would recognise travels with the words: the
+comma, and a terminator that is a period, question mark or exclamation mark
+(the question-bearing CHAT terminators `+/?`, `+!?`, `+//?` and `+..?` are sent
+as a question mark). CHAT-only notation is not sent at all, so `+...`, `+/.`,
+`+//.`, the tag marker and the vocative never reach the engine as text to
+translate.
+
+For languages written in Han script (`zho`, `cmn`, `yue`, `wuu`, `nan`, `hak`)
+the words are joined without spaces and the period is written as the ideographic
+full stop; the translation is converted back on the way in. This follows the
+writing system, not a list of two codes, so Mandarin tagged `cmn` is handled
+like `zho`.
+
+Before 2026-09-15 batchalign3 sent only the `%mor`-domain words: no retraces, no
+filled pauses and no terminator. Files translated by an earlier build were
+translated from a different source text; re-run `translate` over them to get
+translations of what was actually said.
 
 ## Engine
 
@@ -112,7 +143,7 @@ fixed to English. To "override" the source language, edit the file's
 ```mermaid
 flowchart TD
     start([translate invoked]) --> parse[Parse all files → ASTs]
-    parse --> collect[collect_payloads\nExtract utterance text + source/target language]
+    parse --> collect[collect_payloads\nSpoken words and terminator per utterance]
     collect --> worker[execute_v2(task="translate")\nprepared_text batch → raw translations]
     worker --> inject[inject %xtra tiers with translated text]
     inject --> merge_check{--merge-abbrev?}
@@ -150,6 +181,18 @@ re-invoke the worker.
 
 ---
 
+## Provenance
+
+Every file translate writes records the engines that produced its translations
+in a `[fc-ba3 translate | engine=... ; lang=... | ...]` comment. Each engine is
+the one the worker named on the translation it returned, so a file where
+nothing was translated (for example, only blank utterances) gets no comment and
+the run says why. Files translated by a build before 2026-09-15 carry no
+comment at all, because the batch path wrote none; re-running `translate` over
+them adds one. See [Processing Provenance](../provenance.md).
+
+---
+
 ## Failure modes
 
 batchalign3 translate fails fast on engine failures rather than emitting
@@ -176,14 +219,17 @@ will say so.
 | Tencent `yue→en` request | Raises `ValueError: Tencent TMT does not support source language 'yue'; use --translate-engine aliyun (cloud, supports Cantonese) or --translate-engine nllb (self-hosted local model)`. Switch the Cantonese run to `aliyun` or `nllb`. |
 | Aliyun MT credentials missing / wrong | File marked failed citing `~/.batchalign.ini` parse error or an Aliyun SDK `ClientException`/`ServerException`. Ensure `engine.aliyun.ak_id` / `ak_secret` are populated (same keys the Aliyun ASR backend uses); the Aliyun MT service must also be activated in the Alibaba Cloud console for the access key's account. |
 | Aliyun MT unmapped source language | Raises `ValueError: Aliyun MT does not have a mapped source language for '<iso>'; use --translate-engine nllb for this language`. Use `nllb` for the unmapped language or extend `_ISO_639_3_TO_ALIYUN_LANG` in `batchalign/worker/_model_loading/translation.py`. |
+| Engine returns an empty translation for an utterance (nothing, or only the punctuation batchalign3 sent) | File marked failed with `translate failed for N item(s): item 0: <engine> returned an empty translation; try a different --translate-engine or options and run the file again`. The file is not written. The verdict is terminal, because the same request gets the same answer from the same engine: the remedy is another engine or different options, not a retry. Before 2026-09-15 the utterance was silently left without a `%xtra` tier. |
 | googletrans library import error in a stripped venv | Worker startup fails (loud), not a per-job failure. |
 
 ---
 
 ## What changes in the `.cha` file
 
-- A `%xtra:` tier is added after each utterance containing the English
-  translation
+- A `%xtra:` tier is added after each utterance that produced words, containing
+  the English translation
+- An utterance the engine returned nothing usable for does not get an empty
+  tier: the file fails instead, and nothing is written
 - All other tiers (`%mor`, `%gra`, `%wor`) are preserved unchanged
 - No audio is involved
 

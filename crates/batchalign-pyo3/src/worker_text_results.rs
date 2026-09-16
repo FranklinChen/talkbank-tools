@@ -4,14 +4,14 @@
 //! - Python caller: `batchalign/worker/_text_v2.py`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
-use batchalign_transform::coref::CorefRawResponse;
 use batchalign_types::worker::{BatchInferResponse, InferResponse};
 use batchalign_types::worker_v2::{
-    CorefAnnotationV2, CorefChainRefV2, CorefItemResultV2, CorefResultV2, MorphosyntaxItemResultV2,
-    MorphosyntaxResultV2, TranslationItemResultV2, TranslationResultV2,
-    UtsegBoundaryModelEvidenceV2, UtsegItemResultV2, UtsegResultV2,
+    CorefItemResultV2, CorefResultV2, MorphosyntaxItemResultV2, MorphosyntaxResultV2,
+    TranslationItemResultV2, TranslationResultV2, UtsegBoundaryModelEvidenceV2, UtsegItemResultV2,
+    UtsegResultV2,
 };
 use pyo3::prelude::*;
+use serde::de::DeserializeOwned;
 
 /// Why a host response could not be normalized into a typed V2 payload.
 ///
@@ -50,26 +50,46 @@ fn response_object<'a>(
     }
 }
 
-fn normalize_morphosyntax_raw_sentences(
-    result: Option<&serde_json::Value>,
-) -> Result<Option<Vec<serde_json::Value>>, TextResultShapeError> {
-    let Some(obj) = response_object(result, "morphosyntax")? else {
-        return Ok(None);
-    };
+/// A tagged per-item result whose failure variant the bridge can build.
+///
+/// The morphosyntax, translation and coreference hosts return each item's
+/// `result` already in its V2 tagged shape (`{"kind": "analyzed", ...}`), so
+/// the bridge parses it through the canonical Rust wire type rather than
+/// re-reading fields. Anything that does not parse becomes THAT item's
+/// failure, the same per-item attribution the server applies, instead of
+/// failing every other item in the batch.
+trait HostItemResult: DeserializeOwned {
+    /// The item-level failure carrying `error`.
+    fn failed(error: String) -> Self;
+}
 
-    if let Some(raw_sentences) = obj.get("raw_sentences") {
-        return match raw_sentences {
-            serde_json::Value::Array(items) => Ok(Some(items.clone())),
-            _ => Err(TextResultShapeError(
-                "morphosyntax V2 raw_sentences must be a list".to_owned(),
-            )),
-        };
+impl HostItemResult for MorphosyntaxItemResultV2 {
+    fn failed(error: String) -> Self {
+        Self::Failed { error }
     }
+}
 
-    match obj.get("sentences") {
-        Some(serde_json::Value::Array(sentences)) if sentences.is_empty() => Ok(Some(Vec::new())),
-        _ => Err(TextResultShapeError(
-            "morphosyntax V2 expected raw_sentences in worker result".to_owned(),
+impl HostItemResult for TranslationItemResultV2 {
+    fn failed(error: String) -> Self {
+        Self::Failed { error }
+    }
+}
+
+impl HostItemResult for CorefItemResultV2 {
+    fn failed(error: String) -> Self {
+        Self::Failed { error }
+    }
+}
+
+/// Normalize one host item into its tagged V2 result. A host error wins; a
+/// result is parsed from the borrowed JSON without cloning it.
+fn normalize_item<T: HostItemResult>(infer_result: &InferResponse, task: &str) -> T {
+    match (&infer_result.error, &infer_result.result) {
+        (Some(error), _) => T::failed(error.clone()),
+        (None, Some(result)) => T::deserialize(result)
+            .unwrap_or_else(|error| T::failed(format!("invalid {task} host item: {error}"))),
+        (None, None) => T::failed(format!(
+            "{task} host returned neither a result nor an error for this item"
         )),
     }
 }
@@ -163,83 +183,16 @@ fn normalize_utseg_boundary_model_evidence(
         })
 }
 
-fn normalize_string_field(
-    result: Option<&serde_json::Value>,
-    field_name: &str,
-    task: &str,
-) -> Result<Option<String>, TextResultShapeError> {
-    let Some(obj) = response_object(result, task)? else {
-        return Ok(None);
-    };
-
-    let Some(value) = obj.get(field_name) else {
-        return Ok(None);
-    };
-
-    match value {
-        serde_json::Value::String(text) => Ok(Some(text.clone())),
-        _ => Err(TextResultShapeError(format!(
-            "{task} V2 field {field_name:?} must be a string"
-        ))),
-    }
-}
-
-fn normalize_coref_annotations(
-    result: Option<&serde_json::Value>,
-) -> Result<Option<Vec<CorefAnnotationV2>>, TextResultShapeError> {
-    let Some(obj) = response_object(result, "coref")? else {
-        return Ok(None);
-    };
-
-    let raw: CorefRawResponse = serde_json::from_value(serde_json::Value::Object(obj.clone()))
-        .map_err(|error| {
-            TextResultShapeError(format!(
-                "coref V2 annotations must match CorefRawResponse: {error}"
-            ))
-        })?;
-
-    Ok(Some(
-        raw.annotations
-            .into_iter()
-            .map(|annotation| CorefAnnotationV2 {
-                sentence_idx: annotation.sentence_idx,
-                words: annotation
-                    .words
-                    .into_iter()
-                    .map(|word_refs| {
-                        word_refs
-                            .into_iter()
-                            .map(|chain_ref| CorefChainRefV2 {
-                                chain_id: chain_ref.chain_id,
-                                is_start: chain_ref.is_start,
-                                is_end: chain_ref.is_end,
-                            })
-                            .collect()
-                    })
-                    .collect(),
-            })
-            .collect(),
-    ))
-}
-
 pub(crate) fn normalize_morphosyntax_result(
     response: &BatchInferResponse,
     expected_count: usize,
 ) -> Result<MorphosyntaxResultV2, TextResultShapeError> {
-    let payload = MorphosyntaxResultV2 {
+    Ok(MorphosyntaxResultV2 {
         items: normalize_result_count(response, expected_count, "morphosyntax")?
             .iter()
-            .map(|infer_result| {
-                Ok(MorphosyntaxItemResultV2 {
-                    raw_sentences: normalize_morphosyntax_raw_sentences(
-                        infer_result.result.as_ref(),
-                    )?,
-                    error: infer_result.error.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, TextResultShapeError>>()?,
-    };
-    Ok(payload)
+            .map(|infer_result| normalize_item(infer_result, "morphosyntax"))
+            .collect(),
+    })
 }
 
 pub(crate) fn normalize_utseg_result(
@@ -272,40 +225,24 @@ pub(crate) fn normalize_translation_result(
     response: &BatchInferResponse,
     expected_count: usize,
 ) -> Result<TranslationResultV2, TextResultShapeError> {
-    let payload = TranslationResultV2 {
+    Ok(TranslationResultV2 {
         items: normalize_result_count(response, expected_count, "translate")?
             .iter()
-            .map(|infer_result| {
-                Ok(TranslationItemResultV2 {
-                    raw_translation: normalize_string_field(
-                        infer_result.result.as_ref(),
-                        "raw_translation",
-                        "translate",
-                    )?,
-                    error: infer_result.error.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, TextResultShapeError>>()?,
-    };
-    Ok(payload)
+            .map(|infer_result| normalize_item(infer_result, "translate"))
+            .collect(),
+    })
 }
 
 pub(crate) fn normalize_coref_result(
     response: &BatchInferResponse,
     expected_count: usize,
 ) -> Result<CorefResultV2, TextResultShapeError> {
-    let payload = CorefResultV2 {
+    Ok(CorefResultV2 {
         items: normalize_result_count(response, expected_count, "coref")?
             .iter()
-            .map(|infer_result| {
-                Ok(CorefItemResultV2 {
-                    annotations: normalize_coref_annotations(infer_result.result.as_ref())?,
-                    error: infer_result.error.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, TextResultShapeError>>()?,
-    };
-    Ok(payload)
+            .map(|infer_result| normalize_item(infer_result, "coref"))
+            .collect(),
+    })
 }
 
 // ---------------------------------------------------------------------------

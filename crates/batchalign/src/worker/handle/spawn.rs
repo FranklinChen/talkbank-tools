@@ -211,6 +211,12 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
     if let Some(server_process_id) = config.runtime.server_process_id {
         cmd.env("BATCHALIGN_SERVER_PID", server_process_id.to_string());
     }
+    // The daemon writes this into its registry entry, so a server of another
+    // build can refuse to adopt it (see `worker::registry`).
+    cmd.env(
+        crate::worker::registry::BUILD_IDENTITY_ENV,
+        crate::build_hash(),
+    );
     for (key, value) in worker_provider_envs(config, &HkAsrCredentialSources::from_env()) {
         cmd.env(key, value);
     }

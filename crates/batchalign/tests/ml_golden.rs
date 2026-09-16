@@ -22,6 +22,7 @@
 //! Update golden snapshots: `cargo insta review`
 
 mod common;
+mod live_deadline;
 
 // ML test submodules, each was previously a separate binary with its own
 // worker pool. Now they share one process-global LazyLock<LiveFixtureBackend>.

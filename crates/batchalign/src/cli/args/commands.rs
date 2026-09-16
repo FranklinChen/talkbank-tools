@@ -431,6 +431,20 @@ impl AsrSelectionArgs {
     }
 }
 
+/// Parse `--num-speakers` for `diarize` into a count a diarizer can answer.
+///
+/// The refusal lives in the value parser rather than downstream so the CLI
+/// cannot even construct a count of one: omitting the flag is how a caller asks
+/// for automatic detection, and one is neither that nor a separation request.
+fn parse_diarization_speaker_count(
+    value: &str,
+) -> Result<crate::options::DiarizationSpeakerCount, String> {
+    let count: u32 = value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a whole number of speakers"))?;
+    crate::options::DiarizationSpeakerCount::try_from(count).map_err(|error| error.to_string())
+}
+
 /// Arguments for the `transcribe` command.
 #[derive(Args, Debug, Clone)]
 pub struct TranscribeArgs {
@@ -802,8 +816,8 @@ pub struct DiarizeArgs {
     /// Expected number of speakers. Omit to auto-detect (recommended).
     ///
     /// NOT a worker count: see `--workers`. No short flag by design.
-    #[arg(long)]
-    pub num_speakers: Option<u32>,
+    #[arg(long, value_parser = parse_diarization_speaker_count)]
+    pub num_speakers: Option<crate::options::DiarizationSpeakerCount>,
 
     /// Language (3-letter ISO code). Worker-pool selection only;
     /// diarization itself is language-independent.
@@ -1649,6 +1663,70 @@ pub enum EvalAction {
     /// mutation, retaining exact match and timing-proposal evidence.
     #[command(name = "utr-alignment")]
     UtrAlignment(UtrAlignmentEvalArgs),
+    /// Reapply retained utterance-segmentation evidence and check that it
+    /// reproduces the output the run wrote, without inference.
+    #[command(name = "utseg-replay")]
+    UtsegReplay(UtsegReplayArgs),
+}
+
+/// Offline utterance-segmentation replay family.
+#[derive(Args, Debug, Clone)]
+pub struct UtsegReplayArgs {
+    /// Which segmentation pass to reproduce.
+    #[command(subcommand)]
+    pub action: UtsegReplayAction,
+}
+
+/// Which retained segmentation pass a replay reproduces.
+///
+/// A distinct typed input per pass, not one argument list read differently:
+/// the two passes consume different artifacts (an existing CHAT document
+/// against post-CHAT evidence, a retained ASR response against pre-CHAT
+/// evidence), and each mode admits only the evidence phase it reproduces.
+#[derive(Subcommand, Debug, Clone)]
+pub enum UtsegReplayAction {
+    /// Reproduce the pass over main-tier words of an existing CHAT document.
+    #[command(name = "post-chat")]
+    PostChat(UtsegPostChatReplayArgs),
+    /// Reproduce the pass over timed ASR chunks, before CHAT was built.
+    #[command(name = "pre-asr")]
+    PreAsr(UtsegPreAsrReplayArgs),
+}
+
+/// Arguments for `eval utseg-replay post-chat`.
+#[derive(Args, Debug, Clone)]
+pub struct UtsegPostChatReplayArgs {
+    /// The CHAT document the run segmented.
+    #[arg(long)]
+    pub input_chat: std::path::PathBuf,
+    /// The run's retained `*_post_chat_utseg_evidence.json` artifact.
+    #[arg(long)]
+    pub evidence: std::path::PathBuf,
+    /// The CHAT document the run wrote, to reproduce.
+    #[arg(long)]
+    pub output_chat: std::path::PathBuf,
+}
+
+/// Arguments for `eval utseg-replay pre-asr`.
+#[derive(Args, Debug, Clone)]
+pub struct UtsegPreAsrReplayArgs {
+    /// The run's retained `*_asr_response.json` artifact.
+    #[arg(long)]
+    pub asr_response: std::path::PathBuf,
+    /// The run's retained `*_pre_chat_utseg_evidence.json` artifact.
+    #[arg(long)]
+    pub evidence: std::path::PathBuf,
+    /// The CHAT document the run wrote, to reproduce.
+    #[arg(long)]
+    pub output_chat: std::path::PathBuf,
+    /// The media name the run recorded in the `@Media` header. Omit it to
+    /// reproduce a run that recorded none, as transcribe's own option is
+    /// optional.
+    #[arg(long)]
+    pub media_name: Option<String>,
+    /// Reproduce a run that generated `%wor` tiers from ASR word timings.
+    #[arg(long)]
+    pub wor: bool,
 }
 
 /// Arguments for `eval utr-alignment`.

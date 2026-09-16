@@ -159,6 +159,7 @@ fn snapshot_job_info() {
                 error_codes: None,
                 error_line: None,
                 bug_report_id: None,
+                stamp: batchalign::api::FileStampOutcome::Unrecorded,
                 started_at: Some(UnixTimestamp(1700000000.0)),
                 finished_at: Some(UnixTimestamp(1700000005.0)),
                 next_eligible_at: None,
@@ -175,6 +176,7 @@ fn snapshot_job_info() {
                 error_codes: None,
                 error_line: None,
                 bug_report_id: None,
+                stamp: batchalign::api::FileStampOutcome::Unrecorded,
                 started_at: Some(UnixTimestamp(1700000005.0)),
                 finished_at: None,
                 next_eligible_at: None,
@@ -213,14 +215,16 @@ fn snapshot_job_result_response() {
                 content: "@UTF8\n@Begin\n*CHI:\thello .\n@End".into(),
                 content_type: ContentType::Chat,
                 error: None,
-                provenance: Vec::new(),
+                provenance: FileProvenance::Parsed {
+                    entries: Vec::new(),
+                },
             },
             FileResult {
                 filename: "02DM.cha".into(),
                 content: String::new(),
                 content_type: ContentType::Chat,
                 error: Some("Pipeline error: unknown language".into()),
-                provenance: Vec::new(),
+                provenance: FileProvenance::NotRead,
             },
         ],
     };
@@ -261,6 +265,23 @@ fn snapshot_health_response() {
         capabilities: vec!["align".into(), "morphotag".into(), "transcribe".into()],
         loaded_pipelines: vec!["morphotag:eng:1".into()],
         worker_runtime_identities: vec![],
+        worker_capability_admissions: vec![WorkerCapabilityAdmission {
+            worker_key: "profile:gpu:eng".into(),
+            outcome: CapabilityAdmissionOutcome::Refused {
+                reason:
+                    batchalign::engine_reports::EngineReportAdmissionError::MissingEngineReport {
+                        task: InferTask::Fa,
+                    },
+            },
+        }],
+        refused_registry_workers: vec![RefusedRegistryWorker {
+            worker_key: "profile:stanza:eng".into(),
+            pid: 4242,
+            reason: RegistryWorkerRefusal::ForeignBuild {
+                reported_build: "0.8.4".into(),
+                server_build: "0.8.5".into(),
+            },
+        }],
         media_roots: vec!["/data/media".into()],
         media_mapping_keys: vec!["childes-data".into()],
         workers_available: 3,
@@ -360,14 +381,26 @@ fn snapshot_worker_capabilities() {
     let caps = WorkerCapabilities {
         commands: vec!["align".into(), "morphotag".into(), "transcribe".into()],
         free_threaded: true,
-        infer_tasks: vec![InferTask::Morphosyntax, InferTask::Utseg],
+        infer_tasks: vec![InferTask::Morphosyntax, InferTask::Fa],
+        // Only forced alignment's entry names an engine; every other task's
+        // entry is null.
         engine_versions: std::collections::BTreeMap::from([
-            ("morphosyntax".into(), "stanza-1.9.2".into()),
-            ("utseg".into(), "stanza-1.9.2".into()),
+            (InferTask::Morphosyntax, None),
+            (
+                InferTask::Fa,
+                Some(batchalign::api::ReportedEngineName::try_from("wave2vec-fa-v1").unwrap()),
+            ),
         ]),
         stanza_capabilities: Default::default(),
     };
-    insta::assert_json_snapshot!("worker_capabilities", caps);
+    // Snapshot the JSON serde_json writes, which is the wire: task-keyed maps
+    // are written with string keys there, while insta's own serializer
+    // refuses non-string map keys. Serialized directly (not through a
+    // `Value`) so field order is the struct's, as on the wire.
+    insta::assert_snapshot!(
+        "worker_capabilities",
+        serde_json::to_string_pretty(&caps).expect("capabilities serialize to JSON")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -535,16 +568,23 @@ fn deserialize_python_capabilities_with_infer() {
     let python_json = r#"{
         "commands": ["morphotag", "align"],
         "free_threaded": false,
-        "infer_tasks": ["morphosyntax", "utseg"],
-        "engine_versions": {"morphosyntax": "stanza-1.9.2", "utseg": "stanza-1.9.2"}
+        "infer_tasks": ["morphosyntax", "fa"],
+        "engine_versions": {"morphosyntax": null, "fa": "wave2vec-fa-v1"}
     }"#;
 
     let caps: WorkerCapabilities = serde_json::from_str(python_json).unwrap();
     assert_eq!(
         caps.infer_tasks,
-        vec![InferTask::Morphosyntax, InferTask::Utseg]
+        vec![InferTask::Morphosyntax, InferTask::Fa]
     );
-    assert_eq!(caps.engine_versions["morphosyntax"], "stanza-1.9.2");
+    assert_eq!(
+        caps.engine_versions[&InferTask::Fa]
+            .as_ref()
+            .map(|name| name.as_str()),
+        Some("wave2vec-fa-v1")
+    );
+    // Every task but FA is reported as null, never a guessed name.
+    assert_eq!(caps.engine_versions[&InferTask::Morphosyntax], None);
 }
 
 /// Missing infer capability fields should fail deserialization.

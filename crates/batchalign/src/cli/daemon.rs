@@ -15,7 +15,7 @@
 //! ## Stale-binary detection
 //!
 //! `DaemonInfo` carries a `build_hash` (set at write time from
-//! [`crate::cli::build_hash()`]).  `ensure_daemon_locked()` compares it against
+//! [`crate::build_hash()`]).  `ensure_daemon_locked()` compares it against
 //! the current binary's hash and auto-restarts on mismatch.  Old daemon.json
 //! files that lack `build_hash` fall back to version comparison.
 
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::cli::client::BatchalignClient;
-use crate::cli::error::CliError;
+use crate::cli::error::{CliError, ServerBuild};
 use crate::cli::python::resolve_python_executable;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,15 @@ const HEALTH_TIMEOUT: f64 = 90.0;
 ///
 /// Shared by `serve start` and the auto-daemon path so both mean the same
 /// thing by "the daemon did not come up".
-pub(crate) fn startup_budget() -> Duration {
+///
+/// Public because it is also the floor for any harness that runs `serve start`
+/// as a subprocess and kills it on a timeout. A killer whose budget is smaller
+/// than this one preempts the wait below, so the command dies by signal with no
+/// diagnosis instead of reporting which phase it was still in. The CLI test
+/// suite derives its kill budget from this function rather than restating a
+/// number that could drift under it (`tests/live_deadline`,
+/// `CliRunBudget::DaemonStart`).
+pub fn startup_budget() -> Duration {
     Duration::from_secs_f64(HEALTH_TIMEOUT)
 }
 
@@ -378,7 +386,7 @@ fn stop_profile(profile: DaemonProfile) -> Result<bool, CliError> {
 /// with old state files).
 fn is_stale(info: &DaemonInfo) -> bool {
     if !info.build_hash.is_empty() {
-        return info.build_hash != crate::cli::build_hash();
+        return info.build_hash != crate::build_hash();
     }
     // Old state file: fall back to version comparison
     info.version != current_version()
@@ -488,7 +496,7 @@ async fn ensure_daemon_locked(
                     } else {
                         &info.build_hash
                     },
-                    crate::cli::build_hash(),
+                    crate::build_hash(),
                 );
                 kill_process(info.pid);
                 cleanup_state_file_for(profile, dir);
@@ -676,23 +684,87 @@ async fn detect_manual_server(layout: &RuntimeLayout) -> Result<Option<String>, 
         }
     };
 
-    if startup_health_check(port).await {
-        // Warn if the manual server has a stale build hash
-        check_manual_server_staleness(port).await;
-        debug!(port, pid, "Reusing manual server");
-        Ok(Some(format!("http://127.0.0.1:{port}")))
-    } else {
-        Ok(None)
+    match ManualServerDisposition::probe(port).await {
+        ManualServerDisposition::Reusable { url } => {
+            debug!(port, pid, "Reusing manual server");
+            Ok(Some(url))
+        }
+        ManualServerDisposition::Unreachable => Ok(None),
+        // Dispatch refuses this job on this same error a moment later, so the
+        // warning that used to print here was noise before a refusal. The
+        // refusal belongs where the reuse decision is made.
+        ManualServerDisposition::ForeignBuild { url, theirs } => {
+            Err(CliError::ServerBuildMismatch {
+                server: url,
+                server_build: theirs,
+                client_build: crate::build_hash().to_owned(),
+            })
+        }
+    }
+}
+
+/// What a manually started server on a published port turned out to be.
+///
+/// Three facts the caller must act on differently, so the probe's answer is a
+/// type rather than a URL with a warning printed beside it. The check this
+/// replaced returned `()`: it could say something on stderr but could not
+/// hand the caller the answer, so the URL it came back with looked identical
+/// whether the build had matched, differed, or never been compared. A
+/// validator that returns nothing leaves no proof it ran.
+enum ManualServerDisposition {
+    /// A batchalign3 server on OUR OWN build answered. Only this variant
+    /// carries a URL to submit to.
+    Reusable {
+        /// Where it answered.
+        url: String,
+    },
+    /// Nothing answered a batchalign3 health check there: no response, a
+    /// non-success status, or a body that is not a health response. The
+    /// caller falls through to the auto-daemon path, which probes the
+    /// configured port itself.
+    Unreachable,
+    /// A batchalign3 server answered on a build that is not ours, including
+    /// reporting none at all (absence of evidence cannot prove a match).
+    /// Reusing it would serve this invocation's requests from code this
+    /// binary did not build and cannot vouch for.
+    ForeignBuild {
+        /// Where it answered.
+        url: String,
+        /// What it said about its build.
+        theirs: ServerBuild,
+    },
+}
+
+impl ManualServerDisposition {
+    /// The one constructor, so a `Reusable` cannot exist without a build match
+    /// proven by [`build_hash_matches_ours`].
+    ///
+    /// Probes with the same single-shot health check the auto-daemon path
+    /// uses: one request, no retry budget, and a strict parse, so an
+    /// unrelated service holding the port cannot be mistaken for a daemon.
+    async fn probe(port: u16) -> Self {
+        let url = format!("http://127.0.0.1:{port}");
+        match fast_single_shot_health_check(port).await {
+            None => Self::Unreachable,
+            Some(health) if build_hash_matches_ours(&health.build_hash) => Self::Reusable { url },
+            Some(health) => Self::ForeignBuild {
+                url,
+                theirs: match health.build_hash.as_str() {
+                    "" => ServerBuild::Unreported,
+                    reported => ServerBuild::Reported(reported.to_owned()),
+                },
+            },
+        }
     }
 }
 
 /// Whether a reported build hash proves the daemon that reported it is
 /// running the SAME build as this CLI invocation.
 ///
-/// The single owner of this comparison: [`check_manual_server_staleness`]
+/// The single owner of this comparison: [`ManualServerDisposition::probe`]
 /// (the manual-server path) and [`probe_fixed_port`]'s adoption decision
 /// (the auto-daemon path) both call this rather than each spelling out
-/// `!reported.is_empty() && reported == crate::cli::build_hash()`
+/// `!reported.is_empty() && reported == crate::build_hash()`
 /// independently, which is how the auto-daemon path came to skip the
 /// comparison entirely.
 ///
@@ -701,26 +773,7 @@ async fn detect_manual_server(layout: &RuntimeLayout) -> Result<Option<String>, 
 /// evidence is not evidence of a match, and a caller that treated it as
 /// one would adopt a daemon it cannot actually vouch for.
 fn build_hash_matches_ours(reported: &str) -> bool {
-    !reported.is_empty() && reported == crate::cli::build_hash()
-}
-
-/// Best-effort check: warn if a manual server's build hash differs from ours.
-async fn check_manual_server_staleness(port: u16) {
-    let Ok(client) = BatchalignClient::new() else {
-        return;
-    };
-    if let Ok(health) = client
-        .health_check(&format!("http://127.0.0.1:{port}"))
-        .await
-        && !health.build_hash.is_empty()
-        && !build_hash_matches_ours(&health.build_hash)
-    {
-        eprintln!(
-            "warning: manual server on port {port} has a different build ({}). \
-             Restart with `batchalign3 serve stop && batchalign3 serve start`.",
-            health.build_hash,
-        );
-    }
+    !reported.is_empty() && reported == crate::build_hash()
 }
 
 /// What a probe of the daemon's configured fixed port found, immediately
@@ -731,8 +784,8 @@ async fn check_manual_server_staleness(port: u16) {
 /// port is free (safe to spawn into), already held by a healthy batchalign3
 /// daemon on OUR OWN build (adopt it, never spawn a second one), held by a
 /// batchalign3 daemon on a DIFFERENT build (refuse and say so, exactly the
-/// posture [`check_manual_server_staleness`] already takes for a manually
-/// started server), or held by something else entirely (refuse rather than
+/// posture [`ManualServerDisposition`] already takes for a manually started
+/// server), or held by something else entirely (refuse rather than
 /// spawn into a bind that is guaranteed to fail).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PortOccupant {
@@ -754,7 +807,7 @@ enum PortOccupant {
     /// by code this binary can vouch for.
     ExistingDaemon {
         /// The responding daemon's build identity (`HealthResponse::build_hash`),
-        /// proven equal to `crate::cli::build_hash()` by construction
+        /// proven equal to `crate::build_hash()` by construction
         /// (see [`build_hash_matches_ours`]): never empty.
         build_hash: String,
     },
@@ -763,8 +816,8 @@ enum PortOccupant {
     /// which cannot prove a match either way). Adopting it silently would
     /// mean this invocation's requests are served by code this binary did
     /// not build and cannot vouch for; refuse and name the exact restart
-    /// command, the same posture `check_manual_server_staleness` already
-    /// takes for a manually started server.
+    /// command, the same posture [`ManualServerDisposition`] already takes
+    /// for a manually started server.
     StaleDaemon {
         /// The responding daemon's reported build (possibly empty).
         theirs: String,
@@ -808,7 +861,7 @@ async fn probe_fixed_port(port: NonZeroU16) -> PortOccupant {
                 } else {
                     PortOccupant::StaleDaemon {
                         theirs: health.build_hash,
-                        ours: crate::cli::build_hash().to_owned(),
+                        ours: crate::build_hash().to_owned(),
                     }
                 }
             }
@@ -1213,7 +1266,7 @@ fn write_daemon_info_for(
         pid,
         version: current_version(),
         started_at,
-        build_hash: crate::cli::build_hash().to_string(),
+        build_hash: crate::build_hash().to_string(),
         force_cpu: flags.resolved_force_cpu,
         allow_mps: flags.resolved_allow_mps,
         workers,
@@ -1390,7 +1443,7 @@ mod tests {
     #[test]
     fn is_stale_same_build_hash() {
         let info = info_with(
-            crate::cli::build_hash().to_string(),
+            crate::build_hash().to_string(),
             current_version(),
             false,
             None,
@@ -1449,7 +1502,7 @@ mod tests {
             let info = read_daemon_info_for(profile, dir.path()).unwrap();
             assert_eq!(info.pid, 42);
             assert_eq!(info.version, current_version());
-            assert_eq!(info.build_hash, crate::cli::build_hash());
+            assert_eq!(info.build_hash, crate::build_hash());
             assert!(info.force_cpu);
             assert_eq!(info.workers, Some(6));
             assert_eq!(info.audio_task_timeout_s, Some(1800));
@@ -1495,7 +1548,7 @@ mod tests {
     #[test]
     fn runtime_mismatch_detects_force_cpu_changes() {
         let info = info_with(
-            crate::cli::build_hash().to_string(),
+            crate::build_hash().to_string(),
             current_version(),
             false,
             None,
@@ -1681,7 +1734,7 @@ mod tests {
         let their_build = "definitely-not-our-build-hash";
         assert_ne!(
             their_build,
-            crate::cli::build_hash(),
+            crate::build_hash(),
             "test fixture must actually differ from our real build hash"
         );
         let (port, _server) = spawn_fake_health_server(their_build).await;
@@ -1692,7 +1745,7 @@ mod tests {
             outcome,
             PortOccupant::StaleDaemon {
                 theirs: their_build.to_owned(),
-                ours: crate::cli::build_hash().to_owned(),
+                ours: crate::build_hash().to_owned(),
             },
             "a daemon on a different build must never be reported as ExistingDaemon"
         );
@@ -1702,14 +1755,14 @@ mod tests {
     /// adopt, and is still reported as `ExistingDaemon`.
     #[tokio::test]
     async fn probe_fixed_port_adopts_a_daemon_on_our_own_build() {
-        let (port, _server) = spawn_fake_health_server(crate::cli::build_hash()).await;
+        let (port, _server) = spawn_fake_health_server(crate::build_hash()).await;
 
         let outcome = probe_fixed_port(port).await;
 
         assert_eq!(
             outcome,
             PortOccupant::ExistingDaemon {
-                build_hash: crate::cli::build_hash().to_owned(),
+                build_hash: crate::build_hash().to_owned(),
             }
         );
     }

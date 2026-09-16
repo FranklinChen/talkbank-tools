@@ -15,6 +15,10 @@
       "description": "Transcript language.",
       "$ref": "#/$defs/LanguageCode3"
     },
+    "model": {
+      "description": "The models that produced this result, as the runtime observed them.\n\nRequired, and deliberately not defaulted: a transcript whose models are\nunknown cannot be stamped honestly or cached safely, and an optional\nfield would let every producer forget to fill it while still\ncompiling. The only route to a value is a loader that actually loaded\nsomething, so \"which models produced this text\" is answered by\nconstruction rather than by a downstream lookup that can miss.",
+      "$ref": "#/$defs/AsrModelIdentityV2"
+    },
     "text": {
       "description": "Concatenated transcript text.",
       "type": "string"
@@ -23,17 +27,379 @@
   "required": [
     "lang",
     "text",
-    "chunks"
+    "chunks",
+    "model"
   ],
   "$defs": {
+    "AsrModelIdentityV2": {
+      "description": "Every model a worker loaded for one ASR response, with what was asked for\nand what was seen.\n\nRequired on both ASR result types, so a response can never be applied\nwithout naming the models behind it.",
+      "oneOf": [
+        {
+          "description": "Hugging Face Whisper, stock or fine-tune.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The Whisper checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "whisper"
+            }
+          },
+          "required": [
+            "engine",
+            "asr"
+          ]
+        },
+        {
+          "description": "Qwen3-ASR and its forced aligner.",
+          "type": "object",
+          "properties": {
+            "aligner": {
+              "description": "The forced aligner loaded with it.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "asr": {
+              "description": "The Qwen3-ASR checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "qwen"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "aligner"
+          ]
+        },
+        {
+          "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The Paraformer checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "paraformer"
+            },
+            "punc": {
+              "description": "The punctuation model.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "vad": {
+              "description": "The voice-activity model.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "vad",
+            "punc"
+          ]
+        },
+        {
+          "description": "FunASR SenseVoice, with its voice-activity model.",
+          "type": "object",
+          "properties": {
+            "asr": {
+              "description": "The SenseVoice checkpoint that ran.",
+              "$ref": "#/$defs/LoadedModelV2"
+            },
+            "engine": {
+              "type": "string",
+              "const": "sense_voice"
+            },
+            "vad": {
+              "description": "The voice-activity model.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "asr",
+            "vad"
+          ]
+        },
+        {
+          "description": "whisper.cpp run in-process from one ggml weights file.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "native_whisper"
+            },
+            "ggml": {
+              "description": "The ggml weights file that was loaded.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "ggml"
+          ]
+        },
+        {
+          "description": "Tencent cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "tencent"
+            },
+            "engine_model_type": {
+              "description": "The engine-model type the request named.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "engine_model_type"
+          ]
+        },
+        {
+          "description": "Aliyun cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "aliyun"
+            },
+            "service": {
+              "description": "The service identity.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "service"
+          ]
+        },
+        {
+          "description": "Rev.AI cloud ASR.",
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "const": "rev"
+            },
+            "provider": {
+              "description": "The provider constant.",
+              "$ref": "#/$defs/LoadedModelV2"
+            }
+          },
+          "required": [
+            "engine",
+            "provider"
+          ]
+        }
+      ]
+    },
+    "ContentDigestV2": {
+      "description": "A SHA-256 content digest: 64 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "DurationSeconds": {
       "description": "Duration measured in fractional seconds.",
       "type": "number",
       "format": "double"
     },
+    "HubCommitV2": {
+      "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
     "LanguageCode3": {
       "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected, use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
       "type": "string"
+    },
+    "LoadedModelV2": {
+      "description": "One model a worker loaded: what was asked for, and what was seen.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Which model.",
+          "$ref": "#/$defs/ModelIdV2"
+        },
+        "observed": {
+          "description": "The revision the runtime reported.",
+          "$ref": "#/$defs/ObservedRevisionV2"
+        },
+        "requested": {
+          "description": "The revision the plan asked for.",
+          "$ref": "#/$defs/RequestedRevisionV2"
+        }
+      },
+      "required": [
+        "id",
+        "requested",
+        "observed"
+      ]
+    },
+    "ModelIdV2": {
+      "description": "A model identifier as BA3 names it: a hub repo id, a ModelScope repo id, a ggml file name, or a provider service name. Stamp-safe text, because provenance records it byte for byte.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "ObservedRevisionV2": {
+      "description": "What the runtime actually loaded, as the worker observed it.",
+      "oneOf": [
+        {
+          "description": "The runtime reported the hub commit it loaded.",
+          "type": "object",
+          "properties": {
+            "commit": {
+              "description": "The observed commit.",
+              "$ref": "#/$defs/HubCommitV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "commit"
+            }
+          },
+          "required": [
+            "kind",
+            "commit"
+          ]
+        },
+        {
+          "description": "The runtime loaded a file with these contents.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "description": "The observed digest.",
+              "$ref": "#/$defs/ContentDigestV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "content_digest"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ]
+        },
+        {
+          "description": "The runtime exposes no revision at all. True of every ModelScope loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "not_exposed"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "ProviderParameterV2": {
+      "description": "A provider's own model-selection parameter (Tencent's EngineModelType, Aliyun's service identity, Rev.AI's constant). Never a credential.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "RequestedRevisionV2": {
+      "description": "What the plan asked a worker to load.\n\n[`Self::Unpinned`] is a real state, not a placeholder: a user may name an\narbitrary hub model this build has no pin for, and if plan-time resolution\ncannot reach the hub the honest answer is \"load the default and tell me\nwhat you got\". It has its own admission rule (the worker MUST report a\ncommit) and it can never build a cache key.",
+      "oneOf": [
+        {
+          "description": "Load exactly this hub commit.",
+          "type": "object",
+          "properties": {
+            "commit": {
+              "description": "The pinned commit.",
+              "$ref": "#/$defs/HubCommitV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "commit"
+            }
+          },
+          "required": [
+            "kind",
+            "commit"
+          ]
+        },
+        {
+          "description": "Load exactly this published tag. Recorded as a tag, never as a commit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tag"
+            },
+            "tag": {
+              "description": "The pinned tag.",
+              "$ref": "#/$defs/RevisionTagV2"
+            }
+          },
+          "required": [
+            "kind",
+            "tag"
+          ]
+        },
+        {
+          "description": "Load the file with exactly these contents.",
+          "type": "object",
+          "properties": {
+            "digest": {
+              "description": "The pinned digest.",
+              "$ref": "#/$defs/ContentDigestV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "content_digest"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ]
+        },
+        {
+          "description": "Select the provider's model with this parameter.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "provider_parameter"
+            },
+            "parameter": {
+              "description": "The parameter sent to the provider.",
+              "$ref": "#/$defs/ProviderParameterV2"
+            }
+          },
+          "required": [
+            "kind",
+            "parameter"
+          ]
+        },
+        {
+          "description": "The plan could not pin this model, so the worker loads the hub default\nand must report the commit it observed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unpinned"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "RevisionTagV2": {
+      "description": "A release tag as a hub publishes it (for example ModelScope's `v2.0.4`). A tag is never recorded as a commit.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
     },
     "WhisperChunkSpanV2": {
       "description": "One raw Whisper chunk span returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",

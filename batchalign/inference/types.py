@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     )
     from transformers.pipelines import AutomaticSpeechRecognitionPipeline
 
+    from batchalign.worker._types_v2 import AsrModelIdentityV2
+
 
 # ---------------------------------------------------------------------------
 # Stanza Protocols
@@ -219,6 +221,14 @@ class WhisperASRHandle:
         # own configuration. Used by the ``whisper_hub`` engine variant;
         # see ``batchalign/inference/whisper_hub.py``.
         self.skip_language_force = skip_language_force
+
+        # Which checkpoint this handle actually loaded, set by the worker
+        # layer that resolved it (``batchalign/worker/_model_loading/asr.py``).
+        # It travels on every ASR result this handle produces, so a hub
+        # repository that moved is refused by name at the bridge instead of
+        # silently changing transcripts. ``None`` only between construction
+        # and that assignment.
+        self.model_identity: AsrModelIdentityV2 | None = None
 
     def __call__(
         self,

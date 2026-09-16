@@ -1,7 +1,7 @@
 # Utterance Segmentation
 
 **Status:** Current
-**Last updated:** 2026-08-30 20:05 EDT
+**Last updated:** 2026-09-16 09:47 EDT
 
 Utterance segmentation splits continuous ASR output into individual utterances
 for CHAT transcription. This is a critical step, CHAT requires one utterance
@@ -94,8 +94,10 @@ exact model inputs. The production default remains unchanged. See the
 developer `utseg` reference for the reproducible, provider-free probe.
 
 Worker protocol V2 also carries the sum of the three sentence-end
-probabilities for each classified word at fixed micro precision, along with
-model ID and exact revision when available. A normalization omission and a
+probabilities for each classified word at fixed micro precision, along with the
+model ID and its exact revision, which is always present: the model is loaded
+from a pinned snapshot, so the revision is a required part of its identity
+rather than something reported when the library happened to expose it. A normalization omission and a
 short input that bypasses model inference are explicit states. Rust refuses
 the result unless assignments and evidence exactly parallel the dispatched
 words. `transcribe --debug-dir PATH` retains these decisions in separate
@@ -125,8 +127,23 @@ diarization overlap, or CHAT retrace structure. Those signals must be joined
 downstream under an explicitly tested policy.
 
 Both standalone `utseg` and `transcribe`'s pre-CHAT segmentation path resolve
-through the same utterance-model resolver, so `cmn` and `zho` both select
-`talkbank/CHATUtterance-zh_CN`.
+through the same manifest table, so `cmn` and `zho` both select
+`talkbank/CHATUtterance-zh_CN` at the same commit.
+
+The table above is stated in exactly one place, `UTSEG_BOUNDARY_MODELS` in
+`crates/batchalign/src/model_manifest.rs`, which names each model AND pins the
+revision it loads. `UtsegRoute::resolve` is the one function that turns a
+language plus a fallback policy into a segmenter choice, and it reads
+availability from that same table, so a language BA3 offers to segment is by
+construction a language it can name a model for. A language with no boundary
+model and no authorized Stanza fallback has no segmenter, and that is refused
+when the job is planned, before any ASR is dispatched, rather than at the worker
+after the transcription has been produced.
+
+The Python side holds no language-to-model map at all. An id must be known
+before a load in order to pin its revision, so Rust resolves it and sends it to
+the worker with the spawn; the worker loads exactly that snapshot and reports
+the commit it found on disk.
 
 For Rev.AI `--lang auto`, model selection happens after the effective language
 is resolved for post-processing. That means an auto-submitted Rev transcript can
@@ -187,8 +204,13 @@ Before splitting:
 
 Before punctuation-based retokenization, monologues longer than 300 words are
 split into chunks of 300. BA3 also applies a long-pause fallback split before
-retokenization so clearly separated runs are not forced into one giant
-utterance when provider punctuation is missing.
+retokenization, but only in a narrow case: a gap of at least 800 ms whose
+next word is one of a fixed list of English sentence starters (`and`, `so`,
+`what`, and so on: `LONG_PAUSE_SENTENCE_STARTERS` in
+`crates/batchalign-transform/src/asr_postprocess/mod.rs`). It never fires for
+Chinese, Cantonese or other non-English text, so for those languages a long
+unpunctuated run is split only by the utterance model (where one exists) and
+by the 300-word cap.
 
 ## Stanza Utterance Segmentation (CHAT-text path)
 
@@ -226,11 +248,15 @@ developer transcribe reference for the four typed replay choices.
 
 The second pass also has to project timing onto its new children. BA3 permits
 `%wor` partitioning only after equal policy-selected counts pass canonical
-lexical corroboration. When every retained child then supplies complete
+lexical corroboration. Which main-tier words hold a `%wor` slot is Chatter's
+policy (`WorSlotMembershipPolicy`), asked per word rather than restated here,
+so the splitter and the timing binding cannot come to disagree about the
+count they are comparing. When every retained child then supplies complete
 positive word timing, each new main-tier bullet is rederived as that child's
-word-timing hull. If complete per-child evidence is unavailable, BA3 preserves
-the original parent bullet on the last child only rather than manufacturing
-child spans. This timing projection is downstream of the boundary decision and
+word-timing hull. If complete per-child evidence is unavailable, no child
+receives a main-tier bullet at all: the parent's span measures the whole parent,
+not any one of its children, so carrying it onto one of them would present an
+unmeasured span as a measured one. This timing projection is downstream of the boundary decision and
 must not be interpreted as evidence that the chosen segmentation is
 linguistically unique or optimal. See the `%wor` reference for the exact
 fallback conditions.
@@ -255,7 +281,9 @@ To add utterance segmentation for a new language:
 2. Fine-tune a BERT token classification model (6 classes: normal, capitalize,
    period, question, exclamation, comma)
 3. Upload to HuggingFace Hub
-4. Add the model-loading hook in `batchalign/worker/_model_loading/utterance.py`
+4. Add the language, model id and pinned commit to `UTSEG_BOUNDARY_MODELS` in
+   `crates/batchalign/src/model_manifest.rs`. That one edit both makes the
+   language routable and pins what it loads; there is no second table to update
 5. Add any language-specific preprocessing (e.g., character-level tokenization
    for CJK, particle-based chunking)
 

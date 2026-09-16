@@ -152,6 +152,8 @@ impl FaDispatchPlan {
 /// operator to see but one log line. The refusal now travels.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DispatchPlanRefusal {
+    #[error(transparent)]
+    AsrPolicy(#[from] crate::transcribe::TranscribeAsrPlanError),
     /// The persisted options could not be read into a plan at all.
     #[error("command plan could not be built from job options")]
     Options,
@@ -159,6 +161,15 @@ pub(crate) enum DispatchPlanRefusal {
     /// in this build.
     #[error("{0}")]
     Engine(#[from] crate::types::engines::EngineNotImplemented),
+    /// The job asks for utterance segmentation in a language that has no
+    /// segmenter under its fallback policy.
+    ///
+    /// Raised at PLAN time, which is the point of it: this used to be
+    /// discovered by the Python worker at the end of the pipeline, so the job
+    /// ran a full ASR pass first and then failed with a message naming the
+    /// wire format (`invalid utseg V2 result`) rather than the missing model.
+    #[error(transparent)]
+    UtsegUnavailable(#[from] crate::utseg_route::UtsegUnavailable),
 }
 
 /// Typed plan for transcribe dispatch.
@@ -206,20 +217,41 @@ impl TranscribeDispatchPlan {
         let with_morphosyntax = runtime_flag(job, "morphosyntax", false);
         let speaker_backend = diarize.then(|| resolve_speaker_backend(speaker_engine));
 
+        // Refuse a language with no segmenter HERE, before a single ASR
+        // request is dispatched. Whether utterance segmentation can run at all
+        // is a property of the job's language and its fallback policy, both of
+        // which are known now; it used to be rediscovered by the Python worker
+        // after the whole ASR stage had been run and paid for.
+        //
+        // Only for a resolved language. Under `--lang auto` the language is not
+        // known until ASR returns, so this refusal cannot happen before ASR for
+        // that case, and the pipeline resolves the same route once the
+        // detected language exists. That is a real limit of `auto`, not a gap
+        // in the check.
+        if with_utseg && let Some(code) = job.dispatch.lang.as_resolved() {
+            crate::utseg_route::UtsegRoute::resolve(
+                code,
+                crate::params::UtsegFallbackPolicy::from(allow_stanza_fallback_utseg),
+            )?;
+        }
+
         Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
-                auto_speakers,
                 // A refusal here means a persisted job names an engine this
                 // build cannot run. Submission validation refuses those up
                 // front, so reaching this arm means the job predates the
                 // check. The refusal is PROPAGATED: `.ok()?` used to turn it
                 // into `None`, which routing dropped silently.
-                backend: AsrBackend::try_from_engine(&asr_engine)?,
+                asr: crate::transcribe::TranscribeAsrPlan::from_request(
+                    AsrBackend::try_from_engine(&asr_engine)?,
+                    auto_speakers,
+                    job.dispatch.num_speakers.0 as usize,
+                    &engine_extras,
+                )?,
                 diarize,
                 speaker_backend,
                 lang: job.dispatch.lang.clone(),
-                num_speakers: job.dispatch.num_speakers.0 as usize,
                 with_utseg,
                 with_morphosyntax,
                 cache_policies,
@@ -265,17 +297,20 @@ impl BenchmarkDispatchPlan {
         Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
-                auto_speakers: false,
                 // A refusal here means a persisted job names an engine this
                 // build cannot run. Submission validation refuses those up
                 // front, so reaching this arm means the job predates the
                 // check. The refusal is PROPAGATED: `.ok()?` used to turn it
                 // into `None`, which routing dropped silently.
-                backend: AsrBackend::try_from_engine(&asr_engine)?,
+                asr: crate::transcribe::TranscribeAsrPlan::from_request(
+                    AsrBackend::try_from_engine(&asr_engine)?,
+                    false,
+                    job.dispatch.num_speakers.0 as usize,
+                    &engine_extras,
+                )?,
                 diarize: false,
                 speaker_backend: None,
                 lang: job.dispatch.lang.clone(),
-                num_speakers: job.dispatch.num_speakers.0 as usize,
                 with_utseg: false,
                 with_morphosyntax: false,
                 cache_policies: TranscribeCachePolicies::uniform(cache_policy),
@@ -354,7 +389,12 @@ impl MediaAnalysisDispatchPlan {
                 Ok(Self::Diarize {
                     kernel_plan: kernel_plan_for_job(job, config),
                     backend: resolve_selected_speaker_backend(options.speaker_engine),
-                    expected_speakers: options.expected_speakers,
+                    // The option type admits only a count a diarizer can answer
+                    // (at least two, or absent for automatic); the worker
+                    // request still speaks the provider's own parameter.
+                    expected_speakers: options
+                        .expected_speakers
+                        .map(|count| crate::api::NumSpeakers(count.get())),
                     cache_policy: resolve_cache_overrides(job)
                         .policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
                 })
@@ -470,17 +510,49 @@ mod tests {
                 "override_media_cache": true, "debug_dir": "/data/evidence"},
             "paths_mode": true, "source_paths": ["/data/input.wav"],
             "output_paths": ["/data/output.cha"], "display_names": ["input.wav"]
-        })).expect("HTTP submission contract");
-        submission.validate().expect("supported automatic speaker request");
-        let mut job = make_snapshot(ReleasedCommand::Transcribe, submission.options, BTreeMap::new());
+        }))
+        .expect("HTTP submission contract");
+        submission
+            .validate()
+            .expect("supported automatic speaker request");
+        let mut job = make_snapshot(
+            ReleasedCommand::Transcribe,
+            submission.options,
+            BTreeMap::new(),
+        );
         job.dispatch.num_speakers = NumSpeakers(2);
-        let plan = TranscribeDispatchPlan::from_job(&job, &ServerConfig::default()).expect("dispatch plan");
-        assert!(plan.base_options.auto_speakers);
+        let plan = TranscribeDispatchPlan::from_job(&job, &ServerConfig::default())
+            .expect("dispatch plan");
+        assert!(matches!(
+            plan.base_options.asr,
+            crate::transcribe::TranscribeAsrPlan::RevAi(
+                crate::transcribe::RevSpeakerCount::Automatic
+            )
+        ));
         assert_eq!(plan.base_options.expected_speakers(), None);
+        // A persisted job bypasses HTTP validation, but cannot bypass plan admission.
+        let mut invalid = job.clone();
+        invalid.dispatch.options = serde_json::from_value(serde_json::json!({
+            "command": "transcribe", "auto_speakers": true,
+            "engine_overrides": {"asr": "whisper"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            TranscribeDispatchPlan::from_job(&invalid, &ServerConfig::default()),
+            Err(DispatchPlanRefusal::AsrPolicy(
+                crate::transcribe::TranscribeAsrPlanError::UnsupportedAutomaticCount
+            ))
+        ));
         assert!(plan.base_options.speaker_backend.is_some());
         assert!(plan.base_options.write_wor);
-        assert_eq!(plan.base_options.cache_policies.rev_asr, crate::params::CachePolicy::SkipCache);
-        assert_eq!(plan.base_options.cache_policies.speaker, crate::params::CachePolicy::SkipCache);
+        assert_eq!(
+            plan.base_options.cache_policies.rev_asr,
+            crate::params::CachePolicy::SkipCache
+        );
+        assert_eq!(
+            plan.base_options.cache_policies.speaker,
+            crate::params::CachePolicy::SkipCache
+        );
     }
 
     fn make_snapshot(
@@ -578,7 +650,7 @@ mod tests {
             .expect("transcribe plan");
 
         assert!(matches!(
-            plan.base_options.backend,
+            plan.base_options.asr.backend(),
             AsrBackend::Worker(AsrWorkerMode::HkAliyunV2)
         ));
         assert!(plan.base_options.diarize);
@@ -590,7 +662,7 @@ mod tests {
             plan.base_options.lang,
             crate::api::LanguageSpec::Resolved(LanguageCode3::eng())
         );
-        assert_eq!(plan.base_options.num_speakers, 3);
+        assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
         assert!(!plan.base_options.with_utseg);
         assert!(plan.base_options.with_morphosyntax);
         assert_eq!(
@@ -620,7 +692,10 @@ mod tests {
         let plan = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
             .expect("transcribe_s plan");
 
-        assert!(matches!(plan.base_options.backend, AsrBackend::RustRevAi));
+        assert!(matches!(
+            plan.base_options.asr.backend(),
+            AsrBackend::RustRevAi
+        ));
         assert!(plan.base_options.diarize);
         assert_eq!(
             plan.base_options.speaker_backend,
@@ -630,7 +705,7 @@ mod tests {
             plan.base_options.lang,
             crate::api::LanguageSpec::Resolved(LanguageCode3::eng())
         );
-        assert_eq!(plan.base_options.num_speakers, 3);
+        assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
         assert!(plan.base_options.with_utseg);
         assert!(!plan.base_options.with_morphosyntax);
         assert_eq!(
@@ -901,8 +976,11 @@ mod tests {
         let plan = BenchmarkDispatchPlan::from_job(&snapshot, &ServerConfig::default())
             .expect("benchmark plan");
 
-        assert!(matches!(plan.base_options.backend, AsrBackend::RustRevAi));
-        assert_eq!(plan.base_options.num_speakers, 3);
+        assert!(matches!(
+            plan.base_options.asr.backend(),
+            AsrBackend::RustRevAi
+        ));
+        assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
         assert!(!plan.base_options.with_utseg);
         assert!(!plan.base_options.with_morphosyntax);
         assert!(plan.base_options.write_wor);

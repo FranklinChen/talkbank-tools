@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdRelationRepairV2",
+  "description": "One relation rewrite a worker made inside an analysis it returned.\n\nCarries what it takes to attribute the rewrite as well as count it: the\nword it was made on, and both relations. The worker is the only witness,\nbecause the relation Stanza produced does not survive into the analysis it\nsends: by the time the server sees the item, the repaired relation is the\nonly one there.",
+  "type": "object",
+  "properties": {
+    "from_relation": {
+      "description": "The relation the model produced, verbatim.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Which rewrite this is.",
+      "$ref": "#/$defs/UdRelationRepairKindV2"
+    },
+    "to_relation": {
+      "description": "The relation applied in its place, which the worker admits is a UD\nrelation before it builds this value.",
+      "type": "string"
+    },
+    "word": {
+      "description": "Surface form of the word whose relation was rewritten, so a reader can\nfind it in the transcript.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "word",
+    "from_relation",
+    "to_relation"
+  ],
+  "$defs": {
+    "UdRelationRepairKindV2": {
+      "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_relation"
+        },
+        {
+          "type": "string",
+          "const": "relation_case"
+        },
+        {
+          "type": "string",
+          "const": "relation_alias"
+        },
+        {
+          "type": "string",
+          "const": "unknown_relation"
+        }
+      ]
+    }
+  }
+}

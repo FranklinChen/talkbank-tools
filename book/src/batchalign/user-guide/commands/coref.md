@@ -1,7 +1,7 @@
 # coref
 
 **Status:** Current
-**Last updated:** 2026-05-23 09:20 EDT
+**Last updated:** 2026-09-15 20:20 EDT
 
 Add sparse coreference annotation tiers (`%xcoref`) to CHAT transcripts.
 English-only. Uses full document context, all utterances in the file are
@@ -72,9 +72,13 @@ flowchart TD
 | --- | --- | --- |
 | `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the output |
 
-Source language is read from each file's `@Languages` header.
-Non-English files pass through unchanged (Stanza's coreference model
-is English-only).
+**`coref` has no `--lang` flag.** It is English-only, and each file's
+English-ness is read from that file's own `@Languages` header; a file with no
+header is treated as English. Non-English files pass through unchanged
+(Stanza's coreference model is English-only).
+
+Passing a job-level language is refused at submission rather than ignored, so
+nothing can record a language coref did not use.
 
 ---
 
@@ -103,6 +107,18 @@ because coreference depends on full context.
 **Best suited for local or direct-server execution.** `coref` is a
 document-level workflow that benefits from locality. It is not an interactive
 remote-server command in the same way as `align` or `transcribe`.
+
+---
+
+## Provenance
+
+Every English file coref resolves records the engine that produced its chains
+in a `[fc-ba3 coref | engine=... ; lang=eng | ...]` comment. The engine is the
+one the worker named on the result it returned, so a file with nothing to
+resolve gets no comment and the run says why. A non-English file passes through
+with nothing added, comment included. Files processed by a build before
+2026-09-15 carry no comment, because the batch path wrote none; re-running
+`coref` over them adds one. See [Processing Provenance](../provenance.md).
 
 ---
 

@@ -1,7 +1,7 @@
 # Cantonese Language Support
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-15 12:12 EDT
 
 User reference for Cantonese (`yue`) processing in batchalign3, ASR engine
 options, credentials, retokenize usage, and what to expect from each
@@ -23,7 +23,7 @@ normalization pipeline, segmenter selection, source-file map), see
 | Morphosyntax (depparse) | Stanza Chinese (`zh`), Mandarin-trained, but better than nothing |
 | Forced alignment | Jyutping romanization (PyCantonese) → Wave2Vec MMS |
 
-## ASR Engine Options
+## ASR engine options
 
 **The default for `yue` is FunASR/SenseVoice**: a local model that
 empirically outperforms vanilla Whisper-large-v3 by a wide margin
@@ -152,6 +152,22 @@ Cantonese-specific corrections (`真系→真係`, `中意→鍾意`, `系→係
 
 Full example: `你真系好吵呀` → `你真係好嘈啊`.
 
+**Where it runs, and how often.** In the Rust server, once per monologue,
+before any stage splits the words (stage 2d of ASR post-processing). The ASR
+engines themselves hand back their own characters unchanged, so the transcript
+reads the same whichever engine produced it. Normalizing per word would lose
+every multi-character replacement, because these engines report one word per
+Han character; normalizing twice would undo some of them, because the table
+maps `繫` to `係` and would turn a converted `聯繫` back into `聯係`.
+
+**What you would see if it ever could not run.** Normalization hands each word
+back exactly the characters it contributed, which is only sound while the
+conversion preserves the character count. If it did not, the file is refused
+with a message naming both counts, rather than producing a transcript whose
+timings have quietly moved onto different characters. No measured input does
+this: every Han code point and every entry of OpenCC's own `s2hk` dictionaries
+was checked (191,125 strings, none changed length).
+
 The replacement table was originally written by Chuqiao Song in
 batchalign2's `replace_cantonese_words()` (Python + OpenCC C++). Rebuilt
 in Rust for batchalign3, no C++ dependency, always available, correct
@@ -208,7 +224,8 @@ vocabulary coverage 98-100% across MOST, LeeWongLeung, CHCC, EACMC, HKU
 Cantonese uses **traditional** Chinese number characters: `5` → `五`,
 `42` → `四十二`, `10000` → `一萬` (not `一万`). Implemented via
 `num2chinese(n, ChineseScript::Traditional)` in Rust. Runs as Stage 4 of
-ASR post-processing, before Stage 4b (text normalization).
+ASR post-processing, after the text-normalization stage (2d), so the numerals
+it writes are already in their final form.
 
 See [Number Expansion](../number-expansion.md) for the full language
 table.

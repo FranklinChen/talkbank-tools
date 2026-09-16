@@ -6,7 +6,7 @@ use super::fixtures::{
 };
 use super::helpers::{
     count_ast_mor_tiers, find_mor_line_for, has_mor_tier, minimal_chat, parse_output,
-    strip_ba3_comments,
+    strip_provenance_stamps,
 };
 use crate::common::{
     LiveDirectJobClient, assert_completed_without_errors, require_live_direct_warmed,
@@ -281,8 +281,8 @@ async fn direct_morphotag_before_matches_full_rerun_output() {
     );
 
     assert_eq!(
-        strip_ba3_comments(&full_outputs[0]),
-        strip_ba3_comments(&incremental_outputs[0]),
+        strip_provenance_stamps(&full_outputs[0]),
+        strip_provenance_stamps(&incremental_outputs[0]),
         "incremental morphotag output should match full rerun semantics"
     );
 }

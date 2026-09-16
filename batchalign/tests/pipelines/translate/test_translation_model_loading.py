@@ -171,8 +171,7 @@ def _patch_aliyun_sdk(
 def _reset_translate_state() -> None:
     from batchalign.worker._types import _state
 
-    _state.translate_backend = None
-    _state.translate_fn = None
+    _state.translation = None
 
 
 class TestLoadAliyunTranslate:
@@ -182,7 +181,7 @@ class TestLoadAliyunTranslate:
     loader (a) reads creds via ``read_asr_config``, (b) builds a
     ``TranslateGeneralRequest`` with the documented field set,
     (c) parses the ``Data.Translated`` field, and (d) writes both
-    ``_state.translate_backend`` and ``_state.translate_fn`` so the
+    ``_state.translation`` so the
     upstream batch-infer layer picks up the new engine.
     """
 
@@ -205,9 +204,11 @@ class TestLoadAliyunTranslate:
 
         translation_mod._load_aliyun_translate()
 
-        assert _state.translate_backend is TranslationBackend.ALIYUN
-        assert _state.translate_fn is not None
-        result = _state.translate_fn("你好", LanguageCode("yue"))
+        assert _state.translation is not None
+
+        assert _state.translation.backend is TranslationBackend.ALIYUN
+        assert _state.translation is not None
+        result = _state.translation.translate("你好", LanguageCode("yue"))
 
         # Wire-shape pin: any future refactor that drops ``Scene`` or
         # changes ``FormatType`` will break here, surfacing the change.
@@ -219,6 +220,7 @@ class TestLoadAliyunTranslate:
             "Scene": "general",
         }
         assert result == "hello world"
+        assert _state.translation.engine == "aliyun-mt"
 
     def test_empty_text_short_circuits_without_calling_sdk(
         self, monkeypatch: pytest.MonkeyPatch
@@ -238,8 +240,8 @@ class TestLoadAliyunTranslate:
         _reset_translate_state()
 
         translation_mod._load_aliyun_translate()
-        assert _state.translate_fn is not None
-        assert _state.translate_fn("", LanguageCode("eng")) == ""
+        assert _state.translation is not None
+        assert _state.translation.translate("", LanguageCode("eng")) == ""
 
     def test_unmapped_source_language_raises(
         self, monkeypatch: pytest.MonkeyPatch
@@ -261,11 +263,11 @@ class TestLoadAliyunTranslate:
         _reset_translate_state()
 
         translation_mod._load_aliyun_translate()
-        assert _state.translate_fn is not None
+        assert _state.translation is not None
         with pytest.raises(ValueError, match="Aliyun MT does not have a mapped"):
             # ``mlt`` is a valid ISO-639-3 (Maltese) but not in our
             # map; serves as the canonical unmapped case.
-            _state.translate_fn("text", LanguageCode("mlt"))
+            _state.translation.translate("text", LanguageCode("mlt"))
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +314,7 @@ def _load_translate_engine_fixture(
         _state,
     )
 
-    saved_backend = _state.translate_backend
-    saved_fn = _state.translate_fn
+    saved_translation = _state.translation
     load_translation_engine(
         WorkerBootstrapRuntime(
             task=InferTask.TRANSLATE,
@@ -322,16 +323,15 @@ def _load_translate_engine_fixture(
             engine_overrides={"translate": engine_wire_name},
         )
     )
-    assert _state.translate_backend is expected_backend, (
-        f"fixture failed to select {expected_backend.name}; "
-        f"got {_state.translate_backend!r}"
-    )
-    assert _state.translate_fn is not None
+    assert (
+        _state.translation is not None
+        and _state.translation.backend is expected_backend
+    ), f"fixture failed to select {expected_backend.name}; got {_state.translation!r}"
+    assert _state.translation is not None
     try:
-        yield _state.translate_fn
+        yield _state.translation.translate
     finally:
-        _state.translate_backend = saved_backend
-        _state.translate_fn = saved_fn
+        _state.translation = saved_translation
 
 
 @pytest.fixture(scope="module")
@@ -465,11 +465,11 @@ class TestSeamlessRuntimeInvariants:
         assert first.strip() and second.strip()
 
     def test_backend_loader_populates_state(self) -> None:
-        # The loader's contract: after a successful load, both
-        # ``_state.translate_backend`` and ``_state.translate_fn``
-        # are populated. The batch-infer handler in
-        # ``_infer_hosts.py`` asserts both are non-None before
-        # accepting work, so the loader must satisfy that.
+        # The loader's contract: after a successful load,
+        # ``_state.translation`` holds the backend, its engine identity
+        # and the callable together. The batch-infer handler in
+        # ``_infer_hosts.py`` refuses work while it is None, so the
+        # loader must satisfy that.
         from batchalign.worker._model_loading.translation import load_translation_engine
         from batchalign.worker._types import (
             InferTask,
@@ -477,8 +477,7 @@ class TestSeamlessRuntimeInvariants:
             _state,
         )
 
-        saved_backend = _state.translate_backend
-        saved_fn = _state.translate_fn
+        saved_translation = _state.translation
         try:
             load_translation_engine(
                 WorkerBootstrapRuntime(
@@ -488,12 +487,12 @@ class TestSeamlessRuntimeInvariants:
                     engine_overrides={"translate": "seamless"},
                 )
             )
-            assert _state.translate_backend is TranslationBackend.SEAMLESS
-            assert _state.translate_fn is not None
-            assert callable(_state.translate_fn)
+            assert _state.translation is not None
+            assert _state.translation.backend is TranslationBackend.SEAMLESS
+            assert _state.translation is not None
+            assert callable(_state.translation.translate)
         finally:
-            _state.translate_backend = saved_backend
-            _state.translate_fn = saved_fn
+            _state.translation = saved_translation
 
     def test_can_switch_from_google_to_seamless_in_same_process(self) -> None:
         # A daemon serving both engine pools (one worker on Google,
@@ -507,8 +506,7 @@ class TestSeamlessRuntimeInvariants:
             _state,
         )
 
-        saved_backend = _state.translate_backend
-        saved_fn = _state.translate_fn
+        saved_translation = _state.translation
         try:
             load_translation_engine(
                 WorkerBootstrapRuntime(
@@ -518,8 +516,9 @@ class TestSeamlessRuntimeInvariants:
                     engine_overrides={"translate": "google"},
                 )
             )
-            assert _state.translate_backend is TranslationBackend.GOOGLE
-            google_fn = _state.translate_fn
+            assert _state.translation is not None
+            assert _state.translation.backend is TranslationBackend.GOOGLE
+            google_translation = _state.translation
 
             load_translation_engine(
                 WorkerBootstrapRuntime(
@@ -529,15 +528,15 @@ class TestSeamlessRuntimeInvariants:
                     engine_overrides={"translate": "seamless"},
                 )
             )
-            assert _state.translate_backend is TranslationBackend.SEAMLESS
-            assert _state.translate_fn is not google_fn, (
-                "Seamless load must replace ``_state.translate_fn``, "
+            assert _state.translation is not None
+            assert _state.translation.backend is TranslationBackend.SEAMLESS
+            assert _state.translation is not google_translation, (
+                "Seamless load must replace ``_state.translation``, "
                 "leaving the Google fn in place would silently route "
                 "Seamless-pool requests to Google."
             )
         finally:
-            _state.translate_backend = saved_backend
-            _state.translate_fn = saved_fn
+            _state.translation = saved_translation
 
 
 # ---------------------------------------------------------------------------
@@ -614,8 +613,7 @@ class TestNllbRuntimeInvariants:
             _state,
         )
 
-        saved_backend = _state.translate_backend
-        saved_fn = _state.translate_fn
+        saved_translation = _state.translation
         try:
             load_translation_engine(
                 WorkerBootstrapRuntime(
@@ -625,12 +623,12 @@ class TestNllbRuntimeInvariants:
                     engine_overrides={"translate": "nllb"},
                 )
             )
-            assert _state.translate_backend is TranslationBackend.NLLB
-            assert _state.translate_fn is not None
-            assert callable(_state.translate_fn)
+            assert _state.translation is not None
+            assert _state.translation.backend is TranslationBackend.NLLB
+            assert _state.translation is not None
+            assert callable(_state.translation.translate)
         finally:
-            _state.translate_backend = saved_backend
-            _state.translate_fn = saved_fn
+            _state.translation = saved_translation
 
     def test_unsupported_language_raises_clear_error(self, nllb_translate_fn) -> None:
         # The FLORES-200 mapping is a closed set, an unmapped source

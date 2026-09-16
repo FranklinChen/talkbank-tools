@@ -9,9 +9,7 @@ import pytest
 
 from batchalign.errors import ConfigError
 from batchalign.inference.languages.cantonese._common import (
-    normalize_cantonese_char_tokens,
     parse_timestamp_pair,
-    provider_lang_code,
     read_asr_config,
 )
 from batchalign.inference.languages.cantonese._funaudio_common import (
@@ -35,9 +33,6 @@ class TestHKHelpers:
         assert parse_timestamp_pair([100.4, 210.6]) == (100, 211)
         assert parse_timestamp_pair(None) == (None, None)
         assert parse_timestamp_pair(["x", "y"]) == (None, None)
-
-    def test_normalize_cantonese_char_tokens(self) -> None:
-        assert normalize_cantonese_char_tokens("真系呀，") == ["真", "係", "啊"]
 
     def test_read_asr_config_validation(self) -> None:
         with pytest.raises(ConfigError):
@@ -67,20 +62,15 @@ class TestHKHelpers:
         assert values["engine.tencent.id"] == "id"
         assert values["engine.tencent.key"] == "key"
 
-    def test_provider_lang_code(self) -> None:
-        assert provider_lang_code("yue") == "yue"
-        assert provider_lang_code("eng") == "en"
-        assert provider_lang_code("zzz") == "zzz"
-
-    def test_funaudio_clean_segment_text(self) -> None:
-        cleaned = FunAudioRecognizer._clean_segment_text("<|zh|> 「hello」，world！")
-        assert cleaned == "hello world"
-
     def test_funaudio_transcribe_sorts_timed_words(self) -> None:
         recognizer = FunAudioRecognizer(lang="eng")
         _S = FunAsrSegment
         recognizer._run_model = lambda _path: [  # type: ignore[method-assign]
-            _S(text="<|zh|> hello， world！", timestamp=[[100, 200], [0, 50]])
+            _S(
+                text="<|zh|> hello， world！",
+                timestamp=[[100, 200], [0, 50]],
+                words=["hello", "world"],
+            )
         ]
 
         payload, timed_words = recognizer.transcribe("dummy.wav")
@@ -96,7 +86,7 @@ class TestHKHelpers:
     def test_tencent_monologues_and_timed_words(self) -> None:
         recognizer = TencentRecognizer.__new__(TencentRecognizer)
         recognizer.lang_code = "yue"
-        recognizer.provider_lang = "yue"
+        recognizer.engine_model_type = "16k_zh_large"
 
         result_detail = [
             SimpleNamespace(
@@ -119,12 +109,14 @@ class TestHKHelpers:
         payload = recognizer.monologues(result_detail)
         assert len(payload["monologues"]) == 2
         first_elements = payload["monologues"][0]["elements"]
-        assert first_elements[0]["value"] == "係"
+        # Tencent's own characters, not normalized ones: normalization has one
+        # owner in the Rust server and runs once per monologue, after this.
+        assert first_elements[0]["value"] == "系"
         assert first_elements[1]["value"] == "你"
 
         timed = recognizer.timed_words(result_detail)
         assert [(item["word"], item["start_ms"], item["end_ms"]) for item in timed] == [
-            ("啊", 500, 600),
-            ("係", 1000, 1200),
+            ("呀", 500, 600),
+            ("系", 1000, 1200),
             ("你", 1300, 1500),
         ]

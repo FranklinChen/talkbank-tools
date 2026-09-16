@@ -63,7 +63,7 @@ impl MergeAbbreviations {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FileOutput {
     /// A CHAT document, written through the provenance gate so a re-run that
-    /// changes only the `[ba3 ...]` timestamp does not touch the file.
+    /// changes only the `[fc-ba3 ...]` timestamp does not touch the file.
     ///
     /// It carries the [`PostValidated`] PROOF, not a bare `String`. The
     /// producing task is the only party that knows what bar this document was
@@ -243,7 +243,7 @@ pub(crate) async fn write_primary_output_artifact(
             let target =
                 ChatOutputTarget::new(filesystem, file_index, &primary_output.display_path);
             // No provenance gate. That gate exists because re-running a CHAT
-            // command rewrites a `[ba3 ...]` timestamp line and produces
+            // command rewrites a `[fc-ba3 ...]` timestamp line and produces
             // semantically empty corpus diffs. An evidence document IS a
             // record of one run, so a fresh one differing from the last is
             // the information, not noise.

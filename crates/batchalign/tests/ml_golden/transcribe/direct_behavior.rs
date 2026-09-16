@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use crate::common::{LiveDirectJobClient, assert_completed_without_errors, require_live_direct};
 use crate::ml_golden::audio_helpers::{count_wor_tiers, parse_output};
 use crate::ml_golden::transcribe::helpers::{
-    prepare_multi_speaker_transcribe_fixture_job, prepare_transcribe_fixture_job,
-    transcribe_options,
+    MULTI_SPEAKER_FIXTURE_SPEAKERS, prepare_multi_speaker_transcribe_fixture_job,
+    prepare_transcribe_fixture_job, transcribe_options,
 };
 use batchalign::api::{JobStatus, ReleasedCommand};
 use batchalign::options::{AsrEngineName, WorTierPolicy};
@@ -165,11 +165,17 @@ async fn direct_transcribe_diarize_surfaces_multiple_speakers_when_available() {
     };
 
     let (info, outputs) = jobs
-        .submit_paths_job(
+        .submit_paths_job_with_speakers(
             ReleasedCommand::Transcribe,
             "eng",
             vec![fixture.source_path],
             vec![fixture.output_path],
+            // The fixture's own CHAT declares three participants (FAT, CHI,
+            // MOT). It used to submit one, which asked the diarizer to
+            // separate speakers in a recording asserted to hold a single one;
+            // the diarizer obliged, and this test then failed for the reason
+            // it was submitted with.
+            MULTI_SPEAKER_FIXTURE_SPEAKERS,
             transcribe_options(AsrEngineName::Whisper, true, WorTierPolicy::Omit),
         )
         .await;

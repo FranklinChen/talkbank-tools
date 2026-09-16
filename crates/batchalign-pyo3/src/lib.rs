@@ -25,7 +25,8 @@
 //! - `worker_text_exec`: Batched text-task executor control plane
 //! - `worker_text_results`: Text task result normalization + token alignment
 //! - `worker_artifacts`: Prepared artifact loading from IPC attachments
-//! - `cantonese_asr_bridge`: HK/Cantonese provider projection + normalization
+//! - `cantonese_asr_bridge`: HK/Cantonese provider projection + normalization,
+//!   with FunASR segment admission in its `funasr_projection` child module
 //!
 //! **See also:** [Interface Map](../../INTERFACE_MAP.md) for unified documentation of all
 //! Python/Rust boundaries, including Python caller locations and schema definitions.
@@ -155,10 +156,6 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // HK/Cantonese ASR bridges
     m.add_function(wrap_pyfunction!(
-        cantonese_asr_bridge::clean_funaudio_segment_text,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
         cantonese_asr_bridge::funaudio_segments_to_asr,
         m
     )?)?;
@@ -170,14 +167,5 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         cantonese_asr_bridge::aliyun_sentences_to_asr,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(
-        cantonese_asr_bridge::normalize_cantonese,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        cantonese_asr_bridge::cantonese_char_tokens,
-        m
-    )?)?;
-
     Ok(())
 }

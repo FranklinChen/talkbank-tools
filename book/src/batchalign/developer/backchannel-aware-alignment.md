@@ -133,7 +133,9 @@ Key unknowns:
 
 ### Source 1: `&*` words pollute the reference sequence
 
-The current `flatten_words()` includes `&*`-embedded words in the reference
+The current `flatten_side()`
+(`crates/batchalign-transform/src/compare/engine.rs`, named `flatten_words()`
+until 2026-09-16) includes `&*`-embedded words in the reference
 sequence.  These words belong to a different speaker and appear at different
 temporal positions in the ASR output.  The DP tries to match them, consumes
 ASR tokens at wrong positions, and desynchronizes subsequent matches.

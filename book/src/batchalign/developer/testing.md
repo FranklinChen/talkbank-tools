@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-06 18:14 EDT
+**Last updated:** 2026-09-15 16:18 EDT
 
 ## Philosophy
 
@@ -91,6 +91,17 @@ flowchart TD
    Stanza, pyannote, etc. Each worker consumes 2-5 GB RAM. They are slow,
    expensive, and dangerous on developer machines.
 
+   Every processed output carries a provenance stamp (`@Comment:` with
+   `[fc-ba3 ...]`) naming the models that ran and the wall-clock time they
+   ran. The ML harness treats the two halves differently. Golden snapshots
+   (`assert_golden_snapshot!`) keep the stamp, so a change in which model or
+   pipeline variant produced the output is a visible snapshot change, but pin
+   its timestamp to `<timestamp>` so a snapshot can be accepted at all. BA2
+   parity (`assert_ba2_parity`) drops stamp lines, because BA2 wrote none and
+   the parity question is about tiers. Both recognize a stamp with
+   `provenance::extract_provenance`, the codec the writer uses, never a text
+   pattern, and both fail the test on a stamp that does not parse.
+
 **ML tests are excluded by default.** You must opt in explicitly, and only
 when you have a reason: a change to worker dispatch, a new language, an
 inference module edit, a pre-release check. Never as part of routine
@@ -142,6 +153,119 @@ test executable. The full default suite has 2,433 runnable tests, so nextest
 would exchange nine ordinary process starts for thousands. It remains rejected
 for the default developer loop on both performance and macOS process-assessment
 grounds.
+
+## Waiting in a live test: the deadline owner
+
+Never write a bare `Duration` in a live test. Two types own every wait, and
+both live in `crates/batchalign/tests/live_deadline/`.
+
+`ServerTestDeadline` is for anything that polls. It carries two bounds instead
+of one: an **idle window**, the longest it may go without observing any change
+in what it is watching, and a **ceiling**, the longest it may run no matter how
+much progress it sees. Observed progress resets the idle window; nothing
+resets the ceiling. So a job that keeps completing files is not killed for
+being slow on a loaded machine, and a job that is genuinely hung still fails,
+inside the idle window, at roughly the time the old fixed deadline would have.
+
+```rust
+let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(job_id));
+loop {
+    let info = get_job(&client, &base_url, job_id).await;
+    if info.status.is_terminal() {
+        return info;
+    }
+    deadline.keep_waiting(ProgressSnapshot::job(&info)).await;
+}
+```
+
+`keep_waiting` is the whole loop body that used to be an `assert!` on a bare
+deadline plus a `sleep` on a bare interval. Its refusal names what the wait was
+for, which of the two bounds was hit, the last progress it observed and how
+long ago, and the probe and change counts.
+
+Two rules make this hold rather than merely read well:
+
+- A `WaitSubject` carries its own budget, and `WaitBudget` is private. You pick
+  what you are waiting for, never how many seconds it gets, so a subject and a
+  budget cannot disagree and a call site cannot invent a number.
+- A `ProgressSnapshot` is built only from a real probe result
+  (`ProgressSnapshot::job`, `::http_status`, `::spawn_admission`,
+  `::process_alive`). There is no constructor from a literal, so "progress"
+  cannot be asserted, only observed. A value that never changes degrades the
+  wait to its idle window; a value that always changes is still stopped by the
+  ceiling.
+
+`CliRunBudget` and `HarnessBudget` own the one-shot durations that have no
+progress to observe: an `assert_cmd` subprocess timeout, a session shutdown, a
+fixture's `ready_timeout_s`. They buy no extension, only a single place where
+each budget is written down.
+
+**A subprocess that owns its own wait does not get a second number.**
+`CliRunBudget::DaemonStart` is not written down at all: it is
+`cli::daemon::startup_budget()` plus the margin the command needs to report its
+own failure. `serve start` spawns a daemon and waits up to that budget (90 s)
+for the handshake, so a harness killer set to anything smaller fires first and
+converts every outcome into the same one. It did: the spawn ran on
+`ServerRoundTrip`'s 60 s, and on a loaded machine the helper died by SIGKILL at
+60 s with an empty `server.log` and wait status 9, which reads exactly like a
+daemon that never started. Across four runs on byte-identical code that went
+fail, pass, fail, fail, taking two different tests down at the same helper line
+whenever three or four live tests overlapped past 60 s.
+
+The fix is not a bigger number. A bigger number written here could fall under
+`startup_budget()` again the next time that constant moves; deriving it cannot.
+A daemon that genuinely never comes up is still refused, by `serve start`
+itself, at 90 s, naming the phase it was stuck in, and the harness kill survives
+as the backstop for a CLI that stops answering altogether.
+
+**Why this exists.** A fixed deadline cannot tell a hung subject from a
+contended one. `memory_guard` holds ONE process-global spawn permit until a
+worker reports ready, so a worker spawn queues behind every other test binary's
+cold model load. `cli_morphotag_real_server` spent its fixed budget in that
+queue and failed with `1/1 local startup slots in use`, twice in consecutive
+change sets, while passing alone in about 12.65 seconds. The bound was not too
+small; it was measuring the wrong thing.
+
+Note that `ready_timeout_s` buys BOTH halves:
+`memory_guard::acquire_spawn_permit` passes it to the host-memory lease wait and
+then to the readiness wait. `HarnessBudget::FixtureWorkerReady` sizes it for
+contention plus startup rather than startup alone.
+
+Durations a test *configures* are not deadlines and do not belong to these
+types: `test_delay_ms`, how long a stub interpreter hangs, and the simulated
+network durations in `turmoil_net.rs` are stimulus, and the assertions that
+measure against them (`CANCEL_UNWIND_BOUND` against `WORKER_NATURAL_COMPLETION`)
+are properties that extending would destroy.
+
+## The shared worker pool is bound to its own runtime
+
+A `tokio::process::Child` registers its pipes with the reactor of the runtime
+that created it and stays bound to it for life. `#[tokio::test]` builds a
+runtime per test and drops it at the end of that test, while the shared
+fixtures keep one warmed `WorkerPool` for the whole binary. A pool that spawned
+on whatever runtime was current therefore handed later tests workers whose
+reactor was gone:
+
+```text
+A Tokio 1.x context was found, but it is being shutdown.
+```
+
+`WorkerPool` now captures the runtime it is CONSTRUCTED on and creates every
+child process there, whoever calls it (`src/worker/pool/spawn_runtime.rs`).
+A worker's reactor is a property of the pool, not of whichever test first
+needed a worker, so no caller can bind one to a shorter-lived runtime. Once a
+worker exists, dispatching to it from another runtime is fine and stays direct;
+that is why the fix works.
+
+Production is unaffected and this is a no-op there: it builds one pool inside
+one process-lifetime runtime (`prepare_workers`), which is the same runtime the
+old ambient spawn would have found.
+
+When you add a pool code path that creates an OS resource, route it through
+`PoolSpawnRuntime` (`spawn_worker`, `adopt_shared_gpu_worker`,
+`spawn_detached`) rather than calling `tokio::spawn` or `WorkerHandle::spawn`
+directly. The type hands out no inner handle, so there is no way to borrow your
+way back to the ambient runtime.
 
 ## Fast Contributor Loop
 
@@ -253,7 +377,10 @@ session and then failed on its own merits. Observed causes, from the run log
 - Worker death mid-job: `worker process exited unexpectedly (exit code: None)`,
   `GPU worker reader loop exited, worker process is dead`.
 - Runtime teardown racing the job: `A Tokio 1.x context was found, but it is
-  being shutdown`.
+  being shutdown`. FIXED 2026-09-16: the pool now binds worker processes to the
+  runtime it was constructed on, so a pooled worker no longer outlives the
+  reactor of whichever test first spawned it. See "The shared worker pool is
+  bound to its own runtime" above.
 - Jobs returning `Failed` where `Completed` was asserted (~30).
 - HTTP 400 on content-job submission (~10).
 - Snapshot drift on the `compare` and `coref` goldens.
@@ -502,6 +629,13 @@ uv run mypy                       # mypy only
 make batchalign-typecheck-python  # mypy under the batchalign-* target group
 make lint-affected                # affected-Rust clippy + affected Python mypy
 ```
+
+The gate is inverted, and that is the property to preserve: `mypy.ini` checks
+every module under `batchalign` and exempts NAMED modules one at a time, each
+carrying the error count that justifies it. A new module is checked because
+nobody listed it, rather than exempt because it fell under a wildcard. Removing
+an entry is the unit of work: fix the module, confirm it reports zero, delete
+its section. Do not silence a module with an inline `type: ignore` instead.
 
 ## CI hygiene
 

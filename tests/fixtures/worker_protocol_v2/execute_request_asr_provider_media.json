@@ -8,7 +8,20 @@
     "input": {
       "kind": "provider_media",
       "media_path": "/tmp/example.wav",
-      "num_speakers": 2
+      "diarization": {
+        "kind": "integrated",
+        "speakers": 2
+      }
+    },
+    "models": {
+      "engine": "tencent",
+      "engine_model_type": {
+        "id": "tencent-asr",
+        "revision": {
+          "kind": "provider_parameter",
+          "parameter": "16k_zh_large"
+        }
+      }
     }
   },
   "attachments": []

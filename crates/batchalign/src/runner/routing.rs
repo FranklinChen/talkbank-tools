@@ -1,29 +1,35 @@
 //! Command dispatch routing: decides which dispatch family to invoke for a
-//! given job, resolves runtime worker capabilities, and delegates to the
-//! per-command dispatch wrappers.
+//! given job, resolves the selected worker's admitted capabilities, and
+//! delegates to the per-command dispatch wrappers.
 //!
 //! The central function is `dispatch_job_with_execution_context`, which is
 //! called by `ExecutionEngine::dispatch_job` after all host-level concerns
 //! (memory reservation, preflight, pre-scaling) have been handled.
+//!
+//! Whether a command can run at all is decided by
+//! [`crate::capability::command_supported`], the same rule that decides what
+//! `/health` advertises, so a command is never advertised and then refused
+//! here for a reason advertisement did not check. The forced-alignment arm
+//! additionally reads the FA engine the loaded worker reported
+//! ([`FaCacheNamespace::from_loaded`]), because every FA cache row is
+//! namespaced by it. Every refusal in this module goes through [`fail_job`].
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::api::{EngineVersion, NumWorkers, ReleasedCommand};
+use crate::api::{NumWorkers, ReleasedCommand};
 use crate::cache::UtteranceCache;
-
-use crate::capability::resolve_worker_capability_snapshot;
-use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind};
+use crate::capability::command_supported;
+use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind, command_spec};
+use crate::dispatch_language::DispatchLanguage;
+use crate::engine_reports::FaCacheNamespace;
 use crate::execution::{
     MorphotagRuntimeOptions, PooledWorkerGateway, dispatch_compare_job, dispatch_coref_job,
     dispatch_morphotag_job, dispatch_translate_job, dispatch_utseg_job,
 };
 use crate::store::{RunnerJobSnapshot, unix_now};
-use crate::worker::InferTask;
 use crate::worker::pool::WorkerPool;
-use crate::worker::target::task_name as infer_task_name;
 
 use super::context::{DispatchHostContext, JobDispatchRequest, RunnerExecutionContext};
 use super::dispatch::{
@@ -32,345 +38,304 @@ use super::dispatch::{
     TranscribeDispatchPlan, TranscribeDispatchRuntime, dispatch_benchmark_infer, dispatch_fa_infer,
     dispatch_media_analysis_v2, dispatch_transcribe_infer,
 };
-use super::policy::{command_requires_chat_infer, infer_task_for_command};
+use super::policy::command_requires_chat_infer;
 use super::test_echo::dispatch_test_echo_files;
 
-/// Core dispatch router: resolves capabilities, selects the right dispatch
-/// family (batched text, FA, transcribe, benchmark, media-analysis, or
-/// test-echo), and delegates.
+/// Core dispatch router: resolves the selected worker's admitted capabilities,
+/// applies the availability rule, selects the dispatch family (batched text,
+/// FA, transcribe, benchmark, media-analysis, speaker identity, or test-echo),
+/// and delegates.
 pub(super) async fn dispatch_job_with_execution_context(
     request: JobDispatchRequest,
     host: &DispatchHostContext,
     execution: &RunnerExecutionContext,
 ) -> Result<(), crate::error::ServerError> {
-    let sink = host.sink().clone();
     let JobDispatchRequest {
         job,
         file_list,
         num_workers,
     } = request;
-    let job_id = &job.identity.job_id;
-    let correlation_id = job.identity.correlation_id.clone();
     let command = job.dispatch.command;
     let pool = &execution.pool;
     let cache = &execution.cache;
-    let startup_infer_tasks = &execution.infer_tasks;
-    let startup_engine_versions = &execution.engine_versions;
-    let test_echo_mode = execution.test_echo_mode;
-    // Capability discovery is language-agnostic, the worker reports its
-    // resources.json which lists every supported language regardless of
-    // which lang the worker boots with. The job-level `LanguageSpec`
-    // (`Resolved(_)`, `Auto`, `PerFile`) is mapped to its `WorkerLanguage`
-    // counterpart and forwarded as-is. The Python bootstrap recognises
-    // `auto` and `per-file` as non-ISO sentinels and skips eager Stanza
-    // model load for those, see
-    // `batchalign/worker/_model_loading/bootstrap.py::_load_single_task`.
-    // No English fallback here; the typed sum carries through.
-    let capability_snapshot = match resolve_runtime_capability_snapshot(
-        pool,
-        startup_infer_tasks,
-        startup_engine_versions,
-        test_echo_mode,
-        command,
-        job.dispatch.lang.to_worker_language(),
-        &job.dispatch.options,
-    )
-    .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(err_msg) => {
-            warn!(job_id = %job_id, correlation_id = %correlation_id, "{}", err_msg);
-            sink.fail_job(job_id, &err_msg, unix_now()).await;
-            return Ok(());
-        }
-    };
-    let infer_tasks = &capability_snapshot.infer_tasks;
-    let engine_versions = &capability_snapshot.engine_versions;
-
     let all_chat = file_list.iter().all(|file| file.has_chat);
-    let infer_task = infer_task_for_command(command);
-    let infer_supported = infer_tasks.contains(&infer_task);
-    let use_infer = all_chat && infer_supported;
 
-    if command_requires_chat_infer(command) && !use_infer {
-        let required_task = infer_task_name(infer_task);
-        let err_msg = format!(
-            "Rust-first dispatch requires infer task '{}' for '{}' (all_chat={}). \
-             Worker advertises infer_tasks: {:?}",
-            required_task, command, all_chat, infer_tasks
-        );
-        warn!(job_id = %job_id, correlation_id = %correlation_id, "{}", err_msg);
-        let failed_at = unix_now();
-        sink.fail_job(job_id, &err_msg, failed_at).await;
+    if command_requires_chat_infer(command) && !all_chat {
+        fail_job(
+            &job,
+            host,
+            format!("'{command}' needs CHAT input for every file, and at least one file has none"),
+        )
+        .await;
         return Ok(());
     }
 
-    // Special case: transcribe/transcribe_s with server-side ASR orchestration.
-    // These commands take audio input (not CHAT), so they do not go through the
-    // standard `use_infer` path which requires all_chat=true.
+    // Test-echo workers answer every task and are never probed per command.
+    if execution.test_echo_mode {
+        dispatch_test_echo_files(&job, host.sink().as_ref(), &file_list, pool.test_delay_ms())
+            .await;
+        return Ok(());
+    }
+
+    // Resolve the admitted report of the exact worker key this command
+    // selects, bootstrapping that worker if the pool has not probed it yet. A
+    // pool-wide first-worker report can advertise task availability, but it
+    // cannot identify the model behind another engine-specific key and must
+    // never namespace that key's cache evidence.
+    //
+    // Capability discovery is language-agnostic: the worker reports its
+    // resources.json, which lists every supported language regardless of which
+    // lang the worker boots with. The job-level `LanguageSpec` (`Resolved(_)`,
+    // `Auto`, `PerFile`) is mapped to its `WorkerLanguage` counterpart and
+    // forwarded as-is. The Python bootstrap recognises `auto` and `per-file` as
+    // non-ISO sentinels and skips eager Stanza model load for those, see
+    // `batchalign/worker/_model_loading/bootstrap.py::_load_single_task`.
+    let loaded = match pool
+        .ensure_command_capabilities(
+            command,
+            job.dispatch.lang.to_worker_language(),
+            &job.dispatch.options,
+        )
+        .await
+    {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            fail_job(
+                &job,
+                host,
+                format!("Failed to resolve selected worker capabilities for '{command}': {error}"),
+            )
+            .await;
+            return Ok(());
+        }
+    };
+    if let Err(unavailable) =
+        command_supported(&command_spec(command).capabilities, loaded.reports())
+    {
+        fail_job(&job, host, format!("cannot run '{command}': {unavailable}")).await;
+        return Ok(());
+    }
+
     let runner_dispatch_kind = command_runner_dispatch_kind(command);
-    let use_transcribe_infer = matches!(
-        runner_dispatch_kind,
-        RunnerDispatchKind::TranscribeAudioInfer
-    ) && infer_tasks.contains(&InferTask::Asr);
-    let use_benchmark_infer = matches!(
-        runner_dispatch_kind,
-        RunnerDispatchKind::BenchmarkAudioInfer
-    ) && infer_tasks.contains(&InferTask::Asr);
-    let use_media_analysis_infer =
-        matches!(runner_dispatch_kind, RunnerDispatchKind::MediaAnalysisV2)
-            && infer_tasks.contains(&infer_task);
+    info!(
+        job_id = %job.identity.job_id,
+        correlation_id = %job.identity.correlation_id,
+        command = %command,
+        dispatch_kind = ?runner_dispatch_kind,
+        "Dispatching job"
+    );
 
-    if test_echo_mode {
-        dispatch_test_echo_files(&job, sink.as_ref(), &file_list, pool.test_delay_ms()).await;
-    } else if use_transcribe_infer {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get("asr")
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using server-side transcribe orchestrator"
-        );
-
-        dispatch_transcribe_command(&job, host, pool, cache, &engine_version, num_workers).await;
-    } else if use_benchmark_infer {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get("asr")
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using server-side benchmark orchestrator"
-        );
-
-        dispatch_benchmark_command(&job, host, pool, cache, &engine_version, num_workers).await;
-    } else if use_media_analysis_infer {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get(infer_task_name(infer_task))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using server-side media-analysis V2 path"
-        );
-
-        dispatch_media_analysis_command(&job, host, pool, cache, num_workers).await;
-    } else if use_infer && command == ReleasedCommand::Morphotag {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get(infer_task_name(InferTask::Morphosyntax))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-        let plan = BatchedInferDispatchPlan::from_job(&job);
-        let gateway = PooledWorkerGateway::new(pool.clone(), cache.clone(), engine_version.clone());
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using recipe-owned morphotag execution path"
-        );
-        dispatch_morphotag_job(
-            &job,
-            host,
-            Arc::new(gateway),
-            MorphotagRuntimeOptions {
-                tokenization_mode: plan.tokenization_mode,
-                multilingual_policy: plan.multilingual_policy,
-                mwt: Arc::new(plan.mwt),
-                l2_policy: plan.l2_policy,
-                pos_hint_policy: plan.pos_hint_policy,
-                ca_policy: plan.ca_policy,
-                should_merge_abbrev: plan.should_merge_abbrev,
-                review_level: plan.review_level,
-            },
-            num_workers,
-        )
-        .await?;
-    } else if use_infer && command == ReleasedCommand::Compare {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get(infer_task_name(InferTask::Morphosyntax))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-        let plan = BatchedInferDispatchPlan::from_job(&job);
-        let gateway = PooledWorkerGateway::new(pool.clone(), cache.clone(), engine_version.clone());
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using recipe-owned compare execution kernel"
-        );
-        dispatch_compare_job(&job, host, &gateway, &plan.mwt, plan.should_merge_abbrev).await?;
-    } else if use_infer && command == ReleasedCommand::Utseg {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get(infer_task_name(InferTask::Utseg))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-        let plan = BatchedInferDispatchPlan::from_job(&job);
-        let gateway: std::sync::Arc<dyn crate::execution::WorkerGateway> = std::sync::Arc::new(
-            PooledWorkerGateway::new(pool.clone(), cache.clone(), engine_version.clone()),
-        );
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using recipe-owned utseg execution path"
-        );
-        dispatch_utseg_job(
-            &job,
-            host,
-            gateway,
-            plan.should_merge_abbrev,
-            job.dispatch.options.utseg_fallback_policy().is_allowed(),
-        )
-        .await?;
-    } else if use_infer && command == ReleasedCommand::Translate {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get(infer_task_name(InferTask::Translate))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-        let plan = BatchedInferDispatchPlan::from_job(&job);
-        let gateway = PooledWorkerGateway::new(pool.clone(), cache.clone(), engine_version.clone());
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using recipe-owned translate execution path"
-        );
-        dispatch_translate_job(&job, host, &gateway, plan.should_merge_abbrev).await?;
-    } else if use_infer && command == ReleasedCommand::Coref {
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get(infer_task_name(InferTask::Coref))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-        let plan = BatchedInferDispatchPlan::from_job(&job);
-        let gateway = PooledWorkerGateway::new(pool.clone(), cache.clone(), engine_version.clone());
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using recipe-owned coref execution path"
-        );
-        dispatch_coref_job(&job, host, &gateway, plan.should_merge_abbrev).await?;
-    } else if use_infer {
-        // --- Server-side infer path ---
-        // The server owns CHAT parse/cache/inject/serialize.
-        // Python workers provide pure Stanza inference only.
-        let engine_version = EngineVersion::from(
-            engine_versions
-                .get(infer_task_name(infer_task))
-                .map(|s| s.as_str())
-                .unwrap_or("unknown"),
-        );
-
-        info!(
-            job_id = %job_id,
-            correlation_id = %correlation_id,
-            command = %command,
-            engine_version = %engine_version,
-            "Using server-side infer path"
-        );
-
-        match runner_dispatch_kind {
-            RunnerDispatchKind::SpeakerIdentity => {
-                crate::runner::dispatch::speaker_identity_pipeline::dispatch_speaker_identity(
-                    &job,
-                    host,
-                    pool.clone(),
-                )
-                .await;
-            }
-            RunnerDispatchKind::ForcedAlignment => {
+    match runner_dispatch_kind {
+        // Audio-first commands: they take audio input, not CHAT.
+        RunnerDispatchKind::TranscribeAudioInfer => {
+            dispatch_transcribe_command(&job, host, pool, cache, num_workers).await;
+        }
+        RunnerDispatchKind::BenchmarkAudioInfer => {
+            dispatch_benchmark_command(&job, host, pool, cache, num_workers).await;
+        }
+        RunnerDispatchKind::MediaAnalysisV2 => {
+            dispatch_media_analysis_command(&job, host, pool, cache, num_workers).await;
+        }
+        RunnerDispatchKind::SpeakerIdentity if all_chat => {
+            crate::runner::dispatch::speaker_identity_pipeline::dispatch_speaker_identity(
+                &job,
+                host,
+                pool.clone(),
+            )
+            .await;
+        }
+        RunnerDispatchKind::SpeakerIdentity => {
+            fail_job(
+                &job,
+                host,
+                format!(
+                    "No released dispatch path remains for command '{command}' without CHAT \
+                     input for every file. Legacy process-path fallback is retired."
+                ),
+            )
+            .await;
+        }
+        // FA cache rows and evidence envelopes are namespaced by the engine the
+        // selected worker reported after FA loaded on it. A worker that still
+        // names no FA engine then is refused: there is nothing honest to
+        // namespace the cache by.
+        RunnerDispatchKind::ForcedAlignment => match FaCacheNamespace::from_loaded(&loaded) {
+            Ok(cache_namespace) => {
                 dispatch_forced_alignment_command(
                     &job,
                     host,
                     pool,
                     cache,
-                    &engine_version,
+                    cache_namespace,
                     num_workers,
                 )
                 .await;
             }
-            // Every other dispatch kind is claimed by a name-matched arm
-            // earlier in this chain, so arriving here means the catalog
-            // declares a kind that no arm handles: a programming error, not a
-            // user error.
-            //
-            // It FAILS the job. The previous code logged an error and returned
-            // `Ok(())`, which left the job sitting in `Running` with nothing
-            // dispatched and nothing that would ever reconcile it, since
-            // recovery only revisits rows it can tell are abandoned. A loud
-            // failure is the only honest outcome for a command the router
-            // cannot route.
-            //
-            // Spelled out variant by variant with no catch-all, so a new
-            // `RunnerDispatchKind` cannot be introduced without stating which
-            // side of this it falls on. `BatchedTextInfer` belongs on this side
-            // now: the five released batched-text commands are all intercepted
-            // by name above (pinned by this module's test), and the legacy
-            // batched-text dispatch they used to fall through to is gone.
-            kind @ (RunnerDispatchKind::BatchedTextInfer
-            | RunnerDispatchKind::TranscribeAudioInfer
-            | RunnerDispatchKind::BenchmarkAudioInfer
-            | RunnerDispatchKind::MediaAnalysisV2) => {
-                let err_msg = format!(
-                    "No dispatch arm handled command '{command}' on the infer path; it declares \
-                     dispatch kind {kind:?}, which reaches this point only if the command has no \
-                     name-matched arm in runner::routing."
-                );
-                tracing::error!(
-                    job_id = %job_id,
-                    correlation_id = %correlation_id,
-                    command = %command,
-                    runner_dispatch_kind = ?kind,
-                    "{}", err_msg
-                );
-                sink.fail_job(job_id, &err_msg, unix_now()).await;
-                return Ok(());
+            Err(unavailable) => {
+                fail_job(&job, host, format!("cannot run '{command}': {unavailable}")).await;
             }
+        },
+        RunnerDispatchKind::BatchedTextInfer => {
+            dispatch_batched_text_command(&job, host, execution, num_workers).await?;
         }
-    } else {
-        let err_msg = format!(
-            "No released dispatch path remains for command '{}' (all_chat={}, infer_task={:?}, infer_supported={}). Legacy process-path fallback is retired.",
-            command, all_chat, infer_task, infer_supported
-        );
-        warn!(job_id = %job_id, correlation_id = %correlation_id, "{}", err_msg);
-        sink.fail_job(job_id, &err_msg, unix_now()).await;
-        return Ok(());
     }
 
     Ok(())
+}
+
+/// Fail a whole job with `message`, logged with the job's identity.
+///
+/// The one route every job-level refusal in this router takes, so each
+/// refusal is logged and recorded the same way.
+async fn fail_job(job: &RunnerJobSnapshot, host: &DispatchHostContext, message: String) {
+    warn!(
+        job_id = %job.identity.job_id,
+        correlation_id = %job.identity.correlation_id,
+        command = %job.dispatch.command,
+        "{message}"
+    );
+    host.sink()
+        .fail_job(&job.identity.job_id, &message, unix_now())
+        .await;
+}
+
+/// Run one batched-text command on the recipe-owned execution path.
+///
+/// Matched on the (language shape, command) pair. The five batched-text
+/// commands each name their arm; every other pairing falls to one arm that
+/// FAILS the job.
+///
+/// That last arm IS a catch-all, and it has to be: the compiler cannot prove
+/// that the five arms above cover every reachable pairing, because the pairing
+/// is decided at runtime by `dispatch_language::language_source`. An earlier
+/// version of this doc claimed there was no catch-all and that a new command
+/// therefore could not compile without stating its side. That is not true, so
+/// the guarantee is provided by a test instead:
+/// `every_batched_text_command_has_a_named_arm` below fails if a command whose
+/// catalog entry declares `BatchedTextInfer` has no arm here.
+async fn dispatch_batched_text_command(
+    job: &RunnerJobSnapshot,
+    host: &DispatchHostContext,
+    execution: &RunnerExecutionContext,
+    num_workers: NumWorkers,
+) -> Result<(), crate::error::ServerError> {
+    let command = job.dispatch.command;
+    let plan = BatchedInferDispatchPlan::from_job(job);
+    let gateway = PooledWorkerGateway::new(execution.pool.clone(), execution.cache.clone());
+
+    // Where this command's language comes from, resolved ONCE from the command
+    // itself. Each dispatcher used to ask its own version of this question of
+    // the job's `LanguageSpec`, and the copies disagreed: coref is a per-file
+    // command, so submission requires it to arrive as `PerFile`, while its
+    // dispatch demanded a resolved code and therefore refused every coref job
+    // ever submitted. A per-file command's dispatcher now takes no language at
+    // all, and a job-level one takes a `JobLanguage` that exists only because
+    // this resolution produced it.
+    let dispatch_language = match DispatchLanguage::resolve(command, &job.dispatch.lang) {
+        Ok(language) => language,
+        Err(refusal) => {
+            fail_job(job, host, format!("cannot run '{command}': {refusal}")).await;
+            return Ok(());
+        }
+    };
+
+    match (dispatch_language, command) {
+        (DispatchLanguage::PerFile, ReleasedCommand::Morphotag) => {
+            dispatch_morphotag_job(
+                job,
+                host,
+                Arc::new(gateway),
+                MorphotagRuntimeOptions {
+                    tokenization_mode: plan.tokenization_mode,
+                    multilingual_policy: plan.multilingual_policy,
+                    mwt: Arc::new(plan.mwt),
+                    l2_policy: plan.l2_policy,
+                    pos_hint_policy: plan.pos_hint_policy,
+                    ca_policy: plan.ca_policy,
+                    should_merge_abbrev: plan.should_merge_abbrev,
+                    review_level: plan.review_level,
+                },
+                num_workers,
+            )
+            .await
+        }
+        (DispatchLanguage::Job(job_language), ReleasedCommand::Compare) => {
+            dispatch_compare_job(
+                job,
+                host,
+                &gateway,
+                &plan.mwt,
+                plan.should_merge_abbrev,
+                &job_language,
+            )
+            .await
+        }
+        (DispatchLanguage::Job(job_language), ReleasedCommand::Utseg) => {
+            // Refuse a language with no segmenter before dispatching, for the
+            // same reason the transcribe plan does: whether utterance
+            // segmentation can run is a property of the language and the
+            // fallback policy, and both are known here. The standalone command
+            // used to discover it at the worker, which named the wire format
+            // rather than the missing model.
+            let fallback = job.dispatch.options.utseg_fallback_policy();
+            if let Err(unavailable) =
+                crate::utseg_route::UtsegRoute::resolve(job_language.code(), fallback)
+            {
+                fail_job(job, host, unavailable.to_string()).await;
+                return Ok(());
+            }
+            dispatch_utseg_job(
+                job,
+                host,
+                Arc::new(gateway),
+                plan.should_merge_abbrev,
+                &job_language,
+                fallback.is_allowed(),
+            )
+            .await
+        }
+        // Translation and coreference name their engines on every result
+        // they apply, so nothing about the worker's report travels with them.
+        // Neither takes a language: translate resolves one per file from that
+        // file's `@Languages:` header, and coref is English-only.
+        (DispatchLanguage::PerFile, ReleasedCommand::Translate) => {
+            dispatch_translate_job(job, host, &gateway, plan.should_merge_abbrev).await
+        }
+        (DispatchLanguage::PerFile, ReleasedCommand::Coref) => {
+            dispatch_coref_job(job, host, &gateway, plan.should_merge_abbrev).await
+        }
+        // A programming error, not a user error, in one of two ways: a command
+        // whose catalog entry declares `BatchedTextInfer` has no arm above, or
+        // its declared shape in `dispatch_language::language_source` disagrees
+        // with the arm written for it. Changing one without the other is the
+        // drift that made coref undispatchable, so both halves are named.
+        //
+        // It FAILS the job. Returning `Ok(())` would leave the job sitting in
+        // `Running` with nothing dispatched and nothing to reconcile it.
+        //
+        // This replaced two adjacent arms, an eight-command enumeration and a
+        // shape-mismatch arm, which reported the same thing twice: the
+        // enumeration was absorbed by the arm that followed it, so it was
+        // ceremony rather than the exhaustiveness guarantee it looked like.
+        (language, command) => {
+            let shape = match language {
+                DispatchLanguage::PerFile => "per-file",
+                DispatchLanguage::Job(_) => "job-level",
+            };
+            fail_job(
+                job,
+                host,
+                format!(
+                    "No dispatch arm handled command '{command}' with a {shape} language shape \
+                     on the batched-text path. Either its catalog entry declares \
+                     BatchedTextInfer without a text arm in runner::routing, or its declared \
+                     shape in dispatch_language disagrees with that arm."
+                ),
+            )
+            .await;
+            Ok(())
+        }
+    }
 }
 
 /// Fail every pending file of a job whose plan was refused.
@@ -466,7 +431,7 @@ async fn dispatch_forced_alignment_command(
     host: &DispatchHostContext,
     pool: &Arc<WorkerPool>,
     cache: &Arc<UtteranceCache>,
-    engine_version: &EngineVersion,
+    cache_namespace: FaCacheNamespace,
     num_workers: NumWorkers,
 ) {
     let Some(plan) = plan_or_fail_files(job, host, FaDispatchPlan::from_job).await else {
@@ -479,7 +444,7 @@ async fn dispatch_forced_alignment_command(
         FaDispatchRuntime {
             pool: pool.clone(),
             cache: cache.clone(),
-            engine_version: engine_version.clone(),
+            cache_namespace,
             num_workers,
         },
         plan,
@@ -492,7 +457,6 @@ async fn dispatch_transcribe_command(
     host: &DispatchHostContext,
     pool: &Arc<WorkerPool>,
     cache: &Arc<UtteranceCache>,
-    engine_version: &EngineVersion,
     num_workers: NumWorkers,
 ) {
     let Some(plan) = plan_or_fail_files(job, host, TranscribeDispatchPlan::from_job).await else {
@@ -505,7 +469,6 @@ async fn dispatch_transcribe_command(
         TranscribeDispatchRuntime {
             pool: pool.clone(),
             cache: cache.clone(),
-            engine_version: engine_version.clone(),
             num_workers,
         },
         plan,
@@ -518,7 +481,6 @@ async fn dispatch_benchmark_command(
     host: &DispatchHostContext,
     pool: &Arc<WorkerPool>,
     cache: &Arc<UtteranceCache>,
-    engine_version: &EngineVersion,
     num_workers: NumWorkers,
 ) {
     let Some(plan) = plan_or_fail_files(job, host, BenchmarkDispatchPlan::from_job).await else {
@@ -531,7 +493,6 @@ async fn dispatch_benchmark_command(
         BenchmarkDispatchRuntime {
             pool: pool.clone(),
             cache: cache.clone(),
-            engine_version: engine_version.clone(),
             num_workers,
         },
         plan,
@@ -562,46 +523,6 @@ async fn dispatch_media_analysis_command(
         plan,
     )
     .await;
-}
-
-/// Resolve a runtime capability snapshot, bootstrapping live capabilities from
-/// a worker if the pool has not yet detected them.
-async fn resolve_runtime_capability_snapshot(
-    pool: &WorkerPool,
-    startup_infer_tasks: &[InferTask],
-    startup_engine_versions: &BTreeMap<String, String>,
-    test_echo_mode: bool,
-    command: ReleasedCommand,
-    lang: impl Into<crate::api::WorkerLanguage>,
-    options: &crate::options::CommandOptions,
-) -> Result<crate::capability::WorkerCapabilitySnapshot, String> {
-    // Resolve capabilities from the exact worker key selected by this command.
-    // A pool-wide first-worker snapshot can advertise task availability, but
-    // it cannot identify the model behind another engine-specific key and must
-    // never namespace that key's cache evidence.
-    let selected_worker_capabilities = if test_echo_mode {
-        None
-    } else {
-        Some(
-            pool.ensure_command_capabilities(command, lang, options)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "Failed to resolve selected worker capabilities for '{}': {}",
-                        command, error
-                    )
-                })?,
-        )
-    };
-
-    resolve_worker_capability_snapshot(
-        &[],
-        startup_infer_tasks,
-        startup_engine_versions,
-        test_echo_mode,
-        selected_worker_capabilities.as_ref(),
-    )
-    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -648,31 +569,25 @@ mod tests {
         );
     }
 
-    /// The dispatch chain above intercepts each batched-text command by NAME
-    /// (`else if use_infer && command == ReleasedCommand::Morphotag`, and four
-    /// more) before reaching the generic `match runner_dispatch_kind` arm at the
-    /// end. Every one of those arms runs the recipe-owned stack in
-    /// `crate::execution`.
+    /// `dispatch_batched_text_command` gives each batched-text command a
+    /// named arm and lists every other command as having none. This test is
+    /// the other half of that agreement: every command the CATALOG declares
+    /// as `BatchedTextInfer` must be one of the commands with an arm, because
+    /// the two are separate facts (the catalog's declared kinds, and the set
+    /// of names the router matches) that nothing else checks against each
+    /// other.
     ///
-    /// This test is what allowed the legacy batched-text dispatch module
-    /// (`runner/dispatch/infer_batched.rs`) to be deleted: it proved the
-    /// module was unreachable, which is a property of two things AGREEING (the
-    /// catalog's declared dispatch kinds, and the set of names the chain
-    /// matches) that nothing was checking. It stays because that agreement can
-    /// still be broken by adding a command.
-    ///
-    /// If it fails because a new command declares `BatchedTextInfer`, the fix
-    /// is to give that command a name-matched arm on the recipe-owned path.
-    /// Nothing silent happens if you forget: the generic arm now fails the job
-    /// with a message naming the declared dispatch kind. This test exists so
-    /// the problem is found at `cargo test` time instead of by a user whose
-    /// job failed.
+    /// If it fails because a new command declares `BatchedTextInfer`, give
+    /// that command an arm on the recipe-owned path. Nothing silent happens if
+    /// you forget: the router fails the job with a message naming the
+    /// declared dispatch kind. This test finds it at `cargo test` time instead
+    /// of by a user whose job failed.
     #[test]
-    fn every_batched_text_command_is_intercepted_before_the_legacy_arm() {
+    fn every_batched_text_command_has_a_named_arm() {
         // Matched on the enum with no catch-all, so a new released command
         // cannot be added without stating which side of this it falls on.
         for command in ReleasedCommand::ALL {
-            let intercepted_by_name = match command {
+            let has_text_arm = match command {
                 ReleasedCommand::Morphotag
                 | ReleasedCommand::Utseg
                 | ReleasedCommand::Translate
@@ -690,10 +605,10 @@ mod tests {
 
             if command_runner_dispatch_kind(command) == RunnerDispatchKind::BatchedTextInfer {
                 assert!(
-                    intercepted_by_name,
-                    "{command} declares BatchedTextInfer but the dispatch chain has no \
-                     name-matched arm for it, so every job for it would fail at the \
-                     generic arm. Give it an arm on the recipe-owned execution path."
+                    has_text_arm,
+                    "{command} declares BatchedTextInfer but the router has no text arm for \
+                     it, so every job for it would fail. Give it an arm on the recipe-owned \
+                     execution path."
                 );
             }
         }

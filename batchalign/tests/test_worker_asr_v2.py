@@ -6,7 +6,17 @@ from pathlib import Path
 
 import numpy as np
 
-from batchalign.inference.asr import AsrElement, AsrMonologue, MonologueAsrResponse
+from batchalign.inference.asr import (
+    AsrElement,
+    AsrMonologue,
+    AttributedSpeaker,
+    MonologueAsrResponse,
+)
+from batchalign.tests._asr_model_pins import (
+    loaded_identity,
+    request_models,
+    worker_loaded,
+)
 from batchalign.worker._asr_v2 import AsrExecutionHostV2, execute_asr_request_v2
 from batchalign.worker._types_v2 import (
     AsrBackendV2,
@@ -16,6 +26,7 @@ from batchalign.worker._types_v2 import (
     ExecuteRequestV2,
     ExecuteSuccessV2,
     InferenceTaskV2,
+    IntegratedDiarizationV2,
     MonologueAsrResultV2,
     PreparedAudioEncodingV2,
     PreparedAudioInputV2,
@@ -51,6 +62,7 @@ def _make_request(
             lang="eng",
             backend=backend,
             input=PreparedAudioInputV2(audio_ref_id="audio-ref-1"),
+            models=request_models(backend),
         ),
         attachments=[
             PreparedAudioRefV2(
@@ -81,8 +93,9 @@ def _make_provider_request(
             backend=backend,
             input=ProviderMediaInputV2(
                 media_path="/tmp/provider.wav",
-                num_speakers=2,
+                diarization=IntegratedDiarizationV2(speakers=2),
             ),
+            models=request_models(backend),
         ),
         attachments=[],
     )
@@ -103,6 +116,7 @@ def test_executes_local_whisper_asr_v2_request(tmp_path: Path) -> None:
                 WhisperChunkSpanV2(text="hello", start_s=0.0, end_s=0.5),
                 WhisperChunkSpanV2(text="world", start_s=0.5, end_s=1.0),
             ],
+            model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
         )
 
     response = execute_asr_request_v2(
@@ -156,6 +170,7 @@ def test_invalid_numeric_attachment_becomes_invalid_payload_even_if_validation_i
                 lang="eng",
                 text="unused",
                 chunks=[],
+                model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
             )
         ),
     )
@@ -179,20 +194,26 @@ def test_returns_model_unavailable_for_unwired_asr_backend(tmp_path: Path) -> No
     assert "Rust control plane" in response.outcome.message
 
 
+@worker_loaded(AsrBackendV2.HK_TENCENT)
 def test_executes_provider_media_asr_v2_request() -> None:
-    """Provider-media ASR requests should return typed monologue output."""
+    """Provider-media ASR requests should return typed monologue output.
+
+    Records a loaded identity first, as the real engine loader does: the bridge
+    reads this worker's load record before calling a provider, because the
+    provider's own reply describes speech and never the model behind it.
+    """
 
     captured: dict[str, object] = {}
 
     def runner(item) -> MonologueAsrResponse:
         captured["audio_path"] = item.audio_path
         captured["lang"] = item.lang
-        captured["num_speakers"] = item.num_speakers
+        captured["diarization"] = item.diarization
         return MonologueAsrResponse(
             lang=item.lang,
             monologues=[
                 AsrMonologue(
-                    speaker=1,
+                    speaker=AttributedSpeaker(label="1"),
                     elements=[
                         AsrElement(
                             value="nei5",
@@ -214,15 +235,18 @@ def test_executes_provider_media_asr_v2_request() -> None:
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, MonologueAsrResultV2)
-    assert response.result.monologues[0].speaker == "1"
+    assert response.result.monologues[0].speaker.kind == "attributed"
+    assert response.result.monologues[0].speaker.label == "1"
     assert response.result.monologues[0].elements[0].kind is AsrElementKindV2.TEXT
     assert (
         response.result.monologues[0].elements[1].kind is AsrElementKindV2.PUNCTUATION
     )
+    # What reaches the provider adapter is the request's own typed answer, not a
+    # bare count whose zero would have to mean "do not separate".
     assert captured == {
         "audio_path": "/tmp/provider.wav",
         "lang": "yue",
-        "num_speakers": 2,
+        "diarization": IntegratedDiarizationV2(speakers=2),
     }
 
 
@@ -251,6 +275,7 @@ def test_invalid_local_whisper_host_output_becomes_runtime_failure(
     assert response.result is None
 
 
+@worker_loaded(AsrBackendV2.HK_TENCENT)
 def test_invalid_provider_asr_host_output_becomes_runtime_failure() -> None:
     """Malformed provider ASR host output should be classified as runtime failure."""
 
@@ -259,7 +284,7 @@ def test_invalid_provider_asr_host_output_becomes_runtime_failure() -> None:
             lang="yue",
             monologues=[
                 AsrMonologue(
-                    speaker=1,
+                    speaker=AttributedSpeaker(label="1"),
                     elements=[
                         AsrElement(
                             value="nei5",
@@ -301,6 +326,7 @@ def test_whisper_chunk_inverted_timestamps_are_clamped(tmp_path: Path) -> None:
             chunks=[
                 WhisperChunkSpanV2(text=" Thank you.", start_s=2017.0, end_s=2020.0),
             ],
+            model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
         )
 
     response = execute_asr_request_v2(

@@ -1,11 +1,7 @@
 use clap::{ArgAction, Args};
 
 use super::parse_engine_overrides_json;
-
-fn validate_engine_overrides_json(value: &str) -> Result<String, String> {
-    parse_engine_overrides_json(value)?;
-    Ok(value.to_string())
-}
+use crate::options::EngineOverrides;
 
 /// Global options that apply to every command.
 #[derive(Args, Debug, Clone)]
@@ -92,13 +88,19 @@ pub struct GlobalOpts {
     pub debug_dir: Option<std::path::PathBuf>,
 
     /// Engine overrides as JSON (e.g. '{"asr": "tencent", "fa": "cantonese_fa"}').
+    ///
+    /// Parsed ONCE, here, by the function that owns the payload's grammar, so
+    /// this field holds the typed overrides themselves. There is no string
+    /// left for a later reader to parse a second time, and no validator
+    /// standing beside the parser with its own copy of the rules to drift
+    /// from them.
     #[arg(
         long,
         value_name = "JSON",
-        value_parser = validate_engine_overrides_json,
+        value_parser = parse_engine_overrides_json,
         global = true
     )]
-    pub engine_overrides: Option<String>,
+    pub engine_overrides: Option<EngineOverrides>,
 
     /// Process files sequentially with minimal infrastructure. One worker
     /// per task type, no memory gate, no server. Ideal for small jobs on

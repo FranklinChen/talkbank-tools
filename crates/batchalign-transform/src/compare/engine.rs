@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use talkbank_model::WriteChat;
 use talkbank_model::alignment::helpers::PositionalDomain;
-use talkbank_model::model::{ChatFile, DependentTier, Line};
+use talkbank_model::model::{ChatFile, Line};
 
 use crate::dp_align::{self, AlignResult, MatchMode};
 use crate::extract::{self, ExtractedUtterance};
@@ -14,6 +14,7 @@ use super::metrics::MetricAccumulator;
 use super::model::{
     CompareStatus, CompareToken, ComparisonBundle, GoldCoverage, GoldWordMatch, UtteranceComparison,
 };
+use super::pos::{GoldPos, GoldTag, MainTag};
 
 /// Where one token of the concatenated gold came from.
 ///
@@ -59,6 +60,21 @@ struct FlattenedWordInfo {
     pos: Option<String>,
 }
 
+/// One document, flattened for alignment, with the tagging evidence it carries.
+///
+/// The three travel together because they are all one document's. Pairing one
+/// side's words with the other side's tagging is the mistake this shape exists
+/// to prevent: [`flatten_side`] builds the [`GoldPos`] from the very file it is
+/// flattening, so no caller assembles the pair itself.
+struct FlattenedSide {
+    /// Cleaned text for every word that takes part in the comparison.
+    words: Vec<String>,
+    /// Position and `%mor` metadata for each entry of `words`.
+    info: Vec<FlattenedWordInfo>,
+    /// Whether this document tags parts of speech at all.
+    pos: GoldPos,
+}
+
 /// Punctuation and fillers to exclude from comparison (matching BA2 behavior).
 ///
 /// Terminators are recognized via the typed `Terminator` enum so the set
@@ -71,10 +87,6 @@ pub(in crate::compare) fn is_punct_or_filler(word: &str) -> bool {
     talkbank_model::model::content::Terminator::is_chat_terminator(w)
         || matches!(w, "," | "‡" | "„")
         || FILLERS.contains(&w.to_lowercase().as_str())
-}
-
-fn is_punct_pos(pos: Option<&str>) -> bool {
-    pos.is_some_and(|value| value.eq_ignore_ascii_case("PUNCT"))
 }
 
 /// Apply conform_words per word, returning expanded tokens and an index
@@ -267,9 +279,21 @@ pub fn compare(
     let main_utts = extract::extract_words(main_file, PositionalDomain::Mor);
     let gold_utts = extract::extract_words(gold_file, PositionalDomain::Mor);
 
-    // 2. Flatten words, filtering punctuation and fillers
-    let (main_words, main_info) = flatten_words(main_file, &main_utts);
-    let (gold_words, gold_info) = flatten_words(gold_file, &gold_utts);
+    // 2. Flatten words, filtering punctuation and fillers.
+    //
+    // Each side is flattened against its OWN tagging evidence. `gold_pos` is
+    // then the one thing that decides which side a matched pair's part of
+    // speech is read from; main's own copy governs only main's filter.
+    let FlattenedSide {
+        words: main_words,
+        info: main_info,
+        ..
+    } = flatten_side(main_file, &main_utts);
+    let FlattenedSide {
+        words: gold_words,
+        info: gold_info,
+        pos: gold_pos,
+    } = flatten_side(gold_file, &gold_utts);
 
     // 3. Apply conform with index mapping
     let (conformed_main, main_map) = conform_with_mapping(&main_words);
@@ -356,7 +380,7 @@ pub fn compare(
 
     // Each main utterance's conformed tokens as a contiguous span.
     //
-    // `flatten_words` walks utterances in order and `conform_with_mapping`
+    // `flatten_side` walks utterances in order and `conform_with_mapping`
     // expands each word in place, so `conformed_main_utts` is non-decreasing
     // and one utterance's tokens are always adjacent. That makes a span of two
     // indices enough, where a per-utterance index vector would be a heap
@@ -460,12 +484,18 @@ pub fn compare(
                     } = gold_sources[local_gold_cursor];
                     let gold_word = &gold_info[orig_gold_idx];
 
-                    // BA2 (compare.py:540-550) attributes the gold form's
-                    // POS to every Match, the gold standard is what the
-                    // reviewer needs to see, not the transcriber's tag.
+                    // A tagged gold side attributes the gold form's POS to
+                    // every Match (BA2 compare.py:540-550): the gold standard
+                    // is what the reviewer needs to see, not the transcriber's
+                    // tag. An UNTAGGED gold side has no tag to attribute, and
+                    // the rule for that case belongs to `gold_pos` rather than
+                    // to a `None` read off this one form. See `super::pos`.
                     let token = CompareToken {
                         text: key,
-                        pos: gold_word.pos.clone(),
+                        pos: gold_pos.pos_for_match(
+                            GoldTag(gold_word.pos.as_deref()),
+                            MainTag(main_word.pos.as_deref()),
+                        ),
                         status: CompareStatus::Match,
                     };
                     metrics.record(&token);
@@ -608,66 +638,39 @@ fn build_utterance_comparisons(
         .collect()
 }
 
-/// Flatten extracted utterances into a word list and info vector.
+/// Flatten one document's extracted utterances for alignment.
 ///
-/// Returns:
-/// - `words`: cleaned text for each non-punct/non-filler word
-/// - `info`: word position and `%mor`-derived metadata for each word
-fn flatten_words(
-    chat_file: &ChatFile,
-    utts: &[ExtractedUtterance],
-) -> (Vec<String>, Vec<FlattenedWordInfo>) {
+/// Returns the cleaned text of every word that takes part in the comparison,
+/// the per-word metadata the alignment needs, and the document's own
+/// part-of-speech evidence. Both the punctuation filter and the recorded tag
+/// come from that evidence, so the file-level question is asked once, here,
+/// rather than rediscovered from a `None` at each consumer.
+fn flatten_side(chat_file: &ChatFile, utts: &[ExtractedUtterance]) -> FlattenedSide {
     let mut words = Vec::new();
     let mut info = Vec::new();
-    let mor_positions = collect_mor_pos_labels(chat_file);
+    let pos = GoldPos::of(chat_file);
 
     for utt in utts {
         let mut compare_position = 0usize;
         for extracted in &utt.words {
             let text = extracted.text.as_str();
-            let pos = mor_positions
-                .get(utt.utterance_index.raw())
-                .and_then(|positions| positions.get(extracted.utterance_word_index.raw()))
-                .cloned()
-                .flatten();
-            if is_punct_or_filler(text) || is_punct_pos(pos.as_deref()) {
+            let utterance_index = utt.utterance_index.raw();
+            let word_position = extracted.utterance_word_index.raw();
+            if pos.excludes_from_comparison(utterance_index, word_position, text) {
                 continue;
             }
             words.push(text.to_string());
             info.push(FlattenedWordInfo {
-                utterance_index: utt.utterance_index.raw(),
-                word_position: extracted.utterance_word_index.raw(),
+                utterance_index,
+                word_position,
                 compare_position,
-                pos,
+                pos: pos.tag(utterance_index, word_position),
             });
             compare_position += 1;
         }
     }
 
-    (words, info)
-}
-
-fn collect_mor_pos_labels(chat_file: &ChatFile) -> Vec<Vec<Option<String>>> {
-    let mut utterance_positions = Vec::new();
-    for line in &chat_file.lines {
-        if let Line::Utterance(utt) = line {
-            let mor_positions = utt
-                .dependent_tiers
-                .iter()
-                .find_map(|tier| match &tier.tier {
-                    DependentTier::Mor(mor) => Some(
-                        mor.items()
-                            .iter()
-                            .map(|item| Some(item.main.pos.to_string().to_uppercase()))
-                            .collect(),
-                    ),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            utterance_positions.push(mor_positions);
-        }
-    }
-    utterance_positions
+    FlattenedSide { words, info, pos }
 }
 
 pub(in crate::compare) fn collect_utterance_terminators(

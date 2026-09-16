@@ -1,7 +1,7 @@
 # Command Lifecycles
 
 **Status:** Current
-**Last updated:** 2026-08-28 14:01 EDT
+**Last updated:** 2026-09-15 19:40 EDT
 
 End-to-end sequence diagrams showing how jobs flow through the system,
 from CLI invocation to output files. Every batchalign command now fits one
@@ -316,7 +316,7 @@ sequenceDiagram
         W-->>Server: typed morphosyntax result
         Note over Server: Worker returned to pool
 
-        Server->>Server: parse_lenient(morphotagged main) -> AST_main
+        Server->>Server: PostValidated::into_judged_document() -> AST_main
         Server->>Server: parse_lenient(raw gold) -> AST_gold
         Server->>Cmp: compare(AST_main, AST_gold)
         Note over Cmp: conform -> per-gold window search -> local DP<br/>main view + gold view + structural word matches + metrics
@@ -433,9 +433,9 @@ sequenceDiagram
 
     Server->>Server: 1. Compound merging (adjacent subword tokens)
     Server->>Server: 2. Timed word extraction (seconds to ms)
+    Server->>Server: 2d. Cantonese normalization, once per monologue (lang=yue only)
     Server->>Server: 3. Multi-word splitting (timestamp interpolation)
     Server->>Server: 4. Number expansion (digits to words)
-    Server->>Server: 4b. Cantonese normalization (lang=yue only)
     Server->>Server: 5. Long-turn splitting (chunk at >300 words)
     Server->>Server: 5b. Long-pause fallback splitting
     opt dedicated speaker segments present
@@ -453,7 +453,7 @@ sequenceDiagram
     Server->>Server: build_chat(): ChatFile AST
     Note over Server: Generate headers: @Languages, @Participants,<br/>@ID (PAR/INV/CHI/MOT...), @Media<br/>Build utterances with %wor tiers<br/>Speaker codes from ASR labels used directly
     opt with_utseg=true (default)
-        Server->>Server: process_utseg(): re-segment utterance boundaries
+        Server->>Server: process_utseg_with_evidence(): re-segment utterance boundaries
     end
     opt with_morphosyntax=true (default: false)
         Server->>Server: process_morphosyntax(): add %mor/%gra tiers
@@ -510,10 +510,11 @@ sequenceDiagram
    The normalization stages in `prepare_asr_chunks()` are:
    1. *Compound merging*, joins adjacent subword tokens
    2. *Timed word extraction*, seconds to milliseconds, filter pauses
+   2d. *Cantonese normalization* (lang=yue only), simplified to traditional via
+       `ferrous-opencc` + domain replacements (pure Rust), run once over the
+       whole monologue before anything splits it
    3. *Multi-word splitting*, split space-separated tokens, interpolate timestamps
    4. *Number expansion*, digits to spelled-out words (language-aware)
-   4b. *Cantonese normalization* (lang=yue only), simplified to traditional
-       via `ferrous-opencc` + domain replacements (pure Rust)
    5. *Long-turn splitting*, chunk monologues at >300 words
    5b. *Long-pause fallback splitting*, split strongly separated runs when
        provider punctuation is missing
@@ -570,8 +571,8 @@ sequenceDiagram
 
     W-->>Server: CapabilitiesResponse {infer_tasks, engine_versions, commands=[]}
 
-    Server->>Server: validate_infer_capability_gate()
-    Note over Server: Rust derives commands from infer tasks:<br/>morphotag needs Morphosyntax ✓<br/>utseg needs Utseg ✓<br/>translate needs Translate ✓<br/>coref needs Coref ✓<br/>align needs FA ✓<br/>opensmile needs OpenSMILE ✗ → excluded
+    Server->>Pool: record_capabilities(): admit the report once, store it per worker key
+    Note over Server: One availability rule (command_supported, primary infer task only):<br/>morphotag needs Morphosyntax ✓<br/>utseg needs Utseg ✓<br/>translate needs Translate ✓<br/>coref needs Coref ✓<br/>align needs FA ✓ (FA engine name read at dispatch, after FA loads)<br/>opensmile needs OpenSMILE ✗ → excluded
 
     Server->>Server: Build final capabilities list
     Note over Server: /health now advertises:<br/>commands: [morphotag, utseg, translate, coref, align, transcribe, ...]<br/>infer_tasks: [Morphosyntax, Utseg, Translate, Coref, FA, ASR, ...]
@@ -596,13 +597,25 @@ sequenceDiagram
    `capabilities()` which **import-probes** each `InferTask`: for each task,
    the worker tries to import the required Python packages (e.g., `stanza` for
    Morphosyntax, `torch`+`torchaudio` for FA). If imports succeed, the task is
-   reported as available along with its engine version.
+   reported as available. Its `engine_versions` entry is `null`, except forced
+   alignment's, which names the FA engine once an FA model has loaded.
 5. The worker **stays in the pool** for actual job work, it is not shut down
    after capability detection.
-6. **`validate_infer_capability_gate()`** derives the released command surface
-   from those infer tasks. For every server-orchestrated command, the
-   corresponding `InferTask` must be available with a non-empty engine version.
-   Commands that fail the check are excluded with a warning.
+6. **`WorkerPool::record_capabilities()`** admits the report once
+   (`WorkerEngineReports::admit`: every advertised task needs an entry, only
+   forced alignment's may be a name, and no entry may name an unadvertised
+   task) and stores the
+   outcome per worker key: the admitted report, or the refusal, which
+   `/health` returns in `worker_capability_admissions`.
+   `WorkerCapabilitySnapshot::detected()` then derives the released command
+   surface with `capability::command_supported`: a command is advertised when
+   the worker supports its primary infer task, whether or not the model behind
+   it has loaded. Engine names are not consulted. At dispatch the same step
+   runs again on a post-load report, and the forced-alignment dispatch arm
+   (only `align`, whose cache rows are namespaced by the FA engine)
+   additionally reads the FA engine from that report with
+   `FaCacheNamespace::from_loaded`, refusing a job whose worker still names no
+   FA engine after the load.
 7. The `/health` endpoint advertises the validated capability set once it is
    known. The CLI checks this before submitting jobs, if a required command is
    missing, it errors immediately rather than queueing a job that will fail.

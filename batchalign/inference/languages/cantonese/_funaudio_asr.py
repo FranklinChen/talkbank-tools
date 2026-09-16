@@ -12,18 +12,14 @@ import time
 from pydantic import ValidationError
 
 from batchalign.inference._domain_types import LanguageCode
-from batchalign.inference.asr import (
-    AsrBatchItem,
-    AsrElement,
-    AsrMonologue,
-    MonologueAsrResponse,
-)
+from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
 )
 
+from ._asr_types import admit_provider_monologues
 from ._common import EngineOverrides
 from ._funaudio_common import FunAudioRecognizer
 
@@ -53,7 +49,17 @@ NOT_LOADED_ERROR = "FunAudio ASR not loaded: call load_funaudio_asr first"
 
 
 def load_funaudio_asr(
-    lang: LanguageCode, engine_overrides: EngineOverrides | None
+    lang: LanguageCode,
+    engine_overrides: EngineOverrides | None,
+    *,
+    model: str | None = None,
+    model_path: str | None = None,
+    model_revision: str | None = None,
+    vad_model: str | None = None,
+    vad_model_path: str | None = None,
+    vad_revision: str | None = None,
+    punc_model: str | None = None,
+    punc_revision: str | None = None,
 ) -> None:
     """Initialize the FunAudio ASR recognizer.
 
@@ -80,19 +86,30 @@ def load_funaudio_asr(
     """
     global _recognizer
 
-    model = "FunAudioLLM/SenseVoiceSmall"
+    selected = model or "FunAudioLLM/SenseVoiceSmall"
     device = "cpu"
     if engine_overrides:
-        if "funaudio_model" in engine_overrides:
-            model = str(engine_overrides["funaudio_model"])
+        if model is None and "funaudio_model" in engine_overrides:
+            selected = str(engine_overrides["funaudio_model"])
         if "funaudio_device" in engine_overrides:
             device = str(engine_overrides["funaudio_device"])
 
-    _recognizer = FunAudioRecognizer(lang=lang, model=model, device=device)
+    _recognizer = FunAudioRecognizer(
+        lang=lang,
+        model=selected,
+        device=device,
+        model_path=model_path,
+        model_revision=model_revision,
+        vad_model=vad_model,
+        vad_model_path=vad_model_path,
+        vad_revision=vad_revision,
+        punc_model=punc_model,
+        punc_revision=punc_revision,
+    )
     L.info(
         "FunAudio ASR recognizer loaded: lang=%s, model=%s, device=%s",
         lang,
-        model,
+        model_path or selected,
         device,
     )
 
@@ -167,26 +184,7 @@ def _transcribe_to_monologues(item: AsrBatchItem) -> MonologueAsrResponse:
         raise RuntimeError("FunAudio recognizer not initialized")
 
     payload, _timed_words = _recognizer.transcribe(item.audio_path)
-
-    return MonologueAsrResponse(
-        lang=item.lang,
-        monologues=[
-            AsrMonologue(
-                speaker=monologue["speaker"],
-                elements=[
-                    AsrElement(
-                        value=element["value"],
-                        ts=element["ts"],
-                        end_ts=element["end_ts"],
-                        type=element["type"],
-                    )
-                    for element in monologue["elements"]
-                    if element["value"].strip()
-                ],
-            )
-            for monologue in payload["monologues"]
-        ],
-    )
+    return admit_provider_monologues(payload, item.lang)
 
 
 def infer_funaudio_asr_v2(item: AsrBatchItem) -> MonologueAsrResponse:

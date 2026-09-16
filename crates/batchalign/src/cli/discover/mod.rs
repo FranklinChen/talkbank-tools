@@ -3,6 +3,7 @@
 //! Walks directories, filters by extension, sorts by size (largest first),
 //! detects and skips dummy CHAT files.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -113,17 +114,41 @@ pub fn discover_client_files(
     Ok((files, outputs))
 }
 
+/// Files discovered across several inputs, each kept once.
+///
+/// A directory input plus a file inside it (or two nested directories) reach
+/// the same file twice; submitting it twice would process and write it twice.
+/// The canonical path is the identity, and the first input to reach a file
+/// decides its output path.
+#[derive(Default)]
+struct UniqueDiscoveries {
+    seen: HashSet<PathBuf>,
+    files: Vec<PathBuf>,
+    outputs: Vec<PathBuf>,
+}
+
+impl UniqueDiscoveries {
+    fn push(&mut self, file: PathBuf, output: PathBuf) -> Result<(), CliError> {
+        let identity = canonicalize_path(&file, "canonicalize discovered input file")?;
+        if self.seen.insert(identity) {
+            self.files.push(file);
+            self.outputs.push(output);
+        }
+        Ok(())
+    }
+}
+
 /// Discover files from mixed inputs (directories + individual files) for server dispatch.
 ///
 /// For directories: walks recursively via [`discover_client_files`].
 /// For individual files: adds directly (no extension filtering, user chose them).
+/// A file reached by more than one input is kept once, at its first occurrence.
 pub fn discover_server_inputs(
     inputs: &[PathBuf],
     out_dir: Option<&Path>,
     input_kind: InputKind,
 ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), CliError> {
-    let mut all_files = Vec::new();
-    let mut all_outputs = Vec::new();
+    let mut discovered = UniqueDiscoveries::default();
 
     for inp in inputs {
         let inp_path = Path::new(inp);
@@ -132,8 +157,9 @@ pub fn discover_server_inputs(
                 .map(PathBuf::from)
                 .unwrap_or_else(|| inp_path.to_path_buf());
             let (fs, os) = discover_client_files(inp_path, &d_out, input_kind)?;
-            all_files.extend(fs);
-            all_outputs.extend(os);
+            for (file, output) in fs.into_iter().zip(os) {
+                discovered.push(file, output)?;
+            }
         } else if inp_path.is_file() {
             let out_path = if let Some(od) = out_dir {
                 let name = required_file_name(inp_path)?;
@@ -141,12 +167,17 @@ pub fn discover_server_inputs(
             } else {
                 inp_path.to_path_buf() // in-place
             };
-            all_files.push(inp_path.to_path_buf());
-            all_outputs.push(out_path);
+            discovered.push(inp_path.to_path_buf(), out_path)?;
         } else {
             return Err(CliError::InputMissing(inp_path.to_path_buf()));
         }
     }
+
+    let UniqueDiscoveries {
+        files: mut all_files,
+        outputs: mut all_outputs,
+        ..
+    } = discovered;
 
     // Sort by file size (largest first)
     sort_by_size_desc(&mut all_files, &mut all_outputs)?;

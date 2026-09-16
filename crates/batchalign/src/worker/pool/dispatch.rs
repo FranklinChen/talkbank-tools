@@ -5,18 +5,94 @@
 //! checkout/return helpers. Routes GPU-profile tasks to shared concurrent
 //! workers; non-GPU tasks use the traditional exclusive-checkout model.
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
 use crate::api::{LanguageCode3, ReleasedCommand, WorkerLanguage};
 use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2};
-use crate::worker::error::WorkerError;
+use crate::worker::error::{WorkerAfterFailure, WorkerError};
 use crate::worker::tcp_handle::TcpWorkerHandle;
 use crate::worker::{BatchInferRequest, BatchInferResponse, WorkerBootstrapMode, WorkerTarget};
-use tracing::{info, instrument, warn};
+use tracing::{instrument, warn};
 
 use super::checkout::CheckedOutWorker;
 use super::eviction::EvictionOutcome;
 use super::execute_v2::{self, execute_v2_worker_key};
 use super::job_tracker::TrackerGuard;
-use super::{WorkerKey, WorkerPool, lock_recovered};
+use super::{WorkerGroup, WorkerKey, WorkerPool, lock_recovered};
+
+/// A TCP worker handle checked out of its group for one exchange.
+///
+/// Owns the handle and its group slot together, so no exit path can lose
+/// either. [`Self::finish`] reads what the exchange left: the handle goes back
+/// to its group unless the error means the worker must be retired
+/// ([`WorkerError::worker_after_failure`]), in which case the handle is
+/// dropped and the slot released. Dropped without `finish` (the exchange
+/// future was cancelled mid-request), the handle is dropped and the slot
+/// released too: a request may be half-sent or a response half-read, and a
+/// later exchange on that stream could read a stale reply as its own.
+pub(super) struct TcpCheckout {
+    handle: TcpWorkerHandle,
+    lease: TcpSlotLease,
+}
+
+impl TcpCheckout {
+    /// The checked-out handle, for the exchange.
+    pub(super) fn handle(&mut self) -> &mut TcpWorkerHandle {
+        &mut self.handle
+    }
+
+    /// End the exchange: return the handle to its group, or retire it.
+    pub(super) fn finish<T>(self, outcome: &Result<T, WorkerError>) {
+        let Self { handle, lease } = self;
+        match outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(WorkerError::worker_after_failure)
+        {
+            Ok(()) | Err(WorkerAfterFailure::Reusable) => lease.return_handle(handle),
+            Err(WorkerAfterFailure::Retire) => {
+                warn!(
+                    pid = %handle.pid(),
+                    "Retiring TCP worker handle after a failed exchange; the daemon is \
+                     left running and is adopted again by the next registry sweep"
+                );
+                // Dropping the handle closes the connection; dropping the lease
+                // releases the slot.
+                drop(handle);
+                drop(lease);
+            }
+        }
+    }
+}
+
+/// The group slot a checked-out TCP handle occupies.
+///
+/// Releases the slot (the group's live count and its global worker permit)
+/// when dropped, unless [`Self::return_handle`] gave the handle back first.
+struct TcpSlotLease {
+    /// `Some` until the slot is either given back with its handle or released.
+    group: Option<Arc<WorkerGroup>>,
+}
+
+impl TcpSlotLease {
+    /// Give the handle back to its group; the slot stays occupied by it.
+    fn return_handle(mut self, handle: TcpWorkerHandle) {
+        if let Some(group) = self.group.take() {
+            lock_recovered(&group.tcp_workers).push_back(handle);
+            group.tcp_available.add_permits(1);
+        }
+    }
+}
+
+impl Drop for TcpSlotLease {
+    fn drop(&mut self) {
+        if let Some(group) = self.group.take() {
+            group.total.fetch_sub(1, Ordering::Relaxed);
+            group.spawn_permits.add_permits(1);
+        }
+    }
+}
 
 /// Build the typed error returned when a saturated checkout exhausts its
 /// wait deadline without freeing a slot. Factored out so the three
@@ -177,10 +253,10 @@ impl WorkerPool {
 
         // Try TCP worker first.
         if matches!(key.target, WorkerTarget::Profile(_))
-            && let Some(mut tcp_handle) = self.try_checkout_tcp(&key)
+            && let Some(mut checkout) = self.try_checkout_tcp(&key)
         {
-            let result = tcp_handle.batch_infer(request).await;
-            self.return_tcp_worker(tcp_handle, &key);
+            let result = checkout.handle().batch_infer(request).await;
+            checkout.finish(&result);
             return result;
         }
 
@@ -223,26 +299,22 @@ impl WorkerPool {
         }
     }
 
-    /// Try to check out a TCP worker handle (non-blocking).
-    pub(super) fn try_checkout_tcp(&self, key: &WorkerKey) -> Option<TcpWorkerHandle> {
-        let groups = lock_recovered(&self.groups);
-        let group = groups.get(key)?;
-        match group.tcp_available.try_acquire() {
-            Ok(permit) => {
-                permit.forget();
-                lock_recovered(&group.tcp_workers).pop_front()
-            }
-            Err(_) => None,
-        }
-    }
-
-    /// Return a TCP worker handle to the pool.
-    pub(super) fn return_tcp_worker(&self, handle: TcpWorkerHandle, key: &WorkerKey) {
-        let groups = lock_recovered(&self.groups);
-        if let Some(group) = groups.get(key) {
-            lock_recovered(&group.tcp_workers).push_back(handle);
-            group.tcp_available.add_permits(1);
-        }
+    /// Try to check out a TCP worker handle (non-blocking), as an owned
+    /// [`TcpCheckout`] that gives it back or retires it.
+    pub(super) fn try_checkout_tcp(&self, key: &WorkerKey) -> Option<TcpCheckout> {
+        let group = lock_recovered(&self.groups).get(key)?.clone();
+        let permit = group.tcp_available.try_acquire().ok()?;
+        let Some(handle) = lock_recovered(&group.tcp_workers).pop_front() else {
+            // A permit with no handle behind it: give the permit back rather
+            // than lose it.
+            drop(permit);
+            return None;
+        };
+        permit.forget();
+        Some(TcpCheckout {
+            handle,
+            lease: TcpSlotLease { group: Some(group) },
+        })
     }
 
     /// Dispatch one typed worker-protocol V2 execute request.
@@ -279,36 +351,43 @@ impl WorkerPool {
             return self.dispatch_gpu_execute_v2(&key, request).await;
         }
 
+        // In LazyProfile mode the worker started with no models, so the task's
+        // models are loaded before dispatching (idempotent if already loaded).
+        // The task is read from the request once, before any worker is taken,
+        // so a malformed request never retires a worker.
+        let lazy_task = match self.config.runtime.bootstrap_mode {
+            WorkerBootstrapMode::LazyProfile => Some(execute_v2::ensure_task_params(request)?),
+            WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => None,
+        };
+        let timeout = self.config.effective_ensure_task_timeout_s();
+
         // Try TCP worker first.
         if matches!(key.target, WorkerTarget::Profile(_))
-            && let Some(mut tcp_handle) = self.try_checkout_tcp(&key)
+            && let Some(mut checkout) = self.try_checkout_tcp(&key)
         {
-            if self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-                let (task_name, overrides) = execute_v2::ensure_task_params(request)?;
-                let timeout = self.config.effective_ensure_task_timeout_s();
-                tcp_handle
-                    .ensure_task(&task_name, overrides.as_ref(), timeout)
-                    .await?;
+            let result = async {
+                if let Some((task_name, overrides)) = &lazy_task {
+                    checkout
+                        .handle()
+                        .ensure_task(task_name, overrides.as_ref(), timeout)
+                        .await?;
+                }
+                checkout
+                    .handle()
+                    .execute_v2_with_progress(request, progress_tx)
+                    .await
             }
-            let result = tcp_handle
-                .execute_v2_with_progress(request, progress_tx)
-                .await;
-            self.return_tcp_worker(tcp_handle, &key);
+            .await;
+            checkout.finish(&result);
             return result;
         }
 
         // Fall back to stdio worker.
         let mut worker = self.checkout(&key).await?;
         let _job_guard = TrackerGuard::new(&self.job_tracker, worker.pid());
-
-        // In LazyProfile mode, ensure the task's models are loaded before
-        // dispatching. The worker started with no models; ensure_task tells
-        // it which engine to load (idempotent if already loaded).
-        if self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-            let (task_name, overrides) = execute_v2::ensure_task_params(request)?;
-            let timeout = self.config.effective_ensure_task_timeout_s();
+        if let Some((task_name, overrides)) = &lazy_task {
             worker
-                .ensure_task(&task_name, overrides.as_ref(), timeout)
+                .ensure_task(task_name, overrides.as_ref(), timeout)
                 .await?;
         }
 
@@ -365,103 +444,252 @@ impl WorkerPool {
         gpu_worker.execute_v2(request).await
     }
 
-    /// Ensure the pool has probed at least one real worker for the given command.
+    /// Load the command's task on the worker it selects, then probe that
+    /// worker's capabilities.
     ///
     /// Startup may only have an optimistic command list with no infer-task
     /// metadata yet. Execution paths that need authoritative infer-task data
     /// call this to force one real worker bootstrap/probe before gating.
+    ///
+    /// The command's primary infer task is loaded FIRST (`ensure_task`, which
+    /// is idempotent: a worker that already loaded the task answers at once),
+    /// in every bootstrap mode, and only then is the report read. A worker
+    /// supports a task before it has loaded it but names the engine only after,
+    /// so the returned [`super::LoadedCapabilities`] is the post-load view: a
+    /// lazily loading daemon probed before it loaded FA names its FA engine
+    /// here. The report is admitted by [`WorkerPool::record_capabilities`], so
+    /// the caller never sees (or re-admits) the raw report.
+    ///
+    /// A refused report retires the worker it came from on every branch (a
+    /// registry GPU daemon is disconnected, a spawned GPU worker is shut down,
+    /// a TCP handle is dropped and a checked-out worker is taken out of its
+    /// group), so a worker whose report was refused is never used.
     pub async fn ensure_command_capabilities(
         &self,
         command: ReleasedCommand,
         lang: impl Into<WorkerLanguage>,
         options: &crate::options::CommandOptions,
-    ) -> Result<crate::worker::WorkerCapabilities, WorkerError> {
+    ) -> Result<super::LoadedCapabilities, WorkerError> {
         let key = WorkerKey::from_command_options(
             command,
             lang.into(),
             options,
             self.config.runtime.bootstrap_mode,
         );
-        let lazy_task = (self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile)
-            .then(|| {
-                let task = crate::command_model::command_spec(command)
-                    .capabilities
-                    .primary_infer_task;
-                let task_name = crate::worker::target::task_name(task).to_owned();
-                let overrides = key.engine_selection.overrides().dispatch_overrides();
-                (task_name, (!overrides.is_empty()).then_some(overrides))
-            });
+        let loaded_task = crate::command_model::command_spec(command)
+            .capabilities
+            .primary_infer_task;
+        let task = crate::worker::target::task_name(loaded_task);
+        let overrides = key.engine_selection.overrides().dispatch_overrides();
+        let overrides = (!overrides.is_empty()).then_some(overrides);
+        let timeout_s = self.config.effective_ensure_task_timeout_s();
 
-        if key.target.is_concurrent() {
-            if matches!(key.target, WorkerTarget::Profile(_)) {
-                let worker = self.gpu_tcp_workers.lock().await.get(&key).cloned();
-                if let Some(worker) = worker {
-                    if let Some((task, overrides)) = &lazy_task {
-                        worker
-                            .ensure_task(
-                                task,
-                                overrides.as_ref(),
-                                self.config.effective_ensure_task_timeout_s(),
-                            )
-                            .await?;
-                    }
+        let reports = if key.target.is_concurrent() {
+            let registry_worker = if matches!(key.target, WorkerTarget::Profile(_)) {
+                self.gpu_tcp_workers.lock().await.get(&key).cloned()
+            } else {
+                None
+            };
+            match registry_worker {
+                Some(worker) => {
+                    worker
+                        .ensure_task(task, overrides.as_ref(), timeout_s)
+                        .await?;
                     let caps = worker.capabilities().await?;
-                    self.record_capabilities(caps.clone());
-                    return Ok(caps);
+                    match self.record_capabilities(&key, caps) {
+                        Ok(reports) => reports,
+                        Err(refusal) => {
+                            self.gpu_tcp_workers.lock().await.remove(&key);
+                            worker.shutdown().await;
+                            return Err(refusal.into());
+                        }
+                    }
+                }
+                None => {
+                    let worker = self.get_or_create_gpu_worker(&key).await?;
+                    worker
+                        .ensure_task(task, overrides.as_ref(), timeout_s)
+                        .await?;
+                    let caps = worker.capabilities().await?;
+                    match self.record_capabilities(&key, caps) {
+                        Ok(reports) => reports,
+                        Err(refusal) => {
+                            self.gpu_workers.lock().await.remove(&key);
+                            worker.shutdown().await;
+                            return Err(refusal.into());
+                        }
+                    }
                 }
             }
-            let worker = self.get_or_create_gpu_worker(&key).await?;
-            if let Some((task, overrides)) = &lazy_task {
-                worker
-                    .ensure_task(
-                        task,
-                        overrides.as_ref(),
-                        self.config.effective_ensure_task_timeout_s(),
-                    )
-                    .await?;
-            }
-            let caps = worker.capabilities().await?;
-            self.record_capabilities(caps.clone());
-            return Ok(caps);
-        }
-
-        if matches!(key.target, WorkerTarget::Profile(_))
-            && let Some(mut tcp_handle) = self.try_checkout_tcp(&key)
+        } else if matches!(key.target, WorkerTarget::Profile(_))
+            && let Some(mut checkout) = self.try_checkout_tcp(&key)
         {
-            if let Some((task, overrides)) = &lazy_task {
-                tcp_handle
-                    .ensure_task(
-                        task,
-                        overrides.as_ref(),
-                        self.config.effective_ensure_task_timeout_s(),
-                    )
+            // Load, probe and admit as one exchange, so a refused report
+            // retires the handle exactly as a broken connection would.
+            let admitted = async {
+                checkout
+                    .handle()
+                    .ensure_task(task, overrides.as_ref(), timeout_s)
                     .await?;
+                let caps = checkout.handle().capabilities().await?;
+                self.record_capabilities(&key, caps)
+                    .map_err(WorkerError::from)
             }
-            let caps = tcp_handle.capabilities().await?;
-            info!(
-                source = "checked-out-tcp-worker",
-                infer_tasks = ?caps.infer_tasks,
-                engine_versions = ?caps.engine_versions,
-                "Resolved selected worker capabilities"
-            );
-            self.record_capabilities(caps.clone());
-            self.return_tcp_worker(tcp_handle, &key);
-            return Ok(caps);
-        }
-
-        let mut worker = self.checkout(&key).await?;
-        if let Some((task, overrides)) = &lazy_task {
+            .await;
+            checkout.finish(&admitted);
+            admitted?
+        } else {
+            let mut worker = self.checkout(&key).await?;
             worker
-                .ensure_task(
-                    task,
-                    overrides.as_ref(),
-                    self.config.effective_ensure_task_timeout_s(),
-                )
+                .ensure_task(task, overrides.as_ref(), timeout_s)
                 .await?;
-        }
-        let caps = worker.capabilities().await?;
-        self.record_capabilities(caps.clone());
-        Ok(caps)
+            let caps = worker.capabilities().await?;
+            match self.record_capabilities(&key, caps) {
+                Ok(reports) => reports,
+                Err(refusal) => {
+                    // `take` releases the slot; the handle drops here, which
+                    // terminates the worker process.
+                    drop(worker.take());
+                    return Err(refusal.into());
+                }
+            }
+        };
+        Ok(super::LoadedCapabilities {
+            task: loaded_task,
+            reports,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tcp_checkout_tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    use super::*;
+    use crate::api::LanguageCode3;
+    use crate::options::{CommandOptions, MorphotagOptions};
+    use crate::worker::tcp_handle::TcpWorkerInfo;
+    use crate::worker::{WorkerPid, WorkerProfile};
+
+    /// A fake TCP worker daemon that reads one request and then either answers
+    /// it with `reply` (and keeps the connection open), or, with no reply,
+    /// closes the connection.
+    async fn fake_daemon(reply: Option<&'static str>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake daemon");
+        let port = listener.local_addr().expect("local addr").port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read, mut write) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            let _request = lines.next_line().await;
+            if let Some(reply) = reply {
+                write.write_all(reply.as_bytes()).await.expect("reply");
+                write.flush().await.expect("flush");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        port
+    }
+
+    /// A pool holding one TCP handle for morphotag's key, as registry
+    /// discovery integrates one, plus that key and command options.
+    async fn pool_with_one_tcp_handle(port: u16) -> (WorkerPool, WorkerKey, CommandOptions) {
+        let mut config = super::super::PoolConfig::default();
+        config.runtime.bootstrap_mode = WorkerBootstrapMode::Profile;
+        config.ensure_task_timeout_s = 5;
+        let pool = WorkerPool::new(config);
+        let options = CommandOptions::Morphotag(MorphotagOptions::default());
+        let key = WorkerKey::from_command_options(
+            ReleasedCommand::Morphotag,
+            WorkerLanguage::from(LanguageCode3::eng()),
+            &options,
+            pool.bootstrap_mode(),
+        );
+        assert!(
+            matches!(key.target, WorkerTarget::Profile(_)) && !key.target.is_concurrent(),
+            "precondition: morphotag dispatches through the sequential TCP path"
+        );
+        let handle = TcpWorkerHandle::connect(TcpWorkerInfo {
+            host: "127.0.0.1".into(),
+            port,
+            profile: WorkerProfile::Stanza,
+            lang: WorkerLanguage::from(LanguageCode3::eng()),
+            engine_overrides: String::new(),
+            pid: WorkerPid(1),
+            audio_task_timeout_s: 0,
+            analysis_task_timeout_s: 0,
+            gpu_thread_pool_size: 1,
+        })
+        .await
+        .expect("connect to fake daemon");
+        let group = pool.get_or_create_group(&key);
+        group
+            .spawn_permits
+            .try_acquire()
+            .expect("a global worker permit")
+            .forget();
+        lock_recovered(&group.tcp_workers).push_back(handle);
+        group.tcp_available.add_permits(1);
+        group.total.fetch_add(1, Ordering::Relaxed);
+        (pool, key, options)
+    }
+
+    /// `ensure_task` failing with a complete error response leaves the
+    /// connection in step: the handle goes back to its group. Before the owned
+    /// checkout, the `?` returned early and the handle was lost for good.
+    #[tokio::test]
+    async fn a_worker_error_response_returns_the_handle_to_its_group() {
+        let port = fake_daemon(Some(
+            "{\"op\":\"error\",\"error\":\"model load failed\",\"kind\":\"bootstrap\"}\n",
+        ))
+        .await;
+        let (pool, key, options) = pool_with_one_tcp_handle(port).await;
+        let permits_before = pool.spawn_permits.available_permits();
+
+        let error = pool
+            .ensure_command_capabilities(
+                ReleasedCommand::Morphotag,
+                WorkerLanguage::from(LanguageCode3::eng()),
+                &options,
+            )
+            .await
+            .expect_err("the fake daemon refuses to load the task");
+        assert!(matches!(error, WorkerError::Bootstrap(_)), "{error:?}");
+
+        let group = pool.get_or_create_group(&key);
+        assert_eq!(lock_recovered(&group.tcp_workers).len(), 1);
+        assert_eq!(group.tcp_available.available_permits(), 1);
+        assert_eq!(group.total.load(Ordering::Relaxed), 1);
+        assert_eq!(pool.spawn_permits.available_permits(), permits_before);
+    }
+
+    /// A closed connection is a typed connection failure: the handle is
+    /// retired and its slot released, not returned to serve another request.
+    #[tokio::test]
+    async fn a_closed_connection_retires_the_handle_and_releases_its_slot() {
+        let port = fake_daemon(None).await;
+        let (pool, key, options) = pool_with_one_tcp_handle(port).await;
+        let permits_before = pool.spawn_permits.available_permits();
+
+        let error = pool
+            .ensure_command_capabilities(
+                ReleasedCommand::Morphotag,
+                WorkerLanguage::from(LanguageCode3::eng()),
+                &options,
+            )
+            .await
+            .expect_err("the fake daemon closed the connection");
+        assert!(matches!(error, WorkerError::Protocol(_)), "{error:?}");
+
+        let group = pool.get_or_create_group(&key);
+        assert!(lock_recovered(&group.tcp_workers).is_empty());
+        assert_eq!(group.tcp_available.available_permits(), 0);
+        assert_eq!(group.total.load(Ordering::Relaxed), 0);
+        assert_eq!(pool.spawn_permits.available_permits(), permits_before + 1);
     }
 }
 

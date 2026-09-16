@@ -1,7 +1,7 @@
 # eval
 
 **Status:** Current
-**Last updated:** 2026-09-06 15:57 EDT
+**Last updated:** 2026-09-15 21:24 EDT
 
 `batchalign3 eval` contains offline evaluators. They consume retained artifacts
 and never submit ordinary processing jobs.
@@ -48,6 +48,175 @@ flowchart LR
     PLAN --> EVIDENCE["Typed match and proposal evidence"]
     EVIDENCE --> REPORT["Atomic non-clobbering JSON report"]
 ```
+
+## Utterance segmentation replay
+
+`batchalign3 eval utseg-replay` reapplies the utterance-boundary evidence a run
+retained and reports whether it still produces the document that run wrote. No
+model loads, no worker starts, and no artifact is modified.
+
+This answers one question: is the segmentation in a retained transcript still
+what this build produces from the same evidence? A difference means the local
+segmentation path changed between the two builds, which is a finding, not a
+failure of the command.
+
+### What a run has to have retained
+
+Everything this command consumes is written only when the run passed
+`--debug-dir` (see [transcribe](transcribe.md)). A run without it retained
+nothing, and nothing here can be replayed. The standalone `utseg` command
+writes no sidecars at all, so the post-CHAT pass replays a transcribe run.
+
+| Artifact | Written as | Is |
+|----------|-----------|-----|
+| ASR response | `<stem>_asr_response.json` | The retained provider response. |
+| Post-ASR CHAT | `<stem>_post_asr.cha` | The document as built, before either segmentation pass touched it. |
+| Pre-utseg CHAT | `<stem>_pre_utseg.cha` | The input to the post-CHAT pass. |
+| Post-utseg CHAT | `<stem>_post_utseg.cha` | The output of the post-CHAT pass. |
+| Pre-CHAT evidence | `<stem>-<12 hex>_pre_chat_utseg_evidence.json` | Boundaries over timed ASR chunks. |
+| Post-CHAT evidence | `<stem>-<12 hex>_post_chat_utseg_evidence.json` | Boundaries over main-tier words. |
+
+The sidecars carry a 12-hex digest of the complete submitted identity whenever
+that identity included a directory, which a transcribe run's always does, so
+two corpus branches holding the same basename cannot overwrite one another in a
+shared debug directory. The `.cha` dumps use the plain stem.
+
+Pick the pair that belongs to the pass. The run's FINAL `.cha` is not the
+output of either pass: it has been through the post-CHAT pass and carries the
+morphology tiers, so replaying against it reports a difference that says
+nothing about segmentation.
+
+### The two passes
+
+Transcribe segments twice, over different populations, and each pass retains
+its own sidecar. Each pass is its own subcommand consuming its own artifacts,
+so neither can be run against the other's evidence:
+
+```bash
+# The pass over main-tier words. Its input is the pre-utseg dump and its
+# output is the post-utseg dump, not the run's final transcript.
+batchalign3 eval utseg-replay post-chat \
+  --input-chat recording_pre_utseg.cha \
+  --evidence recording-1a2b3c4d5e6f_post_chat_utseg_evidence.json \
+  --output-chat recording_post_utseg.cha
+
+# The pass over timed ASR chunks, before the document existed. Its output is
+# the post-ASR dump, which is the document as built.
+batchalign3 eval utseg-replay pre-asr \
+  --asr-response recording_asr_response.json \
+  --evidence recording-1a2b3c4d5e6f_pre_chat_utseg_evidence.json \
+  --output-chat recording_post_asr.cha \
+  --media-name recording.wav
+```
+
+| Flag | Pass | Meaning |
+|------|------|---------|
+| `--input-chat <CHAT>` | post-chat | The document the run segmented, normally the `_pre_utseg.cha` dump. |
+| `--asr-response <JSON>` | pre-asr | The run's retained `*_asr_response.json`. |
+| `--evidence <JSON>` | both | The run's retained utseg evidence sidecar for that pass. |
+| `--output-chat <CHAT>` | both | The document that pass wrote, to reproduce. |
+| `--media-name <NAME>` | pre-asr | The media name the run recorded in `@Media`. Optional, like transcribe's own; omit it for a run that recorded none. |
+| `--wor` | pre-asr | Reproduce a run that generated `%wor` tiers from ASR word timings. |
+
+### What it admits, and what it refuses
+
+The evidence goes through the same admission a live worker result goes through,
+so an artifact is reapplied only when it still describes applicable work:
+
+- The sidecar must be this build's evidence schema, which is **4**, and must
+  record the pass the subcommand reproduces. Any other version is refused by
+  name, older or newer alike, and nothing is migrated. **Every utseg sidecar
+  retained before this build is schema 3, and therefore cannot be replayed at
+  all.** Schema 4 exists because the boundary model's revision became a
+  required part of its identity: where a schema-3 sidecar recorded a revision,
+  it recorded whatever a floating load happened to resolve to that day, and
+  reading that back as "the revision the plan pinned and the worker verified"
+  would reinterpret an accident as a pin. Regenerate the evidence with the
+  current build, which is cheap: these sidecars are `--debug-dir` research
+  artifacts, not a result cache.
+- Every item's assignments must be parallel to the words retained with it, and
+  boundary-model evidence must be parallel to those words and consistent with
+  the assignments and the adjacency policy it declares.
+- The requests this build collects from the input must match the retained items
+  one for one: the same count, the same transcript positions, the same words
+  and text. A count or wording mismatch means the evidence belongs to a
+  different input, and the replay says so rather than segmenting anyway.
+- A locally rederived decision must explain itself: the receipt retained with
+  it has to name the policy its evidence declares, reproduce the worker's own
+  assignments under the worker's policy, and reproduce both the applicable
+  assignments and the exact suppressions it claims.
+- The input document is gated exactly as `utseg` gates its own input: parsed
+  leniently, then judged by the same validity gate with its parse errors in
+  hand. The replay therefore refuses what the run itself would have refused,
+  with the message the run would have given.
+
+Each refusal names the artifact and what was wrong with it. Nothing is
+compared when an input is refused.
+
+### What the pre-ASR pass cannot reproduce
+
+A `--lang auto` run detects languages twice: once per file, which can put
+several codes in `@Languages`, and once per utterance, which writes a
+`[- code]` code-switch precode wherever an utterance differs from the primary
+language. This pass does neither: it builds with the one resolved language the
+evidence names and tags no utterance.
+
+So it refuses, rather than comparing, when the retained output declares any
+language set other than that one language, or carries a code-switch precode.
+Comparing would report a difference and appear to blame the boundaries for
+something segmentation never touched. Reproducing an `--lang auto` run is out
+of scope for this command.
+
+### What the comparison ignores
+
+A run also writes comments recording that a run happened: its `[fc-ba3 ...]`
+stamp and, for transcribe, the unchecked-ASR warning. A stamp carries a
+timestamp and the warning carries a build identity, so neither can ever match
+by equality. Both are recognized through the same provenance codec that writes
+them, left out of the comparison on both sides, and listed in the report. Every
+other line is compared for CHAT semantics, so formatting that does not change
+meaning is not a difference.
+
+Both passes compare on one basis: the AST of the CHAT text. The recomputed
+document is serialized and parsed back before the comparison, because text is
+what a run writes and what every later stage and every reader sees. That also
+keeps a serialization-only defect visible in both passes rather than in
+whichever one happened to reparse.
+
+### Outcomes
+
+The typed report goes to stdout whatever the result.
+
+| Outcome | Exit code | Meaning |
+|---------|-----------|---------|
+| `reproduced` | 0 | Every compared line matches. |
+| `differing` | 1 | The replay ran and the documents disagree. The report names the comparable line counts and where they first differ. |
+| refusal | 2 | An input could not be admitted, so nothing was compared. |
+
+A difference is printed on stderr in the CLI's usual failure form, prefixed
+`error:`, because that is how the executable renders any nonzero exit. The exit
+code is what tells the two apart: 1 means the replay ran and the comparison
+answered "no", while a command used wrongly or a broken machine stays in the 2
+to 6 range described in [the CLI reference](../cli-reference.md).
+
+```mermaid
+flowchart LR
+    EV["Retained utseg evidence"] --> ADMIT{"Admit: schema, pass,<br/>per-item invariants"}
+    IN["Input CHAT or retained ASR response"] --> COLLECT["Collect requests<br/>with the current build"]
+    COLLECT --> BIND{"Bind one-to-one:<br/>count, position, words"}
+    ADMIT --> BIND
+    ADMIT -->|refused| STOP["Refuse, naming the artifact"]
+    BIND -->|refused| STOP
+    BIND --> APPLY["Reapply boundaries"]
+    APPLY --> CMP["Compare, ignoring<br/>generated comments"]
+    RET["Retained output CHAT"] --> CMP
+    CMP --> OUT["reproduced, or a typed difference"]
+```
+
+The pre-ASR pass reads speakers from the retained ASR response, which is where
+they come from when no separate diarization artifact was projected onto the
+chunks. A run whose speakers came from such an artifact is the subject of
+`eval transcribe-replay`, which admits the turns artifact as well.
 
 ## L2 morphotag evaluation
 

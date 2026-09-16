@@ -31,8 +31,10 @@ async fn golden_benchmark_eng() {
 
     let out_dir = session.state_dir().join("out_benchmark");
     std::fs::create_dir_all(&out_dir).expect("mkdir");
-    let output_audio = out_dir.join("test.csv");
-    let output_gold = out_dir.join("test.cha");
+    // One source, one output. Benchmark's inputs are recordings; each one's
+    // gold transcript is DERIVED beside it by replacing the extension, so the
+    // gold is not a submitted source and this job names only the audio.
+    let output_path = out_dir.join("test.cha");
 
     let options = CommandOptions::Benchmark(BenchmarkOptions {
         common: CommonOptions {
@@ -55,14 +57,14 @@ async fn golden_benchmark_eng() {
         source_dir: Default::default(),
         options,
         paths_mode: true,
-        source_paths: vec![
-            fixtures.audio.to_string_lossy().to_string().into(),
-            fixtures.chat.to_string_lossy().to_string().into(),
-        ],
-        output_paths: vec![
-            output_audio.to_string_lossy().to_string().into(),
-            output_gold.to_string_lossy().to_string().into(),
-        ],
+        // The gold transcript (`fixtures.chat`) is deliberately NOT submitted.
+        // It used to be, and submission accepted it: the planner then made it
+        // an audio work unit of its own, whose gold was itself, and the
+        // pipeline handed the transcript to ffmpeg as a recording. Passing a
+        // CHAT file to `benchmark` is now refused at submission, naming the
+        // file.
+        source_paths: vec![fixtures.audio.to_string_lossy().to_string().into()],
+        output_paths: vec![output_path.to_string_lossy().to_string().into()],
         display_names: vec![],
         debug_traces: false,
         before_paths: vec![],
@@ -77,7 +79,8 @@ async fn golden_benchmark_eng() {
     assert_eq!(
         info.status,
         JobStatus::Completed,
-        "benchmark_eng: job should complete"
+        "benchmark_eng: job should complete (job-level error: {:?})",
+        info.error
     );
     assert_eq!(
         count_wor_tiers(&chat_output),

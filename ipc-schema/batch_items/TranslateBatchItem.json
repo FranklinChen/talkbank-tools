@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TranslateBatchItem",
-  "description": "Input payload for a single translation request.\n\nMatches the Python `TranslateBatchItem` wire format.",
+  "description": "Input payload for a single translation request.\n\nThe text is what [`TranslationSource::render`] wrote: the words the speaker\nproduced, in order, and the utterance's terminator. It is never assembled\nat a call site. Matches the Python `TranslateBatchItem` wire format.",
   "type": "object",
   "properties": {
     "text": {
-      "description": "Source-language text to translate.",
+      "description": "Source-language text to translate: the rendered translation source.",
       "type": "string"
     }
   },

@@ -86,23 +86,23 @@
 //! ## Resolve inputs and discover files
 //!
 //! ```rust,no_run
-//! use std::path::Path;
-//! use batchalign::cli::resolve::resolve_inputs;
+//! use std::path::PathBuf;
+//! use batchalign::cli::resolve::{InputSource, resolve_inputs};
 //! use batchalign::cli::args::InputKind;
 //! use batchalign::cli::discover::discover_client_files;
 //!
-//! // Resolve CLI-style positional args into (inputs, output_dir)
-//! let (inputs, out_dir) = resolve_inputs(
-//!     &["corpus/".into(), "output/".into()],
+//! // Resolve CLI-style positional args (legacy IN_DIR OUT_DIR form)
+//! let paths = [PathBuf::from("corpus/"), PathBuf::from("output/")];
+//! let resolved = resolve_inputs(
+//!     InputSource::Paths(&paths),
 //!     None,   // --output
-//!     None,   // --file-list
 //!     false,  // --in-place
 //! ).unwrap();
 //!
 //! // Walk a directory and collect .cha files, sorted largest-first
 //! let (files, outputs) = discover_client_files(
-//!     Path::new(&inputs[0]),
-//!     Path::new(out_dir.as_deref().unwrap()),
+//!     &resolved.inputs.as_paths()[0],
+//!     resolved.output_dir.as_deref().unwrap(),
 //!     InputKind::Chat,
 //! ).unwrap();
 //! println!("found {} .cha files", files.len());
@@ -190,12 +190,6 @@ pub mod tui;
 #[cfg(feature = "binary-entry")]
 pub mod update_check;
 pub mod worker_cmd;
-
-/// Build fingerprint: changes on every rebuild, even when the version stays
-/// the same.  Used for stale-binary detection during development.
-pub fn build_hash() -> &'static str {
-    env!("BUILD_HASH")
-}
 
 /// Run the embedded CLI entry path from an explicit `argv` vector.
 ///
@@ -356,7 +350,7 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
             eprintln!(
                 "batchalign3 {} (build {})",
                 env!("CARGO_PKG_VERSION"),
-                build_hash()
+                crate::build_hash()
             );
             Ok(())
         }
@@ -400,12 +394,15 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
                     // which carry `CommonOpts` from clap.
                     #[allow(clippy::expect_used)]
                     let c = common.expect("processing command must have CommonOpts");
-                    resolve::resolve_inputs(
-                        &c.paths,
-                        c.output.as_deref(),
-                        c.file_list.as_deref(),
-                        c.in_place,
-                    )?
+                    // clap rejects `--file-list` together with positional
+                    // paths, so choosing one variant here discards nothing.
+                    let source = match c.file_list.as_deref() {
+                        Some(list) => resolve::InputSource::FileList(list),
+                        None => resolve::InputSource::Paths(&c.paths),
+                    };
+                    let resolved =
+                        resolve::resolve_inputs(source, c.output.as_deref(), c.in_place)?;
+                    (resolved.inputs.into_paths(), resolved.output_dir)
                 }
             };
 

@@ -11,13 +11,14 @@ Missing any of these causes serde deserialization failure.  The Pydantic
 
 from __future__ import annotations
 
-from typing import Any
+import pytest
 
 from batchalign.inference.morphosyntax import (
+    RelationRepair,
+    RelationRepairKind,
+    RepairedSentence,
     UdWord,
-)
-from batchalign.inference.morphosyntax import (
-    validate_ud_words as _validate_ud_words,
+    _repaired_relation,
 )
 
 # --- Direct model tests ---
@@ -109,38 +110,66 @@ def test_udword_missing_deprel() -> None:
     assert w.deprel == "dep"
 
 
-def test_udword_pad_deprel_sanitized() -> None:
-    """Stanza <PAD> deprel should be replaced with safe default 'dep'."""
-    w = UdWord.model_validate(
-        {
-            "id": 3,
-            "text": "etxean",
-            "lemma": "etxe",
-            "upos": "NOUN",
-            "head": 0,
-            "deprel": "<PAD>",
-        }
+def test_pad_relation_is_repaired_to_dep_and_reported() -> None:
+    """A Stanza <PAD> label is no relation; it becomes 'dep', and is reported."""
+    relation, repair = _repaired_relation("<PAD>", "etxean")
+    assert relation == "dep"
+    assert repair == RelationRepair(
+        kind=RelationRepairKind.PAD_RELATION,
+        word="etxean",
+        from_relation="<PAD>",
+        to_relation="dep",
     )
-    assert w.deprel == "dep"
 
 
-def test_udword_angle_bracket_deprel_sanitized() -> None:
-    """Any angle-bracketed deprel (e.g. <UNK>) should be sanitized."""
-    w = UdWord.model_validate(
-        {
-            "id": 1,
-            "text": "foo",
-            "lemma": "foo",
-            "upos": "NOUN",
-            "head": 0,
-            "deprel": "<UNK>",
-        }
+def test_any_angle_bracketed_relation_is_repaired() -> None:
+    """Any angle-bracketed label (e.g. <UNK>) is padding, not a relation."""
+    relation, repair = _repaired_relation("<UNK>", "foo")
+    assert relation == "dep"
+    assert repair is not None
+    assert repair.kind is RelationRepairKind.PAD_RELATION
+
+
+def test_relation_case_is_repaired_and_reported() -> None:
+    """An upper-case UD relation is lowercased, and the subtype is kept.
+
+    This was the one rewrite with no log line at all: it changed the value
+    silently, so a corpus could not be asked how often it happened.
+    """
+    relation, repair = _repaired_relation("NMOD:poss", "his")
+    assert relation == "nmod:poss"
+    assert repair == RelationRepair(
+        kind=RelationRepairKind.RELATION_CASE,
+        word="his",
+        from_relation="NMOD:poss",
+        to_relation="nmod:poss",
     )
-    assert w.deprel == "dep"
 
 
-def test_udword_normal_deprel_preserved() -> None:
-    """Normal deprel values must not be affected by PAD sanitization."""
+def test_a_repair_cannot_record_a_rewrite_that_changed_nothing() -> None:
+    """The constructor refuses it, so no count can be inflated by a no-op."""
+    with pytest.raises(ValueError, match="must change the relation"):
+        RelationRepair(
+            kind=RelationRepairKind.RELATION_CASE,
+            word="foo",
+            from_relation="nsubj",
+            to_relation="nsubj",
+        )
+
+
+def test_a_repair_cannot_record_a_rewrite_to_a_non_ud_relation() -> None:
+    """A repair that leaves the label invalid is not a repair."""
+    with pytest.raises(ValueError, match="must produce a UD relation"):
+        RelationRepair(
+            kind=RelationRepairKind.UNKNOWN_RELATION,
+            word="foo",
+            from_relation="iob",
+            to_relation="notarelation",
+        )
+
+
+def test_udword_leaves_a_relation_alone() -> None:
+    """The model fills defaults only: repairing relations is not its job."""
     w = UdWord.model_validate(
         {
             "id": 1,
@@ -181,38 +210,39 @@ def test_udword_tuple_id_coerced_to_list() -> None:
     assert w.lemma == ""
 
 
-# --- Integration: _validate_ud_words ---
+# --- Integration: RepairedSentence ---
 
 
-def test_validate_ud_words_fills_all_sentences() -> None:
-    """All sentences and all tokens should be validated."""
-    sents: list[list[dict[str, Any]]] = [
+def test_repaired_sentence_fills_every_word() -> None:
+    """Every token of a sentence is validated, Range parents included."""
+    first = RepairedSentence(
         [
             {"id": 1, "text": "je", "upos": "PRON", "head": 2, "deprel": "nsubj"},
             {"id": [2, 3], "text": "au"},
             {"id": 2, "text": "à", "upos": "ADP", "head": 4, "deprel": "case"},
             {"id": 3, "text": "le", "upos": "DET", "head": 4, "deprel": "det"},
-        ],
-        [
-            {"id": 1, "text": "oui", "head": 0, "deprel": "root"},
-        ],
-    ]
-    _validate_ud_words(sents)
+        ]
+    )
+    second = RepairedSentence([{"id": 1, "text": "oui", "head": 0, "deprel": "root"}])
 
     # Sentence 1: regular token missing lemma
-    assert sents[0][0]["lemma"] == "je"
+    assert first.words[0]["lemma"] == "je"
     # Sentence 1: Range token
-    assert sents[0][1]["lemma"] == ""
-    assert sents[0][1]["upos"] == "X"
+    assert first.words[1]["lemma"] == ""
+    assert first.words[1]["upos"] == "X"
     # Sentence 1: component tokens missing lemma
-    assert sents[0][2]["lemma"] == "à"
-    assert sents[0][3]["lemma"] == "le"
+    assert first.words[2]["lemma"] == "à"
+    assert first.words[3]["lemma"] == "le"
     # Sentence 2: missing lemma and upos
-    assert sents[1][0]["lemma"] == "oui"
-    assert sents[1][0]["upos"] == "X"
+    assert second.words[0]["lemma"] == "oui"
+    assert second.words[0]["upos"] == "X"
+    # Nothing needed repairing, and the sentences say so rather than leaving
+    # the question to a log.
+    assert first.repairs == ()
+    assert second.repairs == ()
 
 
-def test_udword_iob_deprel_normalized_to_iobj() -> None:
+def test_iob_relation_is_repaired_to_iobj_and_reported() -> None:
     """Stanza's Italian model emits `iob`, which is not a UD relation.
 
     Reproduced live on stanza 1.13.0, 2026-07-28, running the Italian
@@ -227,41 +257,35 @@ def test_udword_iob_deprel_normalized_to_iobj() -> None:
     undetected until chatter's E761 relation-vocabulary rule shipped in
     v0.4.0. CLAN CHECK never flagged it.
     """
-    w = UdWord.model_validate(
-        {
-            "id": 2,
-            "text": "ne",
-            "lemma": "ne",
-            "upos": "PRON",
-            "head": 1,
-            "deprel": "iob",
-        }
+    relation, repair = _repaired_relation("iob", "ne")
+    assert relation == "iobj"
+    assert repair == RelationRepair(
+        kind=RelationRepairKind.RELATION_ALIAS,
+        word="ne",
+        from_relation="iob",
+        to_relation="iobj",
     )
-    assert w.deprel == "iobj"
 
 
-def test_udword_unknown_deprel_falls_back_to_dep() -> None:
-    """A deprel outside the UD closed set must not reach `%gra` verbatim.
+def test_unknown_relation_falls_back_to_dep_and_is_reported() -> None:
+    """A relation outside the UD closed set must not reach `%gra` verbatim.
 
     The failure mode this prevents is silent pass-through: `iob` reached the
     corpora precisely because nothing validated the label against UD. An
     unrecognised relation degrades to `dep`, which is a real UD relation, and
-    warns.
+    the degradation is reported rather than only logged.
     """
-    w = UdWord.model_validate(
-        {
-            "id": 1,
-            "text": "foo",
-            "lemma": "foo",
-            "upos": "NOUN",
-            "head": 0,
-            "deprel": "notarelation",
-        }
+    relation, repair = _repaired_relation("notarelation", "foo")
+    assert relation == "dep"
+    assert repair == RelationRepair(
+        kind=RelationRepairKind.UNKNOWN_RELATION,
+        word="foo",
+        from_relation="notarelation",
+        to_relation="dep",
     )
-    assert w.deprel == "dep"
 
 
-def test_udword_valid_ud_relations_pass_through_untouched() -> None:
+def test_valid_ud_relations_pass_through_untouched() -> None:
     """Legitimate relations, including subtypes, must be preserved exactly.
 
     The corpora use many language-specific subtypes (`nmod:poss`,
@@ -280,14 +304,6 @@ def test_udword_valid_ud_relations_pass_through_untouched() -> None:
         "acl:relcl",
         "flat:foreign",
     ):
-        w = UdWord.model_validate(
-            {
-                "id": 1,
-                "text": "foo",
-                "lemma": "foo",
-                "upos": "NOUN",
-                "head": 0,
-                "deprel": deprel,
-            }
+        assert _repaired_relation(deprel, "foo") == (deprel, None), (
+            f"{deprel!r} must survive untouched, and report no repair"
         )
-        assert w.deprel == deprel, f"{deprel!r} must survive untouched"

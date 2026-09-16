@@ -4,13 +4,18 @@
 
 use std::collections::HashMap;
 
-use crate::api::{LanguageCode3, ReleasedCommand};
+use crate::api::FileStampOutcome;
+use crate::api::{InvalidStampSafeText, LanguageCode3, ReleasedCommand};
 use crate::chat_ops::ChatFile;
-use crate::text_batch::{TextBatchFileInput, TextBatchFileResult, TextBatchFileResults};
+use crate::provenance::TextStamp;
+use crate::text_batch::{
+    ItemError, ItemFailure, ItemFailures, TextBatchFileInput, TextBatchFileResult,
+    TextBatchFileResults, TextWorkflowFileError,
+};
 use crate::worker::pool::WorkerPool;
 use batchalign_transform::parse::{is_dummy, parse_lenient};
 use batchalign_transform::validate::{ValidityLevel, validate_to_level};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::error::ServerError;
 use crate::pipeline::PipelineServices;
@@ -18,6 +23,20 @@ use crate::pipeline::post_validate::PostValidated;
 
 type IntegrateFn<Item, State, Response> =
     fn(&mut HashMap<usize, State>, &[(usize, Item)], &[Response]);
+
+/// Where a text command's provenance comment comes from: the responses it
+/// applied, which name the engines that produced them.
+/// [`TextStamp::NotStamped`] carries the reason when no engine produced
+/// anything that was applied. `Err` only when a name a response carries is not
+/// stamp-safe text: translate and coref names are admitted as reported engine
+/// names on arrival and never fail here, while a utseg boundary model's id and
+/// revision are admitted when the stamp is built.
+///
+/// There is no pipeline-wide engine version and no capability report to fall
+/// back on (see the book's provenance page), so a command cannot stamp an
+/// engine its responses did not name.
+pub(crate) type TextProvenance<Response> =
+    fn(&LanguageCode3, &[Response]) -> Result<TextStamp, InvalidStampSafeText>;
 
 /// Hooks for a text-only single-file pipeline.
 ///
@@ -37,6 +56,8 @@ pub(crate) struct TextPipelineHooks<Item, State, Response> {
     pub integrate: IntegrateFn<Item, State, Response>,
     /// Apply all results to the parsed chat file.
     pub apply: fn(&mut ChatFile, &HashMap<usize, State>),
+    /// Source of the provenance comment stamped on the output.
+    pub provenance: TextProvenance<Response>,
 }
 
 /// Run the text-only pipeline for a single CHAT file.
@@ -45,7 +66,7 @@ pub(crate) struct TextPipelineHooks<Item, State, Response> {
 /// `async` callable (stable `AsyncFnOnce` trait, Rust 2024), so native
 /// `async fn` inference routines can be passed without a boxed-future
 /// adapter at the call site.
-pub(crate) async fn run_text_pipeline<Item, State, Response, Infer, Observe>(
+pub(crate) async fn run_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
     chat_text: &str,
     lang: &LanguageCode3,
     services: PipelineServices<'_>,
@@ -54,11 +75,12 @@ pub(crate) async fn run_text_pipeline<Item, State, Response, Infer, Observe>(
     observe: Observe,
 ) -> Result<PostValidated, ServerError>
 where
+    Failure: std::fmt::Display,
     Infer: AsyncFnOnce(
         &WorkerPool,
         &[(usize, Item)],
         &LanguageCode3,
-    ) -> Result<Vec<Result<Response, String>>, ServerError>,
+    ) -> Result<Vec<Result<Response, ItemFailure<Failure>>>, ServerError>,
     Observe: FnOnce(&[(usize, Item)], &[Response]) -> Result<(), ServerError>,
 {
     let parser = crate::chat_parser();
@@ -109,18 +131,20 @@ where
 
     (hooks.apply)(&mut chat_file, &state_map);
 
-    // Inject processing provenance comment.
-    let ev = services.engine_version.as_ref();
-    let lang_str = lang.as_ref();
-    let provenance = match hooks.command {
-        ReleasedCommand::Utseg => Some(crate::provenance::utseg_provenance(lang_str, ev)),
-        ReleasedCommand::Translate => Some(crate::provenance::translate_provenance(lang_str, ev)),
-        // Every other command stamps its provenance in its own pipeline; this
-        // shared skeleton runs only for the two above.
-        _ => None,
-    };
-    if let Some(comment) = provenance {
-        crate::provenance::inject_provenance(&mut chat_file, &comment);
+    // Inject the processing provenance comment, named by the applied
+    // responses. A run that applied nothing says so rather than stamping a
+    // command with no engine behind it.
+    match (hooks.provenance)(lang, &responses)? {
+        TextStamp::Stamped(comment) => {
+            crate::provenance::inject_provenance(&mut chat_file, &comment);
+        }
+        TextStamp::NotStamped(reason) => {
+            info!(
+                command = %hooks.command,
+                reason = %reason,
+                "no provenance stamp written"
+            );
+        }
     }
 
     // The gate runs LAST, on the model that is about to become the bytes we
@@ -156,6 +180,11 @@ pub(crate) struct TextBatchHooks<Item, Response> {
     /// Apply one file's items + responses directly to that file's AST.
     /// Called once per file after global inference completes.
     pub apply: TextBatchApply<Item, Response>,
+    /// Source of the provenance comment stamped on each file's output, from
+    /// the responses that file applied. The same hook the single-file pipeline
+    /// takes: a batch run records what produced a file exactly as a per-file
+    /// run does.
+    pub provenance: TextProvenance<Response>,
 }
 
 /// Run the cross-file text-batch pipeline for `files`.
@@ -175,7 +204,7 @@ pub(crate) struct TextBatchHooks<Item, Response> {
 /// On worker failure every file whose items went into the batch is
 /// reported as an error; files with no payloads (empty/dummy) are
 /// serialized unchanged.
-pub(crate) async fn run_text_batch_pipeline<Item, Response, Infer>(
+pub(crate) async fn run_text_batch_pipeline<Item, Response, Failure, Infer>(
     files: &[TextBatchFileInput],
     lang: &LanguageCode3,
     pool: &WorkerPool,
@@ -184,11 +213,12 @@ pub(crate) async fn run_text_batch_pipeline<Item, Response, Infer>(
 ) -> TextBatchFileResults
 where
     Response: Clone,
+    Failure: std::fmt::Display + Clone,
     Infer: AsyncFnOnce(
         &WorkerPool,
         &[(usize, Item)],
         &LanguageCode3,
-    ) -> Result<Vec<Result<Response, String>>, ServerError>,
+    ) -> Result<Vec<Result<Response, ItemFailure<Failure>>>, ServerError>,
 {
     let parser = crate::chat_parser();
     let mut results: TextBatchFileResults = Vec::with_capacity(files.len());
@@ -358,24 +388,21 @@ where
         // failed, mark the entire file as failed without writing
         // partial output: matches BA2 (one bad utterance abandons
         // the file).
-        let item_errors: Vec<crate::text_batch::ItemError> = file_item_results
+        let item_errors: Vec<ItemError<Failure>> = file_item_results
             .iter()
             .enumerate()
             .filter_map(|(local_idx, r)| match r {
-                Err(message) => Some(crate::text_batch::ItemError {
+                Err(failure) => Some(ItemError {
                     item_index: local_idx,
-                    message: message.clone(),
+                    failure: failure.clone(),
                 }),
                 Ok(_) => None,
             })
             .collect();
-        if !item_errors.is_empty() {
+        if let Some(failures) = ItemFailures::new(item_errors) {
             results.push(TextBatchFileResult::err(
                 file.filename.clone(),
-                crate::text_batch::TextWorkflowFileError::item_errors(
-                    hooks.command.as_str(),
-                    item_errors,
-                ),
+                TextWorkflowFileError::item_errors(hooks.command.as_str(), failures),
             ));
             continue;
         }
@@ -392,12 +419,55 @@ where
             .collect();
         (hooks.apply)(chat_file, file_items, &file_responses);
 
+        // Provenance for THIS file, from the responses this file applied, and
+        // before the gate so the proof covers the bytes that are written. The
+        // batch path used to write none at all, so a corpus processed as a
+        // batch recorded nothing about what produced it.
+        // Recorded on the file, not only logged: the job's per-file status
+        // carries what this command decided, so "no stamp" is an answer with a
+        // reason rather than an absence an operator has to interpret.
+        let stamp;
+        match (hooks.provenance)(lang, &file_responses) {
+            Ok(TextStamp::Stamped(comment)) => {
+                crate::provenance::inject_provenance(chat_file, &comment);
+                stamp = FileStampOutcome::Stamped {
+                    command: hooks.command.to_string(),
+                };
+            }
+            Ok(TextStamp::NotStamped(reason)) => {
+                info!(
+                    filename = %file.filename,
+                    command = %hooks.command,
+                    reason = %reason,
+                    "no provenance stamp written"
+                );
+                stamp = FileStampOutcome::NotStamped {
+                    command: hooks.command.to_string(),
+                    reason: reason.to_string(),
+                };
+            }
+            // A name that cannot be written as a stamp fails THIS file, the
+            // way its own gate would: the alternative is output whose
+            // provenance the next run cannot recognize.
+            Err(error) => {
+                results.push(TextBatchFileResult::err(
+                    file.filename.clone(),
+                    TextWorkflowFileError::validation(error.to_string()),
+                ));
+                continue;
+            }
+        }
+
         // Fail-closed, per file: a file whose output fails the gate is
         // reported as a validation failure and never written; the rest of the
         // cross-file batch is unaffected, which is the same isolation the
         // per-item failure branch above already provides.
         match PostValidated::gate(chat_file, hooks.validity, hooks.command) {
-            Ok(output) => results.push(TextBatchFileResult::ok(file.filename.clone(), output)),
+            Ok(output) => results.push(TextBatchFileResult::ok_stamped(
+                file.filename.clone(),
+                output,
+                stamp,
+            )),
             Err(failure) => {
                 results.push(TextBatchFileResult::err(file.filename.clone(), failure));
             }
@@ -440,6 +510,41 @@ mod tests {
     /// proves the refusal below is caused by the mutation, not by the fixture.
     fn apply_nothing(_file: &mut ChatFile, _items: &[(usize, ())], _r: &[()]) {}
 
+    /// Inference that succeeds for every item, with no payload.
+    ///
+    /// A named function rather than a closure: the pipeline is generic in the
+    /// command's own failure type, and a closure that never constructs one
+    /// leaves it for the compiler to guess.
+    async fn stub_infer(
+        _pool: &WorkerPool,
+        items: &[(usize, ())],
+        _lang: &LanguageCode3,
+    ) -> Result<Vec<Result<(), crate::text_batch::EngineItemFailure>>, ServerError> {
+        Ok(items.iter().map(|_| Ok(())).collect())
+    }
+
+    /// Inference that fails for the whole batch.
+    async fn failing_infer(
+        _pool: &WorkerPool,
+        _items: &[(usize, ())],
+        _lang: &LanguageCode3,
+    ) -> Result<Vec<Result<(), crate::text_batch::EngineItemFailure>>, ServerError> {
+        Err(ServerError::Validation("batch broke".into()))
+    }
+
+    /// A stamp naming one engine, so the batch path's injection is exercised.
+    fn test_stamp(
+        lang: &LanguageCode3,
+        responses: &[()],
+    ) -> Result<TextStamp, crate::api::InvalidStampSafeText> {
+        let engine = crate::api::ReportedEngineName::try_from("test-engine")?;
+        Ok(crate::provenance::result_named_provenance(
+            crate::provenance::ResultNamedCommand::Translate,
+            lang,
+            responses.iter().map(|()| &engine),
+        ))
+    }
+
     async fn run_with(
         apply: TextBatchApply<(), ()>,
     ) -> Result<PostValidated, crate::text_batch::TextWorkflowFileError> {
@@ -453,14 +558,18 @@ mod tests {
             &LanguageCode3::eng(),
             &pool,
             TextBatchHooks {
-                command: ReleasedCommand::Utseg,
+                // Translate, because the stub stamp source below is the
+                // result-named builder translate uses: the command a pipeline
+                // runs and the command its stamp records are the same thing.
+                command: ReleasedCommand::Translate,
                 validity: ValidityLevel::StructurallyComplete,
                 collect: collect_one,
                 apply,
+                provenance: test_stamp,
             },
             // The pool is never touched: inference is stubbed out so the test
             // exercises the apply-and-gate tail, not the worker boundary.
-            async move |_pool, items, _lang| Ok(items.iter().map(|_| Ok(())).collect()),
+            stub_infer,
         )
         .await;
         assert_eq!(results.len(), 1, "one input file, one result");
@@ -474,6 +583,22 @@ mod tests {
         let result = run_with(apply_nothing).await;
         let output = result.expect("an untouched document must pass its own gate");
         assert!(output.as_str().contains("*CHI:"));
+    }
+
+    /// RED FIRST (W2): the batch path stamps the provenance of what it
+    /// applied. It used to write none, so every file of a batch job recorded
+    /// nothing about the engines behind it.
+    #[tokio::test]
+    async fn batch_pipeline_stamps_the_provenance_of_what_it_applied() {
+        let result = run_with(apply_nothing).await;
+        let output = result.expect("an untouched document must pass its own gate");
+        assert!(
+            output
+                .as_str()
+                .contains("[fc-ba3 translate | engine=test-engine ; lang=eng | "),
+            "the batch output must carry its own stamp, got:\n{}",
+            output.as_str()
+        );
     }
 
     /// A file that fails PRE-validation: no `@Participants`, so it cannot
@@ -501,14 +626,13 @@ mod tests {
             &LanguageCode3::eng(),
             &pool,
             TextBatchHooks {
-                command: ReleasedCommand::Utseg,
+                command: ReleasedCommand::Translate,
                 validity: ValidityLevel::StructurallyComplete,
                 collect: collect_one,
                 apply: apply_nothing,
+                provenance: test_stamp,
             },
-            async move |_pool, _items, _lang| {
-                Err(crate::error::ServerError::Validation("batch broke".into()))
-            },
+            failing_infer,
         )
         .await;
 

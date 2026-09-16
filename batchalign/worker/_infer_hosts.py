@@ -90,13 +90,10 @@ def build_translate_batch_infer_handler() -> BatchInferHandler:
 
     def _handler(req: BatchInferRequest) -> BatchInferResponse:
         """Run translation using the engine selected during worker bootstrap."""
-        if _state.translate_fn is None or _state.translate_backend is None:
+        translation = _state.translation
+        if translation is None:
             return unsupported_batch_infer("No translation engine loaded")(req)
-        return batch_infer_translate(
-            req=req,
-            translate_fn=_state.translate_fn,
-            backend=_state.translate_backend,
-        )
+        return batch_infer_translate(req=req, translation=translation)
 
     return _handler
 

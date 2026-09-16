@@ -1,7 +1,7 @@
 # Python/Rust Interface Map
 
 **Status:** Current
-**Last updated:** 2026-09-06 08:27 EDT
+**Last updated:** 2026-09-15 14:00 EDT
 
 This document is the unified reference for all Python/Rust interface boundaries in batchalign3.
 
@@ -57,11 +57,20 @@ does not join an uncancellable OS stdin read.
 | Python host | `batchalign/worker/_asr_v2.py::AsrExecutionHostV2` |
 | Whisper bridge | `batchalign/inference/asr.py` (local model) |
 | HK providers | `batchalign/inference/languages/cantonese/` (Tencent, FunASR, Aliyun) |
-| Schema | `ipc-schema/worker_v2/AsrRequestV2.json`, `ipc-schema/worker_v2/ExecuteResponseV2.json` |
+| Schema | `ipc-schema/worker_v2/AsrRequestV2.json`, `ipc-schema/worker_v2/ExecuteResponseV2.json`, and the model identity types: `AsrRequestedModelsV2.json`, `AsrModelIdentityV2.json`, `RequestedModelV2.json`, `LoadedModelV2.json`, `RequestedRevisionV2.json`, `ObservedRevisionV2.json` |
 
 **Rust/Python contract:**
-- Input: `AsrRequestV2` with `prepared_audio` reference + metadata
-- Output: `ExecuteResponseV2` with ASR results or error
+- Input: `AsrRequestV2` with `prepared_audio` reference + metadata, plus
+  `models`: the composition the control plane pinned for this request
+- Output: `ExecuteResponseV2` whose ASR result carries `model`, the composition
+  the worker actually loaded, each member with the revision it was observed at
+- The bridge admits the two against each other before returning, and refuses a
+  disagreement by name (which role, which id, requested against observed). For
+  a provider backend it admits BEFORE calling the provider, so a plan/worker
+  mismatch costs no paid request
+- A worker that recorded no identity is refused per engine rather than having
+  one inferred from the request: an identity taken from the request would
+  record what was asked for as though it had been seen
 - Side-effects: None (stateless)
 
 **Cross-references:**
@@ -155,7 +164,7 @@ does not join an uncancellable OS stdin read.
 | Aspect | Location |
 |--------|----------|
 | Rust FFI | `crates/batchalign-pyo3/src/worker_text_exec.rs::execute_{morphosyntax,utseg,translate,coref}_request_v2()` |
-| Result normalization | `crates/batchalign-pyo3/src/worker_text_results.rs::normalize_*_result()` (Rust-internal, called by the executors) |
+| Result normalization | `crates/batchalign-pyo3/src/worker_text_results.rs::normalize_*_result()` (Rust-internal, called by the executors). Morphosyntax, translate and coref host items are parsed through the tagged V2 item types (`normalize_item`); an item that does not parse becomes that item's `failed` outcome, while a count mismatch refuses the batch |
 | Rust FFI | `crates/batchalign-pyo3/src/worker_text_results.rs::align_tokens()` (tokenizer realignment, separate concern) |
 | Python caller | `batchalign/worker/_text_v2.py::execute_*_request_v2()` |
 | Schema | Responds with V2 ExecuteResponseV2 |
@@ -198,22 +207,25 @@ ported):**
 
 | Aspect | Location |
 |--------|----------|
-| Rust FFI functions | `crates/batchalign-pyo3/src/cantonese_asr_bridge.rs` (6 functions) |
+| Rust FFI functions | `crates/batchalign-pyo3/src/cantonese_asr_bridge.rs` (3 functions) |
+| FunASR admission types | `crates/batchalign-pyo3/src/cantonese_asr_bridge/funasr_projection.rs` |
 | Python callers | `batchalign/inference/languages/cantonese/`, `batchalign/worker/_asr_v2.py` |
 
 **Functions:**
-- `funaudio_segments_to_asr()`: project FunASR segment output
+- `funaudio_segments_to_asr()`: admit FunASR segments (each unit paired with its own timestamp from `words` or `raw_text`, any disagreement refused) and project them
 - `tencent_result_detail_to_asr()`: project Tencent API response
-- `aliyun_sentences_to_asr()`: project Aliyun API response
-- `normalize_cantonese()`: simplified ↔ traditional + domain replacements
-- `cantonese_char_tokens()`: per-character tokenization for FA
-- `clean_funaudio_segment_text()`: text cleanup before normalization
+- `aliyun_sentences_to_asr()`: project Aliyun API response, splitting a
+  sentence without per-word timing one character per token
 
 **Design:** These bridge the gap between provider-native formats and Batchalign `MonologueAsrResultV2`.
 
 **Responsibility:**
 - **Rust owns:** Output shape (`MonologueAsrResultV2`), char tokenization
 - **Python owns:** Provider SDK invocation, raw response parsing
+
+**Not here:** Cantonese normalization. It has one owner,
+`AlignedNormalization` in `batchalign-transform`, which the server applies once
+per monologue; the bridges report provider surfaces unchanged.
 
 ---
 

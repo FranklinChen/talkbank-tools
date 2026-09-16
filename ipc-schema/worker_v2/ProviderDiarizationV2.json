@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProviderDiarizationV2",
+  "description": "Whether a provider is being asked to separate speakers, and into how many.\n\nThis replaces a bare `num_speakers`, which could not say the one thing the\nbridge needs to know when a provider returns a monologue with no speaker:\nwhether separation was ASKED FOR. Without that, an absent label had to be\ngiven a number, and the number given was zero.\n\nThe count lives inside `Integrated` because it is meaningless without it,\nand it is at least two because [`SeparatedSpeakersV2`] cannot hold less.",
+  "oneOf": [
+    {
+      "description": "One track is expected, and the provider must not separate speakers.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "not_requested"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "The provider separates speakers itself, into this many.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "integrated"
+        },
+        "speakers": {
+          "description": "How many speakers the provider is asked to find, at least two.",
+          "$ref": "#/$defs/SeparatedSpeakersV2"
+        }
+      },
+      "required": [
+        "kind",
+        "speakers"
+      ]
+    }
+  ],
+  "$defs": {
+    "SeparatedSpeakersV2": {
+      "description": "How many speakers a provider is asked to separate a recording into: at least two, because one is not a separation request and zero names nobody.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 2
+    }
+  }
+}

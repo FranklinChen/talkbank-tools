@@ -1,7 +1,7 @@
 # Graceful Failure Invariant
 
 **Status:** Current
-**Last updated:** 2026-05-23 23:52 EDT
+**Last updated:** 2026-09-15 20:20 EDT
 
 ## The rule
 
@@ -42,7 +42,7 @@ flowchart TD
     item -->|"engine/network/model error"| err["Err(message)"]
     item -->|"protocol violation\n(no error AND no payload)"| err
 
-    ok --> collect["Driver collects Vec\<Result\<R, String\>\>"]
+    ok --> collect["Driver collects Vec\<Result\<R, ItemFailure\<S\>\>\>"]
     err --> collect
 
     collect --> attribute["Attribute per-item Err to source file\nvia per_file_info slice"]
@@ -51,8 +51,9 @@ flowchart TD
 ```
 
 A per-file batch sees each item as either `Ok(R)` (engine succeeded
-and produced a typed payload) or `Err(String)` (the engine reported
-a runtime error, or the worker returned neither error nor payload).
+and produced a typed payload) or `Err(ItemFailure<S>)`: the engine
+reported a runtime error, the worker returned neither error nor
+payload, or the command itself refused what came back.
 The driver, `run_text_batch_pipeline` in
 `crates/batchalign/src/pipeline/text_infer.rs`: groups per-item
 results back to their source file via `per_file_info` and writes one
@@ -79,29 +80,46 @@ has two variants:
 
 ```rust,ignore
 pub(crate) enum TextWorkflowFileError {
-    /// Batch-level: worker spawn, IPC, schema, pre- or
-    /// post-validation, serialization. No per-item attribution.
-    Batch(String),
+    /// A failure the control plane already classified, carried with its
+    /// verdict: worker spawn, IPC, schema, pre- or post-validation,
+    /// serialization. No per-item attribution.
+    Categorised(FailureCategory, String),
 
     /// Per-item: one or more items failed. The first N samples are
-    /// retained inline; the rest are counted in `total`.
+    /// retained inline (rendered); the rest are counted in `total`.
     ItemErrors {
         command: &'static str,
         total: usize,
-        samples: Vec<ItemError>,
+        samples: Vec<ItemErrorSample>,
     },
 }
 ```
 
-`ItemError` carries the position in the file's payload list and the
-engine's error string verbatim:
+A per-item failure is typed, and parameterised by the command's own
+failure so a command cannot represent one it does not have:
 
 ```rust,ignore
-pub(crate) struct ItemError {
-    pub item_index: usize,
-    pub message: String,
+pub(crate) enum ItemFailure<S> {
+    /// The engine reported this item's failure, message verbatim.
+    EngineReported(String),
+    /// A failure this command defines.
+    Command(S),
 }
+
+/// utseg, coref and morphotag: `Infallible`, so `Command` is uninhabited.
+pub(crate) type EngineItemFailure = ItemFailure<std::convert::Infallible>;
 ```
+
+Translate's `S` is `EmptyTranslationFailure`: the engine answered with
+nothing that can be written to `%xtra`. The file-level error keeps the
+failures rendered (`ItemErrorSample`), because it outlives the
+command's own type.
+
+Every class we have is the provider's settled answer about that item,
+so `ItemErrors` reports `ProviderTerminal`: an identical request gets
+an identical answer, and telling the control plane otherwise would buy
+another full run. A class that genuinely could differ on a retry has
+to say so where the category is decided.
 
 Engine-class typing (`NetworkError` vs `ModelError` vs
 `ProtocolError` as separate variants) is deliberately not yet
@@ -118,12 +136,22 @@ Today the rule is enforced at these seams:
 |---|---|---|---|
 | Driver (per-file) | `crates/batchalign/src/pipeline/text_infer.rs` | `run_text_pipeline` | Single-file flow; per-item Err collapses to one typed `ServerError::Validation` |
 | Driver (cross-file) | `crates/batchalign/src/pipeline/text_infer.rs` | `run_text_batch_pipeline` | Cross-file flow; per-item Err attributed back to source file via `per_file_info` |
-| Shared helper | `crates/batchalign/src/text_batch.rs` | `unwrap_per_item_results` | Collapses `Vec<Result<R, String>>` → `Result<Vec<R>, TextWorkflowFileError>` |
-| translate worker | `crates/batchalign/src/translate.rs` | `parse_translate_item_results` | Per-item parsing; engine error and protocol violation both → `Err` |
-| utseg worker | `crates/batchalign/src/utseg.rs` | `infer_batch` | Same shape |
+| Shared helper | `crates/batchalign/src/text_batch.rs` | `unwrap_per_item_results` | Collapses `Vec<Result<R, ItemFailure<S>>>` → `Result<Vec<R>, TextWorkflowFileError>` |
+| translate worker | `crates/batchalign/src/translate.rs` | `parse_translate_item_results` | Per-item parsing; engine error, protocol violation and a translation with nothing to apply all → `Err` |
+| utseg worker | `crates/batchalign/src/utseg.rs` | `infer_admitted_batch` | Same shape; the projection to bare responses (`infer_batch`) is gone, so the batch keeps each prediction's evidence |
 | coref worker | `crates/batchalign/src/coref.rs` | `infer_batch` | Per-document (one item per file) |
 | morphotag worker | `crates/batchalign/src/morphosyntax/worker.rs` | `infer_batch_single` | Per-item; Stanza-parse-failure folded into per-item Err |
 | Python worker (utseg) | `batchalign/inference/utseg.py` | `_parse_tree_indices` | Raises `AttributeError` on malformed tree (previously returned `[]`) |
+| transcribe (ASR) | `crates/batchalign/src/pipeline/transcribe.rs` | `stage_asr_postprocess` | The engine recognized no words: `EmptyTranscription::Asr`. This returned `Ok(())` until 2026-09-16, and CHAT assembly then wrote a headers-only file that the job reported as a success |
+| transcribe (post-processing) | `crates/batchalign/src/pipeline/transcribe.rs` | `stage_asr_postprocess` | Words came back and post-processing kept no utterance from them: `EmptyTranscription::Postprocess` |
+| transcribe (CHAT assembly) | `crates/batchalign/src/pipeline/transcribe.rs` | `stage_build_chat` | Utterances reached assembly and none held content, which is what a punctuation-only monologue produces: `EmptyTranscription::ChatBuild { described }` |
+
+The three transcribe seams share one typed error, `EmptyTranscription`, whose
+variant names the stage that produced nothing: a reader of the failure does not
+have to guess which of them came up empty, and an empty transcript is never
+written as a completed job. It answers 422 (the request was fine and the server
+worked; the media yielded no words) and classifies as
+`FailureCategory::Validation`, so it is outside the retry set.
 
 ## What's NOT covered by this rule
 

@@ -35,7 +35,7 @@ class FakeBoundaryModel:
         }
         return UtteranceBoundaryPrediction(
             model_id="test/utterance",
-            model_revision="revision-1",
+            model_revision="0123456789abcdef0123456789abcdef01234567",
             word_evidence=tuple(
                 ClassifiedBoundaryEvidence(
                     raw_action=actions.get(word, BoundaryAction.ORDINARY),
@@ -123,7 +123,7 @@ def test_compare_retained_asr_files_reports_only_assignment_changing_replay(
     assert report.population.word_count == 4
     assert report.population.excluded_provider_tag_count == 1
     assert report.model.model_id == "test/utterance"
-    assert report.model.revision == "revision-1"
+    assert report.model.revision == "0123456789abcdef0123456789abcdef01234567"
     assert report.assignment_changing_difference_count == 1
     assert report.per_input[0].restored_boundary_count == 1
     restored = report.restored_boundaries[0]

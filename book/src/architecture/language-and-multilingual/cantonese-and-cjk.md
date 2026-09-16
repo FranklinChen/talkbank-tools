@@ -58,68 +58,107 @@ projection from raw provider output into monologues and timed-word payloads
 
 - **Tencent**: `ResultDetail` with pre-segmented `Words` array → absolute
   timestamps computed from segment start + word offset.
-- **FunASR**: Raw text + per-character timestamps → `cantonese_char_tokens()`
-  splits and normalizes; timestamps interpolated.
+- **FunASR**: FunASR's own unit list (`words` or `raw_text`) paired with its
+  per-unit timestamps, counts checked before pairing.
 - **Aliyun**: Sentence-level results with optional per-word timing →
   fallback character tokenization when per-word timing unavailable.
 
-Tencent words with zero or negative duration (`end_ms <= start_ms`) are
-filtered in `timed_words()`. FunASR timestamps are sort-normalized into
-start-time order before downstream processing.
+No word is filtered by its duration. Every time is admitted by
+`AdmittedInterval`, the one owner of rounding and range admission: an inverted
+pair (`end_ms < start_ms`) is inadmissible and refuses the file by name, giving
+the provider, the position and the fault, while a zero-width span becomes an
+untimed word carrying `UntimedCause::ZeroLengthSpan`, because a span covering
+no time cannot locate a word in audio. The word keeps its surface either way;
+only a word with an admitted interval reaches `timed_words()`. FunASR
+timestamps are sort-normalized into start-time order before downstream
+processing.
 
-## Text Normalization: Rust-Only
+**No provider bridge normalizes text.** Every surface crosses as the provider
+wrote it; the section below says where normalization does happen.
 
-Cantonese ASR engines (FunASR, Tencent, Aliyun) return text in simplified
-Chinese or with Mainland character variants. CHAT corpora require
+## Text Normalization: one owner in the server
+
+Cantonese ASR engines (FunASR, Tencent, Aliyun, Qwen, Whisper) return text in
+simplified Chinese or with Mainland character variants. CHAT corpora require
 Traditional Chinese with domain-specific corrections. Normalization runs
 automatically for `lang=yue`; no configuration, no opt-out.
 
 ```mermaid
 flowchart LR
-    input["Raw ASR text\n(simplified/mixed)"]
+    input["One monologue's words\n(provider surfaces)"]
+    joined["Joined into one run"]
     OpenCC["OpenCC s2hk\nconversion"]
     replace["Domain replacements\n(Aho-Corasick)"]
-    output["Normalized text"]
+    check{"same character\ncount?"}
+    refill["Each word gets back\nexactly its own characters"]
+    refuse["NormalizationChangedLength\n(file refused)"]
 
-    input --> OpenCC --> replace --> output
+    input --> joined --> OpenCC --> replace --> check
+    check -->|yes| refill
+    check -->|no| refuse
 ```
 
-Implementation: `crates/talkbank-transform/src/asr_postprocess/cantonese.rs`.
+Implementation: `crates/batchalign-transform/src/asr_postprocess/cantonese.rs`.
 
+- **`AlignedNormalization` is the only route to normalized Cantonese text.**
+  `normalize_cantonese` itself is private. The type takes a RUN of units, not a
+  string, because the engines report one unit per Han character and a
+  two-character replacement (`真系` to `真係`) cannot match inside a single
+  character. It normalizes the concatenation once and hands each unit back
+  exactly as many characters as it contributed.
+- **The constructor is the proof.** Refilling is only sound while the character
+  count is unchanged, so the constructor checks it and returns
+  `NormalizationChangedLength` (carrying both counts) otherwise. The ASR
+  pipeline pairs units with per-unit timings, so a count change would shift
+  every later timing while the text still looked plausible.
 - **`ferrous-opencc`** (pure-Rust crate) embeds OpenCC's `S2hk` conversion
   tables in the build. No C++ dependency, no optional import, no fallback
-  path. Compiled into `batchalign_core.so`.
+  path.
 - **31-entry domain replacement table**: Aho-Corasick with
   `LeftmostLongest` matching ensures multi-character patterns
   (e.g., `聯係`→`聯繫`) take priority over single-character ones
   (`系`→`係`). Multi-character entries (13) match before single-character
-  entries (18).
+  entries (18). Every entry maps N characters to N characters, and a unit test
+  holds that.
+- **Why one owner matters here:** the transformation is NOT idempotent. The
+  table maps `繫` to `係`, so normalizing an already-normalized `聯繫` yields
+  `聯係`. Before 2026-09-16 it ran in three places (the provider bridge, the
+  server's stage 4b, and the character tokenizer), so text could be normalized
+  twice or one character at a time.
+- **No Python surface.** `normalize_cantonese` and `cantonese_char_tokens` used
+  to be exported to Python; production called neither, and they offered a second
+  route into a transformation that must run exactly once.
 
-Two PyO3 functions are exposed:
+### Can the refusal actually fire?
 
-```python
-import batchalign_core
-batchalign_core.normalize_cantonese("你真系好吵呀")  # → "你真係好嘈啊"
-batchalign_core.cantonese_char_tokens("真系呀，")  # → ["真", "係", "啊"]
-```
-
-Python `_common.py` delegates to these, zero normalization logic remains
-in Python.
+Not with the tables this build embeds, on any input measured so far.
+`cargo run -p batchalign-transform --example s2hk_length_audit -- <dictionaries>`
+normalizes every Han code point the pipeline recognizes (81,520 of them) plus
+every key and value of OpenCC's own `s2hk` dictionaries (`STPhrases`,
+`STCharacters`, `HKVariantsPhrases`, `HKVariants`,
+`CJK_Compatibility_Ideographs`: 109,605 further strings) and reports how many
+changed length. On 2026-09-16, with `ferrous-opencc` 0.4.0: none of 191,125.
+The refusal stays because a table update is a data change, and the constructor
+is what makes such a change fail loudly instead of silently moving timings.
 
 ### Pipeline integration
 
-`process_raw_asr()` runs normalization as stage 4b, after number expansion
-and before long-turn splitting:
+Normalization runs inside `prepare_words_pre_expansion()`, once per monologue,
+BEFORE anything splits the words:
 
 ```text
 1.  Compound merging
 2.  Timed word extraction (seconds → ms)
+2d. Cantonese normalization (simplified → traditional + domain table)
 3.  Multi-word splitting (timestamp interpolation)
 4.  Number expansion (digits → traditional Chinese characters)
-4b. Cantonese normalization (simplified → traditional + domain table)
 5.  Long-turn splitting (>300 words)
 6.  Retokenization (punctuation-based utterance splitting)
 ```
+
+It has to precede stage 3: that stage interpolates timestamps across a token's
+characters, so it must see final text, and normalizing after it would normalize
+one character at a time.
 
 ### UTF-8-safe retokenization
 
@@ -273,9 +312,10 @@ that handles POS and depparse jointly.
 ### Rust
 
 ```text
-crates/talkbank-transform/src/asr_postprocess/
-├── mod.rs: Pipeline: process_raw_asr() with Cantonese stage 4b
-├── cantonese.rs: normalize_cantonese(), cantonese_char_tokens()
+crates/batchalign-transform/src/asr_postprocess/
+├── mod.rs: Pipeline: process_raw_asr()
+├── prepare.rs: stage 2d, one Cantonese run per monologue
+├── cantonese.rs: AlignedNormalization (the one owner), cantonese_char_tokens()
 ├── compounds.rs: Compound word merging
 ├── num2text.rs: Number expansion
 └── num2chinese.rs: Chinese/Japanese number converter
@@ -292,8 +332,7 @@ crates/batchalign-types/src/worker_v2/requests.rs: MorphosyntaxRequestV2.retoken
 ```text
 batchalign/inference/languages/cantonese/
 ├── __init__.py: Engine registration
-├── _common.py: normalize_cantonese_text() (delegates to Rust),
-│                         read_asr_config(), provider_lang_code()
+├── _common.py: read_asr_config(), parse_timestamp_pair()
 ├── _tencent_asr.py: Tencent Cloud ASR load/infer
 ├── _tencent_api.py: TencentRecognizer class
 ├── _aliyun_asr.py: Aliyun NLS WebSocket ASR

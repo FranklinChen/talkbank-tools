@@ -1,16 +1,40 @@
 //! Durable utterance-segmentation evidence for controlled experiments.
 
+use std::collections::BTreeSet;
+use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::types::worker_v2::UtsegBoundaryModelEvidenceV2;
-use crate::utseg::{AdmittedUtsegPrediction, LocalUtsegDecisionReceipt};
+use crate::api::{InvalidStampSafeText, StampJoiner, StampSafeText};
+use crate::provenance::EngineNames;
+use crate::types::worker_v2::{HubCommitV2, UtsegBoundaryModelEvidenceV2};
+use crate::utseg::{
+    AdmittedUtsegPrediction, LocalUtsegDecisionReceipt, UtsegPredictionOrigin, admit_prediction,
+};
 use batchalign_transform::utseg::UtsegBatchItem;
 
+/// The evidence schema this build writes, and the only one it reads back.
+///
+/// One owner for the writer and the reader: an artifact whose version is not
+/// this one is refused by name rather than read as though its shape were
+/// current.
+///
+/// 4 since a boundary model's revision became a required part of its identity.
+/// A schema-3 artifact is refused rather than read, and that is a semantic
+/// decision rather than a convenience: its revision, where it has one at all,
+/// records whatever a FLOATING load happened to resolve to on the day it ran,
+/// scraped from `config._commit_hash`. Reading it back into a type whose
+/// meaning is "the revision the plan pinned and the worker verified" would
+/// silently reinterpret an accident as a pin. The refusal names the artifact
+/// and tells an operator to regenerate it, which is cheap: these sidecars are
+/// `--debug-dir` research artifacts, not a result cache, and no placeholder is
+/// invented for the ones that never recorded a revision.
+const SCHEMA_VERSION: u8 = 4;
+
 /// Location in transcribe at which utterance segmentation ran.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UtsegEvidencePhase {
     /// Segmentation over timed ASR chunks before CHAT construction.
@@ -28,18 +52,31 @@ impl UtsegEvidencePhase {
     }
 }
 
+impl fmt::Display for UtsegEvidencePhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.filename_component())
+    }
+}
+
 /// Complete, versioned evidence from one utterance-segmentation batch.
-#[derive(Debug, Serialize)]
+///
+/// Both directions of the artifact: written by [`Self::from_predictions`] and
+/// read back by [`AdmittedUtsegEvidence::admit`], so the shape on disk has one
+/// definition and the replay cannot drift from the writer.
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct UtsegEvidenceTrace {
+    /// 4 since a boundary model's revision became required; 3 removed the
+    /// top-level `engine_version`, which inside transcribe carried the ASR
+    /// engine's version and never the segmenter's. Each item's prediction
+    /// already names its own source and model.
     schema_version: u8,
     phase: UtsegEvidencePhase,
     language: String,
-    engine_version: String,
     items: Vec<UtsegEvidenceItem>,
 }
 
 /// One request and the admitted prediction that is safe to apply to it.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct UtsegEvidenceItem {
     item_ordinal: usize,
     words: Vec<String>,
@@ -48,7 +85,7 @@ struct UtsegEvidenceItem {
 }
 
 /// Closed set of inference sources that can produce utseg assignments.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 enum UtsegEvidencePrediction {
     /// TalkBank boundary model with raw and applied per-word evidence.
@@ -80,7 +117,6 @@ impl UtsegEvidenceTrace {
     pub(crate) fn from_predictions(
         phase: UtsegEvidencePhase,
         language: &str,
-        engine_version: &str,
         requests: &[(usize, UtsegBatchItem)],
         predictions: &[AdmittedUtsegPrediction],
     ) -> Result<Self, UtsegEvidenceShapeError> {
@@ -130,12 +166,271 @@ impl UtsegEvidenceTrace {
             .collect();
 
         Ok(Self {
-            schema_version: 2,
+            schema_version: SCHEMA_VERSION,
             phase,
             language: language.to_owned(),
-            engine_version: engine_version.to_owned(),
             items,
         })
+    }
+}
+
+/// One retained evidence artifact, admitted.
+///
+/// Existence proves three things about the bytes it was read from: they are
+/// this build's schema, they record the phase the replay asked for, and every
+/// item's prediction passed the same admission a live worker result passes
+/// ([`admit_prediction`]). A replay can therefore reapply what it holds without
+/// re-checking anything, and cannot reapply an artifact that was never checked,
+/// because there is no other way to obtain this type.
+pub(crate) struct AdmittedUtsegEvidence {
+    language: String,
+    items: Vec<AdmittedUtsegEvidenceItem>,
+}
+
+/// One admitted item: the request that was dispatched and the prediction the
+/// run applied to it.
+pub(crate) struct AdmittedUtsegEvidenceItem {
+    /// The transcript position the producer recorded this request under.
+    pub(crate) item_ordinal: usize,
+    /// The words and text exactly as they were dispatched.
+    pub(crate) request: UtsegBatchItem,
+    /// The prediction that was applied, re-admitted against that request.
+    pub(crate) prediction: AdmittedUtsegPrediction,
+}
+
+/// Why a retained evidence artifact cannot be admitted.
+///
+/// Every variant names what failed, so a refusal tells an operator which
+/// artifact to regenerate rather than only that the replay stopped.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UtsegEvidenceAdmissionError {
+    /// The bytes are not the JSON this artifact is written as.
+    #[error("retained utseg evidence is not readable as this artifact: {0}")]
+    Malformed(#[from] serde_json::Error),
+    /// The artifact was written by a build whose schema this one cannot read.
+    #[error(
+        "retained utseg evidence is schema {found}, and this build reads schema {expected}; \
+         regenerate the evidence with this build"
+    )]
+    UnsupportedSchema {
+        /// The version the artifact declares.
+        found: u8,
+        /// The version this build reads.
+        expected: u8,
+    },
+    /// The artifact records the other segmentation pass.
+    #[error(
+        "retained utseg evidence records the {found} pass, and this replay reproduces the \
+         {expected} pass"
+    )]
+    WrongPhase {
+        /// The pass the artifact records.
+        found: UtsegEvidencePhase,
+        /// The pass this replay needs.
+        expected: UtsegEvidencePhase,
+    },
+    /// One item's prediction does not fit the request retained with it.
+    #[error(
+        "retained utseg evidence item {index} (transcript position {item_ordinal}) is not \
+         applicable to the request retained with it: {reason}"
+    )]
+    Item {
+        /// Position in the artifact's item list.
+        index: usize,
+        /// The transcript position that item records.
+        item_ordinal: usize,
+        /// What admission refused.
+        reason: String,
+    },
+}
+
+impl AdmittedUtsegEvidence {
+    /// Admit one retained artifact for the pass a replay reproduces.
+    ///
+    /// `expected_phase` is a value the caller's mode determines, not a flag a
+    /// user sets, so a post-CHAT replay cannot be handed a pre-CHAT artifact.
+    pub(crate) fn admit(
+        bytes: &[u8],
+        expected_phase: UtsegEvidencePhase,
+    ) -> Result<Self, UtsegEvidenceAdmissionError> {
+        let trace: UtsegEvidenceTrace = serde_json::from_slice(bytes)?;
+        if trace.schema_version != SCHEMA_VERSION {
+            return Err(UtsegEvidenceAdmissionError::UnsupportedSchema {
+                found: trace.schema_version,
+                expected: SCHEMA_VERSION,
+            });
+        }
+        if trace.phase != expected_phase {
+            return Err(UtsegEvidenceAdmissionError::WrongPhase {
+                found: trace.phase,
+                expected: expected_phase,
+            });
+        }
+
+        let mut items = Vec::with_capacity(trace.items.len());
+        for (index, item) in trace.items.into_iter().enumerate() {
+            let item_ordinal = item.item_ordinal;
+            let request = UtsegBatchItem {
+                words: item.words,
+                text: item.text,
+            };
+            let refuse = |reason: String| UtsegEvidenceAdmissionError::Item {
+                index,
+                item_ordinal,
+                reason,
+            };
+            let prediction = match item.prediction {
+                UtsegEvidencePrediction::BoundaryModel {
+                    assignments,
+                    evidence,
+                    local_decision,
+                } => {
+                    let admitted = admit_prediction(
+                        &request,
+                        assignments,
+                        UtsegPredictionOrigin::BoundaryModel(&evidence),
+                    )
+                    .map_err(refuse)?;
+                    match local_decision {
+                        Some(receipt) => {
+                            admitted.with_local_decision(receipt).map_err(refuse)?
+                        }
+                        None => admitted,
+                    }
+                }
+                UtsegEvidencePrediction::UnobservedAssignments { assignments } => admit_prediction(
+                    &request,
+                    assignments,
+                    UtsegPredictionOrigin::UnnamedWorker,
+                )
+                .map_err(refuse)?,
+                UtsegEvidencePrediction::Constituency { assignments } => {
+                    admit_prediction(&request, assignments, UtsegPredictionOrigin::Constituency)
+                        .map_err(refuse)?
+                }
+            };
+            items.push(AdmittedUtsegEvidenceItem {
+                item_ordinal,
+                request,
+                prediction,
+            });
+        }
+
+        Ok(Self {
+            language: trace.language,
+            items,
+        })
+    }
+
+    /// The language the run recorded, and the admitted items, together: the
+    /// two halves of the artifact a replay needs, handed over at once so
+    /// neither is read from a different artifact than the other.
+    pub(crate) fn into_parts(self) -> (String, Vec<AdmittedUtsegEvidenceItem>) {
+        (self.language, self.items)
+    }
+}
+
+/// The inference source behind one admitted utterance-boundary prediction,
+/// borrowed from the prediction and rendered once into provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UtsegEngineIdentity<'a> {
+    /// A TalkBank boundary model, by model id and the exact revision it was
+    /// loaded at. Both halves always exist: the model is loaded from a pinned
+    /// snapshot, so there is no boundary model without a revision to name.
+    BoundaryModel {
+        model_id: &'a str,
+        model_revision: &'a HubCommitV2,
+    },
+    /// Stanza constituency-tree projection.
+    StanzaConstituency,
+    /// A worker that returned assignments without exposing their source.
+    UnobservedWorker,
+}
+
+impl<'a> UtsegEngineIdentity<'a> {
+    /// Name the source of one admitted prediction.
+    fn of(prediction: &'a AdmittedUtsegPrediction) -> Self {
+        match prediction {
+            AdmittedUtsegPrediction::BoundaryModelWorkerDeclared { evidence, .. }
+            | AdmittedUtsegPrediction::BoundaryModelLocallyReapplied { evidence, .. } => {
+                Self::BoundaryModel {
+                    model_id: &evidence.model_id,
+                    model_revision: &evidence.model_revision,
+                }
+            }
+            AdmittedUtsegPrediction::UnobservedAssignments { .. } => Self::UnobservedWorker,
+            AdmittedUtsegPrediction::Constituency { .. } => Self::StanzaConstituency,
+        }
+    }
+}
+
+impl UtsegEngineIdentity<'_> {
+    /// The name provenance records for this source, or `None` when this source
+    /// has no name to record.
+    ///
+    /// A boundary model is always `<model id>@<revision>`: a stamp states what
+    /// the worker said and nothing else, so there is no `unrecorded-revision`
+    /// placeholder and no `unobserved-worker` stand-in. The id-only form is
+    /// gone rather than merely unused: the revision is a required part of the
+    /// model's identity, so a boundary model with no revision to name has no
+    /// representation here and no branch to render it. A worker that returned
+    /// assignments without naming their source contributes no name at all, and
+    /// a file whose sources are all unnamed gets no stamp.
+    ///
+    /// Fallible only for a boundary model: its id comes from the worker's
+    /// prediction evidence as plain text, so it is admitted here as stamp-safe
+    /// text before it is joined. The revision needs no such admission, because
+    /// a [`HubCommitV2`] is 40 hexadecimal characters and therefore already
+    /// stamp-safe.
+    fn stamp_name(&self) -> Result<Option<StampSafeText>, InvalidStampSafeText> {
+        match self {
+            Self::BoundaryModel {
+                model_id,
+                model_revision,
+            } => {
+                let model_id = StampSafeText::try_from(*model_id)?;
+                Ok(Some(StampSafeText::join(
+                    &model_id,
+                    [&StampSafeText::try_from(model_revision.as_str())?],
+                    StampJoiner::At,
+                )))
+            }
+            Self::StanzaConstituency => Ok(Some(
+                const { StampSafeText::from_static("stanza-constituency") },
+            )),
+            Self::UnobservedWorker => Ok(None),
+        }
+    }
+}
+
+/// Every distinct inference source behind one run's applied utterance
+/// boundaries, never empty.
+///
+/// Built only from admitted predictions, so what provenance names is what
+/// actually segmented the file rather than the pipeline's engine version
+/// (which inside transcribe belongs to the ASR engine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UtsegEngineIdentities<'a>(BTreeSet<UtsegEngineIdentity<'a>>);
+
+impl<'a> UtsegEngineIdentities<'a> {
+    /// `None` when there were no predictions, because nothing was segmented.
+    pub(crate) fn from_predictions(predictions: &'a [AdmittedUtsegPrediction]) -> Option<Self> {
+        let identities: BTreeSet<_> = predictions.iter().map(UtsegEngineIdentity::of).collect();
+        (!identities.is_empty()).then_some(Self(identities))
+    }
+}
+
+impl UtsegEngineIdentities<'_> {
+    /// The `engine=` names, one per distinct source that has one, or the first
+    /// source whose name is not stamp-safe text.
+    ///
+    /// Empty when no source named itself, which is not a stamp: see
+    /// [`UtsegEngineIdentity::stamp_name`].
+    pub(crate) fn engine_names(&self) -> Result<EngineNames, InvalidStampSafeText> {
+        self.0
+            .iter()
+            .filter_map(|identity| identity.stamp_name().transpose())
+            .collect()
     }
 }
 
@@ -284,6 +579,14 @@ mod tests {
     use crate::utseg::AdmittedUtsegPrediction;
     use batchalign_transform::utseg::{UtsegBatchItem, UtsegResponse};
 
+    /// A commit-shaped revision for fixtures. The evidence type admits nothing
+    /// else, so a fixture can no longer carry a placeholder like `revision-1`.
+    const TEST_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn test_commit() -> HubCommitV2 {
+        HubCommitV2::try_from(TEST_COMMIT).expect("valid fixture commit")
+    }
+
     fn request() -> UtsegBatchItem {
         UtsegBatchItem {
             words: vec!["hello".to_owned(), "there".to_owned()],
@@ -298,7 +601,7 @@ mod tests {
             },
             evidence: UtsegBoundaryModelEvidenceV2 {
                 model_id: "talkbank/utterance-boundary".to_owned(),
-                model_revision: Some("revision-1".to_owned()),
+                model_revision: test_commit(),
                 normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
                 adjacency_policy_revision:
                     UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
@@ -315,24 +618,23 @@ mod tests {
         let trace = UtsegEvidenceTrace::from_predictions(
             UtsegEvidencePhase::PreChat,
             "eng",
-            "engine-test-1",
             &[(0, request())],
             &[prediction()],
         )
         .expect("parallel admitted predictions should form a trace");
 
         let value = serde_json::to_value(trace).expect("serialize evidence trace");
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(value["phase"], "pre_chat");
         assert_eq!(value["language"], "eng");
-        assert_eq!(value["engine_version"], "engine-test-1");
+        assert!(value.get("engine_version").is_none());
         assert_eq!(value["items"][0]["words"][1], "there");
         assert_eq!(value["items"][0]["text"], "hello there");
         assert_eq!(value["items"][0]["prediction"]["source"], "boundary_model");
         assert_eq!(value["items"][0]["prediction"]["assignments"][1], 1);
         assert_eq!(
             value["items"][0]["prediction"]["evidence"]["model_revision"],
-            "revision-1"
+            TEST_COMMIT
         );
     }
 
@@ -341,7 +643,6 @@ mod tests {
         let error = UtsegEvidenceTrace::from_predictions(
             UtsegEvidencePhase::PostChat,
             "eng",
-            "engine-test-1",
             &[(0, request())],
             &[],
         )
@@ -358,7 +659,6 @@ mod tests {
         let trace = UtsegEvidenceTrace::from_predictions(
             UtsegEvidencePhase::PreChat,
             "eng",
-            "engine-test-1",
             &[(0, request())],
             &[prediction()],
         )
@@ -376,5 +676,58 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).expect("read persisted trace"))
                 .expect("parse persisted trace");
         assert_eq!(value, expected);
+    }
+
+    /// The `engine=` value the sources behind `predictions` join into.
+    fn joined(predictions: &[AdmittedUtsegPrediction]) -> Option<String> {
+        UtsegEngineIdentities::from_predictions(predictions)
+            .expect("predictions were applied")
+            .engine_names()
+            .expect("stamp-safe sources")
+            .joined()
+            .map(|joined| joined.as_str().to_owned())
+    }
+
+    #[test]
+    fn engine_identities_name_the_boundary_model_and_its_revision() {
+        assert_eq!(
+            joined(&[prediction(), prediction()]),
+            Some(format!("talkbank/utterance-boundary@{TEST_COMMIT}"))
+        );
+    }
+
+    /// RED FIRST (review item 2): no placeholder names. A worker that returned
+    /// assignments without naming their source contributes nothing, so a file
+    /// segmented only by such a worker has no `engine=` to write and gets no
+    /// stamp. That used to be written as an invented `unobserved-worker`.
+    ///
+    /// The companion case, a boundary model recorded by its id alone, is no
+    /// longer testable and that is the point: the revision is part of the
+    /// model's identity, so `<id>` with no revision has no representation to
+    /// construct. The compiler refuses the fixture this test used to build.
+    #[test]
+    fn a_source_that_names_nothing_contributes_no_engine_name() {
+        let unobserved = AdmittedUtsegPrediction::UnobservedAssignments {
+            response: UtsegResponse {
+                assignments: vec![0, 0],
+            },
+        };
+        assert_eq!(joined(&[unobserved]), None);
+    }
+
+    #[test]
+    fn engine_identities_list_each_distinct_source_and_are_absent_for_no_predictions() {
+        let constituency = AdmittedUtsegPrediction::Constituency {
+            response: UtsegResponse {
+                assignments: vec![0, 0],
+            },
+        };
+        assert_eq!(
+            joined(&[prediction(), constituency]),
+            Some(format!(
+                "stanza-constituency+talkbank/utterance-boundary@{TEST_COMMIT}"
+            ))
+        );
+        assert_eq!(UtsegEngineIdentities::from_predictions(&[]), None);
     }
 }

@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::EngineVersion;
+use crate::api::ReportedEngineName;
 use crate::chat_ops::CacheKey;
+use crate::engine_reports::FaCacheNamespace;
 use crate::types::engines::{FaEngineName, FaTimingResolution};
 use crate::types::worker_v2::{ExecuteOutcomeRef, ExecuteResponseV2, TaskResultV2};
 
@@ -31,8 +32,37 @@ enum FaRequestEngineVersionOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FaRequestEngineIdentity {
-    version: EngineVersion,
+    /// The FA engine name the request was namespaced by, byte for byte.
+    version: ReportedEngineName,
     origin: FaRequestEngineVersionOrigin,
+}
+
+/// The request identity of admitted evidence: the FA cache namespace itself,
+/// not its name.
+///
+/// Admitted evidence was either built under the live namespace or proven,
+/// when decoded, to name the namespace it is being read under, so it holds
+/// that [`FaCacheNamespace`] rather than a name that must be compared again.
+/// It serializes as the wire [`FaRequestEngineIdentity`] (`version`, `origin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FaRequestNamespace {
+    namespace: FaCacheNamespace,
+    origin: FaRequestEngineVersionOrigin,
+}
+
+impl Serialize for FaRequestNamespace {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            version: &'a ReportedEngineName,
+            origin: FaRequestEngineVersionOrigin,
+        }
+        Wire {
+            version: self.namespace.name(),
+            origin: self.origin,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// Expected main-tier word cardinality attached to one FA request.
@@ -70,7 +100,7 @@ pub(super) enum FaEvidenceRoute<'a> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(super) struct FaRawEvidence {
     schema_version: u8,
-    request_engine_identity: FaRequestEngineIdentity,
+    request_engine_identity: FaRequestNamespace,
     requested_engine: FaEngineName,
     effective_engine: FaEngineName,
     expected_words: ExpectedFaWords,
@@ -107,8 +137,8 @@ pub(super) enum FaRawEvidenceError {
         "cached forced-alignment request namespace {cached} does not match selected worker version {current}"
     )]
     EngineVersionDrift {
-        cached: EngineVersion,
-        current: EngineVersion,
+        cached: ReportedEngineName,
+        current: ReportedEngineName,
     },
     #[error(
         "cached forced-alignment evidence requested {cached:?}, not current engine {current:?}"
@@ -170,7 +200,7 @@ impl FaRawEvidence {
     pub(super) fn admit_requested(
         response: &ExecuteResponseV2,
         requested_engine: FaEngineName,
-        request_engine_version: &EngineVersion,
+        cache_namespace: &FaCacheNamespace,
         expected_words: ExpectedFaWords,
         cache_key: &CacheKey,
         route: FaEvidenceRoute<'_>,
@@ -234,8 +264,8 @@ impl FaRawEvidence {
 
         Ok(Self {
             schema_version: FA_RAW_EVIDENCE_SCHEMA_VERSION,
-            request_engine_identity: FaRequestEngineIdentity {
-                version: request_engine_version.clone(),
+            request_engine_identity: FaRequestNamespace {
+                namespace: cache_namespace.clone(),
                 origin: FaRequestEngineVersionOrigin::SelectedWorkerCapability,
             },
             requested_engine,
@@ -282,14 +312,14 @@ impl ReplayableFaRawEvidence {
     pub(super) fn decode(
         value: serde_json::Value,
         requested_engine: FaEngineName,
-        current_engine_version: &EngineVersion,
+        cache_namespace: &FaCacheNamespace,
         expected_words: ExpectedFaWords,
         cache_key: &CacheKey,
     ) -> Result<Self, FaRawEvidenceError> {
         let raw: RawFaRawEvidence = serde_json::from_value(value)?;
         let request_engine_identity = match (raw.schema_version, raw.request_engine_identity) {
             (1, None) => FaRequestEngineIdentity {
-                version: current_engine_version.clone(),
+                version: cache_namespace.name().clone(),
                 origin: FaRequestEngineVersionOrigin::LegacyCacheNamespace,
             },
             (1, Some(_)) => return Err(FaRawEvidenceError::UnexpectedLegacyEngineIdentity),
@@ -301,12 +331,18 @@ impl ReplayableFaRawEvidence {
             }
             (version, _) => return Err(FaRawEvidenceError::SchemaVersion(version)),
         };
-        if &request_engine_identity.version != current_engine_version {
+        if &request_engine_identity.version != cache_namespace.name() {
             return Err(FaRawEvidenceError::EngineVersionDrift {
                 cached: request_engine_identity.version,
-                current: current_engine_version.clone(),
+                current: cache_namespace.name().clone(),
             });
         }
+        // Proven equal just above, so the evidence holds the namespace it is
+        // read under from here on.
+        let request_engine_identity = FaRequestNamespace {
+            namespace: cache_namespace.clone(),
+            origin: request_engine_identity.origin,
+        };
         if raw.requested_engine != requested_engine {
             return Err(FaRawEvidenceError::RequestedEngineDrift {
                 cached: raw.requested_engine,
@@ -330,7 +366,7 @@ impl ReplayableFaRawEvidence {
         let admitted = FaRawEvidence::admit_requested(
             &raw.response,
             requested_engine,
-            current_engine_version,
+            cache_namespace,
             expected_words,
             cache_key,
             route,
@@ -357,8 +393,10 @@ impl ReplayableFaRawEvidence {
         self.0.requested_engine
     }
 
-    pub(super) fn request_engine_version(&self) -> &EngineVersion {
-        &self.0.request_engine_identity.version
+    /// The FA cache namespace this evidence was requested, and admitted,
+    /// under.
+    pub(super) fn request_engine_version(&self) -> &FaCacheNamespace {
+        &self.0.request_engine_identity.namespace
     }
 
     pub(super) fn expected_words(&self) -> ExpectedFaWords {
@@ -384,8 +422,8 @@ mod tests {
         CacheKey::from_content(label)
     }
 
-    fn engine_version() -> EngineVersion {
-        EngineVersion::from("test-fa-wave-v1")
+    fn engine_version() -> FaCacheNamespace {
+        FaCacheNamespace::for_test("test-fa-wave-v1")
     }
 
     #[test]
@@ -649,7 +687,7 @@ mod tests {
             }),
             DurationSeconds(0.01),
         );
-        let admitted_version = EngineVersion::from("test-fa-wave-v1");
+        let admitted_version = FaCacheNamespace::for_test("test-fa-wave-v1");
         let evidence = FaRawEvidence::admit_requested(
             &response,
             FaEngineName::Wave2Vec,
@@ -663,7 +701,7 @@ mod tests {
         let error = ReplayableFaRawEvidence::decode(
             serde_json::to_value(evidence).expect("serialize evidence"),
             FaEngineName::Wave2Vec,
-            &EngineVersion::from("test-fa-wave-v2"),
+            &FaCacheNamespace::for_test("test-fa-wave-v2"),
             ExpectedFaWords::new(1),
             &cache_key("version-drift"),
         )

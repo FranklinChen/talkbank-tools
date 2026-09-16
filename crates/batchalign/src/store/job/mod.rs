@@ -342,6 +342,7 @@ mod tests {
             Some(CompletedFileOutput {
                 filename: DisplayPath::from("a.cha"),
                 content_type: ContentType::Chat,
+                stamp: crate::api::FileStampOutcome::Unrecorded,
             })
         ));
 

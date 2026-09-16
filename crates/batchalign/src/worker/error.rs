@@ -162,6 +162,15 @@ pub enum WorkerError {
     #[error("worker runtime identity differs from the runtime pinned by this server")]
     RuntimeIdentityMismatch,
 
+    /// The worker's capability report was refused where the pool admits it:
+    /// an advertised task with no engine entry, or an engine entry for a task
+    /// it did not advertise.
+    ///
+    /// **Terminal** -- the same worker code reports the same thing again; the
+    /// report, not the connection, is wrong.
+    #[error(transparent)]
+    CapabilitiesRefused(#[from] crate::engine_reports::EngineReportAdmissionError),
+
     /// Low-level I/O failure on the stdin/stdout pipes to the worker process.
     ///
     /// Usually means the pipe was closed (worker crashed) or a system-level
@@ -220,6 +229,46 @@ pub enum WorkerError {
     /// against. Callers should let the job unwind.
     #[error("worker pool is shutting down")]
     PoolShuttingDown,
+}
+
+/// What a failed exchange leaves of the worker it ran on: whether the worker
+/// may serve another request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerAfterFailure {
+    /// The worker answered with a complete error response and its connection
+    /// is in step with the protocol: it goes back to its pool.
+    Reusable,
+    /// The connection or process can no longer be trusted (a stream that may
+    /// be half-read, a dead process, a timeout whose late reply could still
+    /// arrive), or the worker is not admissible: it is retired, not reused.
+    Retire,
+}
+
+impl WorkerError {
+    /// Whether the worker an exchange failed on may be reused.
+    ///
+    /// Matched on every variant, so a new error kind must decide. Kinds that
+    /// cannot arise from an exchange on a live worker (spawn, ready and
+    /// admission failures) answer `Retire`, the conservative choice.
+    pub(crate) fn worker_after_failure(&self) -> WorkerAfterFailure {
+        match self {
+            Self::WorkerResponse(_)
+            | Self::Bootstrap(_)
+            | Self::MemoryGuard(_)
+            | Self::NoWorker { .. }
+            | Self::PoolShuttingDown => WorkerAfterFailure::Reusable,
+            Self::SpawnFailed(_)
+            | Self::ReadyTimeout { .. }
+            | Self::ReadyParseFailed(_)
+            | Self::HealthCheckFailed(_)
+            | Self::ProcessExited { .. }
+            | Self::Protocol(_)
+            | Self::Io(_)
+            | Self::RuntimeIdentityMismatch
+            // A worker whose capability report was refused is not used.
+            | Self::CapabilitiesRefused(_) => WorkerAfterFailure::Retire,
+        }
+    }
 }
 
 impl From<super::runtime_identity::WorkerRuntimeMismatch> for WorkerError {

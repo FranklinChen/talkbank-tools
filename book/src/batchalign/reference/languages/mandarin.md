@@ -1,7 +1,7 @@
 # Mandarin Language Support
 
 **Status:** Current
-**Last updated:** 2026-08-05 20:38 EDT
+**Last updated:** 2026-09-16 03:36 EDT
 
 Mandarin (`cmn`/`zho`) shares the Stanza `zh` model and Chinese number
 expansion system with Cantonese, but has distinct word segmentation behavior.
@@ -30,8 +30,14 @@ Both `cmn` and `zho` map to Stanza `zh` (which is `zh-hans` internally).
 ## ASR engines
 
 An earlier version of this page said Mandarin had "no alternative ASR
-engines". That was incorrect. Every engine works for Mandarin; none of them is
-language-gated.
+engines", and listed Tencent, Aliyun and FunASR as Cantonese-only. That was
+incorrect. Every engine works for Mandarin; none of them is language-gated.
+
+Tencent was the one real gap, and it was a defect rather than a missing
+engine: a Mandarin job asked Tencent for a model named `16k_cmn`, which
+Tencent does not define. Every Han-script variety now asks for
+`16k_zh_large`, the model Tencent does define. See
+[Tencent (cloud ASR)](../language-code-resolution.md#tencent-cloud-asr).
 
 ```bash
 # Paraformer, the usual choice for Mandarin.
@@ -51,6 +57,13 @@ An explicit `--engine-overrides` wins, so pass one to pick a different
 checkpoint. The full engine list is in
 [`transcribe`](../../user-guide/commands/transcribe.md#asr-engines), and
 `batchalign3 transcribe --help` prints the same list.
+
+Whichever route you take, the transcript records what ran. The `paraformer`
+alias resolves to the checkpoint this build pins, together with the
+voice-activity and punctuation models Paraformer loads with it, and all three
+are written into the stamp's `asr_model=` field. A checkpoint this build does
+not pin still loads; it is recorded at the revision the worker reports for it,
+so the transcript names the weights either way rather than only the engine.
 
 Note that Paraformer's checkpoint loads a punctuation model, so its raw output
 carries CJK punctuation; our post-processing converts 。，！？ to token
@@ -159,10 +172,6 @@ Performance may degrade on:
 - Child speech
 - Technical or domain-specific vocabulary
 - Ambiguous compounds (东西, 大小, 多少)
-
-### No Mandarin-specific ASR engine
-Unlike Cantonese (which has Tencent, Aliyun, FunASR), Mandarin uses only
-Whisper. A Mandarin-specific ASR engine could improve CER.
 
 ### No Cantonese normalization
 Text normalization (simplified → traditional + domain replacements) only

@@ -103,6 +103,7 @@ def load_whisper_hub_asr(
     engine_overrides: dict[str, str] | None,
     *,
     device_policy: DevicePolicy | None = None,
+    model_path: str | None = None,
 ) -> WhisperASRHandle:
     """Load an HF Whisper fine-tune and return the shared ``WhisperASRHandle``.
 
@@ -127,7 +128,13 @@ def load_whisper_hub_asr(
     # for a configuration lookup.
     from batchalign.inference.asr import load_whisper_asr
 
-    model_id = resolve_whisper_hub_model_id(lang, engine_overrides)
+    # ``model_path`` is a snapshot the worker already materialized at the
+    # revision the control plane pinned. When it is given, the per-language
+    # table below is not consulted at all: Rust owns which fine-tune a
+    # language gets (`model_manifest`), and resolving it a second time here
+    # could only disagree. The table remains for direct callers that have no
+    # control plane, and for the named "no default for this language" error.
+    model_id = model_path or resolve_whisper_hub_model_id(lang, engine_overrides)
 
     handle = load_whisper_asr(
         model=model_id,

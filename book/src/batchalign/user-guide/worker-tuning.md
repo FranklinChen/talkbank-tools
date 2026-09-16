@@ -1,7 +1,7 @@
 # Worker Tuning
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-09-15 18:27 EDT
 
 This page explains how the server decides how many workers to run, how memory
 budgets work, and how to tune the server for your hardware.
@@ -146,7 +146,14 @@ spawning a second process.
 
 **Registry adoption.** A TCP worker daemon started outside the server registers
 itself in `workers.json`; the server adopts it at startup and routes to it like
-any other worker.
+any other worker. Each entry records the build that started the daemon
+(`build_identity`, from `BATCHALIGN_BUILD_IDENTITY`, which `batchalign3 worker
+start` and the server's own daemon spawner set). A server refuses to adopt a
+daemon from another build, or one whose entry names no build, and logs the
+remedy: stop the daemon (`batchalign3 worker stop`) and start it again with the
+current build. The refused daemon is left running and listed in `/health`
+under `refused_registry_workers`, with its worker key, pid and reason
+(`foreign_build` or `unreported_build`).
 
 Idle workers are then reclaimed by memory-pressure eviction (largest resident
 set first) rather than by a fixed timeout.
@@ -169,9 +176,14 @@ capability probe from the worker it is actually about to use. In practice:
 
 - `/health` may still show an optimistic command surface immediately after boot
 - the first real job pays the worker startup cost and records the detected
-  infer-task/engine-version view
+  infer-task view
 - later jobs reuse that detected capability view instead of the cold-start
   placeholder
+- `align` is advertised whenever a worker supports forced alignment, even
+  before its FA model has loaded; an align job loads the model first and fails
+  only if the worker still names no FA engine after that
+- a worker whose capability report was refused is never used, and is listed
+  with the reason in `/health` under `worker_capability_admissions`
 
 ## server.yaml reference
 

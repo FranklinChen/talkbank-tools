@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::api::LanguageCode3;
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 use crate::pipeline::PipelineServices;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, TokenizationMode};
 use crate::chat_ops::{DependentTier, Header, Line};
@@ -24,8 +24,7 @@ use crate::params::MorphosyntaxParams;
 use crate::pipeline::post_validate::{PostValidated, UtteranceCensus};
 use crate::text_batch::TextBatchFileInput;
 use batchalign_transform::compare::{
-    ComparisonBundle, GoldCoverage, clear_comparison, compare, format_metrics_csv,
-    inject_comparison, project_gold_structurally,
+    clear_comparison, format_metrics_csv, inject_comparison, project_gold_structurally,
 };
 use batchalign_transform::parse::parse_lenient;
 
@@ -106,26 +105,127 @@ fn gate_comparison_output(
         .map_err(|failure| ServerError::Validation(failure.to_string()))
 }
 
-struct ComparisonArtifacts {
-    main_file: crate::chat_ops::ChatFile,
-    gold_file: crate::chat_ops::ChatFile,
-    bundle: ComparisonBundle,
-}
+/// The comparison's states, and the only transitions between them.
+///
+/// The types live in a module of their own so their fields are private to it.
+/// That is the whole mechanism: [`MorphotaggedMain`] can only be made from a
+/// morphotag PROOF and [`ComparisonArtifacts`] can only be made from a
+/// [`MorphotaggedMain`], so there is no route into a comparison that begins
+/// with a `String`. The lenient re-parse this module replaced was reachable
+/// precisely because such a route existed, and deleting the parse without
+/// closing the route would leave it free to grow back.
+mod artifacts {
+    use batchalign_transform::compare::{ComparisonBundle, GoldCoverage, compare};
+    use tracing::info;
 
-fn build_comparison_artifacts_from_morphotagged_main(
-    morphotagged_main: &str,
-    gold_text: &str,
-) -> Result<ComparisonArtifacts, ServerError> {
-    let parser = crate::chat_parser();
-    let (main_file, main_errors) = parse_lenient(&parser, morphotagged_main);
-    if !main_errors.is_empty() {
-        warn!(
-            num_errors = main_errors.len(),
-            "Parse errors in morphotagged main (continuing)"
-        );
+    use crate::chat_ops::ChatFile;
+    use crate::error::ServerError;
+    use crate::pipeline::post_validate::PostValidated;
+
+    /// The morphotagged main transcript, as a document only morphotag's own
+    /// proof can produce.
+    pub(super) struct MorphotaggedMain {
+        /// Private to this module, which is the point: [`Self::from_proof`] is
+        /// the only thing that can fill it, so no caller anywhere, this file's
+        /// own tests included, can mint a main side out of text.
+        file: ChatFile,
     }
 
-    let (gold_file, gold_errors) = parse_lenient(&parser, gold_text);
+    impl MorphotaggedMain {
+        /// THE transition into the comparison: consume morphotag's proof and
+        /// go on in the document it judged.
+        ///
+        /// Fails only for a proof that carries no document at all, which is a
+        /// pass-through; morphotag's two routes both carry one, so the compare
+        /// pipeline does not meet that error. It is returned rather than
+        /// papered over with a parse because parsing here would be the very
+        /// re-parse this graph exists to remove.
+        pub(super) fn from_proof(proof: PostValidated) -> Result<Self, ServerError> {
+            proof
+                .into_judged_document()
+                .map(|file| Self { file })
+                .map_err(|refused| ServerError::Validation(refused.to_string()))
+        }
+    }
+
+    /// One comparison: the two documents, and the bundle comparing THEM.
+    pub(super) struct ComparisonArtifacts {
+        main_file: ChatFile,
+        gold_file: ChatFile,
+        bundle: ComparisonBundle,
+    }
+
+    /// A finished comparison, opened up for the materializers that consume it.
+    ///
+    /// Destructuring only. Nothing turns these parts back into a
+    /// [`ComparisonArtifacts`], so the single-constructor rule above still
+    /// holds: this is how a materializer takes ownership of the documents it
+    /// edits, not a second way to build a comparison.
+    pub(super) struct ComparisonParts {
+        pub(super) main_file: ChatFile,
+        pub(super) gold_file: ChatFile,
+        pub(super) bundle: ComparisonBundle,
+    }
+
+    impl ComparisonArtifacts {
+        /// Compare a proof-carried main side against a gold companion.
+        ///
+        /// The only constructor, and it RUNS the comparison rather than
+        /// accepting one, so the bundle a materializer reads is always the
+        /// comparison of the two documents beside it. Passing a bundle built
+        /// from different documents is not a mistake a caller can make here,
+        /// because a caller does not supply the bundle at all.
+        pub(super) fn build(main: MorphotaggedMain, gold_file: ChatFile) -> Self {
+            // A `FILE.gold.cha` companion is a re-transcription of the same
+            // recording, so main material it does not account for is genuinely
+            // unmatched output.
+            let bundle = compare(&main.file, &gold_file, GoldCoverage::Complete);
+
+            info!(
+                matches = bundle.metrics.matches,
+                insertions = bundle.metrics.insertions,
+                deletions = bundle.metrics.deletions,
+                wer = %format!("{:.4}", bundle.metrics.wer),
+                cwer = %format!("{:.4}", bundle.metrics.cwer),
+                "Compare alignment complete"
+            );
+
+            Self {
+                main_file: main.file,
+                gold_file,
+                bundle,
+            }
+        }
+
+        /// Hand the two documents and their comparison to a materializer.
+        pub(super) fn into_parts(self) -> ComparisonParts {
+            ComparisonParts {
+                main_file: self.main_file,
+                gold_file: self.gold_file,
+                bundle: self.bundle,
+            }
+        }
+    }
+}
+
+use artifacts::{ComparisonArtifacts, ComparisonParts, MorphotaggedMain};
+
+/// Build the comparison from morphotag's proof and the gold companion's text.
+///
+/// The main side arrives as a PROOF and is never parsed here. The gold side is
+/// the one input nothing vouched for: it is read off disk as it is, parsed
+/// leniently, and its parse errors are reported rather than refused. That
+/// asymmetry is deliberate and is the same one [`gate_comparison_output`]
+/// documents: compare's output is judged against what the gold companion HAD,
+/// so refusing the companion for its own faults would refuse a document this
+/// command never damaged.
+fn build_comparison_artifacts_from_proof(
+    morphotagged_main: PostValidated,
+    gold_text: &str,
+) -> Result<ComparisonArtifacts, ServerError> {
+    let main = MorphotaggedMain::from_proof(morphotagged_main)?;
+
+    let (gold_file, gold_errors) = parse_lenient(&crate::chat_parser(), gold_text);
     if !gold_errors.is_empty() {
         warn!(
             num_errors = gold_errors.len(),
@@ -133,24 +233,7 @@ fn build_comparison_artifacts_from_morphotagged_main(
         );
     }
 
-    // A `FILE.gold.cha` companion is a re-transcription of the same recording,
-    // so main material it does not account for is genuinely unmatched output.
-    let bundle = compare(&main_file, &gold_file, GoldCoverage::Complete);
-
-    info!(
-        matches = bundle.metrics.matches,
-        insertions = bundle.metrics.insertions,
-        deletions = bundle.metrics.deletions,
-        wer = %format!("{:.4}", bundle.metrics.wer),
-        cwer = %format!("{:.4}", bundle.metrics.cwer),
-        "Compare alignment complete"
-    );
-
-    Ok(ComparisonArtifacts {
-        main_file,
-        gold_file,
-        bundle,
-    })
+    Ok(ComparisonArtifacts::build(main, gold_file))
 }
 
 async fn build_comparison_artifacts(
@@ -180,25 +263,25 @@ async fn build_comparison_artifacts(
             reason: "compare-runs has no job-level cancellation",
         },
     };
-    // The INTERNAL morphotag's proof is discharged here: its bytes are never
-    // written, they are re-parsed into the comparison's main side. What the
-    // command writes is the comparison artifact, and that gets its own proof
-    // in the materializers below.
+    // The INTERNAL morphotag's proof is CARRIED, not discharged: its bytes are
+    // never written and its DOCUMENT is the comparison's main side. It used to
+    // become a `String` here and be parsed again below, which is how a document
+    // the gate had judged came to be re-read by a parser that tolerates what
+    // the gate refuses. What the command writes is the comparison artifact, and
+    // that gets its own proof in the materializers below.
     let morphotagged_main =
-        crate::morphosyntax::process_morphosyntax(main_text, services, &mor_params)
-            .await?
-            .into_text();
-    build_comparison_artifacts_from_morphotagged_main(&morphotagged_main, gold_text)
+        crate::morphosyntax::process_morphosyntax(main_text, services, &mor_params).await?;
+    build_comparison_artifacts_from_proof(morphotagged_main, gold_text)
 }
 
 fn materialize_main_annotated(
     artifacts: ComparisonArtifacts,
 ) -> Result<MainAnnotatedCompareOutputs, ServerError> {
-    let ComparisonArtifacts {
+    let ComparisonParts {
         mut main_file,
         bundle,
         ..
-    } = artifacts;
+    } = artifacts.into_parts();
     // Taken BEFORE the edits below, because this output descends from the main
     // transcript and preservation is a claim about that descent.
     let input = UtteranceCensus::of(&main_file);
@@ -221,11 +304,11 @@ fn materialize_main_annotated(
 fn materialize_released(
     artifacts: ComparisonArtifacts,
 ) -> Result<CompareMaterializedOutputs, ServerError> {
-    let ComparisonArtifacts {
+    let ComparisonParts {
         main_file,
         gold_file,
         bundle,
-    } = artifacts;
+    } = artifacts.into_parts();
     // Taken BEFORE the projection, because the released output descends from
     // the gold companion, faults included.
     let input = UtteranceCensus::of(&gold_file);
@@ -308,12 +391,17 @@ pub(crate) async fn process_compare(
     )
 }
 
-/// Materialize compare outputs starting from a morphotagged main transcript.
+/// Materialize compare outputs from morphotag's own PROOF of the main
+/// transcript.
+///
+/// It takes the proof rather than the bytes, and that is what makes the lenient
+/// re-parse unreachable rather than merely deleted: the kernel has no `String`
+/// to offer here, and no constructor anywhere below would accept one.
 pub(crate) fn process_compare_morphotagged_main(
-    morphotagged_main: &str,
+    morphotagged_main: PostValidated,
     gold_text: &str,
 ) -> Result<CompareMaterializedOutputs, ServerError> {
-    materialize_released(build_comparison_artifacts_from_morphotagged_main(
+    materialize_released(build_comparison_artifacts_from_proof(
         morphotagged_main,
         gold_text,
     )?)
@@ -420,9 +508,26 @@ pub(crate) async fn process_compare_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use batchalign_transform::compare::compare;
     use batchalign_transform::parse::TreeSitterParser;
     use batchalign_transform::parse::parse_lenient;
+
+    /// Build a comparison the way production does: out of a morphotag PROOF.
+    ///
+    /// There is no other route, here or anywhere else. `ComparisonArtifacts`
+    /// has private fields and a single constructor, which consumes a
+    /// `MorphotaggedMain`, which only a proof can produce. These tests cannot
+    /// assemble a comparison out of two strings any more than the kernel can,
+    /// which is what keeps the deleted lenient parse from growing back: a
+    /// future caller reaching for text has nothing to call.
+    fn comparison_of(main: &str, gold: &str) -> ComparisonArtifacts {
+        let (gold_file, _) = parse_lenient(&TreeSitterParser::new().expect("parser"), gold);
+        let main = MorphotaggedMain::from_proof(PostValidated::for_test(
+            main,
+            crate::api::ReleasedCommand::Morphotag,
+        ))
+        .expect("a gated proof carries the document it judged");
+        ComparisonArtifacts::build(main, gold_file)
+    }
 
     fn make_chat(utterances: &[(&str, &str)]) -> String {
         let mut lines = vec![
@@ -472,19 +577,10 @@ mod tests {
 
     #[test]
     fn released_compare_surface_should_match_ba2_projected_gold_chat() {
-        let parser = TreeSitterParser::new().expect("parser");
         let main = make_chat(&[("PAR", "hello big world .")]);
         let gold = make_chat(&[("PAR", "hello world today .")]);
-        let (main_file, _) = parse_lenient(&parser, &main);
-        let (gold_file, _) = parse_lenient(&parser, &gold);
-        let bundle = compare(&main_file, &gold_file, GoldCoverage::Complete);
 
-        let output = materialize_released(ComparisonArtifacts {
-            main_file,
-            gold_file,
-            bundle,
-        })
-        .expect("materialized");
+        let output = materialize_released(comparison_of(&main, &gold)).expect("materialized");
 
         assert_eq!(
             output.chat_output.command(),
@@ -507,19 +603,11 @@ mod tests {
 
     #[test]
     fn main_materializer_keeps_main_anchor() {
-        let parser = TreeSitterParser::new().expect("parser");
         let main = make_chat(&[("PAR", "hello big world .")]);
         let gold = make_chat(&[("PAR", "hello world today .")]);
-        let (main_file, _) = parse_lenient(&parser, &main);
-        let (gold_file, _) = parse_lenient(&parser, &gold);
-        let bundle = compare(&main_file, &gold_file, GoldCoverage::Complete);
 
-        let output = materialize_main_annotated(ComparisonArtifacts {
-            main_file,
-            gold_file,
-            bundle,
-        })
-        .expect("materialized");
+        let output =
+            materialize_main_annotated(comparison_of(&main, &gold)).expect("materialized");
 
         assert_eq!(
             output.annotated_main_chat.command(),
@@ -542,19 +630,10 @@ mod tests {
 
     #[test]
     fn gold_materializer_projects_structural_tiers_for_exact_match() {
-        let parser = TreeSitterParser::new().expect("parser");
         let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n%gra:\t1|2|COM 2|0|ROOT 3|2|PUNCT\n%wor:\thello \u{15}0_100\u{15} world \u{15}100_200\u{15} .\n@End\n";
         let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello world .\n@End\n";
-        let (main_file, _) = parse_lenient(&parser, main);
-        let (gold_file, _) = parse_lenient(&parser, gold);
-        let bundle = compare(&main_file, &gold_file, GoldCoverage::Complete);
 
-        let output = materialize_released(ComparisonArtifacts {
-            main_file,
-            gold_file,
-            bundle,
-        })
-        .expect("materialized");
+        let output = materialize_released(comparison_of(main, gold)).expect("materialized");
 
         assert!(!output.chat_output.as_str().contains("%mor:"));
         assert!(!output.chat_output.as_str().contains("%gra:"));
@@ -612,22 +691,14 @@ mod tests {
     /// never damaged.
     #[test]
     fn a_gold_companion_that_arrives_without_a_terminator_is_still_written() {
-        let parser = TreeSitterParser::new().expect("parser");
         let main = make_chat(&[("PAR", "hello big world .")]);
         // Read from disk and parsed leniently: nothing admits a gold companion
         // at any level, so a terminator-less utterance in one is an INPUT
         // property, not a loss.
         let gold = make_chat(&[("PAR", "hello world today")]);
-        let (main_file, _) = parse_lenient(&parser, &main);
-        let (gold_file, _) = parse_lenient(&parser, &gold);
-        let bundle = compare(&main_file, &gold_file, GoldCoverage::Complete);
 
-        let output = materialize_released(ComparisonArtifacts {
-            main_file,
-            gold_file,
-            bundle,
-        })
-        .expect("a gold companion compare never damaged must still be written");
+        let output = materialize_released(comparison_of(&main, &gold))
+            .expect("a gold companion compare never damaged must still be written");
         assert!(
             output
                 .chat_output
@@ -640,19 +711,10 @@ mod tests {
 
     #[test]
     fn released_compare_output_copies_media_header_from_main() {
-        let parser = TreeSitterParser::new().expect("parser");
         let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\tsample, audio\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";
         let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello world .\n@End\n";
-        let (main_file, _) = parse_lenient(&parser, main);
-        let (gold_file, _) = parse_lenient(&parser, gold);
-        let bundle = compare(&main_file, &gold_file, GoldCoverage::Complete);
 
-        let output = materialize_released(ComparisonArtifacts {
-            main_file,
-            gold_file,
-            bundle,
-        })
-        .expect("materialized");
+        let output = materialize_released(comparison_of(main, gold)).expect("materialized");
 
         assert!(
             output

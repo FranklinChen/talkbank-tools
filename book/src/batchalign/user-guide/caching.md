@@ -1,7 +1,7 @@
 # Caching
 
 **Status:** Current
-**Last updated:** 2026-08-31 22:01 EDT
+**Last updated:** 2026-09-15 17:23 EDT
 
 ## What gets cached
 
@@ -274,6 +274,32 @@ repeating both paid boundaries.
 
 Use this when you suspect cached results are wrong, or after manually
 updating model files outside of a normal batchalign upgrade.
+
+## UTR ASR results after an upgrade
+
+UTR ASR results are stored under a namespace naming the timing-recovery engine
+AND the models it ran, for example
+`utr-asr-v1:whisper_utr:whisper|asr=openai/whisper-large-v3@06f233fe...`.
+Earlier builds stored them under the forced-alignment engine's version instead,
+and then under the recovery engine's name alone. The first `align` run on this
+build therefore misses those older UTR ASR entries once, recomputes them, and
+stores them under the new namespace; later runs hit as before.
+Forced-alignment entries are unaffected, because their namespace did not
+change: it is still exactly the forced-alignment engine name the worker
+reports.
+
+Naming the models is what makes an upgrade safe rather than merely noticed.
+Upgrading a recovery model now lands in a different namespace, so results
+produced by the previous weights are never reused for the new ones. Nothing
+reads the older rows: a namespace move makes them unreachable by construction,
+so there is no compatibility path to keep true.
+
+This costs one recompute, not two. The namespace already moved once in this
+release, and the model identity was folded into that same move deliberately.
+
+With `--require-media-cache`, that one recompute is refused like any other
+miss for Whisper and Tencent recovery. Rev recovery can still rebuild the
+entry from retained raw Rev evidence without a new provider call.
 
 ## Where the caches are stored
 

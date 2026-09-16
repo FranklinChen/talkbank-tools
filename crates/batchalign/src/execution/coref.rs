@@ -1,31 +1,71 @@
 use crate::infer_retry::Cancellation;
+use crate::planning;
 use crate::runner::DispatchHostContext;
-use crate::runner::util::FileStage;
-use crate::store::RunnerJobSnapshot;
+use crate::runner::util::{FileRunTracker, FileStage};
+use crate::scheduling::WorkUnitKind;
+use crate::store::{RunnerJobSnapshot, unix_now};
 
-use super::simple_batched_text::dispatch_simple_batched_text_job;
+use super::text_io::{load_text_inputs, write_text_results};
 use super::worker_gateway::WorkerGateway;
 
+/// Dispatch a coref job: one cross-file batch, no job-level language.
+///
+/// **Coref takes no language, and this dispatch cannot ask for one.** Coref is
+/// a per-file command ([`crate::dispatch_language`]): it has no `--lang` on the
+/// CLI, so submission validation requires it to arrive as
+/// [`LanguageSpec::PerFile`](crate::api::LanguageSpec::PerFile), and the
+/// command itself is English-only, reading per-file English-ness from each
+/// file's `@Languages:` header and holding the inference language at the
+/// constant `eng`.
+///
+/// Until this was fixed, coref went through a shared "simple batched text"
+/// dispatch that began by demanding `job.dispatch.lang.as_resolved()`. On a
+/// per-file job that is always `None`, so EVERY coref job was refused before
+/// any work was dispatched, with a message telling the operator to pass a
+/// `--lang` flag coref does not have. The language it demanded was then
+/// discarded by the batch itself, which hardcodes `eng`. The job could not
+/// succeed and the message named the wrong thing.
+///
+/// The shared path had exactly one caller (this one), so it was deleted rather
+/// than made conditional: a runtime check for a condition one caller can never
+/// satisfy is a defect, and a second caller would have inherited it.
+///
+/// Cross-file batching is preserved deliberately. Coref resolves chains over a
+/// whole document and has no per-file language to route on, so unlike translate
+/// and utseg there is nothing to gain by splitting the batch per file.
 pub(crate) async fn dispatch_coref_job(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     gateway: &dyn WorkerGateway,
     should_merge_abbrev: bool,
 ) -> Result<(), crate::error::ServerError> {
-    dispatch_simple_batched_text_job(
-        job,
-        host,
-        should_merge_abbrev,
-        FileStage::ResolvingCoreference,
-        "Coref",
-        "Coref",
-        |files, lang| async move {
-            gateway
-                .coref_batch(&files, &lang, Cancellation::Token(&job.cancel_token))
-                .await
-        },
-    )
-    .await
+    let plan = planning::build_job_plan(job).map_err(|error| {
+        crate::error::ServerError::Validation(format!("Coref planning failed: {error}"))
+    })?;
+    let sink = host.sink().clone();
+    let started_at = unix_now();
+
+    for file in &job.pending_files {
+        FileRunTracker::new(sink.as_ref(), &job.identity.job_id, file.filename.as_ref())
+            .begin_first_attempt(
+                WorkUnitKind::BatchInfer,
+                started_at,
+                FileStage::ResolvingCoreference,
+            )
+            .await;
+    }
+
+    let inputs = load_text_inputs(job, host, false).await;
+    if inputs.file_texts.is_empty() {
+        return Ok(());
+    }
+
+    let results = gateway
+        .coref_batch(&inputs.file_texts, Cancellation::Token(&job.cancel_token))
+        .await;
+
+    write_text_results(job, host, &plan, results, should_merge_abbrev, "Coref").await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -66,7 +106,8 @@ mod tests {
             _lang: &LanguageCode3,
             _mwt: &MwtDict,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<String, crate::error::ServerError> {
+        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        {
             unreachable!()
         }
 
@@ -105,7 +146,6 @@ mod tests {
         async fn coref_batch(
             &self,
             files: &[TextBatchFileInput],
-            _lang: &LanguageCode3,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             let mut state = self.state.lock().unwrap();
@@ -141,7 +181,12 @@ mod tests {
             },
             dispatch: crate::store::RunnerDispatchConfig {
                 command: ReleasedCommand::Coref,
-                lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+                // The shape a real coref submission has: coref takes no
+                // `--lang`, so submission validation requires `PerFile`. The
+                // fixture used to carry `Resolved(eng)`, which is a shape the
+                // wire boundary rejects, and that is why the dispatch defect
+                // this test now covers was invisible here.
+                lang: LanguageSpec::PerFile,
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Coref(CorefOptions {
                     common: CommonOptions::default(),
@@ -187,6 +232,27 @@ mod tests {
             None,
             tx,
         )))
+    }
+
+    /// RED FIRST: a coref job submitted in its only legal shape (`PerFile`)
+    /// reaches the gateway at all. Before the fix this dispatch refused the
+    /// job outright, so the gateway was never called and no file was written.
+    #[tokio::test]
+    async fn coref_dispatches_a_per_file_job_instead_of_refusing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = host();
+        let gateway = FakeCorefGateway::default();
+        let job = coref_snapshot(temp.path());
+
+        dispatch_coref_job(&job, &host, &gateway, false)
+            .await
+            .expect("a per-file coref job must dispatch");
+
+        let state = gateway.state.lock().unwrap();
+        assert_eq!(
+            state.batch_calls, 1,
+            "coref must reach the gateway; it used to be refused before dispatch"
+        );
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use crate::revai::{RevAiClient, SubmitOptions, Transcript, TranscriptResult};
 use batchalign_transform::asr_postprocess::{
     AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs, SpeakerIndex,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::api::{DurationSeconds, LanguageCode3, LanguageSpec, NumSpeakers};
 use crate::error::ServerError;
@@ -362,6 +362,7 @@ fn transcript_to_asr_response(transcript: &Transcript, lang: &LanguageCode3) -> 
         tokens,
         lang: lang.clone(),
         source_monologues: Some(transcript_to_asr_output(transcript).monologues),
+        model: Some(crate::model_manifest::rev_loaded_identity()),
     }
 }
 
@@ -382,20 +383,8 @@ fn transcript_to_asr_output(transcript: &Transcript) -> AsrOutput {
                         }
                         Some(AsrElement {
                             value: AsrRawText::new(text),
-                            ts: AsrTimestampSecs(element.ts.unwrap_or_else(|| {
-                                warn!(
-                                    token = text,
-                                    "Rev.AI element missing start timestamp, defaulting to 0.0s"
-                                );
-                                0.0
-                            })),
-                            end_ts: AsrTimestampSecs(element.end_ts.unwrap_or_else(|| {
-                                warn!(
-                                    token = text,
-                                    "Rev.AI element missing end timestamp, defaulting to 0.0s"
-                                );
-                                0.0
-                            })),
+                            ts: AsrTimestampSecs::from(element.ts),
+                            end_ts: AsrTimestampSecs::from(element.end_ts),
                             kind: if element.element_type == "text" {
                                 AsrElementKind::Text
                             } else {
@@ -475,6 +464,8 @@ mod tests {
         assert_eq!(monologues[0].elements.len(), 3);
         assert_eq!(monologues[0].elements[1].value, ",");
         assert_eq!(monologues[0].elements[1].kind, AsrElementKind::Punctuation);
+        assert_eq!(monologues[0].elements[1].ts, AsrTimestampSecs::Absent);
+        assert_eq!(monologues[0].elements[1].end_ts, AsrTimestampSecs::Absent);
         assert_eq!(monologues[1].speaker, SpeakerIndex(3));
         assert_eq!(monologues[1].elements.len(), 2);
         assert_eq!(monologues[1].elements[1].value, "?");

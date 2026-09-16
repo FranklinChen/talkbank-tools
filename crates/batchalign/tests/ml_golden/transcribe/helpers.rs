@@ -10,6 +10,16 @@ pub(super) struct TranscribeFixtureJob {
     pub(super) output_path: String,
 }
 
+/// How many speakers the multi-speaker fixture actually holds.
+///
+/// Read from the fixture's own companion CHAT
+/// (`batchalign/tests/support/parity/eng_multi_speaker.cha`), whose
+/// `@Participants` line declares `FAT Father, CHI Target_Child, MOT Mother`.
+/// Stated once here so a diarized test submits what its audio MEANS rather
+/// than the harness's old single literal.
+pub(super) const MULTI_SPEAKER_FIXTURE_SPEAKERS: batchalign::api::NumSpeakers =
+    batchalign::api::NumSpeakers(3);
+
 pub(super) fn transcribe_options(
     engine: AsrEngineName,
     diarize: bool,

@@ -1,7 +1,7 @@
 # Chinese/Cantonese Word Segmentation
 
 **Status:** Current
-**Last updated:** 2026-05-20 01:19 EDT
+**Last updated:** 2026-09-15 12:12 EDT
 
 ## Problem
 
@@ -72,13 +72,13 @@ warn: Cantonese input appears to be per-character tokens (42/50 single-CJK words
       Consider --retokenize for word-level analysis.
 ```
 
-## Which ASR Engines Produce What
+## Which ASR engines produce what
 
 | Engine | Word Segmentation | Recommendation |
 |--------|-------------------|----------------|
 | Tencent Cloud ASR | Per-character tokens (verified 2026-03-23: 25 words, 0 multi-char) | Use `--retokenize` |
 | FunASR / SenseVoice | Per-character tokens (verified) | Use `--retokenize` |
-| Paraformer (Mandarin) | Per-character tokens (reported, not yet verified) | Use `--retokenize` |
+| Paraformer (Mandarin) | Per-character tokens, one timestamp each (verified 2026-09-15 against real FunASR output); see [ASR token pipeline](../architecture/asr-token-pipeline.md#provider-adapters-funasr-unit-admission) | Use `--retokenize` |
 | Whisper | Variable (often per-character for CJK) | Use `--retokenize` |
 
 ## Known Limitations

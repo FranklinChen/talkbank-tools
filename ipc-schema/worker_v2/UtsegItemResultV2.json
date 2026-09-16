@@ -52,6 +52,11 @@
       "format": "uint32",
       "minimum": 0
     },
+    "HubCommitV2": {
+      "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
     "UtsegAdjacencyPolicyRevisionV2": {
       "description": "Closed raw-to-applied boundary-action policy revisions.",
       "oneOf": [
@@ -111,15 +116,12 @@
           "$ref": "#/$defs/UtsegAdjacencyPolicyRevisionV2"
         },
         "model_id": {
-          "description": "HuggingFace model identifier selected by the resolver.",
+          "description": "HuggingFace model identifier the control plane pinned.",
           "type": "string"
         },
         "model_revision": {
-          "description": "Exact HuggingFace revision when the loaded config exposes one.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "The exact revision the worker loaded, and never anything else.\n\nRequired, and a [`HubCommitV2`] rather than a string: the boundary model\nis resolved from a pinned snapshot whose commit is read off the\ndirectory on disk, so a worker that cannot say which revision it loaded\nrefuses instead of reporting one. It was `Option<String>` while the\nmodel loaded by NAME and the revision was scraped from\n`config._commit_hash`, which could simply be absent; nothing downstream\ncould distinguish \"no revision\" from \"a revision nobody recorded\".",
+          "$ref": "#/$defs/HubCommitV2"
         },
         "normalization_revision": {
           "description": "Exact lexical-normalization semantics applied before inference.",
@@ -135,6 +137,7 @@
       },
       "required": [
         "model_id",
+        "model_revision",
         "normalization_revision",
         "adjacency_policy_revision",
         "word_evidence"

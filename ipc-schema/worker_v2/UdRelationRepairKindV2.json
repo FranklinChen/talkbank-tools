@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdRelationRepairKindV2",
+  "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
+  "oneOf": [
+    {
+      "type": "string",
+      "const": "pad_relation"
+    },
+    {
+      "type": "string",
+      "const": "relation_case"
+    },
+    {
+      "type": "string",
+      "const": "relation_alias"
+    },
+    {
+      "type": "string",
+      "const": "unknown_relation"
+    }
+  ]
+}

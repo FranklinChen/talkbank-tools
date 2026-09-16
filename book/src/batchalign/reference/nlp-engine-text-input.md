@@ -1,7 +1,7 @@
 # NLP Engine Text Input Expectations
 
 **Status:** Current
-**Last updated:** 2026-09-10 13:54 EDT
+**Last updated:** 2026-09-15 20:20 EDT
 
 Comprehensive reference for what text format each NLP engine/tool in batchalign3
 expects as input, what preprocessing is applied, and what would break if raw
@@ -73,10 +73,11 @@ through a multi-stage Rust pipeline before becoming CHAT:
 
 1. Compound merging (3,584 known compound pairs after dedup; see
    `crates/batchalign-transform/src/asr_postprocess/compounds.rs`)
-2. Multi-word splitting (space-separated tokens get timestamp interpolation)
-3. Number expansion via `crates/batchalign-transform/data/num2lang.json`
+2. Cantonese normalization (simplified to traditional + domain replacements,
+   `lang=yue` only), once per monologue, before any splitting
+3. Multi-word splitting (space-separated tokens get timestamp interpolation)
+4. Number expansion via `crates/batchalign-transform/data/num2lang.json`
    (46 languages today) plus `num2chinese.rs` for CJK
-4. Cantonese normalization (simplified to traditional + domain replacements, `lang=yue` only)
 5. Long turn splitting (>300 words)
 6. Retokenization (split into utterances by punctuation)
 7. Disfluency replacement (`um` -> `&-um`, `'cause` -> `(be)cause`)
@@ -396,7 +397,8 @@ to Rust. Rust then applies the standard ASR post-processing pipeline
 (compound merging, number expansion, Cantonese normalization via `ferrous-opencc`, etc.).
 
 **Cantonese normalization:** Tencent returns simplified Chinese characters.
-Rust's `cantonese.rs` module applies:
+They cross the provider bridge unchanged; the server's post-processing
+normalizes the whole monologue once, in `cantonese.rs`:
 1. `ferrous-opencc` crate: simplified to traditional Chinese conversion
 2. 31-entry Aho-Corasick domain replacement table for Cantonese-specific
    character corrections
@@ -493,7 +495,7 @@ The POS tagger would assign incorrect tags to tokens containing `@`, `+`, etc.
 
 **Task:** Translate utterance text to English.
 
-**Input:** Space-joined cleaned words as a single string:
+**Input:** what the speaker produced, as a single string:
 
 ```python
 translated = _translate(item.text, src_lang)
@@ -501,13 +503,24 @@ translated = _translate(item.text, src_lang)
 
 (from `translate.py` line 72)
 
-The `text` field arrives pre-processed from Rust. Rust collects translation
-payloads via `collect_translate_payloads()` in `translate.rs`, which joins
-extracted `ChatCleanedText` words with spaces.
+The `text` field is rendered by Rust and arrives ready to send. Rust collects a
+typed `TranslationSource` per utterance (`collect_translate_payloads()` in
+`batchalign-transform/src/translate.rs`): every word the speaker produced, in
+transcript order, with retraced words and filled pauses included and each word
+as its cleaned text, followed by the utterance's terminator.
+`TranslationSource::render()` is the one place that text is built. It joins
+words with spaces and attaches punctuation, except in Han script (`zho`, `cmn`,
+`yue`, `wuu`, `nan`, `hak`), where words are joined without spaces and a period
+is written as the ideographic full stop. Words that were not produced are left
+out: `0`-prefixed omissions, `&~` nonwords, `&+` fragments and the
+untranscribed markers `xxx` / `yyy` / `www`. So is CHAT-only notation: only the
+comma travels among separators, and only a period, question mark or exclamation
+mark among terminators (`+...`, `+/.` and the other CHAT tokens send nothing).
 
 **What would break with CHAT markers:** Translation quality would degrade --
 the model would attempt to translate CHAT notation as natural language. CHAT
-markers like `&-um`, `(be)cause`, `@s:eng` would produce nonsense translations.
+markers like `&-um`, `(be)cause`, `@s:eng` would produce nonsense translations,
+which is why a filled pause arrives as `um` rather than `&-um`.
 
 **Source files:**
 - `batchalign/inference/translate.py` (Python: `batch_infer_translate()`)

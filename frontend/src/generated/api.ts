@@ -221,8 +221,8 @@ export interface paths {
          * Retrieve the output for a single file within a job.
          * @description Waits for the individual file to reach a terminal status, not the whole job,
          *     so clients can fetch results incrementally as files finish. Supports
-         *     stem-based matching (e.g., requesting `sample.wav` will find `sample.cha`)
-         *     to handle the common case where the output extension differs from the input.
+         *     command-policy matching (e.g., requesting `sample.wav` finds `sample.cha`,
+         *     and speaker identification maps `sample.cha` to its evidence JSON).
          */
         get: operations["get_single_result"];
         put?: never;
@@ -336,6 +336,18 @@ export interface components {
             reason?: null | components["schemas"]["CancelReason"];
             source?: null | components["schemas"]["CancelSource"];
         };
+        /** @description The outcome of admitting one worker key's capability report. */
+        CapabilityAdmissionOutcome: {
+            /** @description The infer tasks the worker supports. */
+            infer_tasks: string[];
+            /** @enum {string} */
+            kind: "admitted";
+        } | {
+            /** @enum {string} */
+            kind: "refused";
+            /** @description Why the report was refused. */
+            reason: components["schemas"]["EngineReportAdmissionError"];
+        };
         /**
          * @description A path on the submitting client's filesystem.
          *
@@ -383,6 +395,32 @@ export interface components {
          * @description Duration measured in fractional seconds.
          */
         DurationSeconds: number;
+        /**
+         * @description Why a worker's capability report was refused at admission.
+         *
+         *     A blank or separator-bearing name and an unknown task key cannot reach this
+         *     point: [`ReportedEngineName`] and [`InferTask`] refuse them while the wire
+         *     report is deserialized.
+         *
+         *     Also a wire type: `/health` returns it for a worker key whose latest report
+         *     was refused, so an operator sees why that worker is not used.
+         */
+        EngineReportAdmissionError: {
+            /** @enum {string} */
+            kind: "missing_engine_report";
+            /** @description The advertised task. */
+            task: string;
+        } | {
+            /** @enum {string} */
+            kind: "unadvertised_engine_report";
+            /** @description The unmatched task. */
+            task: string;
+        } | {
+            /** @enum {string} */
+            kind: "engine_named_for_non_fa_task";
+            /** @description The task whose entry named an engine. */
+            task: string;
+        };
         /**
          * @description Standard error response body, matching FastAPI's `HTTPException` format.
          *
@@ -455,6 +493,28 @@ export interface components {
          * @enum {string}
          */
         FileProgressStage: "processing" | "reading" | "resolving_audio" | "recovering_utterance_timing" | "recovering_timing_fallback" | "aligning" | "transcribing" | "benchmarking" | "checking_cache" | "applying_results" | "post_processing" | "building_chat" | "segmenting_utterances" | "analyzing_morphosyntax" | "finalizing" | "writing" | "parsing" | "analyzing" | "segmenting" | "translating" | "resolving_coreference" | "comparing" | "retry_scheduled";
+        /**
+         * @description The provenance stamps read from one result file.
+         *
+         *     A typed state rather than a list that an unreadable stamp would either
+         *     silently shorten or turn into a failure of the whole response: a stamp of
+         *     ours that does not parse is that file's state, and the rest of the job's
+         *     results are still served.
+         */
+        FileProvenance: {
+            /** @enum {string} */
+            kind: "not_read";
+        } | {
+            /** @description The stamps, in file order. */
+            entries: components["schemas"]["ProvenanceEntry"][];
+            /** @enum {string} */
+            kind: "parsed";
+        } | {
+            /** @enum {string} */
+            kind: "unparseable";
+            /** @description Which stamp and what is wrong with it. */
+            reason: string;
+        };
         /** @description Result for a single processed file. */
         FileResult: {
             /**
@@ -479,12 +539,11 @@ export interface components {
              */
             filename: components["schemas"]["DisplayPath"];
             /**
-             * @description Processing provenance extracted from the output CHAT file.
-             *     Each entry records one batchalign3 command that was applied
-             *     (command name, engine version, timestamp). Empty for non-CHAT
-             *     output or files that failed processing.
+             * @description Processing provenance read from the output file, as a typed state:
+             *     the parsed stamps, a stamp of ours that did not parse, or nothing read
+             *     (non-CHAT output, or a file that failed).
              */
-            provenance?: components["schemas"]["ProvenanceEntry"][];
+            provenance: components["schemas"]["FileProvenance"];
         };
         /**
          * @description Per-file status within a job.
@@ -677,6 +736,12 @@ export interface components {
             /** @description Identifier of the current server node. */
             node_id?: components["schemas"]["NodeId"];
             /**
+             * @description Registry daemons the latest discovery sweep found alive and refused to
+             *     adopt (another build, or no build named), with why, so an operator sees
+             *     why a running daemon is unused.
+             */
+            refused_registry_workers?: components["schemas"]["RefusedRegistryWorker"][];
+            /**
              * @description Server health status.  Always `Ok` in the current implementation
              *     (the endpoint itself being reachable implies health), but future
              *     versions may report degraded states.
@@ -710,6 +775,12 @@ export interface components {
              *     would already have broken the stale-daemon check this field exists for.
              */
             version: string;
+            /**
+             * @description The latest capability admission outcome of every worker key that has
+             *     reported: admitted with its infer tasks, or refused with the reason, so
+             *     an operator sees why a worker is not used.
+             */
+            worker_capability_admissions?: components["schemas"]["WorkerCapabilityAdmission"][];
             /**
              * Format: int64
              * @description Cumulative count of worker process crashes since server start.
@@ -1069,6 +1140,39 @@ export interface components {
             /** @description ISO 8601 timestamp string. */
             timestamp: string;
         };
+        /** @description A registry daemon the server found alive and refused to adopt. */
+        RefusedRegistryWorker: {
+            /**
+             * Format: int32
+             * @description The daemon's process id, from its registry entry.
+             */
+            pid: number;
+            /** @description Why it was refused. */
+            reason: components["schemas"]["RegistryWorkerRefusal"];
+            /**
+             * @description The daemon's worker key as its registry entry names it:
+             *     `profile:<profile>:<lang>`.
+             */
+            worker_key: string;
+        };
+        /**
+         * @description Why a registry daemon was not adopted. Either way the remedy is to restart
+         *     the daemon with this server's build (`batchalign3 worker stop`, then
+         *     `batchalign3 worker start` for its profile and language).
+         */
+        RegistryWorkerRefusal: {
+            /** @enum {string} */
+            kind: "foreign_build";
+            /** @description The build the entry names. */
+            reported_build: string;
+            /** @description This server's build. */
+            server_build: string;
+        } | {
+            /** @enum {string} */
+            kind: "unreported_build";
+            /** @description This server's build. */
+            server_build: string;
+        };
         /**
          * @description Closed released command vocabulary used at all Rust seams.
          *
@@ -1110,6 +1214,13 @@ export interface components {
          * @description Unix timestamp as fractional seconds since epoch.
          */
         UnixTimestamp: number;
+        /** @description What the server decided about one worker key's latest capability report. */
+        WorkerCapabilityAdmission: {
+            /** @description Admitted or refused. */
+            outcome: components["schemas"]["CapabilityAdmissionOutcome"];
+            /** @description Worker key label: `target:lang`, plus the engine selection when set. */
+            worker_key: string;
+        };
         /** @description Runtime identity proven by the current ready-handshake schema. */
         WorkerRuntimeIdentity: {
             batchalign_core_extension_sha256: components["schemas"]["Sha256Digest"];

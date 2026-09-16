@@ -24,6 +24,7 @@ pub(crate) fn rev_evidence_to_utr_asr_response(evidence: &CompletedRevAsrEvidenc
             .collect(),
         lang: evidence.resolved_language.clone(),
         source_monologues: None,
+        model: Some(crate::model_manifest::rev_loaded_identity()),
     }
 }
 

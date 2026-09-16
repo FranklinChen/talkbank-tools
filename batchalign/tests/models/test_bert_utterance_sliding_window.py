@@ -176,8 +176,8 @@ def _make_test_model(
     and model, bypassing the AutoTokenizer.from_pretrained network call.
     """
     instance = BertUtteranceModel.__new__(BertUtteranceModel)
-    instance.model_name = "test-fake"
-    instance.model_revision = "test-revision"
+    instance.model_id = "test-fake"
+    instance.model_revision = "0123456789abcdef0123456789abcdef01234567"
     instance.tokenizer = _FakeTokenizer(tokens_per_word=tokens_per_word)
     instance.model = _FakeModel(
         max_position_embeddings=max_position_embeddings,

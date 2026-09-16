@@ -381,29 +381,49 @@ impl PartialEq<&str> for ChatWordText {
 /// Timestamp in seconds from an ASR provider (raw timing).
 ///
 /// ASR providers report element boundaries in fractional seconds.
-/// This newtype distinguishes provider timestamps from the millisecond
-/// timings used internally by `AsrWord` (plain `i64`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct AsrTimestampSecs(pub f64);
+/// This type distinguishes observed provider timestamps, absent endpoints,
+/// and the millisecond timings used internally by `AsrWord` (plain `i64`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AsrTimestampSecs {
+    /// An endpoint explicitly reported by the provider, including real zero.
+    Observed(f64),
+    /// No endpoint was supplied. Serialized as null, never a numeric sentinel.
+    #[default]
+    Absent,
+}
 
 impl AsrTimestampSecs {
-    /// Returns the inner `f64` value.
-    pub fn as_f64(self) -> f64 {
-        self.0
+    /// Preserve whether the provider supplied an endpoint.
+    pub fn as_f64(self) -> Option<f64> {
+        match self {
+            Self::Observed(seconds) => Some(seconds),
+            Self::Absent => None,
+        }
+    }
+}
+
+impl From<Option<f64>> for AsrTimestampSecs {
+    fn from(value: Option<f64>) -> Self {
+        match value {
+            Some(seconds) => Self::Observed(seconds),
+            None => Self::Absent,
+        }
     }
 }
 
 impl PartialEq<f64> for AsrTimestampSecs {
     fn eq(&self, other: &f64) -> bool {
-        self.0 == *other
+        self.as_f64() == Some(*other)
     }
 }
 
 impl fmt::Display for AsrTimestampSecs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:.3}s", self.0)
+        match self {
+            Self::Observed(seconds) => write!(f, "{seconds:.3}s"),
+            Self::Absent => f.write_str("absent"),
+        }
     }
 }
 
@@ -472,7 +492,7 @@ mod tests {
 
     #[test]
     fn timestamp_serde_roundtrip() {
-        let ts = AsrTimestampSecs(1.234);
+        let ts = AsrTimestampSecs::Observed(1.234);
         let json = serde_json::to_string(&ts).unwrap();
         assert_eq!(json, "1.234");
         let decoded: AsrTimestampSecs = serde_json::from_str(&json).unwrap();

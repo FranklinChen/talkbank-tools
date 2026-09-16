@@ -1,7 +1,7 @@
-# `whisper_hub` ASR Engine
+# `whisper_hub` ASR engine
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-15 12:12 EDT
 
 ## What it is
 
@@ -25,9 +25,9 @@ only path to coherent transcription.
 ## Quick start
 
 ```bash
-# Uses the per-language default model_id resolved from
-# batchalign/models/resolve.py. For Malayalam that's
-# thennal/whisper-medium-ml.
+# Uses the per-language default model_id resolved from the Rust manifest,
+# crates/batchalign/src/model_manifest.rs. For Malayalam that's
+# thennal/whisper-medium-ml, at the commit the manifest pins.
 batchalign3 transcribe input/ output/ --lang mal --asr-engine whisper_hub
 ```
 
@@ -43,19 +43,37 @@ batchalign3 transcribe input/ output/ \
 ## Per-language defaults
 
 The per-language default model_id table lives in
-`batchalign/models/resolve.py`. It is intentionally small and seeded
-reactively from empirical evaluation, a language only gets a default
+`crates/batchalign/src/model_manifest.rs::WHISPER_HUB_DEFAULTS`, together with
+the exact hub commit each default is pinned to. It is intentionally small and
+seeded reactively from empirical evaluation, a language only gets a default
 after we've confirmed the chosen fine-tune produces coherent output.
 
 | Language (ISO-639-3) | Default HF model_id | Notes |
 |---|---|---|
 | `mal` (Malayalam) | `thennal/whisper-medium-ml` | See "Evaluation below." |
 
+Rust owns that table because an id has to be known BEFORE a load in order to
+pin its revision, and a second copy on the worker side could only disagree with
+it. A planned job therefore resolves from the manifest, and an entry added only
+to `batchalign/models/resolve.py` leaves the job refused: planning fails with
+`ModelPlanError::WhisperHubHasNoDefaultModel`, naming the language, rather than
+loading something unpinned. The Python table and its
+`WhisperHubModelNotFoundError` remain for direct callers that have no control
+plane.
+
 Any other language requires passing `--asr-engine whisper_hub
---engine-overrides '{"model_id":"..."}'`: the loader raises
-`WhisperHubModelNotFoundError` with a specific message telling the user
-how to fix it, instead of falling back to a stock Whisper checkpoint
-that would silently produce garbage.
+--engine-overrides '{"model_id":"..."}'`, instead of falling back to a stock
+Whisper checkpoint that would silently produce garbage.
+
+## What the run records about identity
+
+An id the manifest pins is loaded at that exact commit, and the transcript's
+stamp names the model with its revision. An id the manifest does not know,
+which is any model_id passed through `--engine-overrides` that is not a seeded
+default, is carried as a FLOATING identity: it loads, and the revision recorded
+for it is whatever the worker reports for the weights it actually resolved, so
+an override never leaves the transcript naming the engine alone. A floating
+identity can never build a cache key.
 
 ## Why a per-language table and not auto-discovery?
 

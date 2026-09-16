@@ -374,9 +374,11 @@ be called out explicitly.
 
 Current `batchalign3` now handles this in the Rust-owned ASR post-process path:
 
-- Cantonese text is normalized to HK traditional form,
-- Han-script `yue` ASR chunks are split with the shared
-  `cantonese_char_tokens()` helper,
+- Cantonese text is normalized to HK traditional form once per monologue,
+  through `AlignedNormalization`, before anything splits it,
+- Han-script `yue` ASR chunks are then split with the shared
+  `cantonese_char_tokens()` helper, which splits and strips punctuation and
+  normalizes nothing,
 - ASCII/code-switched tokens are left intact,
 - punctuation-based utterance retokenization then runs on those normalized
   tokens.

@@ -470,7 +470,6 @@ pub(crate) async fn store_backed_control_plane_snapshot(
 mod tests {
     use super::*;
 
-    use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -573,19 +572,13 @@ mod tests {
             test_echo: true,
             ..Default::default()
         }));
-        pool.start_background_tasks();
+        let _ = pool.start_background_tasks();
         let cache = Arc::new(
             UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
                 .await
                 .expect("open cache"),
         );
-        let engine = ExecutionEngine::new(RunnerExecutionContext::new(
-            pool,
-            cache,
-            Vec::new(),
-            BTreeMap::new(),
-            true,
-        ));
+        let engine = ExecutionEngine::new(RunnerExecutionContext::new(pool, cache, true));
 
         let bootstrap = bootstrap_local_server_backend(
             crate::config::ServerConfig::default(),

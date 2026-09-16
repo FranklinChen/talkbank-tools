@@ -40,6 +40,7 @@ pub use direct_job_client::LiveDirectJobClient;
 #[allow(unused_imports)]
 pub use paths_mode::{
     submit_paths_and_complete, submit_paths_and_complete_direct,
+    submit_paths_and_complete_direct_with_speakers,
     submit_paths_with_before_and_complete_direct,
 };
 #[allow(unused_imports)]
@@ -66,6 +67,10 @@ use batchalign::{
     prepare_workers,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::live_deadline::{
+    HarnessBudget, ProgressSnapshot, ServerTestDeadline, WaitSubject,
+};
 
 /// Cached worker backend that survives across isolated server and direct sessions.
 struct LiveFixtureBackend {
@@ -399,8 +404,11 @@ impl LiveDirectSession {
 }
 
 /// Poll one submitted job until it reaches a terminal state.
+///
+/// Real models, so the idle window is generous; the wait still refuses as soon
+/// as the job stops changing for that window. See `tests/live_deadline`.
 pub async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -> JobInfo {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(300);
+    let mut deadline = ServerTestDeadline::new(WaitSubject::ml_job_completion(job_id));
 
     loop {
         let resp = client
@@ -417,13 +425,7 @@ pub async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &st
             return info;
         }
 
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Job {job_id} did not finish within 5 min (status: {:?})",
-            info.status
-        );
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        deadline.keep_waiting(ProgressSnapshot::job(&info)).await;
     }
 }
 
@@ -504,7 +506,8 @@ async fn collect_direct_content_results(detail: &batchalign::store::JobDetail) -
                 content: String::new(),
                 content_type: result.content_type,
                 error: result.error.clone(),
-                provenance: Vec::new(),
+                // The harness reads no stamps: it hands back output bytes only.
+                provenance: batchalign::api::FileProvenance::NotRead,
             })
             .collect();
     }
@@ -525,7 +528,8 @@ async fn collect_direct_content_results(detail: &batchalign::store::JobDetail) -
             content,
             content_type: result.content_type,
             error: result.error.clone(),
-            provenance: Vec::new(),
+            // The harness reads no stamps: it hands back output bytes only.
+            provenance: batchalign::api::FileProvenance::NotRead,
         });
     }
     files
@@ -800,10 +804,7 @@ fn run_fixture_thread(receiver: mpsc::Receiver<FixtureCommand>) {
 
                 let snapshot = DirectSnapshot {
                     prepared_workers: backend.prepared_workers.clone(),
-                    infer_tasks: backend
-                        .prepared_workers
-                        .current_infer_tasks()
-                        .unwrap_or_else(|_| backend.prepared_workers.infer_tasks().to_vec()),
+                    infer_tasks: backend.prepared_workers.infer_tasks(),
                 };
                 let _ = reply.send(Ok(snapshot));
             }
@@ -913,7 +914,10 @@ pub(super) async fn cleanup_active_session(
 ) {
     server_task.abort();
     let _ = server_task.await;
-    match state.shutdown_for_reuse(Duration::from_secs(5)).await {
+    match state
+        .shutdown_for_reuse(HarnessBudget::SessionShutdown.as_duration())
+        .await
+    {
         Ok(shutdown) if shutdown.timed_out || shutdown.remaining_jobs > 0 => {
             eprintln!(
                 "WARN: {label} shutdown left {} tracked jobs (timed_out={})",
@@ -1163,6 +1167,18 @@ pub fn load_ba2_compare_master_golden(name: &str) -> Option<(String, String)> {
 pub fn assert_ba2_parity(label: &str, ba3_output: &str, ba2_golden: &str) {
     let normalize = |s: &str| -> Vec<String> {
         s.lines()
+            // A BA3 provenance stamp records which models ran and when; BA2
+            // wrote none, so it is not part of the parity question. It is
+            // recognized by the codec the writer uses, never by a text
+            // pattern, and a stamp that does not parse fails the comparison
+            // rather than being dropped unread.
+            .filter(|line| {
+                batchalign::provenance::extract_provenance(line)
+                    .unwrap_or_else(|stamp| {
+                        panic!("{label}: output carries an unparseable stamp: {stamp}")
+                    })
+                    .is_empty()
+            })
             .filter(|line| {
                 // Skip lines that naturally differ between BA2 and BA3
                 !line.starts_with("@PID:")
@@ -1325,7 +1341,9 @@ fn live_fixture_pool_config(python_path: &str) -> PoolConfig {
         python_path: python_path.into(),
         test_echo: false,
         health_check_interval_s: 3_600,
-        ready_timeout_s: 120,
+        // One number buys both winning a host-wide startup slot and this
+        // worker's own model load; see `HarnessBudget::FixtureWorkerReady`.
+        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_secs(),
         // Allow 2 workers per key so sequential tests don't block waiting
         // for a prior test's checked-out worker to be returned to the pool.
         max_workers_per_key: PerProfile::uniform(2),

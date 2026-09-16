@@ -1,12 +1,13 @@
 ---
-source: crates/batchalign-app/tests/ml_golden/utseg/golden.rs
-expression: "&results[0].content"
+source: crates/batchalign/tests/ml_golden/utseg/golden.rs
+expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(&results[0].content)"
 ---
 @UTF8
 @Begin
 @Languages:	eng
 @Participants:	PAR Participant
 @ID:	eng|test|PAR|||||Participant|||
+@Comment:	[fc-ba3 utseg | engine=talkbank/CHATUtterance-en@764ec3f762c2e24df2def8df98b5fe34940085c6 ; lang=eng | <timestamp>]
 *PAR:	the dog is running .
 *PAR:	I like cats .
 *PAR:	she went to the store .

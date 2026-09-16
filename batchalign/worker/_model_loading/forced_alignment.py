@@ -28,7 +28,6 @@ def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
             engine_overrides,
             device_policy=bootstrap.device_policy,
         )
-        _state.fa_engine = FaEngine.WAV2VEC_CANTO
         _state.fa_model_name = "wav2vec-canto-v1"
     elif backend is FaEngine.QWEN3:
         from batchalign.inference.qwen_forced_alignment import load_qwen_fa
@@ -38,13 +37,11 @@ def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         # at bootstrap, so an unsupported language fails before the download
         # rather than after it.
         _state.qwen_fa_host = load_qwen_fa(lang, device_policy=bootstrap.device_policy)
-        _state.fa_engine = FaEngine.QWEN3
         _state.fa_model_name = QWEN_FORCED_ALIGNER_MODEL_ID
     elif backend is FaEngine.WHISPER:
         from batchalign.inference.fa import load_whisper_fa
 
         _state.whisper_fa_model = load_whisper_fa(device_policy=bootstrap.device_policy)
-        _state.fa_engine = FaEngine.WHISPER
         _state.fa_model_name = "whisper-fa-large-v2"
     elif backend is FaEngine.WAVE2VEC:
         import importlib.metadata as importlib_metadata
@@ -54,7 +51,6 @@ def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         _state.wave2vec_fa_model = load_wave2vec_fa(
             device_policy=bootstrap.device_policy
         )
-        _state.fa_engine = FaEngine.WAVE2VEC
         try:
             torchaudio_version = importlib_metadata.version("torchaudio")
             _state.fa_model_name = f"wave2vec-fa-mms-{torchaudio_version}"

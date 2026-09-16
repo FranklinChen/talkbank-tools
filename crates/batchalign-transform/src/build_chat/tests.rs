@@ -312,17 +312,31 @@ fn test_transcript_from_asr_utterances() {
 }
 
 #[test]
-fn test_transcript_from_asr_auto_generates_speaker_ids() {
+fn test_numbered_asr_names_require_no_dense_speaker_population() {
     let utterances = vec![asr_postprocess::Utterance {
-        speaker: asr_postprocess::SpeakerIndex(5),
+        speaker: asr_postprocess::SpeakerIndex(usize::MAX),
         words: vec![asr_postprocess::AsrWord::new("hello", None, None)],
         lang: None,
     }];
 
-    let desc = transcript_from_asr_utterances(&utterances, &[], &["eng".to_string()], None, false)
+    assert!(matches!(
+        transcript_from_asr_utterances(&utterances, &[], &["eng".to_string()], None, false),
+        Err(TranscriptBuildError::MissingParticipantCode(_))
+    ));
+    let desc = NamedAsrUtterances::numbered(&utterances).into_transcript(&["eng".to_string()], None, false)
         .expect("test: transcript_from_asr_utterances should succeed")
         .description;
-    assert_eq!(desc.participants[0].id, "SP5");
+    assert_eq!(desc.participants.len(), 1);
+    assert_eq!(desc.participants[0].id, format!("PAR{}", usize::MAX));
+    assert_eq!(desc.utterances[0].speaker, desc.participants[0].id);
+}
+
+#[test]
+fn test_numbered_asr_empty_population_and_missing_language() {
+    let empty = NamedAsrUtterances::numbered(&[]).into_transcript(&["eng".to_string()], None, false).unwrap();
+    assert!(empty.description.participants.is_empty());
+    assert!(empty.description.utterances.is_empty());
+    assert!(matches!(NamedAsrUtterances::numbered(&[]).into_transcript(&[], None, false), Err(TranscriptBuildError::MissingPrimaryLanguage)));
 }
 
 // ── ASR-to-CHAT validation gap regression tests ──────────────────────
@@ -608,7 +622,7 @@ fn retrace_output_reparses_cleanly() {
 #[test]
 fn disfluency_and_retrace_end_to_end() {
     let parser = TreeSitterParser::new().unwrap();
-    // Full pipeline: raw ASR → process_raw_asr (includes disfluency + retrace)
+    // Full pipeline: raw ASR → process_raw_asr (includes disfluency + retrace).expect("test: ASR post-processing must not refuse this input")
     // → transcript_from_asr_utterances → build_chat.
     //
     // Input "um um I I went" exercises BOTH pipeline stages:
@@ -621,38 +635,38 @@ fn disfluency_and_retrace_end_to_end() {
             elements: vec![
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("um"),
-                    ts: asr_postprocess::AsrTimestampSecs(0.0),
-                    end_ts: asr_postprocess::AsrTimestampSecs(0.2),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.0),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.2),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("um"),
-                    ts: asr_postprocess::AsrTimestampSecs(0.2),
-                    end_ts: asr_postprocess::AsrTimestampSecs(0.4),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.2),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.4),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("I"),
-                    ts: asr_postprocess::AsrTimestampSecs(0.4),
-                    end_ts: asr_postprocess::AsrTimestampSecs(0.5),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.4),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.5),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("I"),
-                    ts: asr_postprocess::AsrTimestampSecs(0.5),
-                    end_ts: asr_postprocess::AsrTimestampSecs(0.6),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.5),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.6),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("went"),
-                    ts: asr_postprocess::AsrTimestampSecs(0.6),
-                    end_ts: asr_postprocess::AsrTimestampSecs(0.8),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.6),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.8),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
             ],
         }],
     };
-    let utts = asr_postprocess::process_raw_asr(&output, "eng");
+    let utts = asr_postprocess::process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
 
     let desc = transcript_from_asr_utterances(
         &utts,
@@ -868,8 +882,8 @@ fn single_speaker_asr_output(tokens: &[(&str, f64, f64)]) -> asr_postprocess::As
             };
             asr_postprocess::AsrElement {
                 value: asr_postprocess::AsrRawText::new(*text),
-                ts: asr_postprocess::AsrTimestampSecs(*start),
-                end_ts: asr_postprocess::AsrTimestampSecs(*end),
+                ts: asr_postprocess::AsrTimestampSecs::Observed(*start),
+                end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end),
                 kind,
             }
         })
@@ -889,7 +903,7 @@ fn run_transcribe_to_description(
     lang: &str,
 ) -> Result<AsrTranscript, TranscriptBuildError> {
     let output = single_speaker_asr_output(tokens);
-    let utts = asr_postprocess::process_raw_asr(&output, lang);
+    let utts = asr_postprocess::process_raw_asr(&output, lang).expect("test: ASR post-processing must not refuse this input");
     transcript_from_asr_utterances(
         &utts,
         &["PAR1".to_string()],
@@ -1065,8 +1079,8 @@ fn asr_single_speaker(elements: &[(&str, f64, f64)]) -> asr_postprocess::AsrOutp
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs(*end_ts),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),
@@ -1081,7 +1095,7 @@ fn asr_to_chat_roundtrip(
     output: &asr_postprocess::AsrOutput,
     lang: &str,
 ) -> (String, Vec<talkbank_model::ParseError>) {
-    let utts = asr_postprocess::process_raw_asr(output, lang);
+    let utts = asr_postprocess::process_raw_asr(output, lang).expect("test: ASR post-processing must not refuse this input");
     let desc = transcript_from_asr_utterances(
         &utts,
         &["PAR".to_string()],
@@ -1171,8 +1185,8 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs(*end_ts),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),
@@ -1190,8 +1204,8 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs(*end_ts),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),
@@ -1208,8 +1222,8 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs(*end_ts),
+                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
+                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),
@@ -1217,7 +1231,7 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
         ],
     };
 
-    let utts = asr_postprocess::process_raw_asr(&output, "eng");
+    let utts = asr_postprocess::process_raw_asr(&output, "eng").expect("test: ASR post-processing must not refuse this input");
     let desc = transcript_from_asr_utterances(
         &utts,
         &["PAR0".to_string(), "PAR1".to_string()],

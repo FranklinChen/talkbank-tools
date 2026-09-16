@@ -54,6 +54,7 @@ pub(crate) mod reaper;
 mod rss_observer;
 pub(crate) mod shared_gpu;
 mod shutdown;
+mod spawn_runtime;
 pub mod status;
 
 pub use checkout::CheckedOutWorker;
@@ -75,6 +76,8 @@ use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
 use self::gpu_slot::GpuWorkerSlot;
+use self::spawn_runtime::PoolSpawnRuntime;
+use crate::engine_reports::WorkerEngineReports;
 use crate::worker::error::WorkerError;
 use crate::worker::handle::{WorkerHandle, WorkerRuntimeConfig};
 use crate::worker::python::resolve_python_executable;
@@ -301,7 +304,88 @@ pub(super) struct WorkerKey {
     pub(super) engine_selection: EngineSelection,
 }
 
+/// Why probing a freshly spawned worker's capabilities admitted no report.
+///
+/// The two cases call for different handling, which is why they are not one
+/// `WorkerError`: an unanswered probe leaves a worker that may still serve (the
+/// report is taken again at dispatch), while a refused report means the worker
+/// is not used at all and must not be pooled.
+#[derive(Debug)]
+pub(super) enum CapabilityProbeFailure {
+    /// The worker did not answer the capabilities request.
+    Unanswered(WorkerError),
+    /// The worker answered, and admission refused its report.
+    Refused(crate::engine_reports::EngineReportAdmissionError),
+}
+
+/// What the pool decided about one worker key's latest capability report.
+#[derive(Debug, Clone)]
+enum CapabilityAdmission {
+    /// Admitted; dispatch reads this report.
+    Admitted(Arc<WorkerEngineReports>),
+    /// Refused; the key's workers are not used for dispatch while this stands.
+    Refused(crate::engine_reports::EngineReportAdmissionError),
+}
+
+/// A worker key's admitted capability report, taken AFTER the command's
+/// primary infer task was loaded on the selected worker.
+///
+/// Supporting a task and naming the engine behind it are different facts: a
+/// lazily loading worker supports forced alignment before it has loaded an FA
+/// model, and names the FA engine only after. Advertisement reads support from
+/// any admitted report. An engine a command must name before dispatch is read
+/// only from this type (`FaCacheNamespace::from_loaded`), and only
+/// [`WorkerPool::ensure_command_capabilities`] builds one, after `ensure_task`:
+/// the fields are private to this module tree. So a `null` read from it means
+/// "still unnamed after loading", and that alone is a refusal. It records the
+/// task that was loaded, so an identity is never read for a task other than
+/// the one the report was taken after.
+#[derive(Debug, Clone)]
+pub struct LoadedCapabilities {
+    /// The task `ensure_task` loaded before the report was taken.
+    task: InferTask,
+    /// The admitted report taken after that load.
+    reports: Arc<WorkerEngineReports>,
+}
+
+impl LoadedCapabilities {
+    /// The task that was loaded before this report was taken.
+    pub fn task(&self) -> InferTask {
+        self.task
+    }
+
+    /// The admitted post-load report.
+    pub fn reports(&self) -> &WorkerEngineReports {
+        &self.reports
+    }
+
+    /// A post-load report for tests that exercise the availability rule
+    /// without a worker.
+    #[cfg(test)]
+    pub(crate) fn for_test(task: InferTask, reports: WorkerEngineReports) -> Self {
+        Self {
+            task,
+            reports: Arc::new(reports),
+        }
+    }
+}
+
 impl WorkerKey {
+    /// Operator-facing label: `target:lang`, plus the engine selection when
+    /// one is set.
+    pub(super) fn label(&self) -> String {
+        if self.engine_selection.is_none() {
+            format!("{}:{}", self.target.label(), self.language)
+        } else {
+            format!(
+                "{}:{}:{}",
+                self.target.label(),
+                self.language,
+                self.engine_selection
+            )
+        }
+    }
+
     /// A key with no engine selection.
     ///
     /// This is the door `for_target` closes only halfway, and it cannot be
@@ -723,8 +807,22 @@ pub struct WorkerPool {
     /// when any worker anywhere in the pool becomes available.
     pub(super) worker_returned: Arc<tokio::sync::Notify>,
     pub(super) cancel: CancellationToken,
-    /// Lazily detected worker capabilities (populated on first worker spawn).
-    pub(super) lazy_capabilities: std::sync::OnceLock<WorkerCapabilities>,
+    /// The first capability report any worker gave, as admitted: the
+    /// pool-wide view the startup snapshot reads. Set once, on the first spawn
+    /// or registry probe.
+    pub(super) first_admitted_capabilities: std::sync::OnceLock<Arc<WorkerEngineReports>>,
+    /// The latest admission outcome per worker key, replaced on every probe of
+    /// that key: the admitted report, or why the report was refused. A report
+    /// is admitted exactly once, in [`Self::record_capabilities`]; nothing
+    /// downstream reads a raw report. `/health` lists these outcomes
+    /// ([`Self::capability_admissions`]), so an operator sees why a refused
+    /// worker is not used.
+    admitted_capabilities: std::sync::Mutex<HashMap<WorkerKey, CapabilityAdmission>>,
+    /// Registry daemons the latest discovery sweep found alive and refused to
+    /// adopt, with why (another build, or no build named). Replaced by every
+    /// sweep; `/health` lists them, so an operator sees why a running daemon
+    /// is unused rather than finding only a log line.
+    refused_registry_workers: std::sync::Mutex<Vec<crate::api::RefusedRegistryWorker>>,
     /// Per-language Stanza processor registry (populated from first worker's
     /// stanza_capabilities field). Used for submission validation and dispatch.
     stanza_registry: std::sync::OnceLock<Box<crate::stanza_registry::StanzaRegistry>>,
@@ -744,6 +842,17 @@ pub struct WorkerPool {
     /// herd documented in BUG-028. See `pool/permit.rs` for the RAII
     /// guard that wraps an [`tokio::sync::OwnedSemaphorePermit`].
     pub(super) spawn_permits: Arc<tokio::sync::Semaphore>,
+    /// The runtime every worker process this pool creates is bound to.
+    ///
+    /// Captured at construction rather than taken from whichever runtime is
+    /// current at a spawn site, because a `tokio::process::Child` stays
+    /// registered with the reactor that created it. See `spawn_runtime.rs` for
+    /// the harness failure that made this a property of the pool.
+    /// Private, not `pub(super)`: the pool's runtime is reached only from this
+    /// module tree (`lifecycle`, `eviction`, and the GPU path here), which
+    /// already sees it as a descendant of the defining module. Widening it
+    /// would let worker code outside the pool spawn onto it.
+    spawn_runtime: PoolSpawnRuntime,
 }
 
 /// Read-only snapshot of pool counters. Cheap to compute (one
@@ -856,11 +965,16 @@ impl WorkerPool {
             ),
             worker_returned: Arc::new(tokio::sync::Notify::new()),
             cancel: CancellationToken::new(),
-            lazy_capabilities: std::sync::OnceLock::new(),
+            first_admitted_capabilities: std::sync::OnceLock::new(),
+            admitted_capabilities: std::sync::Mutex::new(HashMap::new()),
+            refused_registry_workers: std::sync::Mutex::new(Vec::new()),
             stanza_registry: std::sync::OnceLock::new(),
             job_tracker: job_tracker::JobWorkerTracker::new(),
             rejection_counters: WorkerRejectionCounters::default(),
             spawn_permits,
+            // Bind the pool to the runtime it is being built on, before any
+            // caller can spawn a worker onto a shorter-lived one.
+            spawn_runtime: PoolSpawnRuntime::captured_at_construction(),
         }
     }
 
@@ -997,16 +1111,100 @@ impl WorkerPool {
         self.stanza_registry.get().map(|b| b.as_ref())
     }
 
-    /// Record worker capabilities and populate the Stanza registry.
-    pub(super) fn record_capabilities(&self, caps: WorkerCapabilities) {
-        if !caps.stanza_capabilities.is_empty() && self.stanza_registry.get().is_none() {
+    /// Admit one worker's capability report and record the outcome for `key`.
+    ///
+    /// The ONE place a report is admitted. The outcome is stored per worker
+    /// key, replacing that key's previous one (a lazily loaded model names its
+    /// engine only after it loads). An admitted report is returned, and the
+    /// first one also becomes the pool-wide view. A refused report is recorded
+    /// as that key's refusal, which `/health` reports, and is also the
+    /// caller's error, typed so the caller can retire the worker it came from.
+    /// The Stanza registry is populated from the first admitted report that
+    /// carries it.
+    pub(super) fn record_capabilities(
+        &self,
+        key: &WorkerKey,
+        caps: WorkerCapabilities,
+    ) -> Result<Arc<WorkerEngineReports>, crate::engine_reports::EngineReportAdmissionError> {
+        let WorkerCapabilities {
+            infer_tasks,
+            engine_versions,
+            stanza_capabilities,
+            ..
+        } = caps;
+        let admitted = match WorkerEngineReports::admit(&infer_tasks, engine_versions) {
+            Ok(reports) => Arc::new(reports),
+            Err(refusal) => {
+                warn!(
+                    worker_key = %key.label(),
+                    %refusal,
+                    "Refused worker capabilities; this worker key is not used until it reports again"
+                );
+                lock_recovered(&self.admitted_capabilities)
+                    .insert(key.clone(), CapabilityAdmission::Refused(refusal.clone()));
+                return Err(refusal);
+            }
+        };
+        if !stanza_capabilities.is_empty() && self.stanza_registry.get().is_none() {
             let _ = self.stanza_registry.set(Box::new(
-                crate::stanza_registry::StanzaRegistry::from_capabilities(
-                    &caps.stanza_capabilities,
-                ),
+                crate::stanza_registry::StanzaRegistry::from_capabilities(&stanza_capabilities),
             ));
         }
-        let _ = self.lazy_capabilities.set(caps);
+        info!(
+            target = %key.target.label(),
+            lang = %key.language,
+            engine_reports = ?admitted,
+            "Admitted worker capabilities"
+        );
+        let _ = self.first_admitted_capabilities.set(Arc::clone(&admitted));
+        lock_recovered(&self.admitted_capabilities).insert(
+            key.clone(),
+            CapabilityAdmission::Admitted(Arc::clone(&admitted)),
+        );
+        Ok(admitted)
+    }
+
+    /// The latest capability admission outcome of every worker key that has
+    /// reported, sorted by key label: what `/health` returns, so an operator
+    /// sees which workers were admitted with which tasks, and why any were
+    /// refused.
+    pub fn capability_admissions(&self) -> Vec<crate::api::WorkerCapabilityAdmission> {
+        let mut admissions: Vec<crate::api::WorkerCapabilityAdmission> =
+            lock_recovered(&self.admitted_capabilities)
+                .iter()
+                .map(|(key, admission)| crate::api::WorkerCapabilityAdmission {
+                    worker_key: key.label(),
+                    outcome: match admission {
+                        CapabilityAdmission::Admitted(reports) => {
+                            crate::api::CapabilityAdmissionOutcome::Admitted {
+                                infer_tasks: reports.tasks().collect(),
+                            }
+                        }
+                        CapabilityAdmission::Refused(refusal) => {
+                            crate::api::CapabilityAdmissionOutcome::Refused {
+                                reason: refusal.clone(),
+                            }
+                        }
+                    },
+                })
+                .collect();
+        admissions.sort_by(|left, right| left.worker_key.cmp(&right.worker_key));
+        admissions
+    }
+
+    /// Record the registry daemons one discovery sweep refused to adopt,
+    /// replacing the previous sweep's list.
+    pub(super) fn record_refused_registry_workers(
+        &self,
+        refused: Vec<crate::api::RefusedRegistryWorker>,
+    ) {
+        *lock_recovered(&self.refused_registry_workers) = refused;
+    }
+
+    /// The registry daemons the latest discovery sweep found alive and refused
+    /// to adopt, with why: what `/health` returns.
+    pub fn refused_registry_workers(&self) -> Vec<crate::api::RefusedRegistryWorker> {
+        lock_recovered(&self.refused_registry_workers).clone()
     }
 
     /// Get or create a shared GPU worker for a derived key.
@@ -1040,16 +1238,24 @@ impl WorkerPool {
                 .clone()
         };
 
-        let config = self.worker_config(key);
+        let config = self.worker_config(key)?;
 
         let worker = slot
             .worker_or_init(|| async move {
-                let mut handle = WorkerHandle::spawn(config).await?;
+                let mut handle = self.spawn_runtime.spawn_worker(config).await?;
                 self.admit_worker_runtime(&handle)?;
-                if self.lazy_capabilities.get().is_none()
-                    && let Err(e) = self.detect_capabilities_from_worker(&mut handle).await
-                {
-                    tracing::warn!(error = %e, "Failed to detect capabilities from first GPU worker (continuing)");
+                if self.first_admitted_capabilities.get().is_none() {
+                    match self.detect_capabilities_from_worker(key, &mut handle).await {
+                        Ok(()) => {}
+                        // Not published into the slot, which stays empty;
+                        // `handle` drops here and the process is terminated.
+                        Err(CapabilityProbeFailure::Refused(refusal)) => {
+                            return Err(refusal.into());
+                        }
+                        Err(CapabilityProbeFailure::Unanswered(error)) => {
+                            tracing::warn!(error = %error, "Failed to detect capabilities from first GPU worker (continuing)");
+                        }
+                    }
                 }
                 info!(
                     target = %key.target.label(),
@@ -1057,7 +1263,7 @@ impl WorkerPool {
                     pid = %handle.pid(),
                     "GPU worker spawned (concurrent mode)"
                 );
-                Ok(Arc::new(shared_gpu::SharedGpuWorker::from_handle(handle).await))
+                self.spawn_runtime.adopt_shared_gpu_worker(handle).await
             })
             .await?;
 
@@ -1088,29 +1294,28 @@ impl WorkerPool {
     ///
     /// Called once after the first worker spawn. The `OnceLock` ensures this
     /// only runs once even under concurrent job dispatch.
-    pub(crate) async fn detect_capabilities_from_worker(
+    pub(super) async fn detect_capabilities_from_worker(
         &self,
+        key: &WorkerKey,
         handle: &mut WorkerHandle,
-    ) -> Result<(), WorkerError> {
-        if self.lazy_capabilities.get().is_some() {
+    ) -> Result<(), CapabilityProbeFailure> {
+        if self.first_admitted_capabilities.get().is_some() {
             return Ok(()); // Already detected
         }
 
-        let caps = handle.capabilities().await?;
-        info!(
-            source = "spawned-worker",
-            infer_tasks = ?caps.infer_tasks,
-            engine_versions = ?caps.engine_versions,
-            "Recorded detected worker capabilities"
-        );
-        self.record_capabilities(caps);
+        let caps = handle
+            .capabilities()
+            .await
+            .map_err(CapabilityProbeFailure::Unanswered)?;
+        self.record_capabilities(key, caps)
+            .map_err(CapabilityProbeFailure::Refused)?;
         Ok(())
     }
 
-    /// Return lazily detected capabilities, or `None` if no worker has
-    /// spawned yet.
-    pub fn detected_capabilities(&self) -> Option<&WorkerCapabilities> {
-        self.lazy_capabilities.get()
+    /// The first admitted capability report, or `None` if no worker has
+    /// answered yet.
+    pub fn detected_capabilities(&self) -> Option<&Arc<WorkerEngineReports>> {
+        self.first_admitted_capabilities.get()
     }
 
     /// The server instance ID assigned at pool creation.
@@ -1153,6 +1358,80 @@ impl WorkerPool {
 }
 
 // V2 execute key resolution helpers live in execute_v2.rs, used by dispatch.rs.
+
+#[cfg(test)]
+mod capability_admission_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::api::{CapabilityAdmissionOutcome, LanguageCode3, ReportedEngineName};
+    use crate::engine_reports::EngineReportAdmissionError;
+
+    fn report(entries: &[(InferTask, Option<&str>)]) -> WorkerCapabilities {
+        WorkerCapabilities {
+            commands: Vec::new(),
+            free_threaded: false,
+            infer_tasks: entries.iter().map(|(task, _)| *task).collect(),
+            engine_versions: entries
+                .iter()
+                .map(|(task, name)| {
+                    (
+                        *task,
+                        name.map(|name| ReportedEngineName::try_from(name).expect("valid name")),
+                    )
+                })
+                .collect(),
+            stanza_capabilities: BTreeMap::new(),
+        }
+    }
+
+    /// A refused report is not log-only: it is the key's recorded state,
+    /// returned for `/health`, until the key reports again and is admitted.
+    #[test]
+    fn a_refused_report_is_returned_with_its_key_and_reason_until_replaced() {
+        let pool = WorkerPool::new(PoolConfig::default());
+        let key = WorkerKey::without_engine_selection(
+            WorkerTarget::profile(WorkerProfile::Gpu),
+            WorkerLanguage::from(LanguageCode3::eng()),
+        );
+        let mut broken = report(&[(InferTask::Fa, None)]);
+        broken.engine_versions.clear();
+
+        let refusal = pool
+            .record_capabilities(&key, broken)
+            .expect_err("an advertised task with no engine entry is refused");
+        assert_eq!(
+            refusal,
+            EngineReportAdmissionError::MissingEngineReport {
+                task: InferTask::Fa
+            }
+        );
+        assert!(pool.detected_capabilities().is_none());
+        assert_eq!(
+            pool.capability_admissions(),
+            vec![crate::api::WorkerCapabilityAdmission {
+                worker_key: key.label(),
+                outcome: CapabilityAdmissionOutcome::Refused {
+                    reason: EngineReportAdmissionError::MissingEngineReport {
+                        task: InferTask::Fa
+                    },
+                },
+            }]
+        );
+
+        pool.record_capabilities(&key, report(&[(InferTask::Fa, Some("wave2vec-fa-v1"))]))
+            .expect("a complete report is admitted");
+        assert_eq!(
+            pool.capability_admissions(),
+            vec![crate::api::WorkerCapabilityAdmission {
+                worker_key: key.label(),
+                outcome: CapabilityAdmissionOutcome::Admitted {
+                    infer_tasks: vec![InferTask::Fa],
+                },
+            }]
+        );
+    }
+}
 
 #[cfg(test)]
 mod default_pool_config_tests {

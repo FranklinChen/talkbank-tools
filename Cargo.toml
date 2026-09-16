@@ -54,27 +54,21 @@ unimplemented = "warn"
 aho-corasick = "1.1"
 async-trait = "0.1"
 assert_cmd = "2.2"
-atty = "0.2"
 axum = { version = "0.8", features = ["ws"] }
 blake3 = "1.8"
-cc = "1.4"
 chrono = "0.4"
 
 # CLI and tools
 clap = { version = "4.6", features = ["derive", "env"] }
-comrak = "0.55.0"
 
 # Concurrency
-crossbeam-channel = "0.5"
 crossterm = "0.29"
-ctrlc = "3.5"
 dashmap = "6.2"
 csv = "1"
 futures = "0.3"
 
 # Utilities
 dirs = "7.0"
-divan = "0.1"
 fs2 = "0.4"
 include_dir = "0.7"
 indexmap = { version = "2.14", features = ["serde"] }
@@ -82,24 +76,13 @@ indicatif = "0.18"
 
 # Testing
 insta = { version = "1.48", features = ["json", "yaml"] }
-jsonschema = { version = "0.54", default-features = false, features = ["resolve-file"] }
-miette = { version = "7.6.0", features = ["derive"] }
-notify = "8.2"
-num_cpus = "1.17"
-parking_lot = "0.12"
 predicates = "3.1"
-
-# Proc-macro dependencies
-proc-macro2 = "1.0"
 proptest = "1.11.0"
 # pyo3 moves in lockstep with the numpy crate (pyo3-ffi's `links = "python"`
 # forbids two pyo3 versions in one graph); see crates/batchalign-pyo3/Cargo.toml.
 pyo3 = "0.29"
-quick-xml = "0.42"
-quote = "1.0"
 rand = "0.10"
 ratatui = { version = "0.30", features = ["serde"] }
-rayon = "1.12"
 regex = "1.13"
 reqwest = { version = "0.13", features = ["multipart", "json", "blocking"] }
 rstest = { version = "0.27.0", default-features = false }
@@ -111,19 +94,14 @@ serde_yaml = "0.9"
 # own manifests rather than inheriting `workspace.package.version`, because the
 # TalkBank core Rust line (`0.2.x`) and the Batchalign preview product line
 # (`0.1.x`) are intentionally separate release trains.
-batchalign = { path = "crates/batchalign" }
 batchalign-types = { path = "crates/batchalign-types" }
 libc = "0.2"
 moka = { version = "0.12", features = ["future"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
-shellexpand = "3.1"
-similar = "3.2"
 smallvec = { version = "1.16", features = ["serde", "union", "const_generics"] }
-smol_str = { version = "0.3", features = ["serde"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 strsim = "0.11.1"
-syn = { version = "3.0", features = ["full", "parsing", "extra-traits"] }
 batchalign-transform = { path = "crates/batchalign-transform" }
 
 # CHAT core crates consumed from the published, public chatter repo via git deps
@@ -133,34 +111,27 @@ batchalign-transform = { path = "crates/batchalign-transform" }
 # ../chatter/crates/...; never commit a path override here. Adopt a newer chatter
 # by bumping the tag. talkbank-transform is the GENERIC transform;
 # batchalign-transform (above) holds the ML accretion.
-talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2", default-features = false }
+talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.25.0", default-features = false }
 # Stage 1 dedup: talkbank-tools no longer carries its own copies of these.
-talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
-talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
-talkbank-parser-re2c = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
-talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.24.2" }
+talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.25.0" }
+talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.25.0" }
+talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.25.0" }
 
-phf = { version = "0.14", features = ["macros"] }
-phf_codegen = "0.14"
 tempfile = "3.27"
-text-size = "1.1"
 thiserror = "^2.0.20"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
-toml = "^1.1.5"
+toml = "^1.1.6"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.33"
 tower-http = { version = "0.7", features = ["cors", "fs", "limit", "trace", "compression-gzip", "compression-br", "catch-panic", "timeout"] }
-tower-lsp = "0.20"
 opentelemetry = { version = "0.32", features = ["trace"] }
 opentelemetry_sdk = { version = "0.32", features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 whatlang = "0.18"
-zhconv = "0.4.1"
-rustc-hash = "2.1"
 sysinfo = "0.39"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
@@ -168,13 +139,8 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Tree-sitter parsing
-tree-sitter = "0.27"
-tree-sitter-highlight = "0.27"
 ferrous-opencc = "0.4.0"
 
-trybuild = "1.0"
-unicode-width = "0.2"
 walkdir = "^2.5"
 # rusqlite was previously a workspace dep for xtask audit-docs; now
 # replaced by sqlx (with a small tokio runtime in xtask) so the

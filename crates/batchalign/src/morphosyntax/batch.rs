@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use super::identity::AppliedAnalyses;
 use super::worker::infer_batch;
 use crate::chat_ops::morphosyntax_ops::BatchItemWithPosition;
 use crate::chat_ops::morphosyntax_ops::l2;
@@ -28,12 +29,16 @@ fn secondary_dispatch_supported(
 /// 3. Runs the structural merge algorithm (primary structural + secondary lexical)
 /// 4. Splices merged morphology back into the ChatFile, replacing L2|xxx
 /// 5. Falls back to L2|xxx for unsupported languages or dispatch failures
+///
+/// Returns what the secondary workers reported about the analysis merged in,
+/// so a caller that stamps provenance names those models beside the
+/// primary-language ones and counts their repairs with the rest.
 pub(crate) async fn dispatch_secondary_l2(
     chat_file: &mut ChatFile,
     deferred: &[l2::L2DeferredPosition],
     services: PipelineServices<'_>,
     filename: &str,
-) {
+) -> AppliedAnalyses {
     use crate::chat_ops::morphosyntax_ops::MorphosyntaxBatchItem;
 
     let dispatch_plan = l2::plan_dispatch_spans(deferred);
@@ -56,6 +61,7 @@ pub(crate) async fn dispatch_secondary_l2(
     );
 
     let mut merged_results: Vec<Option<l2::MergedL2Morphology>> = vec![None; deferred.len()];
+    let mut applied = AppliedAnalyses::none();
 
     for (target_lang, lang_spans) in &by_lang {
         let lang3 = match crate::api::LanguageCode3::try_new(target_lang.as_ref()) {
@@ -123,10 +129,11 @@ pub(crate) async fn dispatch_secondary_l2(
         .await
         {
             Ok(responses) => {
-                for (span, ud_resp) in lang_spans.iter().copied().zip(responses.iter()) {
-                    if let Some(sentence) = ud_resp.sentences.first() {
+                for (span, admitted) in lang_spans.iter().copied().zip(responses.iter()) {
+                    if let Some(sentence) = admitted.response().sentences.first() {
                         match l2::merge_planned_secondary_span(span, deferred, sentence) {
                             Ok(merged_pairs) => {
+                                applied.record(admitted.source());
                                 for (global_idx, merged) in merged_pairs {
                                     merged_results[global_idx] = Some(merged);
                                 }
@@ -163,6 +170,7 @@ pub(crate) async fn dispatch_secondary_l2(
         gra_upgraded = outcome.gra_upgraded,
         "L2 morphotag: splice complete"
     );
+    applied
 }
 
 #[cfg(test)]

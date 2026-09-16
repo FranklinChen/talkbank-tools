@@ -8,7 +8,27 @@
     "input": {
       "kind": "provider_media",
       "media_path": "/tmp/example.wav",
-      "num_speakers": 2
+      "diarization": {
+        "kind": "integrated",
+        "speakers": 2
+      }
+    },
+    "models": {
+      "engine": "qwen",
+      "asr": {
+        "id": "Qwen/Qwen3-ASR-1.7B-hf",
+        "revision": {
+          "kind": "commit",
+          "commit": "bcd2b5b7f32b480ab5790554cfa8347f246a14f3"
+        }
+      },
+      "aligner": {
+        "id": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
+        "revision": {
+          "kind": "commit",
+          "commit": "c07281df297b9905d24a508279258cccf987a064"
+        }
+      }
     }
   },
   "attachments": []

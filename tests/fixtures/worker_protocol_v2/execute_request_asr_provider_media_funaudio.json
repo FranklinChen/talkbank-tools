@@ -8,7 +8,26 @@
     "input": {
       "kind": "provider_media",
       "media_path": "/tmp/example-funaudio.wav",
-      "num_speakers": 1
+      "diarization": {
+        "kind": "not_requested"
+      }
+    },
+    "models": {
+      "engine": "sense_voice",
+      "asr": {
+        "id": "FunAudioLLM/SenseVoiceSmall",
+        "revision": {
+          "kind": "commit",
+          "commit": "3847d57b6bdf2dd8875cb1508d2af43d80a16bf7"
+        }
+      },
+      "vad": {
+        "id": "funasr/fsmn-vad",
+        "revision": {
+          "kind": "commit",
+          "commit": "df20e6b30c653645fa4ff125cacfcabd1020a669"
+        }
+      }
     }
   },
   "attachments": []

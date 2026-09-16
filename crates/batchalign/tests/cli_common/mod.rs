@@ -18,7 +18,6 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use batchalign::api::{JobInfo, JobStatus, MemoryMb, NumSpeakers};
@@ -33,6 +32,10 @@ use batchalign::options::{
 use batchalign::worker::InferTask;
 use batchalign::worker::pool::PoolConfig;
 use batchalign::{AppState, create_app};
+
+use crate::live_deadline::{
+    HarnessBudget, ProgressSnapshot, ServerTestDeadline, WaitSubject,
+};
 
 /// Create a subprocess command for the published `batchalign3` binary.
 ///
@@ -332,7 +335,11 @@ impl LiveTestServer {
     pub async fn shutdown(self) {
         self.server_task.abort();
         let _ = self.server_task.await;
-        match self.state.shutdown_for_reuse(Duration::from_secs(5)).await {
+        match self
+            .state
+            .shutdown_for_reuse(HarnessBudget::SessionShutdown.as_duration())
+            .await
+        {
             Ok(shutdown) if shutdown.timed_out || shutdown.remaining_jobs > 0 => {
                 eprintln!(
                     "WARN: live CLI test server shutdown left {} tracked jobs (timed_out={})",
@@ -378,7 +385,9 @@ pub async fn start_live_server(
         python_path: python_path.into(),
         test_echo: false,
         health_check_interval_s: 3_600,
-        ready_timeout_s: 120,
+        // One number buys both winning a host-wide startup slot and this
+        // worker's own startup; see `HarnessBudget::FixtureWorkerReady`.
+        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_secs(),
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
         runtime: Default::default(),
@@ -390,7 +399,7 @@ pub async fn start_live_server(
         pool_config,
         Some(jobs_dir.to_string_lossy().into()),
         Some(db_dir),
-        Some(batchalign::cli::build_hash().into()),
+        Some(batchalign::build_hash().into()),
     )
     .await
     .map_err(|error| format!("could not create live server app: {error}"))?;
@@ -559,10 +568,46 @@ pub async fn run_job_to_completion(
     files: Vec<batchalign::api::FilePayload>,
     options: CommandOptions,
 ) -> (JobInfo, Vec<batchalign::api::FileResult>) {
+    run_job_to_completion_with_speakers(
+        client,
+        base_url,
+        command,
+        lang,
+        files,
+        speakers_for_command(command),
+        options,
+    )
+    .await
+}
+
+/// The speaker count a command MEANS when a test does not say otherwise.
+///
+/// `transcribe_s` is diarized transcription: asking it to separate speakers
+/// while asserting the recording has one is refused at submission, so the
+/// default for it is the smallest count that asks a real question. Every other
+/// command carries one speaker, which is what the old single literal meant for
+/// them and still means.
+fn speakers_for_command(command: batchalign::api::ReleasedCommand) -> NumSpeakers {
+    match command {
+        batchalign::api::ReleasedCommand::TranscribeS => NumSpeakers(2),
+        _ => NumSpeakers(1),
+    }
+}
+
+/// Submit one job whose speaker count the caller states.
+pub async fn run_job_to_completion_with_speakers(
+    client: &reqwest::Client,
+    base_url: &str,
+    command: batchalign::api::ReleasedCommand,
+    lang: &str,
+    files: Vec<batchalign::api::FilePayload>,
+    num_speakers: NumSpeakers,
+    options: CommandOptions,
+) -> (JobInfo, Vec<batchalign::api::FileResult>) {
     let submission = batchalign::api::JobSubmission {
         command,
         lang: batchalign::api::LanguageSpec::try_from(lang).expect("test lang"),
-        num_speakers: NumSpeakers(1),
+        num_speakers,
         files,
         media_files: vec![],
         media_mapping: Default::default(),
@@ -600,9 +645,13 @@ pub async fn run_job_to_completion(
     (final_info, results_resp.files)
 }
 
-/// Poll until a job reaches a terminal state (60s timeout).
+/// Poll until a job reaches a terminal state.
+///
+/// The wait extends while the job keeps changing and refuses when it stops;
+/// see `tests/live_deadline` for why a fixed deadline here reported contention
+/// as failure.
 pub async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -> JobInfo {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+    let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(job_id));
 
     loop {
         let resp = client
@@ -619,12 +668,6 @@ pub async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &st
             return info;
         }
 
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Job {job_id} did not finish within 60s (status: {:?})",
-            info.status
-        );
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        deadline.keep_waiting(ProgressSnapshot::job(&info)).await;
     }
 }

@@ -30,8 +30,9 @@ use batchalign::api::{DurationSeconds, NumSpeakers};
 use batchalign::types::worker_v2::{
     ArtifactRefV2, AsrBackendV2, AsrInputV2, AsrRequestV2, ExecuteOutcomeRef, ExecuteRequestV2,
     ExecuteResponseV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2, InferenceTaskV2,
-    ProtocolErrorCodeV2, ProviderMediaInputV2, SpeakerBackendV2, SpeakerEmbeddingOutcomeV2,
-    SpeakerInferenceEvidenceV2, TaskRequestV2, TaskResultV2, WorkerArtifactIdV2,
+    ProtocolErrorCodeV2, ProviderDiarizationV2, ProviderMediaInputV2, SpeakerBackendV2,
+    SpeakerEmbeddingOutcomeV2, SpeakerInferenceEvidenceV2, TaskRequestV2, TaskResultV2,
+    WorkerArtifactIdV2,
 };
 use batchalign::worker::WorkerProfile;
 use batchalign::worker::handle::WorkerConfig;
@@ -730,15 +731,10 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
             Ok(())
         }
         TaskResultV2::MorphosyntaxResult(value) => {
+            // Every item is a tagged outcome (analyzed, no words, or failed),
+            // so "neither data nor an error" is not representable.
             if value.items.is_empty() {
                 return Err("morphosyntax result must contain at least one item".into());
-            }
-            if value
-                .items
-                .iter()
-                .all(|item| item.raw_sentences.is_none() && item.error.is_none())
-            {
-                return Err("morphosyntax result items must contain data or an error".into());
             }
             Ok(())
         }
@@ -756,28 +752,19 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
             Ok(())
         }
         TaskResultV2::TranslationResult(value) => {
+            // Every item is a tagged outcome (translated, blank input, or
+            // failed), so "neither text nor an error" is not representable.
             if value.items.is_empty() {
                 return Err("translation result must contain at least one item".into());
-            }
-            if value
-                .items
-                .iter()
-                .all(|item| item.raw_translation.is_none() && item.error.is_none())
-            {
-                return Err("translation result items must contain text or an error".into());
             }
             Ok(())
         }
         TaskResultV2::CorefResult(value) => {
+            // Every item is a tagged outcome (resolved, no sentences, or
+            // failed), so "neither annotations nor an error" is not
+            // representable.
             if value.items.is_empty() {
                 return Err("coref result must contain at least one item".into());
-            }
-            if value
-                .items
-                .iter()
-                .all(|item| item.annotations.is_none() && item.error.is_none())
-            {
-                return Err("coref result items must contain annotations or an error".into());
             }
             Ok(())
         }
@@ -914,9 +901,21 @@ fn mismatched_execute_request(request_id: &str, task: InferenceTaskV2) -> Execut
         payload: TaskRequestV2::Asr(AsrRequestV2 {
             lang: WorkerLanguage::from(LanguageCode3::yue()),
             backend: AsrBackendV2::HkTencent,
+            models: batchalign::types::worker_v2::AsrRequestedModelsV2::Tencent {
+                engine_model_type: batchalign::types::worker_v2::RequestedModelV2 {
+                    id: batchalign::types::worker_v2::ModelIdV2::from_static("tencent-asr"),
+                    revision:
+                        batchalign::types::worker_v2::RequestedRevisionV2::ProviderParameter {
+                            parameter:
+                                batchalign::types::worker_v2::ProviderParameterV2::from_static(
+                                    "16k_zh_large",
+                                ),
+                        },
+                },
+            },
             input: AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
                 media_path: "/tmp/mismatched-provider.wav".into(),
-                num_speakers: NumSpeakers(2),
+                diarization: ProviderDiarizationV2::for_expected_speakers(NumSpeakers(2)),
             }),
             extras: std::collections::BTreeMap::new(),
             decode_budget_seconds: None,
@@ -1034,7 +1033,7 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
     };
     asr_request.input = AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
         media_path: "/tmp/provider.wav".into(),
-        num_speakers: NumSpeakers(2),
+        diarization: ProviderDiarizationV2::for_expected_speakers(NumSpeakers(2)),
     });
     let error = validate_execute_request_invariants(&invalid_asr_transport)
         .expect_err("local whisper with provider_media should fail");

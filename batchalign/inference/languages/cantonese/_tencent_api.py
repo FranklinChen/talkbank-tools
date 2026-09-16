@@ -10,16 +10,19 @@ import time
 import uuid
 from typing import Any
 
-from batchalign.inference._domain_types import AudioPath, LanguageCode, NumSpeakers
+from batchalign.inference._domain_types import AudioPath, LanguageCode
+from batchalign.worker._types_v2 import (
+    IntegratedDiarizationV2,
+    NotRequestedDiarizationV2,
+    ProviderDiarizationV2,
+)
 
 from ._asr_types import AsrGenerationPayload, TimedWord
-from ._common import provider_lang_code, read_asr_config
+from ._common import read_asr_config
 
 _MAX_POLL_SECONDS = 600  # 10-minute safety timeout for ASR task polling
 
 L = logging.getLogger("batchalign.hk.tencent")
-
-_CHINESE_CODES = {"zho", "yue", "wuu", "nan", "hak"}
 
 
 class TencentRecognizer:
@@ -30,6 +33,7 @@ class TencentRecognizer:
         lang: LanguageCode,
         poll_interval_s: float = 10.0,
         *,
+        engine_model_type: str,
         config: configparser.ConfigParser | None = None,
     ) -> None:
         """Load credentials and initialize Tencent ASR/COS clients."""
@@ -60,7 +64,9 @@ class TencentRecognizer:
         region = cfg["engine.tencent.region"]
 
         self.lang_code = lang
-        self.provider_lang = provider_lang_code(lang)
+        # Chosen by the Rust control plane, which owns the one ISO 639-3 to
+        # 639-1 conversion; this class no longer derives it from the language.
+        self.engine_model_type = engine_model_type
         self._poll_interval_s = max(1.0, poll_interval_s)
         self._bucket_name = cfg["engine.tencent.bucket"]
         self._region = region
@@ -76,16 +82,16 @@ class TencentRecognizer:
             )
         )
 
-    def _engine_model_type(self) -> str:
-        """Return the Tencent engine model identifier for the configured language."""
-        if self.lang_code in _CHINESE_CODES or self.provider_lang in _CHINESE_CODES:
-            return "16k_zh_large"
-        return f"16k_{self.provider_lang}"
-
     def transcribe(
-        self, source_path: AudioPath, num_speakers: NumSpeakers = 0
+        self, source_path: AudioPath, diarization: ProviderDiarizationV2
     ) -> list[Any]:
-        """Upload media, submit ASR task, poll for completion, return ResultDetail."""
+        """Upload media, submit ASR task, poll for completion, return ResultDetail.
+
+        ``diarization`` carries no default: whether to separate speakers is the
+        caller's question, and the ``num_speakers = 0`` this parameter used to
+        default to was a spelling of "do not separate" that only this file and
+        the Rust bridge knew.
+        """
         try:
             from tencentcloud.asr.v20190614 import models
         except Exception as exc:
@@ -112,11 +118,25 @@ class TencentRecognizer:
         )
 
         create_req = models.CreateRecTaskRequest()
-        create_req.EngineModelType = self._engine_model_type()
+        create_req.EngineModelType = self.engine_model_type
         create_req.ResTextFormat = 1
-        create_req.SpeakerDiarization = 1
-        if num_speakers > 0:
-            create_req.SpeakerNumber = num_speakers
+        # Separation is requested only when the control plane asked for it, and
+        # the request says which in a type rather than in a number: `Integrated`
+        # carries a count that is at least two by construction, `NotRequested`
+        # carries none at all. Before the typed request this asked Tencent to
+        # diarize every recording, including ones the job declared to have a
+        # single speaker, and then attributed whatever came back.
+        match diarization:
+            case IntegratedDiarizationV2():
+                create_req.SpeakerDiarization = 1
+                create_req.SpeakerNumber = diarization.speakers
+            case NotRequestedDiarizationV2():
+                create_req.SpeakerDiarization = 0
+            case _:
+                # Unreachable through the union above, and it raises rather than
+                # picking a reasonable-looking default, because every default
+                # here is a claim about a recording that nobody made.
+                raise TypeError(f"unknown provider diarization state: {diarization!r}")
         create_req.ChannelNum = 1
         create_req.Url = media_url
         create_req.SourceType = 0
@@ -165,6 +185,4 @@ class TencentRecognizer:
         """Delegate Tencent result-detail projection to the shared Rust helper."""
         import batchalign_core
 
-        return json.loads(
-            batchalign_core.tencent_result_detail_to_asr(result_detail, self.lang_code)
-        )
+        return json.loads(batchalign_core.tencent_result_detail_to_asr(result_detail))

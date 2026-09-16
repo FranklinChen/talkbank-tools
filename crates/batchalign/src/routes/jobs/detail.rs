@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::api::{
-    ContentType, DisplayPath, FileResult, FileStatusKind, JobId, JobInfo, JobResultResponse,
-    JobStatus,
+    ContentType, DisplayPath, FileProvenance, FileResult, FileStatusKind, JobId, JobInfo,
+    JobResultResponse, JobStatus,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -93,10 +93,9 @@ pub(crate) async fn get_results(
         } else {
             String::new()
         };
-        let provenance = if r.error.is_none() && r.content_type == ContentType::Chat {
-            crate::provenance::extract_provenance(&content)
-        } else {
-            Vec::new()
+        let provenance = match &r.error {
+            None => provenance_of(r.content_type, &content),
+            Some(_) => FileProvenance::NotRead,
         };
         files.push(FileResult {
             filename: r.filename.clone(),
@@ -167,25 +166,20 @@ pub(crate) async fn get_single_result(
             content: String::new(),
             content_type: ContentType::Chat,
             error: fs.error.clone().or(Some("Unknown error".into())),
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         }));
     }
 
-    let result_entry = primary_result_entry(&detail, &filename)
-        .ok_or_else(|| {
-            ServerError::FileNotFound(format!("Result for {filename} not found in job {job_id}"))
-        })?;
+    let result_entry = primary_result_entry(&detail, &filename).ok_or_else(|| {
+        ServerError::FileNotFound(format!("Result for {filename} not found in job {job_id}"))
+    })?;
 
     let content_type = result_entry.content_type;
     let out_filename = result_entry.filename.clone();
 
     let content = read_result_content(&result_content_path(&detail, &out_filename)).await?;
 
-    let provenance = if content_type == ContentType::Chat {
-        crate::provenance::extract_provenance(&content)
-    } else {
-        Vec::new()
-    };
+    let provenance = provenance_of(content_type, &content);
     Ok(Json(FileResult {
         filename: out_filename,
         content,
@@ -201,10 +195,30 @@ fn primary_result_entry<'a>(
     detail: &'a crate::store::JobDetail,
     input: &str,
 ) -> Option<&'a crate::store::FileResultEntry> {
-    let expected = crate::recipe_runner::runtime::result_display_path_for_command(
-        detail.command, input,
-    );
-    detail.results.iter().find(|r| r.error.is_none() && r.filename == expected)
+    let expected =
+        crate::recipe_runner::runtime::result_display_path_for_command(detail.command, input);
+    detail
+        .results
+        .iter()
+        .find(|r| r.error.is_none() && r.filename == expected)
+}
+
+/// Read one successful result file's provenance stamps as a typed state.
+///
+/// A stamp of ours that does not parse is that file's state, never a failure
+/// of the whole request and never a silently shorter history, so the rest of
+/// the job's results are still served. Matched on the content type with no
+/// catch-all, so a new content type has to state whether it carries stamps.
+fn provenance_of(content_type: ContentType, content: &str) -> FileProvenance {
+    match content_type {
+        ContentType::Chat => match crate::provenance::extract_provenance(content) {
+            Ok(entries) => FileProvenance::Parsed { entries },
+            Err(unparseable) => FileProvenance::Unparseable {
+                reason: unparseable.to_string(),
+            },
+        },
+        ContentType::Csv | ContentType::Text | ContentType::Json => FileProvenance::NotRead,
+    }
 }
 
 async fn read_result_content(path: &std::path::Path) -> Result<String, ServerError> {
@@ -256,6 +270,7 @@ mod tests {
                 error_codes: None,
                 error_line: None,
                 bug_report_id: None,
+                stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
                 next_eligible_at: None,
@@ -265,6 +280,30 @@ mod tests {
                 progress_label: None,
             }],
         }
+    }
+
+    /// An unparseable stamp is one file's state, not a failed request: the
+    /// file still reports, and a well-formed file beside it parses.
+    #[test]
+    fn an_unparseable_stamp_is_that_files_provenance_state() {
+        use crate::api::FileProvenance;
+
+        let stamped = "@Comment:\t[fc-ba3 align | fa=wave2vec-fa-v1 ; lang=eng | 2026-09-15T19:15:00-04:00]\n";
+        assert!(matches!(
+            super::provenance_of(ContentType::Chat, stamped),
+            FileProvenance::Parsed { entries } if entries.len() == 1
+        ));
+
+        let broken = "@Comment:\t[fc-ba3 align]\n";
+        assert!(matches!(
+            super::provenance_of(ContentType::Chat, broken),
+            FileProvenance::Unparseable { reason } if reason.contains("[fc-ba3 align]")
+        ));
+
+        assert_eq!(
+            super::provenance_of(ContentType::Json, broken),
+            FileProvenance::NotRead
+        );
     }
 
     #[test]
@@ -283,7 +322,10 @@ mod tests {
         detail.results[0].filename = "nested/sample_speaker_identity.json".into();
         detail.results[0].content_type = ContentType::Json;
         let result = super::primary_result_entry(&detail, "nested/sample.cha").unwrap();
-        assert_eq!(result.filename.as_ref(), "nested/sample_speaker_identity.json");
+        assert_eq!(
+            result.filename.as_ref(),
+            "nested/sample_speaker_identity.json"
+        );
         assert!(super::primary_result_entry(&detail, "other/sample.cha").is_none());
         detail.results[0].error = Some("failed".into());
         assert!(super::primary_result_entry(&detail, "nested/sample.cha").is_none());

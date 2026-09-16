@@ -41,6 +41,7 @@ import typing
 from typing import NewType
 
 from batchalign.inference._domain_types import LanguageCode, TranslationBackend
+from batchalign.inference.translate import LoadedTranslation
 from batchalign.worker._types import WorkerBootstrapRuntime, _state
 
 # A FLORES-200 language tag (e.g. ``"spa_Latn"``, ``"zho_Hans"``,
@@ -88,8 +89,8 @@ def load_translation_engine(bootstrap: WorkerBootstrapRuntime) -> None:
     else:
         # Exhaustive match: mypy/pyright prove this is unreachable;
         # at runtime ``typing.assert_never`` raises AssertionError so
-        # a missing arm fails loudly instead of leaving translate_fn
-        # unset. Matches the equivalent guards in
+        # a missing arm fails loudly instead of leaving
+        # _state.translation unset. Matches the equivalent guards in
         # ``_model_loading.asr.load_asr_engine`` and
         # ``_model_loading.forced_alignment.load_fa_engine``.
         typing.assert_never(backend)
@@ -122,7 +123,7 @@ def resolve_translate_engine(
 
 
 def _load_google_translate() -> None:
-    """Bind ``_state.translate_fn`` to a googletrans-backed translator."""
+    """Install ``_state.translation`` for a googletrans-backed translator."""
     from googletrans import Translator
 
     async def _do_translate(translator: Translator, text: str) -> str:
@@ -140,12 +141,15 @@ def _load_google_translate() -> None:
         finally:
             loop.close()
 
-    _state.translate_backend = TranslationBackend.GOOGLE
-    _state.translate_fn = translate_fn
+    _state.translation = LoadedTranslation(
+        backend=TranslationBackend.GOOGLE,
+        engine="googletrans-v1",
+        translate=translate_fn,
+    )
 
 
 def _load_seamless_translate() -> None:
-    """Bind ``_state.translate_fn`` to a locally-loaded SeamlessM4T model.
+    """Install ``_state.translation`` for a locally-loaded SeamlessM4T model.
 
     Model is downloaded from HuggingFace on first load and cached
     thereafter. Operators on hosts where the public HF endpoint is slow
@@ -180,8 +184,11 @@ def _load_seamless_translate() -> None:
         output = model.generate(**inputs, tgt_lang="eng", generate_speech=False)
         return str(processor.decode(output[0].tolist()[0], skip_special_tokens=True))
 
-    _state.translate_backend = TranslationBackend.SEAMLESS
-    _state.translate_fn = seamless_fn
+    _state.translation = LoadedTranslation(
+        backend=TranslationBackend.SEAMLESS,
+        engine="facebook/hf-seamless-m4t-medium",
+        translate=seamless_fn,
+    )
 
 
 # Only languages empirically validated against NLLB are listed; an
@@ -206,7 +213,7 @@ _ISO_639_3_TO_FLORES_200: dict[LanguageCode, FloresLanguageTag] = {
 
 
 def _load_nllb_translate() -> None:
-    """Bind ``_state.translate_fn`` to a locally-loaded NLLB-200-distilled-1.3B.
+    """Install ``_state.translation`` for a locally-loaded NLLB-200-distilled-1.3B.
 
     Model downloads from HuggingFace on first load (~5 GB) and is
     cached thereafter. Operators on hosts where the public HF endpoint
@@ -257,8 +264,11 @@ def _load_nllb_translate() -> None:
         )
         return str(tokenizer.decode(translated[0], skip_special_tokens=True))
 
-    _state.translate_backend = TranslationBackend.NLLB
-    _state.translate_fn = nllb_fn
+    _state.translation = LoadedTranslation(
+        backend=TranslationBackend.NLLB,
+        engine=model_id,
+        translate=nllb_fn,
+    )
 
 
 # Map ISO-639-3 codes BA3 emits per CHAT @Languages header to the
@@ -288,7 +298,7 @@ _ISO_639_3_TO_TENCENT_LANG: dict[LanguageCode, TencentLanguageCode] = {
 
 
 def _load_tencent_translate() -> None:
-    """Bind ``_state.translate_fn`` to a Tencent Cloud TMT translator.
+    """Install ``_state.translation`` for a Tencent Cloud TMT translator.
 
     Credentials come from the same source the Tencent ASR backend
     uses: ``read_asr_config`` (in
@@ -362,8 +372,11 @@ def _load_tencent_translate() -> None:
             raise RuntimeError(f"Tencent TMT translation failed: {exc}") from exc
         return str(resp.TargetText)
 
-    _state.translate_backend = TranslationBackend.TENCENT
-    _state.translate_fn = tencent_fn
+    _state.translation = LoadedTranslation(
+        backend=TranslationBackend.TENCENT,
+        engine="tencent-tmt",
+        translate=tencent_fn,
+    )
 
 
 # Map ISO-639-3 codes BA3 emits per CHAT @Languages header to the
@@ -417,7 +430,7 @@ _ALIYUN_MT_SCENE: str = "general"
 
 
 def _load_aliyun_translate() -> None:
-    """Bind ``_state.translate_fn`` to an Aliyun MT translator.
+    """Install ``_state.translation`` for an Aliyun MT translator.
 
     Credentials come from the same source the Aliyun ASR backend
     uses: ``read_asr_config`` (in
@@ -499,8 +512,11 @@ def _load_aliyun_translate() -> None:
             )
         return translated
 
-    _state.translate_backend = TranslationBackend.ALIYUN
-    _state.translate_fn = aliyun_fn
+    _state.translation = LoadedTranslation(
+        backend=TranslationBackend.ALIYUN,
+        engine="aliyun-mt",
+        translate=aliyun_fn,
+    )
 
 
 __all__ = [

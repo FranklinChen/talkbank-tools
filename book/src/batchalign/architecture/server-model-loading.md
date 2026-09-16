@@ -1,7 +1,7 @@
 # Server Model Loading and Caching
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-16 08:18 EDT
 
 This document describes every ML model loaded by batchalign3 workers,
 when each model is loaded into memory, and how results are cached.
@@ -49,7 +49,7 @@ The server auto-chains forced alignment + UTR + disfluency + retrace.
 | Module | Model | Source | Size | Loaded When | HF Hub |
 |--------|-------|--------|------|-------------|--------|
 | `inference/fa.py` (Whisper FA) | `openai/whisper-large-v2` | HF Hub | ~3 GB | Worker startup (immediate) | Yes |
-| `inference/asr.py` (UTR) | `talkbank/CHATWhisper-en-large-v1` (eng) or `openai/whisper-large-v2` (other) | HF Hub | ~3 GB | First audio file (lazy) | Yes |
+| `inference/asr.py` (UTR) | `openai/whisper-large-v3` for every language, pinned to the commit named in `model_manifest.rs` | HF Hub | ~3 GB | First audio file (lazy) | Yes |
 | Rust (disfluency) | None (rule-based data files) | local | negligible | N/A | No |
 | Rust (retrace) | None (Rust n-gram) | local | negligible | N/A | No |
 
@@ -58,7 +58,14 @@ The server auto-chains forced alignment + UTR + disfluency + retrace.
 
 **Result caching:**
 - Forced alignment: SQLite. Key = `BLAKE3(audio identity + time window + words + gap-healing policy + engine)`.
-- UTR: SQLite. Key = `BLAKE3(realpath + filesize)`. Protected from pruning.
+- UTR: SQLite. Key = `BLAKE3(realpath + filesize)`, under the namespace
+  `utr-asr-v1:<UTR engine>:<the models that plan pinned>`. The engine name
+  alone said only which engine wrote a row, never which weights it wrote it
+  with, so a row from before a checkpoint moved was indistinguishable from one
+  after; naming the pinned models makes rows written under an older
+  composition unreadable rather than silently reusable. A plan in which any
+  model floats is ineligible: such a run infers without reading or writing the
+  cache at all. Protected from pruning.
 
 ---
 
@@ -79,10 +86,12 @@ transcribe also runs pre-CHAT utterance segmentation before CHAT assembly.
 | Rust (disfluency) | None | local | negligible | N/A | No |
 | Rust (retrace) | None | local | negligible | N/A | No |
 
-**BertUtteranceModel languages:** Only loaded when `resolve("utterance", lang)`
-returns a model name. Currently: `eng` (`talkbank/CHATUtterance-en`),
-`cmn` / `zho` (`talkbank/CHATUtterance-zh_CN`), `yue` (Cantonese-specific
-model).
+**BertUtteranceModel languages:** Only loaded when the Rust manifest
+(`model_manifest::UTSEG_BOUNDARY_MODELS`) pins a model for the language and
+sends it with the worker spawn. Currently: `eng`
+(`talkbank/CHATUtterance-en`), `cmn` / `zho` (`talkbank/CHATUtterance-zh_CN`),
+`yue` (Cantonese-specific model). The worker loads the pinned snapshot by local
+path, never by name, so the revision it reports is one it verified on disk.
 
 **Result caching:** Raw provider-shaped Rev.AI evidence is cached and replayed
 after strict validation. Ordinary non-Rev ASR engines are not yet cached and

@@ -96,7 +96,7 @@ fn write_one_result(out_dir: &Path) {
         content: "@UTF8\n@Begin\n*CHI:\thello .\n@End\n".to_string(),
         content_type: ContentType::Chat,
         error: None,
-        provenance: Vec::new(),
+        provenance: batchalign::api::FileProvenance::NotRead,
     };
 
     let written = write_result(&result, &result_map, out_dir).expect("write result");

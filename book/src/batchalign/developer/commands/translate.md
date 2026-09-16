@@ -1,7 +1,7 @@
 # translate: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-08-06 16:10 EDT
+**Last updated:** 2026-09-15 20:20 EDT
 
 Implementation guide for the `translate` command. For user-facing
 documentation, see [User Guide: translate](../../user-guide/commands/translate.md).
@@ -16,14 +16,14 @@ documentation, see [User Guide: translate](../../user-guide/commands/translate.m
 | CLI → wire | `crates/batchalign/src/cli/args/options.rs`: `Commands::Translate` arm | No mapping: the flag already holds a `TranslateEngineName`. The CLI-private mirror enum and its hand-written match were removed 2026-08-06; see `SelectableEngine` in `types/engines.rs` |
 | Catalog entry | `crates/batchalign/src/recipe_runner/catalog.rs` | the `CatalogEntry` for `translate` |
 | Stage recipe | `crates/batchalign/src/recipe_runner/recipes.rs` | `TRANSLATE_RECIPE` |
-| Translate orchestration | `crates/batchalign/src/translate.rs` | Cross-file batching, cache, `%xtra` injection |
-| Batch dispatch | `crates/batchalign/src/runner/dispatch/infer_batched.rs` | Shared with morphotag and utseg |
-| Injection | `crates/batchalign/src/translate.rs` | Writes `%xtra:` tiers from translation strings |
+| Translate orchestration | `crates/batchalign/src/translate.rs` | The cross-file text pipeline (the only one; the per-file entry point was deleted with the workflow trait), per-item result admission including the empty-translation refusal, provenance. No result cache |
+| Source model and injection | `crates/batchalign-transform/src/translate.rs` | `TranslationSource` (what the speaker produced) and `render()`, its one renderer; `TranslationText` (a translation with something to apply) and `%xtra` injection |
+| Job dispatch | `crates/batchalign/src/execution/translate.rs`: `dispatch_translate_job` | Reached from `runner::routing::dispatch_batched_text_command`; one gateway call per file, each with the source language read from that file's `@Languages:` header |
 | Engine type | `crates/batchalign/src/types/engines.rs`: `TranslateEngineName` | Wire-format enum (`google` / `seamless` / `nllb` / `tencent` / `aliyun`), `EngineBackend` impl, `EngineOverrides.translate` field |
 | Engine resolution (server) | `crates/batchalign/src/types/options.rs`: `TranslateOptions::effective_translate_engine` | Precedence: shared `--engine-overrides` `{"translate":"..."}` > `--translate-engine` flag > Google default |
 | Engine bootstrap | `batchalign/worker/_model_loading/translation.py::load_translation_engine(bootstrap)` | Reads `bootstrap.engine_overrides["translate"]`, dispatches via exhaustive match to `_load_google_translate`, `_load_seamless_translate`, `_load_nllb_translate`, `_load_tencent_translate`, or `_load_aliyun_translate`. Unknown engine names raise `ValueError` |
 | Engine resolution (worker) | `batchalign/worker/_model_loading/translation.py::resolve_translate_engine` | Pure function from `engine_overrides` dict → `TranslationBackend`; default Google |
-| Worker IPC | `batchalign/inference/translate.py`: `batch_infer_translate()` | Iterates batch items, calls the resolved `translate_fn(text, src_lang)`, returns `raw_translation` per item. Sleeps 1.5s per item when backend is `GOOGLE` (rate limit). Pre-processing (Chinese space removal) happens in Rust before the call; post-processing in Rust after |
+| Worker IPC | `batchalign/inference/translate.py`: `batch_infer_translate()` | Iterates batch items through the loaded translation record and returns one tagged item per input: `translated` (with `raw_translation` and the record's `engine`) or `blank_input`. Sleeps 1.5s per item when backend is `GOOGLE` (rate limit). The text arrives already rendered by Rust (`TranslationSource::render`, which owns the Chinese-script rule); post-processing happens in Rust after. No backend strips the terminator |
 
 Local submissions (auto-daemon or loopback `--server`) use `paths_mode=true`
 as of 2026-04-14: the CLI posts source/output path lists instead of CHAT
@@ -31,30 +31,59 @@ bytes. See [Submission Modes](../../reference/command-io.md#submission-modes-pat
 
 ---
 
-## Cache key structure
+## No result cache
 
-Translation cache keys (BLAKE3 hash of):
-- Normalized utterance text
-- Source language code
-- Target language code (always `eng`)
+Translations are not cached. The utterance cache holds audio evidence only
+(forced alignment, UTR ASR, Rev.AI transcripts and speaker evidence); text NLP
+caching was removed because re-running warm inference cost less than the cache
+lookups. Every translate run calls the worker.
 
 ---
 
 ## Worker IPC: translate task
 
 ```text
-batch_infer request:
-{
-  "task": "translate",
-  "items": [
-    { "text": "Bonjour le monde.", "src_lang": "fra", "tgt_lang": "eng" },
-    ...
-  ]
-}
+request item (rendered from that utterance's TranslationSource; the source and
+target languages travel on the request envelope, not on each item):
+{ "text": "bonjour le monde." }
 
-batch_infer response:
-[ "Hello world.", ... ]
+TranslationResultV2 items, one per request item:
+{ "kind": "translated", "raw_translation": "Hello world.", "engine": "googletrans-v1" }
+{ "kind": "blank_input" }
+{ "kind": "failed", "error": "Translation failed: ..." }
 ```
+
+The PyO3 bridge parses each host item through the Rust wire type; an item that
+does not parse becomes that item's `failed` outcome.
+
+## What reaches the engine
+
+`TranslationSource::render` is the only place source text is built, and three
+closed rules decide its content, each a match with no catch-all:
+
+| Rule | Sent | Not sent |
+|---|---|---|
+| Words (`TranslatableWordText::of_produced_word`) | Ordinary words and filled pauses (without the `&-` prefix); a replaced word contributes its replacement | `0`-prefixed and CA omissions, `&~` nonwords, `&+` fragments, `xxx` / `yyy` / `www` |
+| Separators (`TranslatableSeparator::of_separator`) | The comma | The tag marker and vocative (`„`, `‡`), the CA prosodic marks |
+| Terminator (`render_terminator`) | `.` (the ideographic full stop in Han script), `?` for every question-bearing variant including `+/?`, `+!?`, `+//?`, `+..?`, and `!` | `+...`, `+/.`, `+//.`, `+"/.`, `+".`, `+.` |
+
+`RENDERED_TERMINATORS` lists every string the terminator rule can emit, and
+`TranslationText::admit` refuses a translation equal to one of them, so an
+engine echoing the punctuation batchalign3 sent cannot become a `%xtra` tier.
+
+## Engine identity and provenance
+
+The engine comes from the results, not from the worker's capability report.
+`translate.rs` admits each item into `AdmittedTranslation`
+(`Translated { text, engine }` or `BlankInput`), and the batch pipeline stamps
+each file with `[fc-ba3 translate | engine=... ; lang=... | ...]`, naming the
+distinct engines on the translations that file applied, joined with `+` in text
+order (`result_named_provenance` with `ResultNamedCommand::Translate`, the
+builder coref shares; it cannot fail). A file where nothing was translated
+carries no stamp and the run says why (`TextStamp::NotStamped`). Because
+nothing is read from the report, a translate job is never refused for a worker
+that has not named its translation engine; that pre-dispatch refusal was
+removed.
 
 ---
 
@@ -198,7 +227,9 @@ covers the wire shape via the mocked-SDK test in
 | Default engine | `googletrans` (dispatch.py: `"translate": "gtrans"`) | `googletrans`, with explicit per-host opt-in to Seamless via `server.yaml` `default_translate_engine` or `--translate-engine seamless` |
 | Concurrency | Sequential per utterance, with `time.sleep(1.5)` on Google | Batched cross-file dispatch, multiple worker groups per language, 1.5s sleep retained per-item on Google only |
 | Re-run behavior | Skip already-translated utterances | Overwrite existing `%xtra` |
-| Chinese (yue/zho) preprocessing | Inline in `gtrans.py` only; `seamless.py` did NOT strip spaces (BA2 bug) | Uniform `preprocess_for_translate` in Rust, applied before any backend |
+| What is sent | `utterance.strip(join_with_spaces=False, include_retrace=True, include_fp=True)` in `gtrans.py` and `seamless.py`: words, retraces, filled pauses and punctuation including the terminator, detokenized | The same words, as a typed `TranslationSource` rendered once at the wire boundary. Which words, which punctuation and how a terminator is written are BA3's own closed rules (see below). Before 2026-09-15 BA3 sent only `%mor`-domain words, with no retraces, no filled pauses and no terminator |
+| Chinese preprocessing | Inline in `gtrans.py` only (spaces removed, `.` to `。`); `seamless.py` did NOT strip spaces (BA2 bug) | A property of the language: `WritingSystem::of_language` marks the Han-script varieties (`zho`, `cmn`, `yue`, `wuu`, `nan`, `hak`), and `TranslationSource::render` applies the rule for every backend |
+| Empty translation | Dropped at injection: `generator.py` wrote `%xtra` only when the text was not `""`, `"."`, `"!"` or `"?"`, leaving the utterance with no tier | Refused when the result is admitted, as a typed per-item failure naming the engine and the remedy. Terminal, not retryable: an identical request gets an identical answer |
 | Per-item failure | Aborts the file (single-file CLI invocation) | Marks the affected file as failed with a typed `TextWorkflowFileError::ItemErrors` carrying the engine error(s); other files in the same cross-file batch continue normally. Transient errors at the batch dispatch layer retry; per-item engine failures propagate to file-level failure without retry. |
 | Output tier | `%xtra` | `%xtra` (identical) |
 

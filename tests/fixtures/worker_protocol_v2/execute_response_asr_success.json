@@ -18,7 +18,21 @@
         "start_s": 0.52,
         "end_s": 1.03
       }
-    ]
+    ],
+    "model": {
+      "engine": "whisper",
+      "asr": {
+        "id": "openai/whisper-large-v3",
+        "requested": {
+          "kind": "commit",
+          "commit": "06f233fe06e710322aca913c1bc4249a0d71fce1"
+        },
+        "observed": {
+          "kind": "commit",
+          "commit": "06f233fe06e710322aca913c1bc4249a0d71fce1"
+        }
+      }
+    }
   },
   "elapsed_s": 0.84
 }

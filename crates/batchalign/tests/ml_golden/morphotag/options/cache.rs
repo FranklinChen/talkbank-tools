@@ -153,7 +153,12 @@ async fn option_morphotag_multilingual_warm_cache_preserves_per_language_outputs
 
     for (cold, warm) in results_a.iter().zip(results_b.iter()) {
         assert_eq!(cold.filename, warm.filename);
-        assert_eq!(cold.content, warm.content);
+        // The two runs may stamp different seconds; everything else, the
+        // stamp's fields included, must be identical.
+        assert_eq!(
+            crate::ml_golden::golden::helpers::pin_provenance_timestamps(&cold.content),
+            crate::ml_golden::golden::helpers::pin_provenance_timestamps(&warm.content)
+        );
         assert!(cold.content.contains("%mor:"));
     }
 }

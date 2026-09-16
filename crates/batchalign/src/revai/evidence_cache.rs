@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{EngineVersion, LanguageCode3, LanguageSpec, NumSpeakers};
-use crate::cache::{CacheBackend, CacheError, InferenceLease, UtteranceCache};
-use crate::chat_ops::{CacheKey, CacheTaskName};
+use crate::api::{LanguageCode3, LanguageSpec, NumSpeakers};
+use crate::cache::{CacheError, CacheNamespace, InferenceLease, UtteranceCache, tasks};
+use crate::chat_ops::CacheKey;
 use crate::error::ServerError;
 use crate::params::CachePolicy;
 
@@ -30,6 +30,24 @@ pub(crate) struct RejectedRevLanguageEvidence {
     pub(crate) requested_language: LanguageSpec,
     pub(crate) effective_language: LanguageSpec,
     pub(crate) detected_language: Option<String>,
+}
+
+/// Proof that the exact rejected provider response was durably retained.
+/// Only the evidence commit operation can construct this result; a candidate
+/// cache key or a failed persistence attempt is not retained evidence.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Rev.AI returned no usable detected language. Raw response retained as diagnostic {diagnostic_key}; not admitted for replay. Supply an explicitly verified language before further processing; no English default was applied."
+)]
+pub struct RetainedRevLanguageRejection {
+    diagnostic_key: String,
+}
+
+impl RetainedRevLanguageRejection {
+    /// Address of the committed diagnostic, not a successful ASR cache entry.
+    pub fn diagnostic_key(&self) -> &str {
+        &self.diagnostic_key
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -164,15 +182,23 @@ struct RevAsrEvidenceKeyMaterial<'a> {
 
 /// Provider revision identity distinct from worker ASR engine versions.
 #[derive(Debug, Clone)]
-pub(crate) struct RevAsrModelRevision(EngineVersion);
+pub(crate) struct RevAsrModelRevision(crate::cache::BuildOwnedNamespace);
 
 impl RevAsrModelRevision {
     pub(crate) fn current() -> Self {
-        Self(EngineVersion::from("revai:asynchronous-transcript-v1"))
+        Self(crate::cache::BuildOwnedNamespace::literal(
+            "revai:asynchronous-transcript-v1",
+        ))
     }
 
     fn as_str(&self) -> &str {
-        self.0.as_ref()
+        self.0.as_str()
+    }
+}
+
+impl CacheNamespace for RevAsrModelRevision {
+    fn namespace(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -273,8 +299,8 @@ impl RevAsrEvidenceRequest {
         let stored = cache
             .get(
                 self.cache_key.as_str(),
-                CacheTaskName::RevAsrEvidence.as_str(),
-                self.model_revision.as_str(),
+                tasks::REV_ASR_EVIDENCE,
+                &self.model_revision,
             )
             .await?;
         let Some(stored) = stored else {
@@ -306,9 +332,8 @@ impl RevAsrEvidenceRequest {
         cache
             .put(
                 self.cache_key.as_str(),
-                CacheTaskName::RevAsrEvidence.as_str(),
-                self.model_revision.as_str(),
-                env!("CARGO_PKG_VERSION"),
+                tasks::REV_ASR_EVIDENCE,
+                &self.model_revision,
                 &value,
             )
             .await?;
@@ -610,7 +635,7 @@ impl RevAsrEvidenceCommitPermit {
         cache: &UtteranceCache,
         request: &RevAsrEvidenceTraceSeed,
         rejected: RejectedRevLanguageEvidence,
-    ) -> Result<String, RevAsrEvidenceCacheError> {
+    ) -> Result<RetainedRevLanguageRejection, RevAsrEvidenceCacheError> {
         let envelope = serde_json::json!({
             "diagnostic_schema_version": 1,
             "admission": "rejected_unresolved_language",
@@ -620,12 +645,27 @@ impl RevAsrEvidenceCommitPermit {
         // Distinct responses cannot overwrite each other, and normal evidence
         // lookup never reads this namespace. Do not mark the success lease.
         let bytes = serde_json::to_vec(&envelope)?;
-        let key = format!("rev-asr-rejected-language-{}", blake3::hash(&bytes).to_hex());
-        cache.put(&key, CacheTaskName::RevAsrEvidence.as_str(), self.model_revision.as_str(),
-            env!("CARGO_PKG_VERSION"), &envelope).await.map_err(|source| RevAsrEvidenceCacheError::RejectedEvidencePersistence {
-                diagnostic_key: key.clone(), source,
-            })?;
-        Ok(key)
+        let key = format!(
+            "rev-asr-rejected-language-{}",
+            blake3::hash(&bytes).to_hex()
+        );
+        cache
+            .put(
+                &key,
+                tasks::REV_ASR_EVIDENCE,
+                &self.model_revision,
+                &envelope,
+            )
+            .await
+            .map_err(
+                |source| RevAsrEvidenceCacheError::RejectedEvidencePersistence {
+                    diagnostic_key: key.clone(),
+                    source,
+                },
+            )?;
+        Ok(RetainedRevLanguageRejection {
+            diagnostic_key: key,
+        })
     }
 
     async fn commit(
@@ -643,9 +683,8 @@ impl RevAsrEvidenceCommitPermit {
         cache
             .put(
                 self.cache_key.as_str(),
-                CacheTaskName::RevAsrEvidence.as_str(),
-                self.model_revision.as_str(),
-                env!("CARGO_PKG_VERSION"),
+                tasks::REV_ASR_EVIDENCE,
+                &self.model_revision,
                 &value,
             )
             .await?;
@@ -740,10 +779,10 @@ pub(crate) async fn resolve_rev_asr_evidence<I: RevAsrEvidenceInference + ?Sized
             let evidence = match inference.infer(run).await? {
                 RevAsrInferenceOutcome::Completed(evidence) => evidence,
                 RevAsrInferenceOutcome::UnresolvedLanguage(rejected) => {
-                    let key = permit.retain_rejected_language(cache, &trace_seed, rejected).await?;
-                    return Err(ServerError::Validation(format!(
-                        "Rev.AI returned no usable detected language. Raw response retained as diagnostic {key}; not admitted for replay. Supply an explicitly verified language before further processing; no English default was applied."
-                    )).into());
+                    let retained = permit
+                        .retain_rejected_language(cache, &trace_seed, rejected)
+                        .await?;
+                    return Err(RevAsrEvidenceResolutionError::UnresolvedLanguage(retained));
                 }
             };
             let evidence = permit.commit(cache, evidence).await?;
@@ -759,6 +798,8 @@ pub(crate) async fn resolve_rev_asr_evidence<I: RevAsrEvidenceInference + ?Sized
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RevAsrEvidenceResolutionError {
     #[error(transparent)]
+    UnresolvedLanguage(RetainedRevLanguageRejection),
+    #[error(transparent)]
     Evidence(#[from] RevAsrEvidenceCacheError),
     #[error(transparent)]
     Inference(#[from] ServerError),
@@ -770,6 +811,9 @@ pub(crate) fn rev_asr_resolution_error_to_server_error(
     error: RevAsrEvidenceResolutionError,
 ) -> ServerError {
     match error {
+        RevAsrEvidenceResolutionError::UnresolvedLanguage(retained) => {
+            ServerError::UnresolvedAsrLanguage(retained)
+        }
         RevAsrEvidenceResolutionError::Evidence(
             RevAsrEvidenceCacheError::RequiredEvidenceMissing(cache_key),
         ) => {
@@ -786,8 +830,13 @@ pub(crate) fn rev_asr_resolution_error_to_server_error(
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RevAsrEvidenceCacheError {
-    #[error("failed to retain rejected Rev.AI response at diagnostic key {diagnostic_key}: {source}")]
-    RejectedEvidencePersistence { diagnostic_key: String, source: CacheError },
+    #[error(
+        "failed to retain rejected Rev.AI response at diagnostic key {diagnostic_key}: {source}"
+    )]
+    RejectedEvidencePersistence {
+        diagnostic_key: String,
+        source: CacheError,
+    },
     #[error("could not read Rev.AI provider media: {0}")]
     Io(#[from] std::io::Error),
     #[error("Rev.AI evidence cache failed: {0}")]
@@ -810,7 +859,7 @@ pub(crate) enum RevAsrEvidenceCacheError {
 mod tests {
     use super::*;
     use crate::api::LanguageCode3;
-    use crate::cache::CacheStats;
+    use crate::cache::{CacheBackend, CacheStats};
     use crate::revai::types::{Element, Monologue};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -849,17 +898,48 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CacheBackend for RecordingBackend {
-        async fn get(&self, key: &str, _task: &str, _engine_version: &str) -> Result<Option<serde_json::Value>, CacheError> {
+        async fn get(
+            &self,
+            key: &str,
+            _task: &str,
+            _engine_version: &str,
+        ) -> Result<Option<serde_json::Value>, CacheError> {
             Ok(self.0.lock().unwrap().get(key).cloned())
         }
-        async fn get_batch(&self, _keys: &[String], _task: &str, _engine_version: &str) -> Result<HashMap<String, serde_json::Value>, CacheError> { unreachable!("single entry boundary") }
-        async fn put(&self, key: &str, _task: &str, _engine_version: &str, _ba_version: &str, data: &serde_json::Value) -> Result<(), CacheError> {
+        async fn get_batch(
+            &self,
+            _keys: &[String],
+            _task: &str,
+            _engine_version: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, CacheError> {
+            unreachable!("single entry boundary")
+        }
+        async fn put(
+            &self,
+            key: &str,
+            _task: &str,
+            _engine_version: &str,
+            _ba_version: &str,
+            data: &serde_json::Value,
+        ) -> Result<(), CacheError> {
             self.0.lock().unwrap().insert(key.to_owned(), data.clone());
             Ok(())
         }
-        async fn put_batch(&self, _entries: &[(String, serde_json::Value)], _task: &str, _engine_version: &str, _ba_version: &str) -> Result<(), CacheError> { unreachable!("single entry boundary") }
-        async fn delete_batch(&self, _keys: &[String], _task: &str) -> Result<usize, CacheError> { unreachable!("no deletion") }
-        async fn stats(&self) -> Result<CacheStats, CacheError> { unreachable!("no statistics") }
+        async fn put_batch(
+            &self,
+            _entries: &[(String, serde_json::Value)],
+            _task: &str,
+            _engine_version: &str,
+            _ba_version: &str,
+        ) -> Result<(), CacheError> {
+            unreachable!("single entry boundary")
+        }
+        async fn delete_batch(&self, _keys: &[String], _task: &str) -> Result<usize, CacheError> {
+            unreachable!("no deletion")
+        }
+        async fn stats(&self) -> Result<CacheStats, CacheError> {
+            unreachable!("no statistics")
+        }
     }
 
     struct LanguageResponseService {
@@ -870,10 +950,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RevAsrEvidenceInference for LanguageResponseService {
-        async fn infer(&self, run: AuthorizedRevEvidenceRun) -> Result<RevAsrInferenceOutcome, ServerError> {
+        async fn infer(
+            &self,
+            run: AuthorizedRevEvidenceRun,
+        ) -> Result<RevAsrInferenceOutcome, ServerError> {
             Ok(super::super::asr::classify_language_response(
                 RevTranscriptEvidence::from_provider_json(self.raw.to_owned()).unwrap(),
-                run.requested_language, self.effective.clone(), self.detected.map(str::to_owned),
+                run.requested_language,
+                self.effective.clone(),
+                self.detected.map(str::to_owned),
             ))
         }
     }
@@ -881,14 +966,23 @@ mod tests {
     fn language_request() -> RevAsrEvidenceRequest {
         let digest = RevProviderMediaDigest::from_bytes(b"provider media");
         let media = PreparedRevProviderMedia {
-            source_path: PathBuf::from("fixture.wav"), source_digest: digest.clone(),
+            source_path: PathBuf::from("fixture.wav"),
+            source_digest: digest.clone(),
             presentation: RevProviderPresentation {
                 provider_media_blake3: digest,
                 preparation_recipe: RevMediaPreparationRecipe::SourceBytesLegacyAudioMpegV1,
-                upload_file_name: "fixture.wav".to_owned(), upload_mime: "audio/mpeg", upload_metadata: "fixture".to_owned(),
+                upload_file_name: "fixture.wav".to_owned(),
+                upload_mime: "audio/mpeg",
+                upload_metadata: "fixture".to_owned(),
             },
         };
-        RevAsrEvidenceRequest::new(media, &LanguageSpec::Auto, None, &RevAsrModelRevision::current()).unwrap()
+        RevAsrEvidenceRequest::new(
+            media,
+            &LanguageSpec::Auto,
+            None,
+            &RevAsrModelRevision::current(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -899,43 +993,122 @@ mod tests {
         let empty = "{ \"monologues\":[], \"future\":{\"value\":17} }";
         let spoken = r#"{"monologues":[{"speaker":0,"elements":[{"type":"text","value":"hello","ts":0.1,"end_ts":0.2}]}],"future":[1,2]}"#;
         for (detected, raw) in [(None, empty), (Some("unmapped-provider-language"), spoken)] {
-            let service = LanguageResponseService { raw, detected, effective: LanguageSpec::Auto };
-            let error = resolve_rev_asr_evidence(&request, &cache, CachePolicy::SkipCache, &service).await.unwrap_err();
+            let service = LanguageResponseService {
+                raw,
+                detected,
+                effective: LanguageSpec::Auto,
+            };
+            let error =
+                resolve_rev_asr_evidence(&request, &cache, CachePolicy::SkipCache, &service)
+                    .await
+                    .unwrap_err();
             let message = error.to_string();
             assert!(message.contains("rev-asr-rejected-language-"));
-            assert!(matches!(error, RevAsrEvidenceResolutionError::Inference(ServerError::Validation(_))));
+            let server_error = rev_asr_resolution_error_to_server_error(error);
+            assert_eq!(
+                crate::runner::util::classify_server_error(&server_error),
+                crate::scheduling::FailureCategory::ProviderTerminal
+            );
+            let ServerError::UnresolvedAsrLanguage(retained) = server_error else {
+                panic!("retained language rejection lost its state");
+            };
+            assert!(message.contains(retained.diagnostic_key()));
+            #[cfg(feature = "server")]
+            {
+                use axum::response::IntoResponse;
+                let key = retained.diagnostic_key().to_owned();
+                let response = ServerError::UnresolvedAsrLanguage(retained).into_response();
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+                let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["diagnostic_key"], key);
+                assert_eq!(body["admission"], "rejected_unresolved_language");
+            }
             let records = backend.0.lock().unwrap();
             assert!(!records.contains_key(request.cache_key.as_str()));
-            let (key, diagnostic) = records.iter().find(|(_, value)| value["response"]["detected_language"] == serde_json::to_value(detected).unwrap()).unwrap();
+            let (key, diagnostic) = records
+                .iter()
+                .find(|(_, value)| {
+                    value["response"]["detected_language"]
+                        == serde_json::to_value(detected).unwrap()
+                })
+                .unwrap();
             assert!(message.contains(key));
-            assert_eq!(diagnostic["request"], serde_json::to_value(request.trace_seed()).unwrap());
-            assert_eq!(diagnostic["response"]["transcript_evidence"]["raw_json"], raw);
-            assert_eq!(diagnostic["response"]["requested_language"], serde_json::to_value(LanguageSpec::Auto).unwrap());
-            assert_eq!(diagnostic["response"]["effective_language"], serde_json::to_value(LanguageSpec::Auto).unwrap());
+            assert_eq!(
+                diagnostic["request"],
+                serde_json::to_value(request.trace_seed()).unwrap()
+            );
+            assert_eq!(
+                diagnostic["response"]["transcript_evidence"]["raw_json"],
+                raw
+            );
+            assert_eq!(
+                diagnostic["response"]["requested_language"],
+                serde_json::to_value(LanguageSpec::Auto).unwrap()
+            );
+            assert_eq!(
+                diagnostic["response"]["effective_language"],
+                serde_json::to_value(LanguageSpec::Auto).unwrap()
+            );
             assert!(StoredRevAsrEvidence::decode_for(diagnostic.clone(), &request).is_err());
         }
         assert_eq!(backend.0.lock().unwrap().len(), 2);
-        let service = LanguageResponseService { raw: empty, detected: None, effective: LanguageSpec::Auto };
-        assert!(matches!(resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service).await,
-            Err(RevAsrEvidenceResolutionError::Evidence(RevAsrEvidenceCacheError::RequiredEvidenceMissing(_)))));
+        let service = LanguageResponseService {
+            raw: empty,
+            detected: None,
+            effective: LanguageSpec::Auto,
+        };
+        assert!(matches!(
+            resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service).await,
+            Err(RevAsrEvidenceResolutionError::Evidence(
+                RevAsrEvidenceCacheError::RequiredEvidenceMissing(_)
+            ))
+        ));
         // Auto -> successfully identified language remains admitted, even if
         // transcription omitted its own detected-language field.
-        let service = LanguageResponseService { raw: spoken, detected: None, effective: LanguageSpec::Resolved(LanguageCode3::eng()) };
-        resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service).await.unwrap();
-        let replay = resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service).await.unwrap();
+        let service = LanguageResponseService {
+            raw: spoken,
+            detected: None,
+            effective: LanguageSpec::Resolved(LanguageCode3::eng()),
+        };
+        resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
+            .await
+            .unwrap();
+        let replay =
+            resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service)
+                .await
+                .unwrap();
         assert_eq!(replay.source(), RevAsrEvidenceSource::Replayed);
-        assert_eq!(replay.evidence.transcript_evidence.exact_provider_json(), Some(spoken));
+        assert_eq!(
+            replay.evidence.transcript_evidence.exact_provider_json(),
+            Some(spoken)
+        );
     }
 
     #[tokio::test]
     async fn rejected_language_response_persistence_failure_is_not_masked() {
         let cache = UtteranceCache::from_backend(Box::new(FailingCommitBackend));
         let request = language_request();
-        let service = LanguageResponseService { raw: r#"{"monologues":[]}"#, detected: None, effective: LanguageSpec::Auto };
-        let error = resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service).await.unwrap_err();
+        let service = LanguageResponseService {
+            raw: r#"{"monologues":[]}"#,
+            detected: None,
+            effective: LanguageSpec::Auto,
+        };
+        let error = resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("rev-asr-rejected-language-"));
-        assert!(error.to_string().contains("injected durable commit failure"));
-        assert!(matches!(rev_asr_resolution_error_to_server_error(error), ServerError::Persistence(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("injected durable commit failure")
+        );
+        assert!(matches!(
+            rev_asr_resolution_error_to_server_error(error),
+            ServerError::Persistence(_)
+        ));
     }
 
     #[async_trait::async_trait]
@@ -1022,11 +1195,19 @@ mod tests {
         };
         let language = LanguageSpec::Resolved(LanguageCode3::eng());
         let revision = RevAsrModelRevision::current();
-        let automatic = RevAsrEvidenceRequest::new(media.clone(), &language, None, &revision).expect("automatic request");
-        let exact = RevAsrEvidenceRequest::new(media.clone(), &language, NumSpeakers(2), &revision).expect("exact request");
+        let automatic = RevAsrEvidenceRequest::new(media.clone(), &language, None, &revision)
+            .expect("automatic request");
+        let exact = RevAsrEvidenceRequest::new(media.clone(), &language, NumSpeakers(2), &revision)
+            .expect("exact request");
         assert_ne!(automatic.cache_key(), exact.cache_key());
-        assert!(serde_json::to_value(automatic.trace_seed()).expect("trace")["expected_speakers"].is_null());
-        assert_eq!(serde_json::to_value(exact.trace_seed()).expect("trace")["expected_speakers"], 2);
+        assert!(
+            serde_json::to_value(automatic.trace_seed()).expect("trace")["expected_speakers"]
+                .is_null()
+        );
+        assert_eq!(
+            serde_json::to_value(exact.trace_seed()).expect("trace")["expected_speakers"],
+            2
+        );
         assert!(RevAsrEvidenceRequest::new(media, &language, NumSpeakers(0), &revision).is_err());
     }
 

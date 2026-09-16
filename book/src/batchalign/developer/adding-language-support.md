@@ -28,7 +28,7 @@ need a "not available for X" line.
 | **`num2words` backend?** (build-time only) | `python -c "import num2words; print('XX' in num2words.CONVERTER_CLASSES)"` (use ISO 639-1 2-char code). The Rust `NUM2LANG` table at `crates/batchalign-transform/data/num2lang.json` is the codegenned output of an offline `num2words` sweep; runtime uses Rust only. (No in-tree codegen script today: see [Number Expansion](../architecture/number-expansion.md) for the regeneration protocol.) | Number expansion (E220 risk) |
 | **Rev.AI quality?** | Submit a sample to Rev.AI; check for hallucinations, script confusion, repetition. Document result in `book/src/batchalign/reference/revai-language-quality-strategy.md` | Default ASR engine choice |
 | **Stock Whisper quality?** | Same: run a representative sample, evaluate | Fallback ASR engine choice |
-| **HuggingFace fine-tune available?** | Search HF Hub for `whisper-*-{lang}` checkpoints | `whisper_hub` engine routing in `batchalign/models/resolve.py` |
+| **HuggingFace fine-tune available?** | Search HF Hub for `whisper-*-{lang}` checkpoints | `whisper_hub` engine routing in `crates/batchalign/src/model_manifest.rs::WHISPER_HUB_DEFAULTS` |
 | **CHAT digit-validator allows digits?** | `rg "{lang}" talkbank-tools/../chatter/crates/talkbank-model/src/validation/word/language/digits.rs` | Whether E220 fires on Whisper digit emissions |
 | **PyCantonese / language-specific tools?** | Per-language: relevant for CJK, possibly others | Special-case wiring |
 
@@ -116,7 +116,9 @@ a representative sample:
    no per-language config. Good baseline.
 2. **HuggingFace fine-tune via `whisper_hub`**: when stock Whisper or
    Rev.AI underperform on extended recordings. Configure model
-   resolution in `batchalign/models/resolve.py`.
+   resolution in
+   `crates/batchalign/src/model_manifest.rs::WHISPER_HUB_DEFAULTS`, naming the
+   hub commit to pin it to; that is what a planned job resolves from.
 3. **Rev.AI** (`--asr-engine rev`): only if it produces clean output
    for this language. Many languages return garbage from Rev.AI; see
    `book/src/batchalign/reference/revai-language-quality-strategy.md` for the

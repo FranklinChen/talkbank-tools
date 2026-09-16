@@ -281,6 +281,7 @@ fn resolve_output_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::FileProvenance;
 
     /// Resolve against a real (absolute) root and report where the file would
     /// land, so the assertions below read as plain paths.
@@ -348,7 +349,7 @@ mod tests {
             content: "@Begin\n*CHI:\thello .\n@End\n".to_string(),
             content_type: ContentType::Chat,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let ok = write_result(&result, &map, dir.path()).unwrap();
@@ -365,7 +366,7 @@ mod tests {
             content: String::new(),
             content_type: ContentType::Chat,
             error: Some("processing failed".to_string()),
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let ok = write_result(&result, &map, dir.path()).unwrap();
@@ -417,7 +418,7 @@ mod tests {
             content: "bad".to_string(),
             content_type: ContentType::Chat,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let err = write_result(&result, &map, dir.path()).unwrap_err();
@@ -436,7 +437,7 @@ mod tests {
             content: "bad".to_string(),
             content_type: ContentType::Chat,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let err = write_result(&result, &map, dir.path()).unwrap_err();
@@ -455,7 +456,7 @@ mod tests {
             content: "bad".to_string(),
             content_type: ContentType::Csv,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let err = write_result(&result, &map, dir.path()).unwrap_err();
@@ -477,7 +478,7 @@ mod tests {
             content: "bad".to_string(),
             content_type: ContentType::Chat,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let err = write_result(&result, &map, dir.path()).unwrap_err();
@@ -504,7 +505,7 @@ mod tests {
             content: "@Begin\n@End\n".to_string(),
             content_type: ContentType::Chat,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let ok = write_result(&result, &map, dir.path()).unwrap();
@@ -525,7 +526,7 @@ mod tests {
             content: "col1,col2\n1,2\n".to_string(),
             content_type: ContentType::Csv,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let ok = write_result(&result, &map, dir.path()).unwrap();
@@ -550,7 +551,7 @@ mod tests {
             content: String::new(),
             content_type: ContentType::Chat,
             error: None,
-            provenance: Vec::new(),
+            provenance: FileProvenance::NotRead,
         };
 
         let ok = write_result(&result, &map, dir.path()).unwrap();
