@@ -202,7 +202,7 @@ pub(in crate::runner) async fn run_utr_pass(
                 let seg_response = match cached_seg {
                     UtrAsrCacheLookup::Hit(cached) => {
                         info!(context.filename, start_ms, end_ms, "UTR segment cache hit");
-                        cached
+                        *cached
                     }
                     UtrAsrCacheLookup::Miss(miss) => {
                         let segment_path = match crate::ensure_wav::extract_audio_segment(
@@ -353,7 +353,7 @@ async fn run_utr_pass_full(
     {
         UtrAsrCacheLookup::Hit(cached) => {
             info!(context.filename, "UTR ASR cache hit");
-            cached
+            *cached
         }
         UtrAsrCacheLookup::Miss(miss) => {
             info!(
@@ -388,9 +388,9 @@ async fn run_utr_pass_full(
     let recording = context.recording().await?;
     let whole_file =
         FaWindow::within(&recording, FileMs::new(0), recording.duration()).map_err(|why| {
-            crate::error::ServerError::RecordingDuration(format!(
-                "the whole recording is not a valid window over itself: {why}"
-            ))
+            crate::error::ServerError::RecordingDuration(
+                crate::error::RecordingDurationError::WholeFileWindow(why),
+            )
         })?;
     let converted = asr_response_to_utr_tokens(
         &asr_response,
@@ -487,7 +487,9 @@ async fn infer_utr_asr_response(
 /// neither, so they fail closed instead of silently becoming paid work.
 #[derive(Debug)]
 enum UtrAsrCacheLookup {
-    Hit(crate::transcribe::AsrResponse),
+    /// Boxed: a stored response dwarfs the miss arm, so an unboxed enum would
+    /// make every cache miss pay the size of a hit it did not get.
+    Hit(Box<crate::transcribe::AsrResponse>),
     Miss(UtrAsrCacheMiss),
 }
 
@@ -577,7 +579,7 @@ async fn lookup_utr_asr_cache(
             "invalid cached UTR ASR response for key {cache_key}: {error}"
         ))
     })?;
-    Ok(UtrAsrCacheLookup::Hit(response))
+    Ok(UtrAsrCacheLookup::Hit(Box::new(response)))
 }
 
 /// Store one UTR ASR response under the UTR engine's namespace.

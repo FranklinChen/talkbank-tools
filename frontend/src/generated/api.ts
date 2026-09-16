@@ -546,6 +546,34 @@ export interface components {
             provenance: components["schemas"]["FileProvenance"];
         };
         /**
+         * @description What a command decided about stamping one file with provenance.
+         *
+         *     Recorded when the file completes and reported with its per-file status, so
+         *     "this file carries no stamp" is an answer with a reason rather than
+         *     something an operator has to infer from an absent comment. Not persisted:
+         *     a file whose status is rebuilt from the database after a restart reads
+         *     `Unrecorded`, which is the honest answer for a record that never held it.
+         */
+        FileStampOutcome: {
+            /** @enum {string} */
+            kind: "unrecorded";
+        } | {
+            /** @description The command whose stamp was written. */
+            command: string;
+            /** @enum {string} */
+            kind: "stamped";
+        } | {
+            /** @description The command that ran. */
+            command: string;
+            /** @enum {string} */
+            kind: "not_stamped";
+            /**
+             * @description Why it wrote no stamp (for example, no engine produced anything
+             *     that was applied).
+             */
+            reason: string;
+        };
+        /**
          * @description Per-file status within a job.
          *
          *     Tracks processing state, timing, progress, and error details for a
@@ -600,6 +628,13 @@ export interface components {
              * @description Total number of sub-steps expected for this file.
              */
             progress_total?: number | null;
+            /**
+             * @description What the command decided about stamping this file with provenance.
+             *     Absent when nothing was recorded, which is what `Unrecorded` means: a
+             *     command that writes no per-file stamp, or a status restored from the
+             *     job database.
+             */
+            stamp?: components["schemas"]["FileStampOutcome"];
             started_at?: null | components["schemas"]["UnixTimestamp"];
             /** @description Current lifecycle state of this file. */
             status: components["schemas"]["FileStatusKind"];

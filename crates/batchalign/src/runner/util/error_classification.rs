@@ -4,7 +4,7 @@
 //! to end users. This module translates classified failures into messages
 //! that help users understand what happened and what to do about it.
 
-use crate::error::{AsrProviderDisposition, ServerError};
+use crate::error::{AsrProviderDisposition, RecordingDurationFault, ServerError};
 use crate::scheduling::FailureCategory;
 use crate::worker::error::WorkerError;
 
@@ -125,11 +125,17 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         // closest fit is `System`, and the error message itself directs the
         // operator to check task-queue configuration.
         ServerError::JobNotInLocalStore(_) => FailureCategory::System,
-        // A recording whose duration cannot be established is a property of the
-        // media on disk, not of the request or of a worker: ffprobe could not
-        // read it, or it is empty. `System` is the category an operator should
-        // look at the host for.
-        ServerError::RecordingDuration(_) => FailureCategory::System,
+        // A file ffprobe refuses, or one that probes as zero length, is the
+        // submitter's to fix, and retrying cannot change it. `Validation` is
+        // chosen for what it RENDERS as, the same reasoning as
+        // `EmptyTranscription` above: the typed message names the file and
+        // what was wrong with it, where `System` replaced it with "internal
+        // error, try restarting the job". A host without ffprobe, or a broken
+        // invariant, stays `System`, which is the operator's.
+        ServerError::RecordingDuration(error) => match error.fault() {
+            RecordingDurationFault::Media => FailureCategory::Validation,
+            RecordingDurationFault::Host => FailureCategory::System,
+        },
         // A gated/credential-denied Hugging Face Hub artifact is deterministic
         // across retries (the operator's credentials do not change mid-job)
         // and actionable, so it gets its own category rather than `System`
@@ -268,6 +274,48 @@ mod tests {
 
         assert_eq!(category, FailureCategory::ModelAccessDenied);
         assert_ne!(category, FailureCategory::Validation);
+    }
+
+    /// Audio ffprobe cannot read is the submitter's problem and says which
+    /// file; a host without ffprobe is the operator's.
+    ///
+    /// The regression (2026-09-16): a folder of trimmed audio files that held
+    /// no audio failed every file with "internal error, try restarting the
+    /// job", because the probe's typed verdict had been rendered to a string
+    /// and could only classify as `System`.
+    #[test]
+    fn unreadable_audio_names_the_file_and_a_missing_ffprobe_stays_internal() {
+        use crate::error::RecordingDurationError;
+        use crate::media::probe::ProbeError;
+
+        let refused =
+            ServerError::RecordingDuration(RecordingDurationError::Probe(ProbeError::Refused {
+                input: "/audio/empty.mp3".to_owned(),
+            }));
+        let category = classify_server_error(&refused);
+        assert_eq!(category, FailureCategory::Validation);
+        assert!(!is_retryable_worker_failure(category));
+        let message = user_facing_error(category, "Alignment", "empty.cha", &refused.to_string());
+        assert!(
+            message.contains("/audio/empty.mp3"),
+            "the user must be told which file could not be read: {message}"
+        );
+
+        let zero_length = ServerError::RecordingDuration(RecordingDurationError::NotARecording {
+            audio: "/audio/silent.mp3".to_owned(),
+            source: crate::chat_ops::fa::coordinates::NotARecording::ZeroDuration,
+        });
+        assert_eq!(
+            classify_server_error(&zero_length),
+            FailureCategory::Validation
+        );
+
+        let missing = ServerError::RecordingDuration(RecordingDurationError::Probe(
+            ProbeError::FfprobeMissing {
+                input: "/audio/fine.mp3".to_owned(),
+            },
+        ));
+        assert_eq!(classify_server_error(&missing), FailureCategory::System);
     }
 
     /// A deterministic, credential-class failure must not be auto-retried:

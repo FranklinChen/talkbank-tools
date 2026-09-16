@@ -167,7 +167,7 @@ resets the ceiling. So a job that keeps completing files is not killed for
 being slow on a loaded machine, and a job that is genuinely hung still fails,
 inside the idle window, at roughly the time the old fixed deadline would have.
 
-```rust
+```rust,ignore
 let mut deadline = ServerTestDeadline::new(WaitSubject::job_completion(job_id));
 loop {
     let info = get_job(&client, &base_url, job_id).await;

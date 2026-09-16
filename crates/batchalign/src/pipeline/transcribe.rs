@@ -48,7 +48,10 @@ enum TranscribeEvidenceInput<'a> {
         rev_inference: &'a dyn RevAsrEvidenceInference,
     },
     LegacyReplay {
-        replay: AdmittedLegacyTranscribeReplay,
+        /// Boxed: a replay is an order of magnitude larger than a live
+        /// inference reference, so an unboxed enum would make every live
+        /// transcribe pay the replay's size.
+        replay: Box<AdmittedLegacyTranscribeReplay>,
     },
 }
 
@@ -283,7 +286,9 @@ pub(crate) async fn run_transcribe_pipeline_with_legacy_replay<'a>(
         opts,
         progress,
         debug_dir,
-        TranscribeEvidenceInput::LegacyReplay { replay },
+        TranscribeEvidenceInput::LegacyReplay {
+            replay: Box::new(replay),
+        },
         utseg_execution,
     )
     .await?;

@@ -12,7 +12,7 @@ use crate::chat_ops::CacheTaskName;
 use crate::chat_ops::fa::coordinates::{Ms, Recording};
 use crate::chat_ops::fa::{AudioIdentity, WordGapHealing};
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, TokenizationMode};
-use crate::error::ServerError;
+use crate::error::{RecordingDurationError, ServerError};
 use crate::infer_retry::Cancellation;
 use crate::types::engines::FaEngineName;
 use serde::{Deserialize, Serialize};
@@ -349,14 +349,14 @@ impl AudioContext<'_> {
                 .duration()
                 .await
                 .map_err(|why| {
-                    ServerError::RecordingDuration(format!(
-                        "probing {} failed: {why}",
-                        self.audio_path.display()
-                    ))
+                    ServerError::RecordingDuration(RecordingDurationError::Probe(why))
                 })?,
         };
-        Recording::of_duration(Ms(duration.0)).map_err(|why| {
-            ServerError::RecordingDuration(format!("{}: {why}", self.audio_path.display()))
+        Recording::of_duration(Ms(duration.0)).map_err(|source| {
+            ServerError::RecordingDuration(RecordingDurationError::NotARecording {
+                audio: self.audio_path.display().to_string(),
+                source,
+            })
         })
     }
 }

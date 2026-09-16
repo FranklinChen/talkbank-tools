@@ -352,7 +352,7 @@ fn build_asr_participants(utterances: &[NamedAsrUtterance<'_>]) -> Vec<Participa
     seen_speakers
         .into_values()
         .map(|id| {
-            let (_name, role) = role_for_speaker_code(&id);
+            let (_name, role) = role_for_speaker_code(id);
             ParticipantDesc {
                 id: id.clone(),
                 name: None,

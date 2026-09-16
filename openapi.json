@@ -469,6 +469,71 @@
         ],
         "type": "object"
       },
+      "FileStampOutcome": {
+        "description": "What a command decided about stamping one file with provenance.\n\nRecorded when the file completes and reported with its per-file status, so\n\"this file carries no stamp\" is an answer with a reason rather than\nsomething an operator has to infer from an absent comment. Not persisted:\na file whose status is rebuilt from the database after a restart reads\n`Unrecorded`, which is the honest answer for a record that never held it.",
+        "oneOf": [
+          {
+            "description": "No stamp decision was recorded for this file: a command that writes no\nper-file provenance stamp, or a status restored from the database.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unrecorded"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command stamped this file.",
+            "properties": {
+              "command": {
+                "description": "The command whose stamp was written.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "stamped"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The command wrote no stamp on this file, for this reason.",
+            "properties": {
+              "command": {
+                "description": "The command that ran.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "not_stamped"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "description": "Why it wrote no stamp (for example, no engine produced anything\nthat was applied).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "reason",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "FileStatusEntry": {
         "description": "Per-file status within a job.\n\nTracks processing state, timing, progress, and error details for a\nsingle file.  The server updates these entries as workers report\nresults, and they are included in `JobInfo.file_statuses`.",
         "properties": {
@@ -574,6 +639,10 @@
               "integer",
               "null"
             ]
+          },
+          "stamp": {
+            "$ref": "#/components/schemas/FileStampOutcome",
+            "description": "What the command decided about stamping this file with provenance.\nAbsent when nothing was recorded, which is what `Unrecorded` means: a\ncommand that writes no per-file stamp, or a status restored from the\njob database."
           },
           "started_at": {
             "oneOf": [

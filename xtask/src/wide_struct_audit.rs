@@ -286,10 +286,11 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/store/mod.rs",
         struct_name: "FileStatus",
-        max_fields: 14,
+        max_fields: 15,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
-        reason: "stored per-file processing status record",
+        reason: "stored per-file processing status record; the newest field is the per-file \
+                 provenance stamp outcome, a closed enum rather than a flag",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/transcribe/types.rs",
@@ -338,20 +339,23 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/types/response.rs",
         struct_name: "FileStatusEntry",
-        max_fields: 14,
+        max_fields: 15,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
-        reason: "API response record for one file's processing status",
+        reason: "API response record for one file's processing status; the newest field is the \
+                 wire projection of FileStatus's provenance stamp outcome",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/types/response.rs",
         struct_name: "HealthResponse",
-        max_fields: 33,
+        max_fields: 35,
         max_bool_fields: 1,
         disposition: WideStructDisposition::TransportRecord,
-        reason: "health/status API response aggregates independent runtime metrics; the newest \
-                 field is the content-addressed worker-runtime identity collection required to \
-                 prove which Python code actually executed",
+        reason: "health/status API response aggregates independent runtime metrics; beside the \
+                 content-addressed worker-runtime identity collection that proves which Python \
+                 code actually executed, the two newest fields list each worker key's \
+                 capability admission outcome and the registry daemons discovery refused, so \
+                 an operator can see why a worker or daemon is unused",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/types/response.rs",
@@ -425,10 +429,11 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/worker/registry.rs",
         struct_name: "RegistryEntry",
-        max_fields: 10,
+        max_fields: 11,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
-        reason: "worker registry snapshot entry",
+        reason: "worker registry snapshot entry; the newest field is the build identity of the \
+                 binary that started the daemon, which discovery requires before adopting it",
     },
     WideStructAllowance {
         path: "crates/batchalign/tests/common/test_worker_pool.rs",

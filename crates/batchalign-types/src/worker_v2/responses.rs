@@ -800,7 +800,11 @@ pub struct ExecuteResponseV2 {
 #[derive(Debug, Clone, PartialEq)]
 enum ExecuteResponseBodyV2 {
     /// Succeeded, with the payload success promises.
-    Success(TaskResultV2),
+    ///
+    /// Boxed because the payload dwarfs the failure arm, so an unboxed enum
+    /// would make every response, failures included, pay the success size.
+    /// `Box` is transparent to serde, so the wire shape is unchanged.
+    Success(Box<TaskResultV2>),
     /// Failed, with the code and message a failure promises, and nothing else.
     Failure {
         code: ProtocolErrorCodeV2,
@@ -842,7 +846,9 @@ impl<'de> Deserialize<'de> for ExecuteResponseV2 {
     {
         let wire = ExecuteResponseWireV2::deserialize(deserializer)?;
         let body = match (wire.outcome, wire.result) {
-            (ExecuteOutcomeV2::Success, Some(result)) => ExecuteResponseBodyV2::Success(result),
+            (ExecuteOutcomeV2::Success, Some(result)) => {
+                ExecuteResponseBodyV2::Success(Box::new(result))
+            }
             (ExecuteOutcomeV2::Success, None) => {
                 return Err(serde::de::Error::custom(
                     "execute response claimed success but carried no result payload",
@@ -960,7 +966,7 @@ impl ExecuteResponseV2 {
     ) -> Self {
         Self {
             request_id,
-            body: ExecuteResponseBodyV2::Success(result),
+            body: ExecuteResponseBodyV2::Success(Box::new(result)),
             elapsed_s,
         }
     }
@@ -1010,10 +1016,9 @@ impl ExecuteResponseV2 {
     ///
     /// The owned counterpart of [`Self::read`], for a consumer that moves the
     /// payload's parts into its own types instead of cloning them.
-    #[must_use]
     pub fn into_outcome(self) -> Result<TaskResultV2, (ProtocolErrorCodeV2, String)> {
         match self.body {
-            ExecuteResponseBodyV2::Success(result) => Ok(result),
+            ExecuteResponseBodyV2::Success(result) => Ok(*result),
             ExecuteResponseBodyV2::Failure { code, message } => Err((code, message)),
         }
     }

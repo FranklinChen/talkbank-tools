@@ -9,8 +9,63 @@ use axum::response::{IntoResponse, Response};
 
 use crate::api::JobId;
 use crate::chat_ops::CacheKey;
+use crate::chat_ops::fa::coordinates::{NotARecording, WindowFault};
+use crate::media::probe::ProbeError;
 use crate::media::window::EmptySegment;
 pub use crate::revai::RetainedRevLanguageRejection;
+
+/// Why a recording's duration could not be established.
+///
+/// Typed rather than a rendered string because the variants ask for different
+/// people. A file ffprobe refuses, or one that probes as zero length, is the
+/// submitter's to fix and says so; a host without ffprobe, or a window over
+/// the whole file that does not fit it, is the operator's. While this was a
+/// `String` every case classified as an internal error, so a folder of empty
+/// audio files told its owner to restart the job, and each restart failed the
+/// same way.
+#[derive(Debug, thiserror::Error)]
+pub enum RecordingDurationError {
+    /// ffprobe could not answer for this file. Whose problem that is belongs
+    /// to the probe error's own variant; its message already names the file.
+    #[error(transparent)]
+    Probe(ProbeError),
+    /// The file probed as zero length, so it holds no audio.
+    #[error("{audio}: {source}")]
+    NotARecording {
+        /// The media that was probed.
+        audio: String,
+        /// Why it is not a recording.
+        source: NotARecording,
+    },
+    /// The whole recording is not a valid window over itself, which a
+    /// recording of positive length always is: an internal invariant.
+    #[error("the whole recording is not a valid window over itself: {0}")]
+    WholeFileWindow(WindowFault),
+}
+
+/// Whose problem a [`RecordingDurationError`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordingDurationFault {
+    /// The submitted media: the person who sent it can fix it; a retry cannot.
+    Media,
+    /// The host or this build: the operator's.
+    Host,
+}
+
+impl RecordingDurationError {
+    /// Whose problem this is.
+    ///
+    /// The one question classification asks, answered by an exhaustive match
+    /// so a new probe failure has to take a side.
+    pub(crate) fn fault(&self) -> RecordingDurationFault {
+        match self {
+            Self::Probe(ProbeError::Refused { .. } | ProbeError::Unreadable { .. })
+            | Self::NotARecording { .. } => RecordingDurationFault::Media,
+            Self::Probe(ProbeError::FfprobeMissing { .. } | ProbeError::Spawn { .. })
+            | Self::WholeFileWindow(_) => RecordingDurationFault::Host,
+        }
+    }
+}
 
 /// Non-empty forced-alignment cache misses behind `--require-media-cache`.
 ///
@@ -400,7 +455,7 @@ pub enum ServerError {
     /// engine must read the same bytes, so failing here means something is
     /// wrong with the media, not with the request.
     #[error("cannot establish the recording's duration: {0}")]
-    RecordingDuration(String),
+    RecordingDuration(RecordingDurationError),
 
     /// A pinned Hugging Face Hub artifact refused this machine's request: a
     /// gated repository requiring accepted terms, a missing/invalid token,

@@ -182,6 +182,10 @@ impl<'a> LiveServerJobClient<'a> {
         .await
     }
 
+    /// `#[allow(clippy::too_many_arguments)]`: a test helper that mirrors the
+    /// paths-mode submission shape, so its parameters are the request's own
+    /// fields rather than a design choice worth bundling here.
+    #[allow(clippy::too_many_arguments)]
     async fn submit_paths_job_inner(
         &self,
         command: ReleasedCommand,

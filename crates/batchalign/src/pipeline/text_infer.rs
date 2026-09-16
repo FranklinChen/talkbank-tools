@@ -426,13 +426,12 @@ where
         // Recorded on the file, not only logged: the job's per-file status
         // carries what this command decided, so "no stamp" is an answer with a
         // reason rather than an absence an operator has to interpret.
-        let stamp;
-        match (hooks.provenance)(lang, &file_responses) {
+        let stamp = match (hooks.provenance)(lang, &file_responses) {
             Ok(TextStamp::Stamped(comment)) => {
                 crate::provenance::inject_provenance(chat_file, &comment);
-                stamp = FileStampOutcome::Stamped {
+                FileStampOutcome::Stamped {
                     command: hooks.command.to_string(),
-                };
+                }
             }
             Ok(TextStamp::NotStamped(reason)) => {
                 info!(
@@ -441,10 +440,10 @@ where
                     reason = %reason,
                     "no provenance stamp written"
                 );
-                stamp = FileStampOutcome::NotStamped {
+                FileStampOutcome::NotStamped {
                     command: hooks.command.to_string(),
                     reason: reason.to_string(),
-                };
+                }
             }
             // A name that cannot be written as a stamp fails THIS file, the
             // way its own gate would: the alternative is output whose
@@ -456,7 +455,7 @@ where
                 ));
                 continue;
             }
-        }
+        };
 
         // Fail-closed, per file: a file whose output fails the gate is
         // reported as a validation failure and never written; the rest of the

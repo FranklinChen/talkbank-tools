@@ -1222,6 +1222,7 @@ impl schemars::JsonSchema for ReportedEngineName {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)] // fixture construction; the refusals are the assertions
 mod stamp_safe_text_tests {
     use super::{
         InvalidStampSafeText, LanguageCode3, ReportedEngineName, StampJoiner, StampSafeText,
