@@ -772,7 +772,10 @@ mod speaker_plan_tests {
         ] {
             let refusal = TranscribeAsrPlan::from_request(backend, true, 2, &none, &pair)
                 .expect_err("a pair is withheld at plan time on every engine");
-            assert!(matches!(refusal, TranscribeAsrPlanError::PairWithheld(_)), "{refusal}");
+            assert!(
+                matches!(refusal, TranscribeAsrPlanError::PairWithheld(_)),
+                "{refusal}"
+            );
             assert!(refusal.to_string().contains("withheld"), "{refusal}");
         }
 

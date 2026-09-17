@@ -347,9 +347,9 @@ impl JobSubmission {
             (LanguageSpec::Pair(pair), _) => {
                 use crate::dispatch_language::{LanguagePairSupport, language_pair_support};
                 match language_pair_support(self.command) {
-                    LanguagePairSupport::Withheld => Err(ValidationError(
-                        LanguagePairSupport::withheld_message(pair),
-                    )),
+                    LanguagePairSupport::Withheld => {
+                        Err(ValidationError(LanguagePairSupport::withheld_message(pair)))
+                    }
                     LanguagePairSupport::Refused => Err(ValidationError(format!(
                         "command '{}' takes one language; a code-switched pair such as '{pair}' \
                          describes a recording and belongs to transcription, which withholds it \
@@ -1085,7 +1085,9 @@ mod tests {
         if let CommandOptions::Transcribe(opts) = &mut authorized.options {
             opts.utseg_fallback = true.into();
         }
-        authorized.validate().expect("the opt-in makes Spanish segmentable");
+        authorized
+            .validate()
+            .expect("the opt-in makes Spanish segmentable");
 
         transcribe_submission("eng", AsrEngineName::RevAi)
             .validate()
@@ -1324,7 +1326,10 @@ mod tests {
                 .to_string();
             assert!(refusal.contains(pair), "{refusal}");
             assert!(refusal.contains("withheld"), "{refusal}");
-            assert!(refusal.contains("English where Spanish was spoken"), "{refusal}");
+            assert!(
+                refusal.contains("English where Spanish was spoken"),
+                "{refusal}"
+            );
             assert!(refusal.contains("--lang spa"), "{refusal}");
         }
 
