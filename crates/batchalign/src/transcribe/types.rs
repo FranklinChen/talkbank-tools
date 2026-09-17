@@ -428,15 +428,18 @@ impl AdmittedAsrLanguage {
         backend: AsrBackend,
         language: &LanguageSpec,
     ) -> Result<Self, TranscribeAsrPlanError> {
-        let request = AsrLanguageRequest::try_from(language)?;
         // A pair is withheld from transcription on every engine, here as well
         // as at submission: a job saved under an earlier build and restarted
         // after this one plans through here without being resubmitted, and
         // the withholding (`LanguagePairSupport::Withheld`, the measured
-        // reason) must hold for it too.
-        if let AsrLanguageRequest::Pair(pair) = request {
-            return Err(TranscribeAsrPlanError::PairWithheld(pair));
-        }
+        // reason) must hold for it too. Refused before the engine is asked,
+        // so neither engine arm below can see a pair.
+        let request = match AsrLanguageRequest::try_from(language)? {
+            AsrLanguageRequest::Pair(pair) => {
+                return Err(TranscribeAsrPlanError::PairWithheld(pair));
+            }
+            single => single,
+        };
         match backend.as_non_rev() {
             None => Ok(Self::RevAi(RevLanguage::admit(&request)?)),
             Some(backend) => Ok(Self::NonRev {
@@ -444,7 +447,9 @@ impl AdmittedAsrLanguage {
                 language: match request {
                     AsrLanguageRequest::One(code) => SingleAsrLanguage::One(code),
                     AsrLanguageRequest::Detect => SingleAsrLanguage::Detect,
-                    AsrLanguageRequest::Pair(_) => unreachable!("a pair was withheld above"),
+                    AsrLanguageRequest::Pair(pair) => {
+                        return Err(TranscribeAsrPlanError::PairWithheld(pair));
+                    }
                 },
             }),
         }
