@@ -107,6 +107,19 @@ pub(crate) fn is_chat_source_name(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".cha")
 }
 
+/// A job language that passed the command pairing: one code, detection or
+/// per-file resolution. There is no pair variant. A pair is refused by
+/// [`JobSubmission::validate_lang_command_pairing`], this type's only
+/// constructor, so the checks that run after it cannot see a pair and cannot
+/// fail open on one; the order of the checks lives in the signatures, not in a
+/// comment.
+#[derive(Debug, Clone, Copy)]
+enum PairedLanguage<'a> {
+    Resolved(&'a LanguageCode3),
+    Auto,
+    PerFile,
+}
+
 impl JobSubmission {
     /// Validate submission constraints (paths_mode, command consistency).
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -168,14 +181,17 @@ impl JobSubmission {
         // other processing command MUST NOT. This boundary check keeps
         // pipeline code from ever observing an invalid combination, and
         // makes the dashboard / job record show honest values.
-        self.validate_lang_command_pairing()?;
+        let language = self.validate_lang_command_pairing()?;
 
         // Reject a source whose KIND the command cannot consume, while the
         // filename is still in hand to name in the message.
         self.validate_source_kinds()?;
 
         // Validate language support for engines the command will use.
-        self.validate_language_support()?;
+        self.validate_language_support(&language)?;
+
+        // Refuse a language transcribe cannot segment, here at submission.
+        self.validate_utseg_route(&language)?;
 
         if self.paths_mode {
             if self.source_paths.is_empty() || self.output_paths.is_empty() {
@@ -311,7 +327,7 @@ impl JobSubmission {
     /// takes a concrete `--lang` (or `--lang auto` for ASR-detect). Those
     /// must never carry `PerFile`; if they do, something downstream of
     /// the CLI built a malformed `JobSubmission`.
-    fn validate_lang_command_pairing(&self) -> Result<(), ValidationError> {
+    fn validate_lang_command_pairing(&self) -> Result<PairedLanguage<'_>, ValidationError> {
         use crate::dispatch_language::{CommandLanguageSource, language_source};
         use crate::types::domain::LanguageSpec;
 
@@ -327,17 +343,19 @@ impl JobSubmission {
         );
 
         match (&self.lang, is_per_file_command) {
-            (LanguageSpec::PerFile, true) => Ok(()),
+            (LanguageSpec::PerFile, true) => Ok(PairedLanguage::PerFile),
             (LanguageSpec::Pair(pair), _) => {
-                match crate::dispatch_language::language_pair_support(self.command) {
-                    crate::dispatch_language::LanguagePairSupport::Accepted => Ok(()),
-                    crate::dispatch_language::LanguagePairSupport::Refused => {
-                        Err(ValidationError(format!(
-                            "command '{}' takes one language; a code-switched pair such as '{pair}' \
-                         is accepted only by transcribe and transcribe_s",
-                            self.command
-                        )))
-                    }
+                use crate::dispatch_language::{LanguagePairSupport, language_pair_support};
+                match language_pair_support(self.command) {
+                    LanguagePairSupport::Withheld => Err(ValidationError(
+                        LanguagePairSupport::withheld_message(pair),
+                    )),
+                    LanguagePairSupport::Refused => Err(ValidationError(format!(
+                        "command '{}' takes one language; a code-switched pair such as '{pair}' \
+                         describes a recording and belongs to transcription, which withholds it \
+                         today",
+                        self.command
+                    ))),
                 }
             }
             (LanguageSpec::PerFile, false) => Err(ValidationError(format!(
@@ -352,7 +370,8 @@ impl JobSubmission {
                     self.command
                 )))
             }
-            (LanguageSpec::Auto | LanguageSpec::Resolved(_), false) => Ok(()),
+            (LanguageSpec::Auto, false) => Ok(PairedLanguage::Auto),
+            (LanguageSpec::Resolved(code), false) => Ok(PairedLanguage::Resolved(code)),
         }
     }
 
@@ -423,36 +442,44 @@ impl JobSubmission {
         Ok(())
     }
 
-    /// A code-switched pair, admitted exactly as dispatch admits it
-    /// ([`crate::transcribe::AdmittedAsrLanguage::admit`]): only Rev.AI takes
-    /// one, and only its English/Spanish model, so the refusal message is the
-    /// plan's own. Which commands take a pair at all was settled by
-    /// [`Self::validate_lang_command_pairing`], and every such command selects
-    /// an ASR engine; one that did not is refused rather than admitted.
-    fn validate_language_pair_support(&self) -> Result<(), ValidationError> {
-        let engine = self.selected_asr_engine().ok_or_else(|| {
-            ValidationError(format!(
-                "command '{}' has no ASR engine to recognize a code-switched pair",
-                self.command
-            ))
-        })?;
-        let backend = crate::transcribe::AsrBackend::try_from_engine(&engine)
-            .map_err(|refusal| ValidationError(refusal.to_string()))?;
-        crate::transcribe::AdmittedAsrLanguage::admit(backend, &self.lang)
+    /// Transcribe segments every transcript, and whether a language can be
+    /// segmented is a property of the language and the fallback policy alone
+    /// ([`crate::utseg_route::UtsegRoute::resolve`], the one table). The plan
+    /// already refused it before any ASR request; a job accepted at POST and
+    /// refused per file at plan time still reads as a failed job rather than a
+    /// rejected request, and the operator learns it one file at a time. So the
+    /// same resolution runs here, at submission, and a request that cannot run
+    /// is a 400 with the route's own message. Under `auto` the language is not
+    /// known until ASR returns, so that case is decided later, as the plan and
+    /// pipeline already do.
+    fn validate_utseg_route(&self, language: &PairedLanguage<'_>) -> Result<(), ValidationError> {
+        let fallback = match &self.options {
+            CommandOptions::Transcribe(opts) | CommandOptions::TranscribeS(opts) => {
+                opts.utseg_fallback
+            }
+            _ => return Ok(()),
+        };
+        let lang = match language {
+            PairedLanguage::Resolved(code) => *code,
+            PairedLanguage::Auto | PairedLanguage::PerFile => return Ok(()),
+        };
+        crate::utseg_route::UtsegRoute::resolve(lang, fallback)
             .map(|_| ())
             .map_err(|refusal| ValidationError(refusal.to_string()))
     }
 
-    fn validate_language_support(&self) -> Result<(), ValidationError> {
+    fn validate_language_support(
+        &self,
+        language: &PairedLanguage<'_>,
+    ) -> Result<(), ValidationError> {
         // Auto-detect and per-file resolution both defer language to a later
         // stage, so submission-time engine-support checks can't run here. For
         // PerFile commands (morphotag/translate/coref) the per-file
         // `@Languages:` header is the authority; they don't use Rev.AI or
         // engine-tied processing this validator covers.
-        let lang = match &self.lang {
-            LanguageSpec::Auto | LanguageSpec::PerFile => return Ok(()),
-            LanguageSpec::Pair(_) => return self.validate_language_pair_support(),
-            LanguageSpec::Resolved(code) => code,
+        let lang = match language {
+            PairedLanguage::Auto | PairedLanguage::PerFile => return Ok(()),
+            PairedLanguage::Resolved(code) => *code,
         };
 
         // Commands that use eager request-level ASR validation: transcribe,
@@ -1041,6 +1068,30 @@ mod tests {
         morphotag_submission_with_lang(LanguageSpec::PerFile)
     }
 
+    /// A transcribe request in a language with no boundary model is refused at
+    /// submission with the route's message, unless the Stanza fallback is
+    /// authorized; a language with a boundary model needs no opt-in. This is
+    /// the refusal the plan already made per file after the job was accepted.
+    #[test]
+    fn transcribe_in_an_unsegmentable_language_is_refused_at_submission() {
+        let refused = transcribe_submission("spa", AsrEngineName::RevAi);
+        let err = refused
+            .validate()
+            .expect_err("Spanish has no boundary model and no opt-in");
+        assert!(err.to_string().contains("spa"), "{err}");
+        assert!(err.to_string().contains("utseg_fallback"), "{err}");
+
+        let mut authorized = transcribe_submission("spa", AsrEngineName::RevAi);
+        if let CommandOptions::Transcribe(opts) = &mut authorized.options {
+            opts.utseg_fallback = true.into();
+        }
+        authorized.validate().expect("the opt-in makes Spanish segmentable");
+
+        transcribe_submission("eng", AsrEngineName::RevAi)
+            .validate()
+            .expect("English has a boundary model");
+    }
+
     fn utseg_submission(lang: &str) -> JobSubmission {
         JobSubmission {
             command: ReleasedCommand::Utseg,
@@ -1250,29 +1301,32 @@ mod tests {
         );
     }
 
-    /// A code-switched pair is accepted by transcription on Rev.AI, whose
-    /// multilingual model is English/Spanish, and refused everywhere else, each
-    /// refusal saying why.
+    /// A code-switched pair is withheld from transcription at submission, in
+    /// either order and on every engine, with the measured reason and what to
+    /// run instead; every other command refuses a pair as not its question.
+    /// Engine admission withholds a pair as well, for a job saved under an
+    /// earlier build and restarted without resubmission.
     #[test]
-    fn a_language_pair_is_accepted_only_by_rev_transcription_of_english_and_spanish() {
-        transcribe_submission("eng,spa", AsrEngineName::RevAi)
-            .validate()
-            .expect("Rev.AI transcribes English/Spanish");
-        transcribe_submission("spa,eng", AsrEngineName::RevAi)
-            .validate()
-            .expect("either order: the order is the transcript's @Languages order");
-
-        let whisper = transcribe_submission("eng,spa", AsrEngineName::Whisper)
-            .validate()
-            .expect_err("Whisper recognizes one language at a time")
-            .to_string();
-        assert!(whisper.contains("--asr-engine rev"), "{whisper}");
-
-        let french = transcribe_submission("eng,fra", AsrEngineName::RevAi)
-            .validate()
-            .expect_err("Rev.AI has no English/French model")
-            .to_string();
-        assert!(french.contains("English and Spanish"), "{french}");
+    fn a_language_pair_is_withheld_from_transcription_and_refused_elsewhere() {
+        for (pair, engine) in [
+            ("eng,spa", AsrEngineName::RevAi),
+            ("spa,eng", AsrEngineName::RevAi),
+            ("eng,spa", AsrEngineName::Whisper),
+            ("eng,fra", AsrEngineName::RevAi),
+        ] {
+            let mut submission = transcribe_submission(pair, engine);
+            if let CommandOptions::Transcribe(opts) = &mut submission.options {
+                opts.utseg_fallback = true.into();
+            }
+            let refusal = submission
+                .validate()
+                .expect_err("a pair is withheld from transcription")
+                .to_string();
+            assert!(refusal.contains(pair), "{refusal}");
+            assert!(refusal.contains("withheld"), "{refusal}");
+            assert!(refusal.contains("English where Spanish was spoken"), "{refusal}");
+            assert!(refusal.contains("--lang spa"), "{refusal}");
+        }
 
         let mut utseg = utseg_submission("eng");
         utseg.lang = LanguageSpec::try_from("eng,spa").expect("a pair");
@@ -1280,7 +1334,7 @@ mod tests {
             .validate()
             .expect_err("utseg runs under one language")
             .to_string();
-        assert!(refused.contains("accepted only by transcribe"), "{refused}");
+        assert!(refused.contains("takes one language"), "{refused}");
 
         let mut morphotag = morphotag_submission();
         morphotag.lang = LanguageSpec::try_from("eng,spa").expect("a pair");
@@ -1480,9 +1534,16 @@ mod tests {
     /// That is why the Rev.AI deny-list for ``mal`` now recommends
     /// ``whisper_hub``, not ``whisper``. This test remains as a *validation*
     /// guard rail (API-supported), not a quality claim.
+    ///
+    /// Malayalam has no TalkBank boundary model either, so the submission
+    /// authorizes the Stanza segmentation fallback: the ASR engine is what this
+    /// test is about, and without the opt-in the route, not the engine, refuses.
     #[test]
     fn transcribe_whisper_on_malayalam_passes_validation() {
-        let submission = transcribe_submission("mal", AsrEngineName::Whisper);
+        let mut submission = transcribe_submission("mal", AsrEngineName::Whisper);
+        if let CommandOptions::Transcribe(opts) = &mut submission.options {
+            opts.utseg_fallback = true.into();
+        }
         submission
             .validate()
             .expect("whisper + mal must pass validation; quality caveats live in the book");
@@ -1495,7 +1556,10 @@ mod tests {
     /// pass validation itself.
     #[test]
     fn transcribe_whisper_hub_on_malayalam_passes_validation() {
-        let submission = transcribe_submission("mal", AsrEngineName::WhisperHub);
+        let mut submission = transcribe_submission("mal", AsrEngineName::WhisperHub);
+        if let CommandOptions::Transcribe(opts) = &mut submission.options {
+            opts.utseg_fallback = true.into();
+        }
         submission.validate().expect(
             "whisper_hub + mal must pass validation so the deny-list \
              recommendation is viable",

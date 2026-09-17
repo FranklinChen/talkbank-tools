@@ -21,8 +21,9 @@ batchalign3 transcribe recordings/ -o transcripts/ --lang eng
 # Auto-detect the recording's language (one language for the whole file)
 batchalign3 transcribe recording.wav -o out/ --lang auto
 
-# Code-switched English/Spanish, with Rev.AI's multilingual model
-batchalign3 transcribe bilingual.wav -o out/ --lang eng,spa
+# A code-switched recording: detection recognizes with one model and tags
+# utterances by language; the eng,spa pair is withheld (see below)
+batchalign3 transcribe bilingual.wav -o out/ --lang auto
 
 # Transcribe with paid pyannoteAI Precision-2 diarization, the default
 batchalign3 transcribe interview.wav -o out/ --asr-engine whisper --diarization enabled
@@ -291,7 +292,7 @@ acceptable CHAT segmentation.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--lang CODE` | `eng` | 3-letter ISO language code, `auto` for language auto-detection, or a code-switched pair such as `eng,spa` (primary language first; see [Code-switched recordings](#code-switched-recordings---lang-engspa)) |
+| `--lang CODE` | `eng` | 3-letter ISO language code, `auto` for language auto-detection, or a code-switched pair such as `eng,spa` (primary language first; parsed, and withheld from transcription today; see [Code-switched recordings](#code-switched-recordings---lang-engspa-withheld)) |
 | `--asr-engine NAME` | `rev` | ASR engine; see the table below. `--help` prints the same list, generated from the engines that exist, so neither can go stale. |
 | `--asr-engine-custom NAME` |: | **Deprecated alias for `--asr-engine`**, still honoured so existing scripts keep working. Hidden from `--help`. |
 | `--num-speakers N` | `2` | Speaker count passed to Rev.AI and to the dedicated diarizer. With `--diarization enabled` it must be 2 or more: a count of 1 is refused at submission, not obeyed. NOT a worker count; see `--workers`. No short flag, deliberately: see below. |
@@ -496,27 +497,52 @@ API. Note that Rev.AI auto-detect and explicit `--lang eng` can produce
 different punctuation, diarization, and turn boundaries from the provider.
 
 Detection chooses ONE language for the whole file. It does not transcribe a
-code-switched recording in two languages; `--lang eng,spa` below does.
+code-switched recording in two languages, and today nothing in BA3 does: the
+pair request below is withheld.
 
 ---
 
-## Code-switched recordings: `--lang eng,spa`
+## Code-switched recordings: `--lang eng,spa` (withheld)
 
 A pair declares that a recording mixes two languages. The first is the primary
 language (the one an unmarked utterance is in, and the first `@Languages`
-entry), the second the other language. Either order is accepted.
+entry), the second the other language. Either order parses.
 
 ```bash
-batchalign3 transcribe miami/ -o out/ --lang eng,spa   # English primary
-batchalign3 transcribe miami/ -o out/ --lang spa,eng   # Spanish primary
+batchalign3 transcribe miami/ -o out/ --lang eng,spa   # refused at submission today
 ```
 
-What happens:
+**Withheld since 2026-09-17.** The only pair model available, Rev.AI's
+multilingual English/Spanish model (`language: "en/es"`), was measured writing
+fluent English where Spanish was spoken, with real timestamps: on one
+English/Spanish recording it transcribed some Spanish stretches as Spanish and
+rendered others as English sentences the speaker did not say ("Sit down. Put
+your feet like" where a Spanish-only pass heard "Siéntate por las así"), and on
+a public clip the day before it garbled Spanish that a Spanish-only pass got
+right. A translated line is indistinguishable downstream from transcribed
+speech, so `transcribe` and `transcribe_s` refuse every pair at submission with
+that reason, before anything is paid for. What to do instead:
+
+- run the recording under each language alone, `--lang eng` and `--lang spa`
+  (Spanish needs `--utseg-fallback-stanza`, having no TalkBank boundary model),
+  and keep both transcripts;
+- or `--lang auto`, which recognizes with one model and tags utterances by
+  detected language (`[- spa]` precodes), which finds the switches but does
+  not recognize the other language's words any better.
+
+The route that will replace the pair is two single-language passes merged by
+stretch, each stretch's words from the model of its language, scored first on
+gold code-switched transcripts. A pair is refused at planning as well, so a
+job saved under an earlier build does not run one on restart. The pair's
+request type, header writing and evidence keys stay for the routed merge (it
+declares the pair in its header) and for evidence already recorded; nothing
+measures the pair today, and the behaviour below describes what a pair request
+did when it was admitted:
 
 - **Rev.AI only, English/Spanish only.** The pair is sent as Rev.AI's
   multilingual English/Spanish model (`language: "en/es"`). Any other engine,
-  and any other pair, is refused at submission, before anything is paid for.
-  Every command other than `transcribe` refuses a pair.
+  and any other pair, is refused. Every command other than `transcribe` refuses
+  a pair as not its question.
 - **Headers and provenance** declare both languages: `@Languages: eng, spa`
   and `lang=eng,spa` in the `[fc-ba3 transcribe | ...]` stamp.
 - **No speaker count and no spoken-form switch.** Rev.AI's API refuses both

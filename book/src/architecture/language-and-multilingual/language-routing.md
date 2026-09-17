@@ -216,17 +216,22 @@ flowchart TD
     tag --> collect --> headers & precodes
 ```
 
-### A declared pair: `--lang eng,spa`
+### A declared pair: `--lang eng,spa` (withheld)
 
 Detection chooses one language for the whole file. A code-switched
-recording can instead be declared as a pair, primary first, which Rev.AI
-transcribes with its multilingual English/Spanish model (`en/es`). The
-transcript's language is then `TranscriptLanguage::Pair`: `@Languages`
-lists both, the provenance stamp says `lang=eng,spa`, and segmentation,
-morphosyntax and speaker routing run under the primary. Nothing marks an
-utterance or word as the secondary language yet, and numerals are kept as
-digits, because nothing says which language they were spoken in. See
-[transcribe](../../batchalign/user-guide/commands/transcribe.md#code-switched-recordings---lang-engspa).
+recording can instead be declared as a pair, primary first. The one owner
+of which commands take a pair (`dispatch_language::language_pair_support`)
+answers `Withheld` for transcription since 2026-09-17: Rev.AI's `en/es`
+model, the only pair model, was measured rendering some Spanish stretches
+as fluent English with real timestamps, which no downstream reader can tell
+from transcription, so submission refuses every pair with that reason. The
+pair's types stay: when admitted, the transcript's language is
+`TranscriptLanguage::Pair`, `@Languages` lists both, the provenance stamp
+says `lang=eng,spa`, and segmentation, morphosyntax and speaker routing run
+under the primary; nothing marks an utterance or word as the secondary
+language, and numerals are kept as digits. The route that will take the
+pair's place is two single-language passes merged by stretch. See
+[transcribe](../../batchalign/user-guide/commands/transcribe.md#code-switched-recordings---lang-engspa-withheld).
 
 ### Two-stage resolution
 

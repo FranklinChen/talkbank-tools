@@ -213,6 +213,25 @@ Move from Option A/B to Option C (build the probe harness) when:
   evidence (kept in an operational workspace, never inline in this
   public repo).
 
+### The English/Spanish pair (`en/es`), withheld 2026-09-17
+
+The pair is not a deny-list row: rows are keyed by one language, and the
+pair's owner is `dispatch_language::language_pair_support`, whose
+`Withheld` variant carries the reason. The failure mode differs from the
+Malayalam one above: the output is not illegal CHAT but fluent English the
+speaker did not say, where Spanish was spoken, with real timestamps, so no
+validator downstream can refuse it. Evidence (kept in the operational
+workspace, not here): one English/Spanish recording on 2026-09-17, several
+stretches translated while others in the same run were transcribed as
+Spanish; one public clip on 2026-09-16 garbled where Spanish alone was
+right. Unwithholding needs a measurement, not an incident count, and no
+route measures the pair today: `benchmark` takes one language, and
+transcription refuses the pair at submission and at planning. The evidence
+so far is the recorded pair outputs of 2026-09-16 and 2026-09-17; a
+measurement route (benchmark taking a pair, scored by compare's language
+rows on gold code-switched transcripts against Spanish alone and the routed
+two-pass merge) is what would reopen the question.
+
 ### Recommended alternative: `whisper_hub`
 
 The deny-list error message currently recommends `--asr-engine whisper_hub`

@@ -230,9 +230,10 @@ re-running morphotag afterwards).
 **The segmenter is decided from the language alone, before any work is
 dispatched.** A language the manifest pins a boundary model for takes that
 model. Stanza constituency parsing is the legacy fallback and is opt-in:
-`--utseg-fallback-stanza` authorizes it, and without it a language with no
-boundary model is refused at planning, naming the language, rather than being
-segmented by a substitute nobody asked for.
+`--utseg-fallback-stanza` authorizes it (`"utseg_fallback": true` in a job
+request's options), and without it a language with no boundary model is
+refused at submission, naming the language and both spellings of the opt-in,
+rather than being segmented by a substitute nobody asked for.
 
 **No media involved.**
 

@@ -72,8 +72,9 @@ pub(crate) enum UtsegRoute {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "utterance segmentation has no TalkBank boundary model for language '{lang}', and the \
-     Stanza constituency fallback was not authorized. Re-run with `--utseg-fallback-stanza` to \
-     use it (quality varies by language), or run without utterance segmentation."
+     Stanza constituency fallback was not authorized. Authorize it to proceed (its quality \
+     varies by language): `--utseg-fallback-stanza` on the command line, or \
+     `\"utseg_fallback\": true` in a job request's options."
 )]
 pub(crate) struct UtsegUnavailable {
     /// The language that has no segmenter.
@@ -141,7 +142,17 @@ mod tests {
         );
         assert!(
             message.contains("--utseg-fallback-stanza"),
-            "the refusal must name the remedy: {message}"
+            "the refusal must name the command-line remedy: {message}"
+        );
+        assert!(
+            message.contains("\"utseg_fallback\": true"),
+            "the refusal must name the job request's option by its wire name, which is not \
+             the flag's name; a caller who sent the flag's name was refused again with the \
+             same message: {message}"
+        );
+        assert!(
+            !message.contains("without utterance segmentation"),
+            "the refusal must not offer a remedy transcribe does not have: {message}"
         );
         assert!(
             !message.contains("utseg V2"),

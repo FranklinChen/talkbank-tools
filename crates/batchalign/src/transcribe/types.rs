@@ -429,6 +429,14 @@ impl AdmittedAsrLanguage {
         language: &LanguageSpec,
     ) -> Result<Self, TranscribeAsrPlanError> {
         let request = AsrLanguageRequest::try_from(language)?;
+        // A pair is withheld from transcription on every engine, here as well
+        // as at submission: a job saved under an earlier build and restarted
+        // after this one plans through here without being resubmitted, and
+        // the withholding (`LanguagePairSupport::Withheld`, the measured
+        // reason) must hold for it too.
+        if let AsrLanguageRequest::Pair(pair) = request {
+            return Err(TranscribeAsrPlanError::PairWithheld(pair));
+        }
         match backend.as_non_rev() {
             None => Ok(Self::RevAi(RevLanguage::admit(&request)?)),
             Some(backend) => Ok(Self::NonRev {
@@ -436,9 +444,7 @@ impl AdmittedAsrLanguage {
                 language: match request {
                     AsrLanguageRequest::One(code) => SingleAsrLanguage::One(code),
                     AsrLanguageRequest::Detect => SingleAsrLanguage::Detect,
-                    AsrLanguageRequest::Pair(pair) => {
-                        return Err(TranscribeAsrPlanError::PairRequiresRev(pair));
-                    }
+                    AsrLanguageRequest::Pair(_) => unreachable!("a pair was withheld above"),
                 },
             }),
         }
@@ -515,10 +521,10 @@ pub enum TranscribeAsrPlanError {
     RevLanguage(#[from] RevLanguageRefusal),
     /// A code-switched pair was requested from an engine that recognizes one
     /// language at a time.
-    #[error(
-        "the language pair '{0}' requires the Rev.AI ASR engine (--asr-engine rev); other engines recognize one language at a time"
-    )]
-    PairRequiresRev(LanguagePair),
+    /// A pair reached engine admission: through a job saved before the
+    /// withholding, since submission refuses every pair first.
+    #[error("{}", crate::dispatch_language::LanguagePairSupport::withheld_message(.0))]
+    PairWithheld(LanguagePair),
 }
 
 impl TranscribeAsrPlan {
@@ -747,38 +753,28 @@ mod speaker_plan_tests {
     }
 
     /// Each engine's plan holds only the language requests that engine can
-    /// take: Rev.AI takes one language, detection or the English/Spanish pair;
-    /// every other engine takes one language or detection. Transcription is
-    /// never per-file.
+    /// take: one language or detection. A pair is withheld from every engine
+    /// at plan time too, which is the route a job saved under an earlier build
+    /// takes when it is restarted without resubmission. Transcription is never
+    /// per-file.
     #[test]
     fn the_language_is_admitted_with_the_engine() {
         let none = std::collections::BTreeMap::new();
         let whisper = AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2);
 
-        let rev_pair = TranscribeAsrPlan::from_request(
-            AsrBackend::RustRevAi,
-            true,
-            2,
-            &none,
-            &english_spanish(),
-        )
-        .expect("Rev.AI takes English/Spanish");
-        assert_eq!(rev_pair.language().to_string(), "eng,spa");
-
-        assert!(matches!(
-            TranscribeAsrPlan::from_request(whisper, false, 2, &none, &english_spanish()),
-            Err(TranscribeAsrPlanError::PairRequiresRev(_))
-        ));
-
         let english_french = LanguageSpec::Pair(
             LanguagePair::new(LanguageCode3::eng(), LanguageCode3::fra()).expect("two languages"),
         );
-        assert!(matches!(
-            TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, true, 2, &none, &english_french),
-            Err(TranscribeAsrPlanError::RevLanguage(
-                RevLanguageRefusal::UnsupportedPair(_)
-            ))
-        ));
+        for (backend, pair) in [
+            (AsrBackend::RustRevAi, english_spanish()),
+            (whisper, english_spanish()),
+            (AsrBackend::RustRevAi, english_french),
+        ] {
+            let refusal = TranscribeAsrPlan::from_request(backend, true, 2, &none, &pair)
+                .expect_err("a pair is withheld at plan time on every engine");
+            assert!(matches!(refusal, TranscribeAsrPlanError::PairWithheld(_)), "{refusal}");
+            assert!(refusal.to_string().contains("withheld"), "{refusal}");
+        }
 
         for backend in [AsrBackend::RustRevAi, whisper] {
             assert!(matches!(

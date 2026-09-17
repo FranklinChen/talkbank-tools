@@ -73,19 +73,50 @@ pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguage
 /// Whether one command accepts a code-switched language pair such as `eng,spa`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LanguagePairSupport {
-    /// The command recognizes speech in both languages of a pair.
-    Accepted,
+    /// The command is the one that could recognize both languages of a pair,
+    /// and withholds it: the only pair model available, Rev.AI's `en/es`, was
+    /// measured on 2026-09-17 writing fluent English where Spanish was spoken,
+    /// with real timestamps, on one bilingual corpus recording (several stretches; real
+    /// Spanish in others of the same run) and on one public clip on
+    /// 2026-09-16. Translation presented as transcription is a value the file
+    /// cannot reveal as fabricated, so no transcript is produced from the pair
+    /// until a route exists whose Spanish words are recognized by a Spanish
+    /// model (two single-language passes merged by stretch, the next build).
+    /// Engine admission refuses a pair for the same reason, so a job saved
+    /// under an earlier build cannot plan one on restart. The pair's request
+    /// type, header writing and evidence-cache keys stay: the routed merge
+    /// declares the pair in its header, and evidence already recorded under
+    /// pair keys must stay readable. Nothing measures the pair today;
+    /// unwithholding needs a measurement route that does not yet exist.
+    Withheld,
     /// The command runs under one language, or none.
     Refused,
 }
 
+impl LanguagePairSupport {
+    /// The refusal a withheld pair gets at submission: the measurement, and
+    /// what to run instead. One text, so the CLI and the API say the same.
+    pub(crate) fn withheld_message(pair: &crate::api::LanguagePair) -> String {
+        format!(
+            "the language pair '{pair}' is withheld from transcription: the only pair model, \
+             Rev.AI's en/es, was measured writing fluent English where Spanish was spoken \
+             (translation presented as transcription, with real timestamps, which nothing \
+             downstream can tell from speech; 2026-09-17, one recording, and a public clip \
+             on 2026-09-16). Run the recording under each language alone (`--lang eng`; \
+             `--lang spa` with `--utseg-fallback-stanza`) until the routed two-pass merge \
+             lands; `--lang auto` tags utterances by language but recognizes with one model."
+        )
+    }
+}
+
 /// The one owner of which commands take a language pair.
 ///
-/// Only transcription does: a pair describes a recording, and transcription is
-/// what recognizes one. No catch-all arm, so a new command states its answer.
+/// Only transcription could: a pair describes a recording, and transcription is
+/// what recognizes one; it withholds the pair today, for the measured reason on
+/// the variant. No catch-all arm, so a new command states its answer.
 pub(crate) const fn language_pair_support(command: ReleasedCommand) -> LanguagePairSupport {
     match command {
-        ReleasedCommand::Transcribe | ReleasedCommand::TranscribeS => LanguagePairSupport::Accepted,
+        ReleasedCommand::Transcribe | ReleasedCommand::TranscribeS => LanguagePairSupport::Withheld,
         ReleasedCommand::Morphotag
         | ReleasedCommand::Translate
         | ReleasedCommand::Coref

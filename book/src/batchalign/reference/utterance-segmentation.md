@@ -137,8 +137,20 @@ language plus a fallback policy into a segmenter choice, and it reads
 availability from that same table, so a language BA3 offers to segment is by
 construction a language it can name a model for. A language with no boundary
 model and no authorized Stanza fallback has no segmenter, and that is refused
-when the job is planned, before any ASR is dispatched, rather than at the worker
-after the transcription has been produced.
+when the job is submitted (`POST /jobs` answers 400 with a message naming the
+language and both ways to authorize the fallback: `--utseg-fallback-stanza` on
+the command line, `"utseg_fallback": true` in a job request's options), and
+again when a job persisted before that check is planned, before any ASR is
+dispatched, rather than at the worker after the transcription has been
+produced. A code-switched pair is segmented under its primary language, so
+`eng,spa` takes the English model and `spa,eng` needs the same opt-in as
+Spanish alone (pairs are withheld from transcription today; the rule holds
+for the benchmark and for the route that replaces the pair). Under `--lang auto` the language is not known until ASR
+returns, so that case is decided when it is. Until 2026-09-17 the refusal
+came only at planning, after the request had been accepted: an API caller saw
+a job that failed on every file, and the message named only the command-line
+flag and offered "run without utterance segmentation", which `transcribe` has
+no way to do.
 
 The Python side holds no language-to-model map at all. An id must be known
 before a load in order to pin its revision, so Rust resolves it and sends it to
