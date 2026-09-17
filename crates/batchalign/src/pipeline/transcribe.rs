@@ -1550,58 +1550,101 @@ mod tests {
     }
 
     /// Rev.AI evidence for a code-switched English/Spanish request.
-    struct EnglishSpanishRevInference;
-
-    #[async_trait::async_trait]
-    impl RevAsrEvidenceInference for EnglishSpanishRevInference {
-        async fn infer(
-            &self,
-            _run: AuthorizedRevEvidenceRun,
-        ) -> Result<crate::revai::RevAsrInferenceOutcome, ServerError> {
-            Ok(crate::revai::RevAsrInferenceOutcome::Fetched(FetchedRevAsrEvidence {
-                transcript_evidence: RevTranscriptEvidence::from_provider_json(
-                    r#"{"monologues":[{"speaker":0,"elements":[{"type":"text","value":"quiero","ts":0.1,"end_ts":0.4,"confidence":0.9},{"type":"text","value":"water","ts":0.5,"end_ts":0.9,"confidence":0.8},{"type":"text","value":"25","ts":0.9,"end_ts":1.2,"confidence":0.8},{"type":"punct","value":".","ts":null,"end_ts":null,"confidence":null}]}]}"#
-                        .to_owned(),
-                )
-                .expect("valid provider transcript fixture"),
-                resolved_language: TranscriptLanguage::Pair(
-                    crate::api::LanguagePair::new(LanguageCode3::eng(), LanguageCode3::spa())
-                        .expect("two languages"),
-                ),
-            }))
-        }
-    }
-
-    /// A code-switched request declares both of its languages: `@Languages`
-    /// in the pair's order, and one `lang=` provenance field naming the pair.
+    /// A code-switched pair declares both of its languages: `@Languages` in
+    /// the pair's order, and one `lang=` provenance field naming the pair.
+    /// Live transcription withholds a pair (`LanguagePairSupport::Withheld`),
+    /// so the one route that still produces a pair transcript is replay of
+    /// evidence recorded under a pair, which is what this exercises: the
+    /// plan's pair is the transcript language whatever single code the
+    /// recorded response carries.
     #[tokio::test]
     async fn a_language_pair_is_declared_in_languages_and_provenance() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let audio_path = tempdir.path().join("sample.wav");
-        tokio::fs::write(&audio_path, b"provider media")
-            .await
-            .expect("write provider media");
-        let pool = WorkerPool::new(PoolConfig::default());
+        let media = tempdir.path().join("sample.wav");
+        let asr = tempdir.path().join("sample_asr_response.json");
+        let manifest = tempdir.path().join("sample.replay.json");
+        std::fs::write(&media, b"fingerprinted media").expect("media");
+        std::fs::write(
+            &asr,
+            serde_json::to_vec_pretty(&AsrResponse {
+                tokens: vec![
+                    AsrToken {
+                        text: "quiero".into(),
+                        start_s: Some(DurationSeconds(0.1)),
+                        end_s: Some(DurationSeconds(0.4)),
+                        speaker: Some("ASR_0".into()),
+                        confidence: Some(0.9),
+                    },
+                    AsrToken {
+                        text: "water".into(),
+                        start_s: Some(DurationSeconds(0.5)),
+                        end_s: Some(DurationSeconds(0.9)),
+                        speaker: Some("ASR_0".into()),
+                        confidence: Some(0.8),
+                    },
+                    AsrToken {
+                        text: "25".into(),
+                        start_s: Some(DurationSeconds(0.9)),
+                        end_s: Some(DurationSeconds(1.2)),
+                        speaker: Some("ASR_0".into()),
+                        confidence: Some(0.8),
+                    },
+                    AsrToken {
+                        text: ".".into(),
+                        start_s: None,
+                        end_s: None,
+                        speaker: Some("ASR_0".into()),
+                        confidence: None,
+                    },
+                ],
+                lang: LanguageCode3::eng(),
+                model: None,
+                source_monologues: None,
+            })
+            .expect("ASR JSON"),
+        )
+        .expect("ASR artifact");
+        write_legacy_replay_manifest(
+            LegacyReplayManifestRequest {
+                recording_id: "sample",
+                media_path: &media,
+                asr_response_path: &asr,
+                speaker_turns_path: None,
+                producer: LegacyProjectedAsrProducer::RevAi,
+            },
+            &manifest,
+        )
+        .expect("manifest");
+        let replay = admit_legacy_replay_manifest(&manifest).expect("admitted replay");
+
         let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
             .await
             .expect("cache");
-        let mut opts = test_transcribe_options_in(
-            None,
-            crate::api::LanguageSpec::try_from("eng,spa").expect("a pair"),
-        );
-        opts.diarize = false;
-
-        let completed = run_transcribe_pipeline_with_rev_inference(
-            &audio_path,
+        let pool = WorkerPool::new(PoolConfig::default());
+        let live = test_transcribe_options(None);
+        let pair = crate::api::LanguageSpec::try_from("eng,spa").expect("a pair");
+        let opts = TranscribeOptions {
+            asr: ReplayAsrPlan::for_legacy_replay(2, &pair).unwrap(),
+            diarize: false,
+            speaker_backend: None,
+            with_utseg: live.with_utseg,
+            with_morphosyntax: live.with_morphosyntax,
+            cache_policies: live.cache_policies,
+            allow_stanza_fallback_utseg: live.allow_stanza_fallback_utseg,
+            write_wor: live.write_wor,
+            media_name: live.media_name,
+            engine_extras: live.engine_extras,
+        };
+        let chat = run_transcribe_pipeline_with_legacy_replay(
+            replay,
+            TranscribeUtsegExecution::production(opts.with_utseg),
             PipelineServices::new(&pool, &cache),
             &opts,
             None,
             None,
-            &EnglishSpanishRevInference,
         )
         .await
-        .expect("transcribe");
-        let chat = completed.chat_text;
+        .expect("offline replay");
 
         assert!(
             chat.lines().any(|line| line == "@Languages:\teng, spa"),
