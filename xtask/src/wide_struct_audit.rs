@@ -293,14 +293,24 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
                  provenance stamp outcome, a closed enum rather than a flag",
     },
     WideStructAllowance {
+        path: "crates/batchalign/src/pipeline/transcribe.rs",
+        struct_name: "TranscribePipelineContext",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "one transcription execution owns its service handles, diagnostic sinks and \
+                 optional evidence; required stage outputs live in the mandatory generic state, \
+                 replaced by consuming transitions, while the plan type separates live and replay",
+    },
+    WideStructAllowance {
         path: "crates/batchalign/src/transcribe/types.rs",
         struct_name: "TranscribeOptions",
-        max_fields: 13,
-        max_bool_fields: 6,
+        max_fields: 10,
+        max_bool_fields: 5,
         disposition: WideStructDisposition::BoundaryShim,
-        reason: "transcription option bag crossing CLI/server/runtime boundaries; the six bools \
-                 are independent switches rather than flag/no-flag pairs, which is why this \
-                 stays a shim while the clap structs above do not",
+        reason: "transcription policy boundary with five independent stage/output switches; \
+                 language, backend and speaker-count admission belong to the sealed ASR plan, \
+                 whose type also pairs live inference and replay with their inputs",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/types/cancellation.rs",
@@ -516,9 +526,12 @@ fn parse_named_structs_in_file(relative_path: &str, text: &str) -> Vec<NamedStru
 }
 
 fn struct_name_from_declaration(line: &str) -> Option<String> {
-    let declaration = line
-        .strip_prefix("pub struct ")
-        .or_else(|| line.strip_prefix("struct "))?;
+    let line = if let Some(scoped) = line.strip_prefix("pub(") {
+        scoped.split_once(')')?.1.trim_start()
+    } else {
+        line.strip_prefix("pub ").unwrap_or(line)
+    };
+    let declaration = line.strip_prefix("struct ")?;
     if !declaration.contains('{') {
         return None;
     }
@@ -628,6 +641,20 @@ pub fn run(root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::parse_named_structs_in_file;
+
+    #[test]
+    fn scoped_visibility_preserves_generic_structs_and_fields() {
+        for visibility in ["pub(crate)", "pub(super)", "pub(in crate::pipeline)"] {
+            let source = format!(
+                "{visibility} struct Options<P = Plan> {{\n    pub(crate) plan: P,\n    pub enabled: bool,\n}}"
+            );
+            let found = parse_named_structs_in_file("options.rs", &source);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].struct_name, "Options");
+            assert_eq!(found[0].field_count, 2);
+            assert_eq!(found[0].bool_field_count, 1);
+        }
+    }
 
     /// A multi-line attribute is not a field, even when it contains a colon.
     ///

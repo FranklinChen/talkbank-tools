@@ -13,21 +13,20 @@ ROOT = Path(__file__).resolve().parents[2]
 # `len(...) == 5` next to the set of files, so the two had to be kept in step
 # by hand and the failure said only "6 != 5", naming neither the file that
 # gained a call nor the one that lost one. A per-file count carries strictly
-# more (engine.rs legitimately holds two) and the diff points at the change.
+# more information and the diff points at the change.
 #
 # dp_align is O(n*m), so a new call site is a decision worth recording rather
 # than an incident worth blocking:
 #
-# - benchmark.rs: WER evaluation.
-# - compare/engine.rs: transcript comparison (window alignment + rotation).
+# - compare/engine.rs: one whole-file transcript comparison, shared by WER
+#   evaluation; window alignment and rotation no longer add separate calls.
 # - compare/cross_run.rs: cross-run agreement metrics for `compare-runs`.
 # - chat_ops/fa/utr.rs: UTR global alignment, correctness critical and not
 #   avoidable.
 # - chat_ops/fa/utr/two_pass.rs: overlap-aware UTR timing recovery.
 ALLOWED_DP_ALIGN_CALLS = {
-    "crates/batchalign-transform/src/benchmark.rs": 1,
     "crates/batchalign-transform/src/compare/cross_run.rs": 1,
-    "crates/batchalign-transform/src/compare/engine.rs": 2,
+    "crates/batchalign-transform/src/compare/engine.rs": 1,
     "crates/batchalign/src/chat_ops/fa/utr.rs": 1,
     "crates/batchalign/src/chat_ops/fa/utr/two_pass.rs": 1,
 }
