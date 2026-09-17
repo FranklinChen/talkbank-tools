@@ -182,11 +182,11 @@ mod artifacts {
             let bundle = compare(&main.file, &gold_file, GoldCoverage::Complete);
 
             info!(
-                matches = bundle.metrics.matches,
-                insertions = bundle.metrics.insertions,
-                deletions = bundle.metrics.deletions,
-                wer = %format!("{:.4}", bundle.metrics.wer),
-                cwer = %format!("{:.4}", bundle.metrics.cwer),
+                matches = bundle.metrics.matches(),
+                insertions = bundle.metrics.insertions(),
+                deletions = bundle.metrics.deletions(),
+                wer = %format!("{:.4}", bundle.metrics.wer()),
+                cwer = %format!("{:.4}", bundle.metrics.cwer()),
                 "Compare alignment complete"
             );
 

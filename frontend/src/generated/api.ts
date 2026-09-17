@@ -914,7 +914,10 @@ export interface components {
             file_statuses?: components["schemas"]["FileStatusEntry"][];
             /** @description Server-assigned UUID (v4) for this job. */
             job_id: components["schemas"]["JobId"];
-            /** @description Language specification: a resolved ISO 639-3 code or `"auto"`. */
+            /**
+             * @description Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
+             *     code-switched pair such as `"eng,spa"`.
+             */
             lang?: components["schemas"]["LanguageSpec"];
             last_cancelled_at?: null | components["schemas"]["UnixTimestamp"];
             /** @description Caller-reported host of the most recent cancel attempt. */
@@ -1002,7 +1005,10 @@ export interface components {
             error_files?: number;
             /** @description Server-assigned UUID (v4) for this job. */
             job_id: components["schemas"]["JobId"];
-            /** @description Language specification: a resolved ISO 639-3 code or `"auto"`. */
+            /**
+             * @description Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
+             *     code-switched pair such as `"eng,spa"`.
+             */
             lang?: components["schemas"]["LanguageSpec"];
             next_eligible_at?: null | components["schemas"]["UnixTimestamp"];
             /**
@@ -1070,8 +1076,8 @@ export interface components {
             /** @description CHAT files to process. */
             files?: components["schemas"]["FilePayload"][];
             /**
-             * @description Language specification: a 3-letter ISO code or `"auto"` for
-             *     ASR-driven detection.
+             * @description Job language: a 3-letter ISO code, `"auto"` for ASR-driven detection,
+             *     `"per-file"`, or a code-switched pair such as `"eng,spa"`.
              */
             lang?: components["schemas"]["LanguageSpec"];
             /** @description Media filenames for the server to resolve from media_roots (transcribe only). */
@@ -1094,36 +1100,13 @@ export interface components {
             source_paths?: components["schemas"]["ClientPath"][];
         };
         /**
-         * @description 3-letter ISO 639-3 language code (e.g. `"eng"`, `"spa"`).
-         *
-         *     Construction validates that the value is exactly 3 ASCII alphabetic
-         *     characters, lowercased. Sentinel values like `"auto"` are rejected, use
-         *     [`LanguageSpec`] at boundaries where auto-detection is meaningful.
+         * @description Job language: `auto` (the ASR engine detects one language), `per-file` (each file's `@Languages:` header decides), an ISO 639-3 code such as `eng`, or a code-switched pair such as `eng,spa`, primary language first.
+         * @example eng
+         * @example auto
+         * @example per-file
+         * @example eng,spa
          */
-        LanguageCode3: string;
-        /**
-         * @description Language specification from the CLI or job submission.
-         *
-         *     `Auto` means the ASR engine should detect the language. This variant must
-         *     be resolved to a concrete [`LanguageCode3`] before any CHAT construction
-         *     or NLP dispatch that requires a known language.
-         *
-         *     `PerFile` means the command has no job-level language at all: each input
-         *     file's processing language is read from its `@Languages:` header at the
-         *     start of the per-file pipeline. This is distinct from `Auto`: `Auto` is an
-         *     ASR-engine signal asking the model to detect the spoken language;
-         *     `PerFile` is a routing signal for text-NLP commands (morphotag, translate,
-         *     coref) whose language source is the CHAT file itself, not the job
-         *     submission. The 2026-05-03 morphotag incident happened because these
-         *     commands were forced to carry a placeholder `Resolved(eng)` value that
-         *     then leaked into the job record, the dashboard, and the Stanza
-         *     pre-warming key. `PerFile` makes the absence of a job-level language a
-         *     first-class state in the type system.
-         */
-        LanguageSpec: "Auto" | {
-            /** @description A concrete ISO 639-3 language code. */
-            Resolved: components["schemas"]["LanguageCode3"];
-        } | "PerFile";
+        LanguageSpec: string;
         /**
          * @description Lease metadata for a claimed schedulable unit.
          *

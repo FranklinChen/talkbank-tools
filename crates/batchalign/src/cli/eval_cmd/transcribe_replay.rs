@@ -3,7 +3,7 @@
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-use crate::api::{LanguageCode3, LanguageSpec};
+use crate::api::LanguageSpec;
 use crate::cache::UtteranceCache;
 use crate::cli::args::{
     TranscribeReplayAction, TranscribeReplayArgs, TranscribeReplayManifestArgs,
@@ -19,7 +19,7 @@ use crate::transcribe::replay::{
     AdmittedLegacyTranscribeReplay, LegacyProjectedAsrProducer, LegacyReplayManifestRequest,
     admit_legacy_replay_manifest, file_blake3_hex, write_legacy_replay_manifest,
 };
-use crate::transcribe::{AsrBackend, TranscribeCachePolicies, TranscribeOptions};
+use crate::transcribe::{TranscribeCachePolicies, TranscribeOptions};
 use crate::types::worker_v2::SpeakerBackendV2;
 use crate::types::worker_v2::UtsegAdjacencyPolicyRevisionV2;
 use crate::utseg::{TranscribeUtsegExecution, UtsegDecisionPolicy};
@@ -62,7 +62,9 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
         .map(|path| admit_legacy_replay_manifest(path).map_err(replay_error))
         .collect::<Result<Vec<_>, _>>()?;
     validate_batch(&admitted, args.diarize)?;
-    let lang = LanguageCode3::try_new(&args.lang)
+    // Any language a transcript can have been requested in, a pair included:
+    // replay calls no provider, so no provider's language table applies.
+    let lang = LanguageSpec::try_from(args.lang.as_str())
         .map_err(|error| CliError::InvalidArgument(format!("invalid --lang: {error}")))?;
 
     if args.output.exists() {
@@ -110,15 +112,9 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
             .and_then(|name| name.to_str())
             .map(ToOwned::to_owned);
         let opts = TranscribeOptions {
-            asr: crate::transcribe::TranscribeAsrPlan::from_request(
-                AsrBackend::RustRevAi,
-                false,
-                args.num_speakers,
-                &std::collections::BTreeMap::new(),
-            )?,
+            asr: crate::transcribe::ReplayAsrPlan::for_legacy_replay(args.num_speakers, &lang)?,
             diarize: args.diarize,
             speaker_backend: args.diarize.then_some(SpeakerBackendV2::PyannoteAi),
-            lang: LanguageSpec::Resolved(lang.clone()),
             with_utseg: utseg_execution.pre_chat_policy().is_some(),
             with_morphosyntax: false,
             // These policies are unreachable in the replay typestate. Keeping
@@ -364,7 +360,7 @@ mod tests {
                     speaker: Some("0".into()),
                     confidence: None,
                 }],
-                lang: LanguageCode3::eng(),
+                lang: crate::api::LanguageCode3::eng(),
                 model: None,
                 source_monologues: None,
             })

@@ -61,6 +61,20 @@ pub(crate) enum SearchedPlace {
     ServerMediaRoot { root: PathBuf },
 }
 
+struct SearchDirectory {
+    root: PathBuf,
+    subdir: PathBuf,
+}
+
+impl SearchDirectory {
+    fn at(root: PathBuf) -> Self {
+        Self {
+            root,
+            subdir: PathBuf::new(),
+        }
+    }
+}
+
 impl SearchedPlace {
     /// Every directory this place means, in the order to try them.
     ///
@@ -68,23 +82,23 @@ impl SearchedPlace {
     /// "`--media-dir` first, then beside the file", which is what
     /// `resolve_audio_for_chat_with_media_dir` did; the rest are a single
     /// root, optionally with a subdir joined under it.
-    fn directories(&self) -> Vec<PathBuf> {
+    fn directories(&self) -> Vec<SearchDirectory> {
         // A subdir joined only when non-empty, matching what the previous
         // `find_media_in_root` did: an empty subdir means the root itself.
-        fn under(root: &Path, subdir: &str) -> PathBuf {
-            if subdir.is_empty() {
-                root.to_path_buf()
-            } else {
-                root.join(subdir)
+        fn under(root: &Path, subdir: &str) -> SearchDirectory {
+            SearchDirectory {
+                root: root.to_owned(),
+                subdir: subdir.into(),
             }
         }
         // `--media-dir` is consulted before the file's own directory, which is
         // the order the previous helper used.
-        fn beside(media_dir: Option<&PathBuf>, transcript: &Path) -> Vec<PathBuf> {
+        fn beside(media_dir: Option<&PathBuf>, transcript: &Path) -> Vec<SearchDirectory> {
             media_dir
                 .cloned()
                 .into_iter()
                 .chain(transcript.parent().map(Path::to_path_buf))
+                .map(SearchDirectory::at)
                 .collect()
         }
         match self {
@@ -99,8 +113,8 @@ impl SearchedPlace {
                 ..
             } => beside(media_dir.as_ref(), transcript),
             Self::LocalMediaMapping { root, subdir, .. } => vec![under(root, subdir)],
-            Self::InferredMediaMapping { dir } => vec![dir.clone()],
-            Self::ServerMediaRoot { root } => vec![root.clone()],
+            Self::InferredMediaMapping { dir } => vec![SearchDirectory::at(dir.clone())],
+            Self::ServerMediaRoot { root } => vec![SearchDirectory::at(root.clone())],
         }
     }
 }
@@ -169,18 +183,32 @@ impl MediaSearch {
     /// only expressible because places are values: in paths_mode with no
     /// `--media-dir`, the adjacency rung and the final fallback are the same
     /// directory, and the old chain probed it twice under nine extensions.
-    pub(crate) async fn try_place(&mut self, place: SearchedPlace) -> Option<PathBuf> {
+    pub(crate) async fn try_place(
+        &mut self,
+        place: SearchedPlace,
+    ) -> Result<Option<PathBuf>, UnresolvedMedia> {
         if self.searched.contains(&place) {
-            return None;
+            return Ok(None);
         }
         let directories = place.directories();
         self.searched.push(place);
         for directory in directories {
-            if let Some(found) = MediaExtensions::find_in(&directory, &self.stem).await {
-                return Some(found);
+            let stem = self.stem.clone();
+            match crate::media::access::access(directory.root, move |root| {
+                MediaExtensions::find_in_blocking(&root.path().join(directory.subdir), &stem)
+            })
+            .await
+            {
+                Ok(Some(found)) => return Ok(Some(found)),
+                Ok(None) | Err(crate::media::access::MediaAccessError::Missing { .. }) => {}
+                Err(error) => {
+                    return Err(UnresolvedMedia {
+                        message: error.to_string(),
+                    });
+                }
             }
         }
-        None
+        Ok(None)
     }
 
     /// Everywhere this search looked.
@@ -224,7 +252,7 @@ mod tests {
         let place = SearchedPlace::ServerMediaRoot {
             root: dir.path().to_path_buf(),
         };
-        assert_eq!(search.try_place(place.clone()).await, None);
+        assert_eq!(search.try_place(place.clone()).await.unwrap(), None);
         assert_eq!(search.places(), [place]);
     }
 
@@ -238,8 +266,8 @@ mod tests {
             media_dir: None,
         };
         let mut search = MediaSearch::for_stem("talk");
-        assert!(search.try_place(place.clone()).await.is_none());
-        assert!(search.try_place(place).await.is_none());
+        assert!(search.try_place(place.clone()).await.unwrap().is_none());
+        assert!(search.try_place(place).await.unwrap().is_none());
         assert_eq!(search.places().len(), 1, "the second attempt was skipped");
     }
 
@@ -255,7 +283,8 @@ mod tests {
                 transcript: dir.path().join("talk.cha"),
                 media_dir: None,
             })
-            .await;
+            .await
+            .unwrap();
         assert_eq!(found, Some(dir.path().join("talk.wav")));
     }
 
@@ -269,7 +298,8 @@ mod tests {
             .try_place(SearchedPlace::ServerMediaRoot {
                 root: root.path().to_path_buf(),
             })
-            .await;
+            .await
+            .unwrap();
         assert_eq!(found, Some(root.path().join("ACWT01a.wav")));
     }
 
@@ -286,7 +316,8 @@ mod tests {
                 transcript: corpus.path().join("talk.cha"),
                 media_dir: Some(media.path().to_path_buf()),
             })
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(found, Some(media.path().join("talk.mp3")));
     }
@@ -301,7 +332,8 @@ mod tests {
                 root: root.path().to_path_buf(),
                 subdir: "French/Newcastle".to_owned(),
             })
-            .await;
+            .await
+            .unwrap();
         assert_eq!(found, Some(root.path().join("French/Newcastle/d01.mp3")));
     }
 
@@ -425,7 +457,7 @@ pub(crate) async fn resolve_transcript_media(
                 root: root.to_path_buf(),
                 subdir: mapped_subdir.clone(),
             })
-            .await;
+            .await?;
         if original_audio_path.is_some() {
             info!(
                 filename,
@@ -442,7 +474,7 @@ pub(crate) async fn resolve_transcript_media(
                 transcript: read_path.to_path_buf(),
                 media_dir: None,
             })
-            .await;
+            .await?;
     }
 
     if original_audio_path.is_none() && !source_dir.is_empty() {
@@ -456,7 +488,7 @@ pub(crate) async fn resolve_transcript_media(
                 transcript: source_path.as_path().to_path_buf(),
                 media_dir: media_dir_path.map(Path::to_path_buf),
             })
-            .await;
+            .await?;
         if original_audio_path.is_some() {
             info!(
                 filename,
@@ -476,7 +508,7 @@ pub(crate) async fn resolve_transcript_media(
                 root: root.as_path().to_path_buf(),
                 subdir: mapped_subdir.clone(),
             })
-            .await;
+            .await?;
         if original_audio_path.is_some() {
             info!(
                 filename,
@@ -528,7 +560,7 @@ pub(crate) async fn resolve_transcript_media(
                 .try_place(SearchedPlace::InferredMediaMapping {
                     dir: search_dir.as_path().to_path_buf(),
                 })
-                .await;
+                .await?;
             if original_audio_path.is_some() {
                 info!(
                     filename,
@@ -546,7 +578,7 @@ pub(crate) async fn resolve_transcript_media(
                 .try_place(SearchedPlace::ServerMediaRoot {
                     root: root.as_path().to_path_buf(),
                 })
-                .await;
+                .await?;
             if original_audio_path.is_some() {
                 break;
             }
@@ -562,7 +594,7 @@ pub(crate) async fn resolve_transcript_media(
                 transcript: read_path.to_path_buf(),
                 media_dir: media_dir_path.map(Path::to_path_buf),
             })
-            .await;
+            .await?;
     }
 
     let original_audio_path = match original_audio_path {

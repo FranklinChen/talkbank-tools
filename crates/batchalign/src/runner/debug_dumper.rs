@@ -5,6 +5,9 @@
 //! generation. When constructed without a path, all methods are zero-cost
 //! no-ops. This is the single testability seam for stage decomposition.
 
+#[cfg(test)]
+use crate::revai::FetchedRevAsrEvidence;
+
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -623,11 +626,8 @@ impl DebugDumper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{LanguageCode3, LanguageSpec, NumSpeakers};
-    use crate::revai::{
-        CompletedRevAsrEvidence, RevAsrEvidenceRequest, RevAsrEvidenceResolution,
-        RevAsrModelRevision,
-    };
+    use crate::api::{LanguageCode3, NumSpeakers};
+    use crate::revai::{RevAsrEvidenceRequest, RevAsrEvidenceResolution, RevAsrModelRevision};
     use crate::types::traces::{FaDecisionTrace, FaTimingDecisionTrace};
     use crate::types::worker_v2::{SpeakerBackendV2, SpeakerSegmentV2};
 
@@ -691,7 +691,10 @@ mod tests {
             .expect("write audio");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &crate::types::revai_language::RevLanguage::admit(
+                &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
+            )
+            .expect("Rev.AI recognizes English"),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -699,11 +702,11 @@ mod tests {
         .expect("request");
         let resolution = RevAsrEvidenceResolution::replayed_for_test(
             &request,
-            CompletedRevAsrEvidence {
+            FetchedRevAsrEvidence {
                 transcript_evidence: crate::revai::RevTranscriptEvidence::from_legacy_transcript(
                     serde_json::from_str(r#"{"monologues": []}"#).expect("valid empty transcript"),
                 ),
-                resolved_language: LanguageCode3::eng(),
+                resolved_language: crate::api::TranscriptLanguage::One(LanguageCode3::eng()),
             },
         );
         let trace = resolution.trace(crate::revai::RevAsrProjectionRevision::AsrResponseV1);

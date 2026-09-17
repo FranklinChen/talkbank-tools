@@ -2,25 +2,24 @@
 
 use std::path::Path;
 
-use super::types::{AsrResponse, AsrWorkerMode, NonRevAsrBackend};
+use super::types::{AsrResponse, AsrWorkerMode, NonRevAsrBackend, SingleAsrLanguage};
 use super::{
     SpeakerEvidenceInference, SpeakerEvidenceModelRevision, SpeakerEvidenceRequest,
     SpeakerEvidenceResolution, SpeakerEvidenceResolutionError, SpeakerEvidenceSource,
     SpeakerEvidenceTrace, SpeakerProjectionRevision, VerifiedSpeakerEvidenceRun,
     resolve_speaker_evidence,
 };
-use crate::api::{LanguageCode3, LanguageSpec, NumSpeakers, WorkerLanguage};
+use crate::api::{LanguageCode3, NumSpeakers, WorkerLanguage};
 use crate::cache::UtteranceCache;
 use crate::chat_ops::CacheKey;
 use crate::error::{MissingRequiredEvidence, MissingSpeakerEvidence, ServerError};
 use crate::params::CachePolicy;
 use crate::types::worker_v2::{
-    ProtocolErrorCodeV2, ProviderDiarizationV2, SpeakerBackendV2, SpeakerInferenceEvidenceV2,
-    SpeakerSegmentV2,
+    ProtocolErrorCodeV2, SpeakerBackendV2, SpeakerInferenceEvidenceV2, SpeakerSegmentV2,
 };
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::asr_request_v2::{
-    AsrBuildInputV2, AsrInputSourceV2, PreparedAsrRequestIdsV2, build_asr_request_v2,
+    AsrBuildInputV2, PreparedAsrRequestIdsV2, build_asr_request_v2,
 };
 use crate::worker::asr_result_v2::parse_asr_response_v2;
 use crate::worker::pool::WorkerPool;
@@ -40,9 +39,10 @@ pub(crate) struct AsrInferParams<'a> {
     pub backend: NonRevAsrBackend,
     /// Audio file to transcribe.
     pub audio_path: &'a Path,
-    /// Language specification for ASR dispatch. May be `Auto`, the GPU
-    /// worker and ASR engine handle auto-detect internally.
-    pub lang: &'a LanguageSpec,
+    /// Language for ASR dispatch: one language, or detection, which the
+    /// engine handles internally. Never a pair: these engines recognize one
+    /// language at a time, and the plan admitted the request as such.
+    pub lang: &'a SingleAsrLanguage,
     /// Expected number of speakers for diarization.
     pub num_speakers: NumSpeakers,
     /// Per-engine configuration extras (e.g. `qwen_model`,
@@ -53,52 +53,25 @@ pub(crate) struct AsrInferParams<'a> {
     pub extras: &'a std::collections::BTreeMap<String, String>,
 }
 
-/// Compute the worker-runtime language and an "expected response
-/// language" hint used by `parse_asr_response_v2` when the ASR response
-/// does not carry a usable detected language of its own.
-///
-/// For `Resolved(code)` jobs, both values are derived from `code`, the
-/// CHAT header will reflect what the user explicitly asked for. For
-/// `Auto` jobs there is no concrete hint, and the parse helper must
-/// drive the language from the response itself; we return `None` so
-/// the caller can surface a typed error if the response is also empty.
-/// `PerFile` is not legal at this point (transcribe-class commands are
-/// rejected by submission validation if they carry it).
-pub(super) fn asr_worker_languages(
-    lang: &LanguageSpec,
-) -> Result<(WorkerLanguage, Option<LanguageCode3>), ServerError> {
-    match lang {
-        LanguageSpec::Resolved(code) => {
-            Ok((WorkerLanguage::Resolved(code.clone()), Some(code.clone())))
-        }
-        LanguageSpec::Auto => Ok((WorkerLanguage::Auto, None)),
-        LanguageSpec::PerFile => Err(ServerError::Validation(
-            "transcribe pipeline received LanguageSpec::PerFile, which is reserved for \
-             morphotag/translate/coref. Submission validation should have rejected \
-             this: please file a bug report."
-                .into(),
-        )),
-    }
-}
-
 /// Call the Python worker for ASR inference on a single audio file.
 pub(crate) async fn infer_asr(
     pool: &WorkerPool,
     params: &AsrInferParams<'_>,
 ) -> Result<AsrResponse, ServerError> {
-    let (worker_lang, fallback_lang) = asr_worker_languages(params.lang)?;
-
     match params.backend {
         NonRevAsrBackend::RustWhisperRs => {
             infer_whisper_rs_asr(params.audio_path, params.lang, params.extras).await
         }
         NonRevAsrBackend::Worker(worker_mode) => {
+            // A requested language is also what the response is read as when
+            // it carries no usable language of its own; under detection there
+            // is none, and an empty response language is a typed error.
             infer_asr_via_worker_v2(
                 pool,
                 params,
                 worker_mode,
-                &worker_lang,
-                fallback_lang.as_ref(),
+                &WorkerLanguage::from(params.lang),
+                params.lang.requested(),
             )
             .await
         }
@@ -121,10 +94,10 @@ pub(crate) async fn infer_asr(
 /// a `WhisperEngine` (infrastructure) error.
 async fn infer_whisper_rs_asr(
     audio_path: &Path,
-    lang: &LanguageSpec,
+    lang: &SingleAsrLanguage,
     extras: &std::collections::BTreeMap<String, String>,
 ) -> Result<AsrResponse, ServerError> {
-    let requested = lang.as_resolved().cloned();
+    let requested = lang.requested().cloned();
 
     let cfg = whisper_rs_config_from(extras).map_err(whisper_error_to_server_error)?;
 
@@ -201,7 +174,7 @@ async fn infer_asr_via_worker_v2(
     // pinning differently for the same job.
     let models = crate::model_manifest::resolve_asr_models(
         worker_mode.as_v2_backend(),
-        params.lang.as_resolved(),
+        params.lang.requested(),
         params.extras,
     )
     .map_err(|error| ServerError::Validation(error.to_string()))?;
@@ -210,25 +183,8 @@ async fn infer_asr_via_worker_v2(
         AsrBuildInputV2 {
             ids: &PreparedAsrRequestIdsV2::fresh(),
             models: &models,
-            input: match worker_mode {
-                // Fine-tune HF Whisper shares the prepared-audio wire shape
-                // with stock Whisper: Rust owns media decoding, the worker
-                // receives a resampled mono waveform. The only difference
-                // is which checkpoint the worker's ``WhisperASRHandle`` was
-                // constructed around at bootstrap.
-                AsrWorkerMode::LocalWhisperV2 | AsrWorkerMode::WhisperHubV2 => {
-                    AsrInputSourceV2::PreparedAudio {
-                        audio_path: params.audio_path,
-                    }
-                }
-                AsrWorkerMode::HkTencentV2
-                | AsrWorkerMode::HkAliyunV2
-                | AsrWorkerMode::HkFunaudioV2
-                | AsrWorkerMode::HkQwenV2 => AsrInputSourceV2::ProviderMedia {
-                    media_path: params.audio_path,
-                    diarization: ProviderDiarizationV2::for_expected_speakers(params.num_speakers),
-                },
-            },
+            audio_path: params.audio_path,
+            expected_speakers: params.num_speakers,
             lang: worker_lang,
             backend: worker_mode.as_v2_backend(),
             extras: params.extras,
@@ -527,9 +483,13 @@ mod tests {
     #[tokio::test]
     async fn whisper_rs_dispatch_accepts_auto_and_types_infra_failures() {
         let extras = std::collections::BTreeMap::new();
-        let err = infer_whisper_rs_asr(Path::new("/nonexistent.wav"), &LanguageSpec::Auto, &extras)
-            .await
-            .expect_err("a nonexistent audio file must fail");
+        let err = infer_whisper_rs_asr(
+            Path::new("/nonexistent.wav"),
+            &SingleAsrLanguage::Detect,
+            &extras,
+        )
+        .await
+        .expect_err("a nonexistent audio file must fail");
         assert!(
             matches!(err, ServerError::WhisperEngine(_)),
             "expected a WhisperEngine (infrastructure) error, got {err:?}"

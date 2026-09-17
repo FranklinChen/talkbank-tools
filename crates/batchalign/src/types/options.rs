@@ -555,7 +555,7 @@ pub struct OpensmileOptions {
 /// diarized runs forced every utterance onto a single track, which is why
 /// `--diarization enabled` transcripts came back with one `PAR0`.
 ///
-/// Franklin's ruling, 2026-09-15: "a diarization speaker count is either
+/// Policy: "a diarization speaker count is either
 /// exactly N (N at least 2) or automatic, for every diarizer."
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]

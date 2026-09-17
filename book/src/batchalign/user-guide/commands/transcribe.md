@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-09-16 09:47 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -18,8 +18,11 @@ batchalign3 transcribe interview.wav
 # Transcribe all audio files in a directory
 batchalign3 transcribe recordings/ -o transcripts/ --lang eng
 
-# Auto-detect language (useful for bilingual/code-switched audio)
-batchalign3 transcribe bilingual.wav -o out/ --lang auto
+# Auto-detect the recording's language (one language for the whole file)
+batchalign3 transcribe recording.wav -o out/ --lang auto
+
+# Code-switched English/Spanish, with Rev.AI's multilingual model
+batchalign3 transcribe bilingual.wav -o out/ --lang eng,spa
 
 # Transcribe with paid pyannoteAI Precision-2 diarization, the default
 batchalign3 transcribe interview.wav -o out/ --asr-engine whisper --diarization enabled
@@ -288,7 +291,7 @@ acceptable CHAT segmentation.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--lang CODE` | `eng` | 3-letter ISO language code, or `auto` for language auto-detection |
+| `--lang CODE` | `eng` | 3-letter ISO language code, `auto` for language auto-detection, or a code-switched pair such as `eng,spa` (primary language first; see [Code-switched recordings](#code-switched-recordings---lang-engspa)) |
 | `--asr-engine NAME` | `rev` | ASR engine; see the table below. `--help` prints the same list, generated from the engines that exist, so neither can go stale. |
 | `--asr-engine-custom NAME` |: | **Deprecated alias for `--asr-engine`**, still honoured so existing scripts keep working. Hidden from `--help`. |
 | `--num-speakers N` | `2` | Speaker count passed to Rev.AI and to the dedicated diarizer. With `--diarization enabled` it must be 2 or more: a count of 1 is refused at submission, not obeyed. NOT a worker count; see `--workers`. No short flag, deliberately: see below. |
@@ -492,6 +495,48 @@ With Rev.AI, `--lang auto` submits a true auto-language request to the Rev.AI
 API. Note that Rev.AI auto-detect and explicit `--lang eng` can produce
 different punctuation, diarization, and turn boundaries from the provider.
 
+Detection chooses ONE language for the whole file. It does not transcribe a
+code-switched recording in two languages; `--lang eng,spa` below does.
+
+---
+
+## Code-switched recordings: `--lang eng,spa`
+
+A pair declares that a recording mixes two languages. The first is the primary
+language (the one an unmarked utterance is in, and the first `@Languages`
+entry), the second the other language. Either order is accepted.
+
+```bash
+batchalign3 transcribe miami/ -o out/ --lang eng,spa   # English primary
+batchalign3 transcribe miami/ -o out/ --lang spa,eng   # Spanish primary
+```
+
+What happens:
+
+- **Rev.AI only, English/Spanish only.** The pair is sent as Rev.AI's
+  multilingual English/Spanish model (`language: "en/es"`). Any other engine,
+  and any other pair, is refused at submission, before anything is paid for.
+  Every command other than `transcribe` refuses a pair.
+- **Headers and provenance** declare both languages: `@Languages: eng, spa`
+  and `lang=eng,spa` in the `[fc-ba3 transcribe | ...]` stamp.
+- **No speaker count and no spoken-form switch.** Rev.AI's API refuses both
+  `speakers_count` and `skip_postprocessing` for `en/es` (HTTP 400, checked
+  against the live API on 2026-09-16), so neither is sent. Rev.AI's own
+  speaker labels are unguided by `--num-speakers`, and its written forms
+  (digits, `80%`) reach post-processing.
+- **Numerals stay digits.** Nothing says which language `25` was spoken in,
+  and writing it out in either would put words in the transcript the speaker
+  may not have said, so `tengo 25 años` keeps `25`, and `80%` becomes `80`.
+  The digits fail CHAT's word rules and are reported with the run's other
+  refused words, for a human to transcribe.
+- **Segmentation and morphosyntax run under the primary language.** A Spanish
+  primary language has no TalkBank boundary model, so `--lang spa,eng` needs
+  `--utseg-fallback-stanza` exactly as `--lang spa` does.
+- **Utterances are not marked by language.** The transcript declares both
+  languages but writes no `[- spa]` precodes, `@s` markers or code-switch
+  spans; every utterance is in the primary language as far as the CHAT says,
+  and filler, retrace and capitalization rules run under the primary.
+
 ---
 
 ## What gets created
@@ -519,18 +564,18 @@ afterwards if morphosyntactic analysis is needed.
 
 ## Gotchas
 
-**Rev.AI `skip_postprocessing`:** For English and Spanish (the only
-languages Rev.AI's API documents the parameter as supporting), Rev.AI
-is called with `skip_postprocessing=true`. The hint table is in
-`crates/batchalign/src/revai/preflight.rs::skip_postprocessing_hint`,
-which matches Rev.AI's own 2-letter codes `"en" | "es"` and returns
-`None` for everything else. The flag is true because CHAT records
-spoken form (`"eighty percent"`, `"seventeen year old"`); leaving it
-off causes Rev.AI to apply ITN and return main-tier-illegal forms
-like `"80%"` / `"17-year-old"`. For languages outside the en/es
-support pair, no flag is sent (the parameter is a no-op there per
-Rev.AI's docs), and BA3's downstream post-processing handles
-spoken-form normalization.
+**Rev.AI `skip_postprocessing`:** BA3 sends `skip_postprocessing=true` for
+English and Spanish, the languages Rev.AI's documentation lists for it. Which
+languages get it is the option column of `REV_LANGUAGES` in
+`crates/batchalign/src/types/revai_language.rs`, read by `rev_submit_options`
+in `crates/batchalign/src/revai/asr.rs`. It is not sent for the `en/es`
+multilingual model, which refuses it, nor for French or Portuguese, which the
+live API's refusal message lists as accepting it but BA3 has never sent it
+for. The flag is true because CHAT records spoken form (`"eighty percent"`,
+`"seventeen year old"`); leaving it off causes Rev.AI to apply ITN and return
+main-tier-illegal forms like `"80%"` / `"17-year-old"`. Where it is not sent,
+BA3's post-processing writes numerals out in the transcript's language, or,
+for a code-switched pair, keeps them as digits.
 
 **A recording with no recognized words fails; it does not produce an empty
 file.** If the ASR engine returns no words, or post-processing keeps no

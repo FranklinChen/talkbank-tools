@@ -74,16 +74,17 @@ pub(crate) async fn list_media(
         state
             .environment
             .media
-            .list_mapped(mapping_root.as_str(), &query.subdir)
+            .list_mapped_bounded(mapping_root.as_str().to_owned(), query.subdir)
+            .await.map_err(|error| ServerError::Validation(error.to_string()))?
     } else {
-        state.environment.media.list_files(
-            &config
+        state.environment.media.list_files_bounded(
+            config
                 .media_roots
                 .iter()
                 .map(|p| p.as_str().to_string())
                 .collect::<Vec<_>>(),
-            &query.subdir,
-        )
+            query.subdir,
+        ).await.map_err(|error| ServerError::Validation(error.to_string()))?
     };
 
     Ok(Json(serde_json::json!({ "files": files })))

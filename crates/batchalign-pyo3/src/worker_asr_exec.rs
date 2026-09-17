@@ -471,7 +471,7 @@ mod tests {
     /// A request that asked the provider to separate speakers, with a real
     /// count. One is not a shape this can take: submission refuses it.
     fn separation_requested() -> ProviderDiarizationV2 {
-        ProviderDiarizationV2::for_expected_speakers(NumSpeakers(2))
+        ProviderDiarizationV2::for_backend(AsrBackendV2::HkTencent, NumSpeakers(2))
     }
 
     /// The failure an admission refused with, or a panic naming what it

@@ -1,7 +1,7 @@
 # compare
 
 **Status:** Current
-**Last updated:** 2026-05-02 02:30 EDT
+**Last updated:** 2026-09-16 22:04 EDT
 
 Compare CHAT transcripts against gold-standard references to compute word
 error rate (WER) and produce annotated output. For each primary `.cha` input,
@@ -42,7 +42,7 @@ flowchart TD
     found -->|No| fail[Report file error]
     found -->|Yes| morph[process_morphosyntax\nmain transcript only\n→ validated document, carried as a proof]
     pair --> parse_gold[parse_lenient raw gold\n→ gold AST]
-    morph --> bundle[compare()\nconform + local window search + local DP\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
+    morph --> bundle[compare()\nconform + one whole-file alignment\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
     parse_gold --> bundle
     bundle --> released[materialize_released\nproject_gold_structurally]
     bundle --> internal_main[materialize_main_annotated\ninternal/benchmark\ninject %xsrep / %xsmor on main]
@@ -153,6 +153,9 @@ contains:
 - Aggregate metrics row: WER, accuracy, match/insertion/deletion counts, total
   words
 - Per-POS breakdown rows
+- Substitution-paired WER and scores by language: per-language error counts,
+  utterance and word language agreement, and code-switch precision and recall.
+  See [Benchmarks: scoring by language](../../reference/benchmarks.md#scoring-by-language).
 
 ---
 

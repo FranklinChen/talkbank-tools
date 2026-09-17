@@ -72,6 +72,44 @@ pub use retrace::{ExactRetraceAnalysis, analyze_exact_retraces};
 // Types
 // ---------------------------------------------------------------------------
 
+/// The language or languages of the ASR text being post-processed.
+///
+/// Most steps mark structure (compound merges, fillers, retraces,
+/// capitalization) and run under [`Self::rules`]. Two steps WRITE words in a
+/// language: number expansion (`25` to `twenty five`) and the percent split
+/// (`80%` to `80` `percent`). For code-switched text nothing says which
+/// language a numeral was spoken in, and expanding it in either would put
+/// words in the transcript the speaker may not have said, so those two steps
+/// keep what was recognized: digits stay digits, and `%`, which cannot reach
+/// the main tier, is dropped as it is for a language with no percent word. The
+/// digits then fail CHAT's word rules and are reported for human review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsrTextLanguage<'a> {
+    /// All of the text is in this one language.
+    One(&'a str),
+    /// Two languages, with no word's language known.
+    CodeSwitched {
+        /// The language structural rules run under.
+        primary: &'a str,
+    },
+}
+
+impl<'a> AsrTextLanguage<'a> {
+    /// The language structural rules run under.
+    pub fn rules(self) -> &'a str {
+        match self {
+            Self::One(lang) | Self::CodeSwitched { primary: lang } => lang,
+        }
+    }
+}
+
+impl<'a> From<&'a str> for AsrTextLanguage<'a> {
+    /// A bare language code is text in that one language.
+    fn from(lang: &'a str) -> Self {
+        Self::One(lang)
+    }
+}
+
 /// What role a word plays in the CHAT output.
 ///
 /// The `build_chat` module reads this to decide how to represent the word

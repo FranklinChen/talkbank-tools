@@ -1,7 +1,7 @@
 # `whisper_hub` ASR engine
 
 **Status:** Current
-**Last updated:** 2026-09-15 12:12 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 ## What it is
 
@@ -103,7 +103,7 @@ A 73-second Malayalam sample was transcribed by four candidates:
 
 Rev.AI on the same file returned 55 tokens of Hangul + Gurmukhi + Latin
 + U+FFFD, zero Malayalam script. That result drove the deny-list
-entry in `revai/preflight.rs::REVAI_KNOWN_BROKEN`, which now
+entry in `types/revai_language.rs::REVAI_KNOWN_BROKEN`, which now
 recommends `whisper_hub` for Malayalam specifically.
 
 Artifacts live in an operational workspace outside this public repo.

@@ -5,13 +5,15 @@
 //! should stay in Python are the ones that genuinely require Python-hosted
 //! model libraries.
 
+use crate::revai::FetchedRevAsrEvidence;
+
 use crate::revai::{RevAiClient, SubmitOptions, Transcript, TranscriptResult};
 use batchalign_transform::asr_postprocess::{
     AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs, SpeakerIndex,
 };
 use tracing::info;
 
-use crate::api::{DurationSeconds, LanguageCode3, LanguageSpec, NumSpeakers};
+use crate::api::{DurationSeconds, LanguageCode3, NumSpeakers};
 use crate::error::ServerError;
 use crate::transcribe::{AsrResponse, AsrToken};
 
@@ -19,14 +21,14 @@ use super::{
     AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RejectedRevLanguageEvidence,
     RevAsrEvidenceInference, RevAsrInferenceOutcome, VerifiedRevProviderMedia, load_revai_api_key,
 };
-use crate::types::revai_language::RevAiLanguageHint;
+use crate::types::revai_language::{RevLanguage, RevOptionSupport};
 
 /// Run Rev.AI ASR directly from Rust and map the transcript into the shared
 /// `AsrResponse` domain used by the transcribe pipeline.
 ///
-/// When `lang` is `LanguageSpec::Auto`, passes `"auto"` to Rev.AI so it
-/// auto-detects the spoken language, and reads the detected language from
-/// the completed job to populate `AsrResponse.lang`.
+/// For detection, runs Rev.AI Language Identification first and submits the
+/// language it names; when that fails or names nothing we map, submits
+/// `"auto"` and reads the detected language from the completed job.
 async fn infer_revai_evidence(
     run: AuthorizedRevEvidenceRun,
 ) -> Result<RevAsrInferenceOutcome, ServerError> {
@@ -43,43 +45,47 @@ async fn infer_revai_evidence(
         // This is a separate API (~5-30s) that identifies the spoken language
         // from audio features: far more accurate than text-based trigram
         // detection, especially for code-switched bilingual audio.
-        let effective_lang = if matches!(lang, LanguageSpec::Auto) {
-            let client = RevAiClient::new(api_key.as_str());
-            match client.identify_language_bytes_blocking(
-                &media.bytes,
-                &media.upload_file_name,
-                media.upload_mime,
-                30,
-            ) {
-                Ok(langid_result) => {
-                    let detected = &langid_result.top_language;
-                    info!(
-                        detected_language = %detected,
-                        confidence = langid_result.language_confidences.first()
-                            .map(|c| c.confidence).unwrap_or(0.0),
-                        "Rev.AI Language ID detected language"
-                    );
-                    match revai_code_to_iso639_3(detected) {
-                        Some(code) => LanguageSpec::Resolved(code),
-                        None => {
-                            tracing::warn!(
-                                detected = %detected,
-                                "Rev.AI Language ID returned unmapped code; using auto fallback"
-                            );
-                            lang.clone()
+        let effective_lang = match lang.request() {
+            crate::api::AsrLanguageRequest::One(_) | crate::api::AsrLanguageRequest::Pair(_) => {
+                lang.clone()
+            }
+            crate::api::AsrLanguageRequest::Detect => {
+                let client = RevAiClient::new(api_key.as_str());
+                match client.identify_language_bytes_blocking(
+                    &media.bytes,
+                    &media.upload_file_name,
+                    media.upload_mime,
+                    30,
+                ) {
+                    Ok(langid_result) => {
+                        let detected = &langid_result.top_language;
+                        info!(
+                            detected_language = %detected,
+                            confidence = langid_result.language_confidences.first()
+                                .map(|c| c.confidence).unwrap_or(0.0),
+                            "Rev.AI Language ID detected language"
+                        );
+                        match RevLanguage::identified(detected) {
+                            Some(identified) => identified,
+                            None => {
+                                tracing::warn!(
+                                    detected = %detected,
+                                    "Rev.AI Language ID named a language BA3 does not map; \
+                                     submitting for transcription-level detection"
+                                );
+                                lang.clone()
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "Rev.AI Language ID failed; falling back to transcription-level auto"
-                    );
-                    lang.clone()
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Rev.AI Language ID failed; falling back to transcription-level auto"
+                        );
+                        lang.clone()
+                    }
                 }
             }
-        } else {
-            lang.clone()
         };
 
         // NOT `Validation(error.to_string())`. A provider failure is neither a
@@ -102,24 +108,17 @@ async fn infer_revai_evidence(
 
 /// Language rejection must return the fetched bytes to the durable boundary.
 /// This does not infer a language from transcript contents or default English.
+///
+/// One language or a pair is what the transcript is in, as requested.
+/// Detection resolves only to a language Rev.AI itself reported.
 pub(super) fn classify_language_response(
     transcript_evidence: super::types::RevTranscriptEvidence,
-    requested_language: LanguageSpec,
-    effective_language: LanguageSpec,
+    requested_language: RevLanguage,
+    effective_language: RevLanguage,
     detected_language: Option<String>,
 ) -> RevAsrInferenceOutcome {
-    let resolved_lang = match &effective_language {
-        LanguageSpec::Resolved(code) => Some(code.clone()),
-        // Auto: user asked Rev.AI to detect. PerFile: transcribe path
-        // shouldn't see this: submission validation rejects it. Either
-        // way the only honest source here is Rev.AI's `detected_language`.
-        LanguageSpec::Auto | LanguageSpec::PerFile => detected_language
-            .as_deref()
-            .filter(|d| !d.is_empty() && *d != "auto")
-            .and_then(revai_code_to_iso639_3),
-    };
-    match resolved_lang {
-        Some(resolved_language) => RevAsrInferenceOutcome::Completed(CompletedRevAsrEvidence {
+    match effective_language.resolve(detected_language.as_deref()) {
+        Some(resolved_language) => RevAsrInferenceOutcome::Fetched(FetchedRevAsrEvidence {
             transcript_evidence,
             resolved_language,
         }),
@@ -152,28 +151,35 @@ impl RevAsrEvidenceInference for RevAsrService {
     }
 }
 
+/// Project admitted evidence into the shared single-language response.
+///
+/// `AsrResponse.lang` is one code, so a code-switched transcript reports its
+/// primary language there. Transcribe reads a pair's languages from the
+/// request it admitted, never from this field.
 pub(crate) fn rev_evidence_to_asr_response(evidence: &CompletedRevAsrEvidence) -> AsrResponse {
     transcript_to_asr_response(
-        evidence.transcript_evidence.transcript(),
-        &evidence.resolved_language,
+        evidence.transcript_evidence().transcript(),
+        evidence.resolved_language().primary(),
     )
 }
 
 /// Submit the verified provider-media artifact and wait for its transcript.
 ///
-/// When `lang` is `LanguageSpec::Auto`, sends `language: "auto"` to Rev.AI.
-/// In auto mode, `speakers_count` and `skip_postprocessing` are not sent
-/// because we can't know the language characteristics ahead of time.
+/// Under detection, `speakers_count` and `skip_postprocessing` are not sent,
+/// because the language's characteristics are not known ahead of time.
 ///
-/// For concrete languages:
-/// - `speakers_count` is sent for English and Spanish (Rev.AI performs its own
-///   speaker diarization for these languages).
-/// - `skip_postprocessing` is `Some(true)` for English and Spanish, Rev.AI's
-///   post-processing applies Inverse Text Normalization (ITN) which converts
-///   spoken form (what the speaker said) into written form
-///   (`"eighty percent"` → `"80%"`, `"seventeen year old"` → `"17-year-old"`).
-///   CHAT records spoken form, so we skip ITN wherever the flag is available.
-///   For other languages the flag is a no-op per Rev.AI docs, so we omit it.
+/// Which languages take `speakers_count` and `skip_postprocessing` is
+/// [`RevLanguage::options`], from the option column of the Rev.AI language
+/// table: English and Spanish take both. `speakers_count` lets Rev.AI's own
+/// diarization use the expected count. `skip_postprocessing` turns off Rev.AI's
+/// Inverse Text Normalization (ITN), which converts spoken form (what the
+/// speaker said) into written form (`"eighty percent"` → `"80%"`,
+/// `"seventeen year old"` → `"17-year-old"`); CHAT records spoken form.
+///
+/// Rev.AI's multilingual English/Spanish model takes neither: the live API
+/// refused each of them for `en/es` with HTTP 400 on 2026-09-16. Its output
+/// therefore keeps Rev.AI's written forms, and post-processing keeps a
+/// code-switched transcript's numerals as digits.
 ///
 /// Production can reach this paid boundary only after the durable evidence
 /// cache authorizes a miss or an explicit refresh. The verified artifact keeps
@@ -181,7 +187,7 @@ pub(crate) fn rev_evidence_to_asr_response(evidence: &CompletedRevAsrEvidence) -
 pub(super) fn fetch_revai_transcript(
     api_key: &super::RevAiApiKey,
     media: &VerifiedRevProviderMedia,
-    lang: &LanguageSpec,
+    lang: &RevLanguage,
     num_speakers: Option<NumSpeakers>,
 ) -> crate::revai::Result<TranscriptResult> {
     let client = RevAiClient::new(api_key.as_str());
@@ -196,33 +202,19 @@ pub(super) fn fetch_revai_transcript(
 }
 
 fn rev_submit_options(
-    lang: &LanguageSpec,
+    lang: &RevLanguage,
     num_speakers: Option<NumSpeakers>,
     metadata: &str,
 ) -> SubmitOptions {
-    let lang_hint_str = match lang.as_resolved() {
-        Some(code) => RevAiLanguageHint::from(code).as_str().to_string(),
-        None => "auto".to_string(),
-    };
-    let is_auto = lang.is_auto();
-
-    // In auto mode, we can't assume language-specific settings.
-    let speakers_count = if is_auto {
-        None
-    } else {
-        match lang_hint_str.as_str() {
-            "en" | "es" => num_speakers.map(|count| count.0),
-            _ => None,
+    let (speakers_count, skip_postprocessing) = match lang.options() {
+        RevOptionSupport::SpeakerCountAndSpokenForm => {
+            (num_speakers.map(|count| count.0), Some(true))
         }
-    };
-    let skip_postprocessing = if is_auto {
-        None
-    } else {
-        skip_postprocessing_hint(lang_hint_str.as_str())
+        RevOptionSupport::Neither => (None, None),
     };
 
     SubmitOptions {
-        language: lang_hint_str,
+        language: lang.provider_code().to_owned(),
         speakers_count,
         skip_postprocessing,
         metadata: Some(metadata.to_owned()),
@@ -231,7 +223,8 @@ fn rev_submit_options(
 
 #[test]
 fn auto_speakers_omits_provider_count_but_preserves_postprocessing() {
-    let lang = LanguageSpec::Resolved(LanguageCode3::eng());
+    let lang = RevLanguage::admit(&crate::api::AsrLanguageRequest::One(LanguageCode3::eng()))
+        .expect("Rev.AI recognizes English");
     let automatic =
         serde_json::to_value(rev_submit_options(&lang, None, "fixture")).expect("provider JSON");
     assert!(automatic.get("speakers_count").is_none());
@@ -241,109 +234,26 @@ fn auto_speakers_omits_provider_count_but_preserves_postprocessing() {
     assert_eq!(exact["speakers_count"], 3);
 }
 
-/// Rev.AI's inverse text normalization turns spoken forms into written forms.
-/// CHAT records spoken form, so English and Spanish explicitly skip it. The
-/// option is omitted for languages where Rev.AI does not support the setting.
-fn skip_postprocessing_hint(language: &str) -> Option<bool> {
-    match language {
-        "en" | "es" => Some(true),
-        _ => None,
+/// An English/Spanish pair, in either order, is submitted to Rev.AI's
+/// multilingual model with neither the speaker count nor the spoken-form
+/// switch: the live API refuses both for `en/es` (HTTP 400), so sending them
+/// would fail every code-switched job.
+#[test]
+fn an_english_spanish_pair_submits_the_multilingual_model_without_refused_options() {
+    for (primary, secondary) in [
+        (LanguageCode3::eng(), LanguageCode3::spa()),
+        (LanguageCode3::spa(), LanguageCode3::eng()),
+    ] {
+        let pair = crate::api::LanguagePair::new(primary, secondary).expect("two languages");
+        let lang = RevLanguage::admit(&crate::api::AsrLanguageRequest::Pair(pair))
+            .expect("Rev.AI has an English/Spanish model");
+        let options =
+            serde_json::to_value(rev_submit_options(&lang, Some(NumSpeakers(2)), "fixture"))
+                .expect("provider JSON");
+        assert_eq!(options["language"], "en/es");
+        assert!(options.get("skip_postprocessing").is_none(), "{options}");
+        assert!(options.get("speakers_count").is_none(), "{options}");
     }
-}
-
-/// Map a Rev.AI ISO 639-1 language code back to an ISO 639-3 code.
-///
-/// This is the reverse of [`try_revai_language_hint`]. When Rev.AI auto-detects
-/// a language, it returns the ISO 639-1 code (e.g. `"es"`). We need to convert
-/// that back to ISO 639-3 (e.g. `"spa"`) for CHAT headers and downstream NLP.
-///
-/// Returns `None` for unrecognized codes rather than panicking, the caller
-/// should fall through to whatlang trigram detection.
-fn revai_code_to_iso639_3(revai_code: &str) -> Option<LanguageCode3> {
-    let iso3 = match revai_code {
-        "en" => "eng",
-        "es" => "spa",
-        "fr" => "fra",
-        "de" => "deu",
-        "it" => "ita",
-        "pt" => "por",
-        "nl" => "nld",
-        "ja" => "jpn",
-        "ko" => "kor",
-        "ru" => "rus",
-        "ar" => "ara",
-        "tr" => "tur",
-        "cmn" => "zho",
-        "pl" => "pol",
-        "cs" => "ces",
-        "ro" => "ron",
-        "hu" => "hun",
-        "bg" => "bul",
-        "hr" => "hrv",
-        "sr" => "srp",
-        "sk" => "slk",
-        "sl" => "slv",
-        "uk" => "ukr",
-        "lt" => "lit",
-        "lv" => "lav",
-        "et" => "est",
-        "fi" => "fin",
-        "da" => "dan",
-        "no" => "nor",
-        "sv" => "swe",
-        "is" => "isl",
-        "el" => "ell",
-        "ca" => "cat",
-        "gl" => "glg",
-        "eu" => "eus",
-        "cy" => "cym",
-        "sq" => "sqi",
-        "be" => "bel",
-        "bs" => "bos",
-        "mk" => "mkd",
-        "mt" => "mlt",
-        "hi" => "hin",
-        "ur" => "urd",
-        "bn" => "ben",
-        "ta" => "tam",
-        "te" => "tel",
-        "kn" => "kan",
-        "ml" => "mal",
-        "mr" => "mar",
-        "pa" => "pan",
-        "ne" => "nep",
-        "si" => "sin",
-        "th" => "tha",
-        "vi" => "vie",
-        "id" => "ind",
-        "tl" => "tgl",
-        "my" => "mya",
-        "km" => "khm",
-        "lo" => "lao",
-        "su" => "sun",
-        "ka" => "kat",
-        "hy" => "hye",
-        "az" => "aze",
-        "kk" => "kaz",
-        "uz" => "uzb",
-        "tg" => "tgk",
-        "fa" => "fas",
-        "he" => "heb",
-        "yi" => "yid",
-        "af" => "afr",
-        "sw" => "swa",
-        "ht" => "hat",
-        "gu" => "guj",
-        "mg" => "mlg",
-        other => {
-            tracing::warn!(
-                revai_code = other,
-                "Unknown Rev.AI language code; falling back to trigram detection"
-            );
-            return None;
-        }
-    };
-    LanguageCode3::try_new(iso3).ok()
 }
 
 fn transcript_to_asr_response(transcript: &Transcript, lang: &LanguageCode3) -> AsrResponse {
@@ -485,33 +395,59 @@ mod tests {
         assert_eq!(monologues[1].elements[1].kind, AsrElementKind::Punctuation);
     }
 
+    /// A pair request resolves to the pair as requested, whatever language
+    /// Rev.AI reports for the job; detection resolves only to what Rev.AI
+    /// reports.
     #[test]
-    fn revai_code_roundtrip_major_languages() {
-        assert_eq!(revai_code_to_iso639_3("es").as_deref(), Some("spa"));
-        assert_eq!(revai_code_to_iso639_3("en").as_deref(), Some("eng"));
-        assert_eq!(revai_code_to_iso639_3("fr").as_deref(), Some("fra"));
-        assert_eq!(revai_code_to_iso639_3("cmn").as_deref(), Some("zho"));
-        assert_eq!(revai_code_to_iso639_3("ja").as_deref(), Some("jpn"));
-    }
-
-    #[test]
-    fn revai_code_rejects_auto_sentinel() {
-        // "auto" is not a language, must return None so caller falls
-        // through to whatlang detection.
-        assert_eq!(revai_code_to_iso639_3("auto"), None);
-    }
-
-    #[test]
-    fn revai_code_rejects_unknown() {
-        assert_eq!(revai_code_to_iso639_3("xx"), None);
-        assert_eq!(revai_code_to_iso639_3(""), None);
+    fn a_pair_request_resolves_to_the_pair() {
+        use crate::api::{AsrLanguageRequest, LanguagePair};
+        let evidence = || {
+            super::super::RevTranscriptEvidence::from_provider_json(
+                r#"{"monologues":[]}"#.to_owned(),
+            )
+            .expect("provider JSON")
+        };
+        let pair = RevLanguage::admit(&AsrLanguageRequest::Pair(
+            LanguagePair::new(LanguageCode3::spa(), LanguageCode3::eng()).expect("two languages"),
+        ))
+        .expect("Rev.AI takes English/Spanish");
+        match classify_language_response(evidence(), pair.clone(), pair, Some("en/es".into())) {
+            RevAsrInferenceOutcome::Fetched(completed) => assert_eq!(
+                completed.resolved_language.to_string(),
+                "spa,eng",
+                "the requested order is the transcript's order"
+            ),
+            RevAsrInferenceOutcome::UnresolvedLanguage(_) => panic!("a pair is always resolved"),
+        }
+        match classify_language_response(
+            evidence(),
+            RevLanguage::detect(),
+            RevLanguage::detect(),
+            Some("es".into()),
+        ) {
+            RevAsrInferenceOutcome::Fetched(completed) => {
+                assert_eq!(completed.resolved_language.to_string(), "spa");
+            }
+            RevAsrInferenceOutcome::UnresolvedLanguage(_) => panic!("Rev.AI reported Spanish"),
+        }
     }
 
     #[test]
     fn skip_postprocessing_is_enabled_only_where_rev_supports_it() {
-        assert_eq!(skip_postprocessing_hint("en"), Some(true));
-        assert_eq!(skip_postprocessing_hint("es"), Some(true));
-        assert_eq!(skip_postprocessing_hint("cmn"), None);
-        assert_eq!(skip_postprocessing_hint("auto"), None);
+        use crate::api::AsrLanguageRequest;
+        let skip = |request: AsrLanguageRequest| {
+            let lang = RevLanguage::admit(&request).expect("Rev.AI takes the request");
+            rev_submit_options(&lang, None, "fixture").skip_postprocessing
+        };
+        assert_eq!(
+            skip(AsrLanguageRequest::One(LanguageCode3::eng())),
+            Some(true)
+        );
+        assert_eq!(
+            skip(AsrLanguageRequest::One(LanguageCode3::spa())),
+            Some(true)
+        );
+        assert_eq!(skip(AsrLanguageRequest::One(LanguageCode3::zho())), None);
+        assert_eq!(skip(AsrLanguageRequest::Detect), None);
     }
 }

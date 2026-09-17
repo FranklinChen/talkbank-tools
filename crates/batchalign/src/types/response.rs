@@ -302,7 +302,8 @@ pub struct JobInfo {
     /// debugging and operator review without reconstructing a lossy CLI string.
     #[cfg_attr(feature = "server", schema(value_type = serde_json::Value))]
     pub options: CommandOptions,
-    /// Language specification: a resolved ISO 639-3 code or `"auto"`.
+    /// Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
+    /// code-switched pair such as `"eng,spa"`.
     #[serde(default = "default_lang")]
     pub lang: LanguageSpec,
     /// Client's original input directory path, used for display in the
@@ -418,7 +419,8 @@ pub struct JobListItem {
     pub status: JobStatus,
     /// Batchalign command (e.g. "morphotag", "align").
     pub command: ReleasedCommand,
-    /// Language specification: a resolved ISO 639-3 code or `"auto"`.
+    /// Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
+    /// code-switched pair such as `"eng,spa"`.
     #[serde(default = "default_lang")]
     pub lang: LanguageSpec,
     /// Client's original input directory path, for display.

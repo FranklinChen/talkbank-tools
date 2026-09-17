@@ -157,6 +157,11 @@ pub(crate) enum DispatchPlanRefusal {
     /// The persisted options could not be read into a plan at all.
     #[error("command plan could not be built from job options")]
     Options,
+    /// Benchmark scores a recording against a gold transcript in one language.
+    #[error(
+        "benchmark requires one resolved `--lang <iso3>` to score against its gold transcript; got '{0}'"
+    )]
+    BenchmarkNeedsOneLanguage(crate::api::LanguageSpec),
     /// The job names an engine that is accepted as a name but not implemented
     /// in this build.
     #[error("{0}")]
@@ -223,35 +228,42 @@ impl TranscribeDispatchPlan {
         // which are known now; it used to be rediscovered by the Python worker
         // after the whole ASR stage had been run and paid for.
         //
-        // Only for a resolved language. Under `--lang auto` the language is not
-        // known until ASR returns, so this refusal cannot happen before ASR for
-        // that case, and the pipeline resolves the same route once the
-        // detected language exists. That is a real limit of `auto`, not a gap
-        // in the check.
-        if with_utseg && let Some(code) = job.dispatch.lang.as_resolved() {
-            crate::utseg_route::UtsegRoute::resolve(
-                code,
-                crate::params::UtsegFallbackPolicy::from(allow_stanza_fallback_utseg),
-            )?;
+        // A refusal here means a persisted job names an engine or language
+        // this build cannot run. Submission validation refuses those up front,
+        // so reaching this arm means the job predates the check. The refusal is
+        // PROPAGATED: `.ok()?` used to turn it into `None`, which routing
+        // dropped silently.
+        let asr = crate::transcribe::TranscribeAsrPlan::from_request(
+            AsrBackend::try_from_engine(&asr_engine)?,
+            auto_speakers,
+            job.dispatch.num_speakers.0 as usize,
+            &engine_extras,
+            &job.dispatch.lang,
+        )?;
+
+        // Refuse a language with no segmenter for a requested language, and
+        // for a pair's primary language, which segmentation runs under. Under
+        // detection the language is not known until ASR returns, so this
+        // refusal cannot happen before ASR for that case, and the pipeline
+        // resolves the same route once the detected language exists. That is a
+        // real limit of detection, not a gap in the check.
+        let fallback = crate::params::UtsegFallbackPolicy::from(allow_stanza_fallback_utseg);
+        match (with_utseg, asr.language()) {
+            (true, crate::api::AsrLanguageRequest::One(code)) => {
+                crate::utseg_route::UtsegRoute::resolve(&code, fallback)?;
+            }
+            (true, crate::api::AsrLanguageRequest::Pair(pair)) => {
+                crate::utseg_route::UtsegRoute::resolve(pair.primary(), fallback)?;
+            }
+            (true, crate::api::AsrLanguageRequest::Detect) | (false, _) => {}
         }
 
         Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
-                // A refusal here means a persisted job names an engine this
-                // build cannot run. Submission validation refuses those up
-                // front, so reaching this arm means the job predates the
-                // check. The refusal is PROPAGATED: `.ok()?` used to turn it
-                // into `None`, which routing dropped silently.
-                asr: crate::transcribe::TranscribeAsrPlan::from_request(
-                    AsrBackend::try_from_engine(&asr_engine)?,
-                    auto_speakers,
-                    job.dispatch.num_speakers.0 as usize,
-                    &engine_extras,
-                )?,
+                asr,
                 diarize,
                 speaker_backend,
-                lang: job.dispatch.lang.clone(),
                 with_utseg,
                 with_morphosyntax,
                 cache_policies,
@@ -276,6 +288,8 @@ pub(crate) struct BenchmarkDispatchPlan {
     pub mwt: MwtDict,
     /// Whether the hypothesis CHAT output should merge abbreviations.
     pub should_merge_abbrev: bool,
+    /// The one language the recording and its gold transcript are scored in.
+    pub lang: crate::api::LanguageCode3,
 }
 
 impl BenchmarkDispatchPlan {
@@ -284,6 +298,20 @@ impl BenchmarkDispatchPlan {
         job: &RunnerJobSnapshot,
         config: &ServerConfig,
     ) -> Result<Self, DispatchPlanRefusal> {
+        // Refused here, once, for the whole job. This used to be a check inside
+        // each file's retry loop that failed the file and continued, so every
+        // retry attempt failed the same way and the file ended with no terminal
+        // state recorded.
+        let lang = match &job.dispatch.lang {
+            crate::api::LanguageSpec::Resolved(code) => code.clone(),
+            crate::api::LanguageSpec::Auto
+            | crate::api::LanguageSpec::Pair(_)
+            | crate::api::LanguageSpec::PerFile => {
+                return Err(DispatchPlanRefusal::BenchmarkNeedsOneLanguage(
+                    job.dispatch.lang.clone(),
+                ));
+            }
+        };
         let cache_policy = resolve_cache_overrides(job).policy_for(CacheTaskName::RevAsrEvidence);
         let BenchmarkDispatchParams {
             asr_engine,
@@ -307,10 +335,10 @@ impl BenchmarkDispatchPlan {
                     false,
                     job.dispatch.num_speakers.0 as usize,
                     &engine_extras,
+                    &job.dispatch.lang,
                 )?,
                 diarize: false,
                 speaker_backend: None,
-                lang: job.dispatch.lang.clone(),
                 with_utseg: false,
                 with_morphosyntax: false,
                 cache_policies: TranscribeCachePolicies::uniform(cache_policy),
@@ -321,6 +349,7 @@ impl BenchmarkDispatchPlan {
             },
             mwt: MwtDict::default(),
             should_merge_abbrev: merge_abbrev.should_merge(),
+            lang,
         })
     }
 }
@@ -523,12 +552,7 @@ mod tests {
         job.dispatch.num_speakers = NumSpeakers(2);
         let plan = TranscribeDispatchPlan::from_job(&job, &ServerConfig::default())
             .expect("dispatch plan");
-        assert!(matches!(
-            plan.base_options.asr,
-            crate::transcribe::TranscribeAsrPlan::RevAi(
-                crate::transcribe::RevSpeakerCount::Automatic
-            )
-        ));
+        assert_eq!(plan.base_options.asr.backend(), AsrBackend::RustRevAi);
         assert_eq!(plan.base_options.expected_speakers(), None);
         // A persisted job bypasses HTTP validation, but cannot bypass plan admission.
         let mut invalid = job.clone();
@@ -659,8 +683,8 @@ mod tests {
             Some(SpeakerBackendV2::PyannoteAi)
         );
         assert_eq!(
-            plan.base_options.lang,
-            crate::api::LanguageSpec::Resolved(LanguageCode3::eng())
+            plan.base_options.language(),
+            crate::api::AsrLanguageRequest::One(LanguageCode3::eng())
         );
         assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
         assert!(!plan.base_options.with_utseg);
@@ -702,8 +726,8 @@ mod tests {
             Some(SpeakerBackendV2::PyannoteAi)
         );
         assert_eq!(
-            plan.base_options.lang,
-            crate::api::LanguageSpec::Resolved(LanguageCode3::eng())
+            plan.base_options.language(),
+            crate::api::AsrLanguageRequest::One(LanguageCode3::eng())
         );
         assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
         assert!(plan.base_options.with_utseg);
@@ -986,6 +1010,30 @@ mod tests {
         assert!(plan.base_options.write_wor);
         assert!(plan.should_merge_abbrev);
         assert!(plan.mwt.is_empty());
+    }
+
+    /// Benchmark scores in one language, so a job carrying anything else is
+    /// refused once, at plan time, for every file, rather than failing inside
+    /// each file's retry loop.
+    #[test]
+    fn benchmark_plan_refuses_anything_but_one_language() {
+        for lang in ["auto", "eng,spa"] {
+            let mut snapshot = make_snapshot(
+                ReleasedCommand::Benchmark,
+                CommandOptions::Benchmark(BenchmarkOptions {
+                    common: CommonOptions::default(),
+                    asr_engine: AsrEngineName::RevAi,
+                    wor: false.into(),
+                    merge_abbrev: false.into(),
+                }),
+                BTreeMap::new(),
+            );
+            snapshot.dispatch.lang = crate::api::LanguageSpec::try_from(lang).expect("a spec");
+            assert!(matches!(
+                BenchmarkDispatchPlan::from_job(&snapshot, &ServerConfig::default()),
+                Err(DispatchPlanRefusal::BenchmarkNeedsOneLanguage(_))
+            ));
+        }
     }
 
     #[test]

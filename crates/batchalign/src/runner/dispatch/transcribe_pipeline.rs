@@ -480,11 +480,11 @@ mod tests {
                 false,
                 1,
                 &std::collections::BTreeMap::new(),
+                &LanguageSpec::Resolved(LanguageCode3::eng()),
             )
             .unwrap(),
             diarize: false,
             speaker_backend: None,
-            lang: LanguageSpec::Resolved(LanguageCode3::eng()),
             with_utseg: true,
             with_morphosyntax: false,
             cache_policies: crate::transcribe::TranscribeCachePolicies::uniform(

@@ -4,7 +4,7 @@
 preserved for context; the live behavior is the Option A hand-curated
 deny-list enforced at `validate_language_support()` in
 `crates/batchalign/src/types/request.rs:190`)
-**Last updated:** 2026-05-20 20:33 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 > The deliberation framing on this page (five options, decision
 > rationale, escalation triggers) is historical analysis preserved
@@ -70,7 +70,7 @@ distinct cost / latency / coverage tradeoff.
 
 ### Option A: Hand-curated deny-list (reactive)
 
-Maintain a small, committed static table in `revai/preflight.rs` listing
+Maintain a small, committed static table in `types/revai_language.rs` listing
 `(language, reason, recommended_engine)` tuples for pairs we have observed
 to be broken. `validate_language_support()` rejects matching job
 submissions at preflight with an error message naming the recommended
@@ -200,10 +200,10 @@ Move from Option A/B to Option C (build the probe harness) when:
 
 ## Implementation notes (Option A)
 
-- Static table lives in `crates/batchalign/src/revai/preflight.rs`.
+- Static table lives in `crates/batchalign/src/types/revai_language.rs`.
 - Preflight hook is `validate_language_support()` in
   `crates/batchalign/src/types/request.rs`, in the existing Rev.AI
-  block immediately after the `try_revai_language_hint(lang).is_none()`
+  block immediately after the `RevSupported::for_iso3(lang).is_none()`
   check.
 - Error message names the offending language, explains the quality
   reason, recommends a specific alternative engine, and links to this

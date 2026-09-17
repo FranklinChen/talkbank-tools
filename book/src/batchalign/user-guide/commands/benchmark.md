@@ -1,7 +1,7 @@
 # benchmark
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-16 20:45 EDT
 
 Transcribe audio via ASR and evaluate word error rate (WER) against gold
 `.cha` transcripts in the same directory. A composite command that runs
@@ -98,7 +98,9 @@ expansion selects media by extension and never picks up the golds.
 ## What gets created
 
 - `FILE.cha`: hypothesis transcript produced by ASR
-- `FILE.compare.csv`: WER metrics: aggregate row plus per-POS breakdown
+- `FILE.compare.csv`: WER metrics: aggregate row, per-POS breakdown, and
+  substitution-paired WER with scores by language
+  ([reference](../../reference/benchmarks.md#scoring-by-language))
 
 The hypothesis `.cha` contains a main-annotated view (unlike `compare`, which
 outputs the projected reference). The `%xsrep` and `%xsmor` tiers are

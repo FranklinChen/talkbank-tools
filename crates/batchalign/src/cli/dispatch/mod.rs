@@ -596,7 +596,7 @@ pub(crate) fn apply_sequential_config(cfg: &mut ServerConfig) {
     // coordinator requires only 1 MB free, which is always true.
     cfg.memory_gate_mb = Some(MemoryMb(1));
     cfg.max_workers_per_key = Some(1);
-    cfg.max_concurrent_worker_startups = 1;
+    cfg.max_concurrent_worker_startups = crate::config::WorkerStartupLimit::new(1);
 }
 
 #[cfg(test)]
@@ -649,7 +649,7 @@ mod tests {
         let mut cfg = ServerConfig::default();
         apply_sequential_config(&mut cfg);
         assert_eq!(cfg.max_workers_per_key, Some(1));
-        assert_eq!(cfg.max_concurrent_worker_startups, 1);
+        assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
     }
 
     /// Answer one HTTP request on an ephemeral loopback port with a canned

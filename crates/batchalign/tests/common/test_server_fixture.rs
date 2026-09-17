@@ -476,7 +476,7 @@ fn test_echo_server_config() -> ServerConfig {
     ServerConfig {
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
-        job_ttl_days: 7,
+        job_ttl_days: batchalign::config::JobTtlDays::new(7),
         memory_gate_mb: Some(MemoryMb(0)),
         ..Default::default()
     }

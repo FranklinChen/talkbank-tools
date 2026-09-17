@@ -608,9 +608,8 @@ pub struct PreparedAudioInputV2 {
 /// At least two, and the bound is the type's rather than a comment's. One
 /// speaker is not a separation request but a contradiction (submission refuses
 /// it by name), and zero names nobody at all, so neither is a count this can
-/// hold. Because [`ProviderDiarizationV2::for_expected_speakers`] is the only
-/// route from a raw count into `Integrated`, and deserialization runs the same
-/// check, a count of one has no spelling anywhere in this protocol: not in a
+/// hold. The backend-aware request builder and deserialization enforce this
+/// bound, so a count of one has no spelling in this protocol: not in a
 /// constructor, not on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -704,20 +703,21 @@ pub enum ProviderDiarizationV2 {
 }
 
 impl ProviderDiarizationV2 {
-    /// Decide, ONCE, whether a job's expected speaker count asks for
-    /// separation, and build the state that says so.
-    ///
-    /// The only route from a raw count into this type, which is what makes the
-    /// answer a property of the type rather than of whoever happened to build
-    /// it: a count of one or zero is not a separation request at all, and two
-    /// or more is a request for exactly that many. This lived in the transcribe
-    /// pipeline as a free function until 2026-09-16, which left every other
-    /// caller free to assemble `Integrated` from any count it liked, the
-    /// refused count of one included.
+    /// Derive separation from the backend's output contract and the expected count.
+    /// A count alone cannot promise a capability the selected adapter lacks.
     #[must_use]
-    pub fn for_expected_speakers(num_speakers: NumSpeakers) -> Self {
-        SeparatedSpeakersV2::try_from(num_speakers)
-            .map_or(Self::NotRequested, |speakers| Self::Integrated { speakers })
+    pub fn for_backend(backend: AsrBackendV2, num_speakers: NumSpeakers) -> Self {
+        match backend {
+            AsrBackendV2::HkTencent | AsrBackendV2::Revai => {
+                SeparatedSpeakersV2::try_from(num_speakers)
+                    .map_or(Self::NotRequested, |speakers| Self::Integrated { speakers })
+            }
+            AsrBackendV2::LocalWhisper
+            | AsrBackendV2::WhisperHub
+            | AsrBackendV2::HkAliyun
+            | AsrBackendV2::HkFunaudio
+            | AsrBackendV2::HkQwen => Self::NotRequested,
+        }
     }
 
     /// Whether the provider was asked to attribute speakers at all.
@@ -1178,6 +1178,19 @@ mod tests {
     use super::{NumSpeakers, ProviderDiarizationV2, SeparatedSpeakersV2};
 
     #[test]
+    fn provider_capability_controls_separation() {
+        use super::AsrBackendV2;
+        for backend in AsrBackendV2::ALL {
+            for count in [0, 1, 2, 3] {
+                let actual = ProviderDiarizationV2::for_backend(backend, NumSpeakers(count));
+                assert_eq!(actual.is_requested(), count >= 2 && matches!(
+                    backend, AsrBackendV2::HkTencent | AsrBackendV2::Revai
+                ), "{backend:?} with {count}");
+            }
+        }
+    }
+
+    #[test]
     fn a_count_below_two_is_not_a_separation_request() {
         // The contradiction submission refuses, and half the reason this type
         // exists: a count of one used to reach the provider as a request to
@@ -1185,7 +1198,7 @@ mod tests {
         // the caller had asked to have separated.
         for count in [0, 1] {
             assert_eq!(
-                ProviderDiarizationV2::for_expected_speakers(NumSpeakers(count)),
+                ProviderDiarizationV2::for_backend(super::AsrBackendV2::HkTencent, NumSpeakers(count)),
                 ProviderDiarizationV2::NotRequested,
             );
         }
@@ -1193,7 +1206,7 @@ mod tests {
 
     #[test]
     fn two_or_more_expected_speakers_asks_for_exactly_that_many() {
-        let diarization = ProviderDiarizationV2::for_expected_speakers(NumSpeakers(3));
+        let diarization = ProviderDiarizationV2::for_backend(super::AsrBackendV2::HkTencent, NumSpeakers(3));
 
         assert!(diarization.is_requested());
         assert_eq!(

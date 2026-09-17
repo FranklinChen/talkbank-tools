@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-09-16 03:36 EDT
+**Last updated:** 2026-09-16 22:04 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -598,7 +598,7 @@ flowchart TD
     found -->|Yes| morph[process_morphosyntax\nmain transcript only]
     pair --> parse_gold[parse_lenient raw gold\n→ gold AST]
     morph --> parse_main[MorphotaggedMain::from_proof\n→ the judged main document\n(never re-parsed from text)]
-    parse_main --> bundle[compare()\nconform + local window search + local DP\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
+    parse_main --> bundle[compare()\nconform + one whole-file alignment\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
     parse_gold --> bundle
     bundle --> released[GoldProjectedCompareMaterializer\nproject_gold_structurally()]
     bundle --> internal_main[MainAnnotatedCompareMaterializer (internal/benchmark)\ninject %xsrep / %xsmor on main]

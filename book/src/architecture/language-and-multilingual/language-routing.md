@@ -1,7 +1,7 @@
 # Language Routing
 
 **Status:** Current
-**Last updated:** 2026-05-21 14:55 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 How language information flows from CHAT headers through the entire
 batchalign3 pipeline. Covers resolution (precode → header → CLI),
@@ -174,7 +174,7 @@ flowchart TD
         langid["Language ID API\nPOST /languageid/v1/jobs\n~5-30s, audio-based"]
         langid_result["top_language: es\nconfidence: 0.907"]
         langid --> langid_result
-        langid_result -->|revai_code_to_iso639_3| resolved_revai["LanguageSpec::Resolved(spa)"]
+        langid_result -->|RevLanguage::identified| resolved_revai["RevLanguage for spa"]
         resolved_revai --> submit_concrete["Submit transcription\nwith language: es"]
     end
 
@@ -195,7 +195,7 @@ flowchart TD
 
     whisper_echo -->|"lang == auto"| vote
 
-    resolved["resolved_lang: LanguageCode3"]
+    resolved["resolved_lang: TranscriptLanguage::One(spa)"]
     submit_concrete --> resolved
     primary --> resolved
 
@@ -216,6 +216,18 @@ flowchart TD
     tag --> collect --> headers & precodes
 ```
 
+### A declared pair: `--lang eng,spa`
+
+Detection chooses one language for the whole file. A code-switched
+recording can instead be declared as a pair, primary first, which Rev.AI
+transcribes with its multilingual English/Spanish model (`en/es`). The
+transcript's language is then `TranscriptLanguage::Pair`: `@Languages`
+lists both, the provenance stamp says `lang=eng,spa`, and segmentation,
+morphosyntax and speaker routing run under the primary. Nothing marks an
+utterance or word as the secondary language yet, and numerals are kept as
+digits, because nothing says which language they were spoken in. See
+[transcribe](../../batchalign/user-guide/commands/transcribe.md#code-switched-recordings---lang-engspa).
+
 ### Two-stage resolution
 
 **Stage 1, primary language (whole-file).** Determines the dominant
@@ -224,7 +236,7 @@ language for `@Languages` header and `@ID` lines.
 | ASR engine | Primary determination |
 |---|---|
 | Rev.AI (auto) | **Rev.AI Language Identification API**: audio-based pre-pass (~5-30s). Returns `top_language` with confidence. Far more accurate than text trigrams for code-switched audio. |
-| Whisper (auto) | whatlang majority vote across utterances (fallback to `eng` if undetectable). |
+| Whisper (auto) | whatlang majority vote across utterances; if nothing is detectable the file is refused, never stamped as English. |
 | Any (explicit) | User-specified `--lang spa` used directly. |
 
 The Rev.AI Language ID pre-pass also enables the transcription job to

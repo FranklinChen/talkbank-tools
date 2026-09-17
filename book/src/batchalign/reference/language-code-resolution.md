@@ -1,7 +1,7 @@
 # Language Code Resolution
 
 **Status:** Current
-**Last updated:** 2026-09-16 08:18 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 This page documents how batchalign3 maps language codes to models, Stanza
 pipelines, and processing behavior.
@@ -195,11 +195,12 @@ per-language consequences.
 ## Rev.AI Language Codes
 
 Rev.AI uses a mix of ISO 639-1 and specific codes. The translation lives in
-`crates/batchalign/src/revai/preflight.rs`:
-
-The translation now uses ~75 explicit entries in `try_revai_language_hint()`
-with a fallback to `"auto"` (Rev.AI auto-detection) + warning log for
-unknown codes. See `crates/batchalign/src/revai/preflight.rs`.
+one table, `REV_LANGUAGES` in `crates/batchalign/src/types/revai_language.rs`:
+74 Rev.AI codes, each with the ISO 639-3 codes that map to it and the
+submission options it takes. Submission reads it from ISO 639-3 to Rev.AI's
+code; Rev.AI's language identification reads it back. `RevLanguage::admit` is
+the only way to name a Rev.AI language, and it refuses a language the table
+does not hold.
 
 ### Truncation fallback: not used
 
@@ -208,12 +209,14 @@ not used; it produces wrong codes for many languages (e.g., `pol` → `po`
 instead of `pl`, `hak` → `ha` which doesn't exist). The current
 behavior is:
 
-1. A **comprehensive explicit mapping table** (~75 entries covering all
-   Rev.AI-supported languages) in `revai/preflight.rs`
-2. A **`try_revai_language_hint()`** function that returns `None` for
-   unsupported languages (enabling callers to report clear diagnostics)
-3. A **fallback to `"auto"`** (Rev.AI's auto-detection) with a warning log
-   for unknown codes, rather than silently submitting a wrong code
+1. A **comprehensive explicit mapping table** (`REV_LANGUAGES`, covering
+   all Rev.AI-supported languages) in `types/revai_language.rs`
+2. **Refusal of unsupported languages**: submission validation refuses them
+   before any request is made, naming alternatives, and `RevLanguage::admit`
+   refuses them with a typed `RevLanguageRefusal`
+3. **No fallback.** Until 2026-09-16 an unmapped language was sent to Rev.AI
+   as `"auto"` with a warning log, which transcribed a job asking for one
+   language as whatever Rev.AI detected; that fallback was deleted
 
 ## Whisper Language Strings
 
@@ -317,9 +320,10 @@ maintain our own validation tables.
 
 - **No API endpoint** to query supported languages
 - Supported languages documented on Rev.AI's website only
-- Our mapping: `try_revai_language_hint()` in `revai/preflight.rs` (~75 entries)
-- **Validation approach:** `try_revai_language_hint(lang)` returns `None` for
-  unsupported languages; callers log a warning and fall back to `"auto"`
+- Our mapping: `REV_LANGUAGES` in `types/revai_language.rs` (74 Rev.AI codes)
+- **Validation approach:** `RevSupported::for_iso3(lang)` returns `None` for
+  unsupported languages; submission validation refuses the job, and
+  `RevLanguage::admit` refuses at plan time
 - **Important runtime nuance:** Rev `"auto"` is a real second request path, not
   just a late alias for English. If Rev language ID resolves to English before
   submission, BA3 uses the explicit-English request settings. If language ID
@@ -327,8 +331,8 @@ maintain our own validation tables.
   resolve the transcript to English, but the provider request was different.
 - **Example validation:**
   ```text
-  if try_revai_language_hint(&lang).is_none() {
-      warn!("Language {lang} not in Rev.AI supported set; using auto-detection");
+  if RevSupported::for_iso3(&lang).is_none() {
+      refuse the submission, naming engines that support the language
   }
   ```
 
@@ -456,9 +460,9 @@ To add language-specific behavior for a new language:
 1. **Stanza mapping**: Add to `_ISO3_OVERRIDES` in
    `batchalign/worker/_stanza_capabilities.py` only when the standard
    alpha-2 mapping does not match Stanza's catalog key.
-2. **Rev.AI mapping**: Add an explicit entry in
-   `crates/batchalign/src/revai/preflight.rs::try_revai_language_hint`
-   (do NOT rely on the truncation fallback).
+2. **Rev.AI mapping**: Add a row to `REV_LANGUAGES` in
+   `crates/batchalign/src/types/revai_language.rs` (do NOT rely on a
+   truncation fallback; there is none).
 3. **ASR model**: Optionally add a fine-tune, with the exact hub commit to pin
    it to, to
    `crates/batchalign/src/model_manifest.rs::WHISPER_HUB_DEFAULTS` with a

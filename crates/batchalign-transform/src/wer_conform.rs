@@ -1,13 +1,13 @@
 //! WER word conforming for benchmark evaluation.
 //!
-//! Normalizes word lists before Word Error Rate (WER) comparison by applying
+//! Normalizes words before Word Error Rate (WER) comparison by applying
 //! deterministic transformations: compound splitting, contraction expansion,
 //! filler normalization, name replacement, abbreviation expansion, and special
 //! word handling.
 //!
 //! This is the Rust replacement for the Python `_conform()` function from
-//! `inference/benchmark.py`, exposed to Python via the
-//! [`batchalign_core.wer_conform()`] PyO3 function.
+//! `inference/benchmark.py`. Which rules apply is a [`WerNormalization`],
+//! chosen once per comparison and applied to both transcripts.
 //!
 //! # Data files
 //!
@@ -68,35 +68,87 @@ static FILLERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Normalize a word list for WER comparison.
+/// Which of the normalizer's rules a comparison applies.
 ///
-/// Each input word is lowercased and then checked against a priority-ordered
-/// rule chain. The first matching rule produces the output token(s) for that
-/// word. Rules are applied per-word, the output may contain more tokens than
-/// the input (compound splits, contraction expansions, etc.).
-///
-/// # Transformation rules (in priority order)
-///
-/// 1. **Compound splitting**: known compound words are split into their
-///    constituent parts (e.g., `"airplane"` → `["air", "plane"]`).
-/// 2. **Abbreviation letter expansion**, known abbreviations are expanded to
-///    individual letters in original case (e.g., `"FBI"` → `["F", "B", "I"]`).
-/// 3. **Contraction expansion**: English contractions are split and expanded
-///    (`'s` → `is`, `'ve` → `have`, `'d` → `had`, `'m` → `am`).
-/// 4. **Filler normalization**: common fillers (`um`, `uhm`, `eh`, `mhm`,
-///    etc.) are all normalized to `"um"`.
-/// 5. **Hyphen splitting**: hyphenated words are split at hyphens.
-/// 6. **Special word expansions**, colloquial forms are expanded
-///    (`gimme` → `give me`, `wanna` → `want to`, `gonna` → `going to`, etc.).
-/// 7. **Name replacement**: known proper names are replaced with `"name"`.
-/// 8. **Specific acronym expansion**, selected acronyms are letter-expanded
-///    (`mba`, `tli`, `bbc`, `ai`, `aa`, `ii`).
-/// 9. **Underscore splitting**: underscore-joined words are split.
-/// 10. **Passthrough**: unrecognized words pass through lowercased.
-pub fn conform_words(words: &[String]) -> Vec<String> {
-    let mut result: Vec<String> = Vec::with_capacity(words.len());
+/// Chosen ONCE per comparison and applied to both transcripts. It must not be
+/// chosen per word or per side from either transcript's language labels: a
+/// hypothesis word recognized correctly but labeled with the wrong language
+/// would then be normalized differently from the identical gold word and
+/// charged as an error, and a benchmark of code-switched speech exists to
+/// measure those labels separately from recognition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WerNormalization {
+    /// Every rule, including replacing known proper names with `name`.
+    English,
+    /// Every rule except name replacement.
+    ///
+    /// The name list holds everyday words of other languages (Spanish `linda`,
+    /// `clara`, `flor`, `luz`), so on material that is not English it turns
+    /// different words into the same token and scores them as matches. The
+    /// other rules only fire on English forms and are harmless elsewhere.
+    KeepNames,
+}
 
-    for word in words {
+impl WerNormalization {
+    /// The normalization for a transcript that declares `languages`.
+    ///
+    /// A transcript declaring English alone gets every rule. One declaring any
+    /// other language keeps names. A transcript declaring nothing is normalized
+    /// as English, which is how every such comparison was normalized before
+    /// this choice existed, so their numbers do not move.
+    pub fn for_declared_languages(languages: &[talkbank_model::model::LanguageCode]) -> Self {
+        match languages {
+            [] => Self::English,
+            [only] if only.as_str() == "eng" => Self::English,
+            [_] | [_, _, ..] => Self::KeepNames,
+        }
+    }
+
+    /// The normalization two transcripts can share: English only when both
+    /// would be normalized as English.
+    pub fn shared(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::English, Self::English) => Self::English,
+            (Self::KeepNames, _) | (_, Self::KeepNames) => Self::KeepNames,
+        }
+    }
+
+    /// Normalize a word list, one word at a time.
+    pub fn conform_words(self, words: &[String]) -> Vec<String> {
+        let mut result = Vec::with_capacity(words.len());
+        for word in words {
+            self.conform_word_into(word, &mut result);
+        }
+        result
+    }
+
+    /// Normalize one word, appending its token(s) to `out`.
+    ///
+    /// The word is lowercased and checked against a priority-ordered rule
+    /// chain; the first matching rule produces the output token(s). A word can
+    /// produce more than one token (compound splits, contraction expansions).
+    /// Appending to the caller's buffer rather than returning a vector is what
+    /// lets a whole transcript be conformed without an allocation per word.
+    ///
+    /// # Transformation rules (in priority order)
+    ///
+    /// 1. **Compound splitting**: known compound words are split into their
+    ///    constituent parts (e.g., `"airplane"` → `["air", "plane"]`).
+    /// 2. **Abbreviation letter expansion**, known abbreviations are expanded to
+    ///    individual letters in original case (e.g., `"FBI"` → `["F", "B", "I"]`).
+    /// 3. **Contraction expansion**: English contractions are split and expanded
+    ///    (`'s` → `is`, `'ve` → `have`, `'d` → `had`, `'m` → `am`).
+    /// 4. **Filler normalization**: common fillers (`um`, `uhm`, `eh`, `mhm`,
+    ///    etc.) are all normalized to `"um"`.
+    /// 5. **Hyphen splitting**: hyphenated words are split at hyphens.
+    /// 6. **Special word expansions**, colloquial forms are expanded
+    ///    (`gimme` → `give me`, `wanna` → `want to`, `gonna` → `going to`, etc.).
+    /// 7. **Name replacement**: known proper names are replaced with `"name"`.
+    /// 8. **Specific acronym expansion**, selected acronyms are letter-expanded
+    ///    (`mba`, `tli`, `bbc`, `ai`, `aa`, `ii`).
+    /// 9. **Underscore splitting**: underscore-joined words are split.
+    /// 10. **Passthrough**: unrecognized words pass through lowercased.
+    pub fn conform_word_into(self, word: &str, result: &mut Vec<String>) {
         let trimmed = word.trim();
         let w = trimmed.to_lowercase();
 
@@ -132,7 +184,7 @@ pub fn conform_words(words: &[String]) -> Vec<String> {
             result.extend(["give", "me"].map(String::from));
         } else if w == "hafta" || w == "havta" {
             result.extend(["have", "to"].map(String::from));
-        } else if NAMES.contains(&w) {
+        } else if self == Self::English && NAMES.contains(&w) {
             result.push("name".to_string());
         } else if w == "dunno" {
             result.extend(["don't", "know"].map(String::from));
@@ -182,8 +234,6 @@ pub fn conform_words(words: &[String]) -> Vec<String> {
             result.push(w);
         }
     }
-
-    result
 }
 
 #[cfg(test)]
@@ -203,79 +253,170 @@ mod tests {
 
     #[test]
     fn test_compound_split() {
-        let result = conform_words(&s(&["airplane"]));
+        let result = WerNormalization::English.conform_words(&s(&["airplane"]));
         assert_eq!(result, s(&["air", "plane"]));
     }
 
     #[test]
     fn test_contraction_expansion() {
-        assert_eq!(conform_words(&s(&["he's"])), s(&["he", "is"]));
-        assert_eq!(conform_words(&s(&["I've"])), s(&["i", "have"]));
-        assert_eq!(conform_words(&s(&["she'd"])), s(&["she", "had"]));
-        assert_eq!(conform_words(&s(&["I'm"])), s(&["i", "am"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["he's"])),
+            s(&["he", "is"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["I've"])),
+            s(&["i", "have"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["she'd"])),
+            s(&["she", "had"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["I'm"])),
+            s(&["i", "am"])
+        );
     }
 
     #[test]
     fn test_filler_normalization() {
-        assert_eq!(conform_words(&s(&["uhm"])), s(&["um"]));
-        assert_eq!(conform_words(&s(&["mhm"])), s(&["um"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["uhm"])),
+            s(&["um"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["mhm"])),
+            s(&["um"])
+        );
+    }
+
+    /// Names are kept whole under `KeepNames`, which is what stops two
+    /// different Spanish words on the name list from matching.
+    #[test]
+    fn keep_names_does_not_collapse_names() {
+        assert_eq!(
+            WerNormalization::KeepNames.conform_words(&s(&["linda", "he's"])),
+            s(&["linda", "he", "is"])
+        );
+    }
+
+    /// The choice is made from what a transcript declares, and a pair shares
+    /// English only when both would.
+    #[test]
+    fn normalization_follows_declared_languages() {
+        let code = |c: &str| talkbank_model::model::LanguageCode::new(c).expect("code");
+        assert_eq!(
+            WerNormalization::for_declared_languages(&[]),
+            WerNormalization::English
+        );
+        assert_eq!(
+            WerNormalization::for_declared_languages(&[code("eng")]),
+            WerNormalization::English
+        );
+        assert_eq!(
+            WerNormalization::for_declared_languages(&[code("spa")]),
+            WerNormalization::KeepNames
+        );
+        assert_eq!(
+            WerNormalization::for_declared_languages(&[code("eng"), code("spa")]),
+            WerNormalization::KeepNames
+        );
+        assert_eq!(
+            WerNormalization::English.shared(WerNormalization::KeepNames),
+            WerNormalization::KeepNames
+        );
     }
 
     #[test]
     fn test_name_replacement() {
         // "aaron" is a common name that should be in the list
-        assert_eq!(conform_words(&s(&["Aaron"])), s(&["name"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["Aaron"])),
+            s(&["name"])
+        );
     }
 
     #[test]
     fn test_special_words() {
-        assert_eq!(conform_words(&s(&["ok"])), s(&["okay"]));
-        assert_eq!(conform_words(&s(&["gimme"])), s(&["give", "me"]));
-        assert_eq!(conform_words(&s(&["wanna"])), s(&["want", "to"]));
-        assert_eq!(conform_words(&s(&["gonna"])), s(&["going", "to"]));
-        assert_eq!(conform_words(&s(&["dunno"])), s(&["don't", "know"]));
-        assert_eq!(conform_words(&s(&["alright"])), s(&["all", "right"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["ok"])),
+            s(&["okay"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["gimme"])),
+            s(&["give", "me"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["wanna"])),
+            s(&["want", "to"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["gonna"])),
+            s(&["going", "to"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["dunno"])),
+            s(&["don't", "know"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["alright"])),
+            s(&["all", "right"])
+        );
     }
 
     #[test]
     fn test_hyphen_split() {
-        assert_eq!(conform_words(&s(&["well-known"])), s(&["well", "known"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["well-known"])),
+            s(&["well", "known"])
+        );
     }
 
     #[test]
     fn test_underscore_split() {
-        assert_eq!(conform_words(&s(&["ice_cream"])), s(&["ice", "cream"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["ice_cream"])),
+            s(&["ice", "cream"])
+        );
     }
 
     #[test]
     fn test_abbreviation_expansion() {
         // Python iterates original-case chars, so "FBI" → "F", "B", "I"
-        assert_eq!(conform_words(&s(&["FBI"])), s(&["F", "B", "I"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["FBI"])),
+            s(&["F", "B", "I"])
+        );
     }
 
     #[test]
     fn test_acronym_expansion() {
-        assert_eq!(conform_words(&s(&["mba"])), s(&["m", "b", "a"]));
-        assert_eq!(conform_words(&s(&["ai"])), s(&["a", "i"]));
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["mba"])),
+            s(&["m", "b", "a"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["ai"])),
+            s(&["a", "i"])
+        );
     }
 
     #[test]
     fn test_passthrough() {
         assert_eq!(
-            conform_words(&s(&["hello", "world"])),
+            WerNormalization::English.conform_words(&s(&["hello", "world"])),
             s(&["hello", "world"])
         );
     }
 
     #[test]
     fn test_empty() {
-        let result = conform_words(&s(&[]));
+        let result = WerNormalization::English.conform_words(&s(&[]));
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_mixed() {
-        let result = conform_words(&s(&["Aaron", "he's", "gonna", "ok"]));
+        let result = WerNormalization::English.conform_words(&s(&["Aaron", "he's", "gonna", "ok"]));
         assert_eq!(result, s(&["name", "he", "is", "going", "to", "okay"]));
     }
 
@@ -319,7 +460,7 @@ mod tests {
         /// Output length is always >= input length (transforms expand, never reduce).
         #[test]
         fn output_never_shrinks(words in word_vec(10)) {
-            let result = conform_words(&words);
+            let result = WerNormalization::English.conform_words(&words);
             prop_assert!(
                 result.len() >= words.len(),
                 "output {} < input {}", result.len(), words.len()
@@ -332,7 +473,7 @@ mod tests {
             let non_empty: Vec<String> = words.into_iter()
                 .filter(|w| !w.trim().is_empty())
                 .collect();
-            let result = conform_words(&non_empty);
+            let result = WerNormalization::English.conform_words(&non_empty);
             for (i, token) in result.iter().enumerate() {
                 prop_assert!(
                     !token.is_empty(),
@@ -346,9 +487,9 @@ mod tests {
         /// but the second application normalizes to lowercase, which is stable thereafter.
         #[test]
         fn double_application_is_fixed_point(words in word_vec(8)) {
-            let once = conform_words(&words);
-            let twice = conform_words(&once);
-            let thrice = conform_words(&twice);
+            let once = WerNormalization::English.conform_words(&words);
+            let twice = WerNormalization::English.conform_words(&once);
+            let thrice = WerNormalization::English.conform_words(&twice);
             prop_assert_eq!(
                 &twice, &thrice,
                 "Not a fixed point at depth 2: {:?} -> {:?} -> {:?}",
@@ -359,7 +500,7 @@ mod tests {
         /// Empty input always produces empty output.
         #[test]
         fn empty_input_empty_output(_dummy in 0..1u8) {
-            let result = conform_words(&[]);
+            let result = WerNormalization::English.conform_words(&[]);
             prop_assert!(result.is_empty());
         }
 
@@ -370,7 +511,7 @@ mod tests {
             let non_empty: Vec<String> = words.into_iter()
                 .filter(|w| !w.trim().is_empty())
                 .collect();
-            let result = conform_words(&non_empty);
+            let result = WerNormalization::English.conform_words(&non_empty);
             prop_assert!(
                 result.len() >= non_empty.len(),
                 "Some words were dropped: {} input, {} output",

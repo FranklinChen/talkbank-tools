@@ -242,6 +242,18 @@ impl From<&LanguageCode3> for StampFieldValue {
     }
 }
 
+/// A transcript's language: its code, or a pair's two codes joined by a comma
+/// (`eng,spa`), in `@Languages` order. One `lang=` field either way; a second
+/// `lang=` field would be a damaged stamp.
+impl From<&crate::api::TranscriptLanguage> for StampFieldValue {
+    fn from(language: &crate::api::TranscriptLanguage) -> Self {
+        match language {
+            crate::api::TranscriptLanguage::One(code) => Self::from(code),
+            crate::api::TranscriptLanguage::Pair(pair) => Self(StampSafeText::from(pair)),
+        }
+    }
+}
+
 impl From<&ReportedEngineName> for StampFieldValue {
     fn from(name: &ReportedEngineName) -> Self {
         Self(name.as_stamp_text().clone())
@@ -1030,7 +1042,7 @@ pub(crate) fn align_provenance(
 /// `asr_model=` the selected checkpoint, when there is one. Infallible: the
 /// checkpoint was admitted as stamp-safe text with the transcribe plan.
 pub(crate) fn transcribe_provenance(
-    lang: &LanguageCode3,
+    lang: &crate::api::TranscriptLanguage,
     asr: &AsrIdentity,
     diarize: bool,
     wor: bool,
@@ -1522,9 +1534,15 @@ mod tests {
     ) -> AsrIdentity {
         let backend = crate::transcribe::types::AsrBackend::try_from_engine(&engine)
             .expect("engine is implemented");
-        crate::transcribe::types::TranscribeAsrPlan::from_request(backend, false, 1, extras)
-            .expect("plan is admitted")
-            .identity()
+        crate::transcribe::types::TranscribeAsrPlan::from_request(
+            backend,
+            false,
+            1,
+            extras,
+            &crate::api::LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
+        )
+        .expect("plan is admitted")
+        .identity()
     }
 
     /// The stamp records the models a run actually LOADED, auxiliaries
@@ -1566,7 +1584,13 @@ mod tests {
             aligner: loaded("Qwen/Qwen3-ForcedAligner-0.6B-hf", ALIGNER),
         });
 
-        let comment = transcribe_provenance(&LanguageCode3::yue(), &qwen, false, false).format();
+        let comment = transcribe_provenance(
+            &crate::api::TranscriptLanguage::One(LanguageCode3::yue()),
+            &qwen,
+            false,
+            false,
+        )
+        .format();
         assert!(
             comment.contains(&format!(
                 "asr_model=Qwen/Qwen3-ASR-1.7B-hf@{ASR}\
@@ -1868,7 +1892,13 @@ mod tests {
                 vad: loaded("funasr/fsmn-vad", FSMN_VAD),
             });
 
-        let comment = transcribe_provenance(&LanguageCode3::zho(), &funaudio, true, false).format();
+        let comment = transcribe_provenance(
+            &crate::api::TranscriptLanguage::One(LanguageCode3::zho()),
+            &funaudio,
+            true,
+            false,
+        )
+        .format();
         assert!(
             comment.contains(&format!("asr_model={expected}")),
             "{comment}"
@@ -1900,8 +1930,13 @@ mod tests {
         )]);
         let unreported = asr_identity(AsrEngineName::HkFunaudio, &extras);
 
-        let comment =
-            transcribe_provenance(&LanguageCode3::zho(), &unreported, true, false).format();
+        let comment = transcribe_provenance(
+            &crate::api::TranscriptLanguage::One(LanguageCode3::zho()),
+            &unreported,
+            true,
+            false,
+        )
+        .format();
         assert!(!comment.contains("asr_model="), "{comment}");
         assert!(!comment.contains("paraformer-zh"), "{comment}");
         assert_eq!(unreported.to_string(), "funaudio");
@@ -1928,7 +1963,13 @@ mod tests {
         let backend = AsrBackend::try_from_engine(&AsrEngineName::HkFunaudio)
             .expect("funaudio is implemented");
         assert!(matches!(
-            TranscribeAsrPlan::from_request(backend, false, 1, &extras),
+            TranscribeAsrPlan::from_request(
+                backend,
+                false,
+                1,
+                &extras,
+                &crate::api::LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
+            ),
             Err(TranscribeAsrPlanError::InvalidCheckpoint {
                 key: FUNAUDIO_MODEL_OVERRIDE_KEY,
                 reason: InvalidStampSafeText::StampStructure(_),

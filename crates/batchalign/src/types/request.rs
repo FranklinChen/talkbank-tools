@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::revai_language::{revai_known_broken, try_revai_language_hint};
+use super::revai_language::{RevSupported, revai_known_broken};
 use crate::options::{AsrEngineName, CommandOptions, FaEngineName, UtrEngine};
 use crate::types::engines::SelectableEngine;
 use crate::types::params::FaParams;
@@ -31,8 +31,8 @@ pub struct FilePayload {
 pub struct JobSubmission {
     /// Batchalign command (align, morphotag, etc.).
     pub command: ReleasedCommand,
-    /// Language specification: a 3-letter ISO code or `"auto"` for
-    /// ASR-driven detection.
+    /// Job language: a 3-letter ISO code, `"auto"` for ASR-driven detection,
+    /// `"per-file"`, or a code-switched pair such as `"eng,spa"`.
     #[serde(default = "default_lang")]
     pub lang: LanguageSpec,
     /// Number of speakers.
@@ -140,7 +140,7 @@ impl JobSubmission {
                         .into(),
                 ));
             }
-            // Franklin's ruling, 2026-09-15: a diarization speaker count is
+            // Policy: a diarization speaker count is
             // either exactly N (N at least 2) or automatic, for every diarizer.
             //
             // Refused rather than quietly treated as automatic. Asking to
@@ -328,6 +328,18 @@ impl JobSubmission {
 
         match (&self.lang, is_per_file_command) {
             (LanguageSpec::PerFile, true) => Ok(()),
+            (LanguageSpec::Pair(pair), _) => {
+                match crate::dispatch_language::language_pair_support(self.command) {
+                    crate::dispatch_language::LanguagePairSupport::Accepted => Ok(()),
+                    crate::dispatch_language::LanguagePairSupport::Refused => {
+                        Err(ValidationError(format!(
+                            "command '{}' takes one language; a code-switched pair such as '{pair}' \
+                         is accepted only by transcribe and transcribe_s",
+                            self.command
+                        )))
+                    }
+                }
+            }
             (LanguageSpec::PerFile, false) => Err(ValidationError(format!(
                 "command '{}' does not accept LanguageSpec::PerFile; pass --lang or --lang auto",
                 self.command
@@ -411,6 +423,26 @@ impl JobSubmission {
         Ok(())
     }
 
+    /// A code-switched pair, admitted exactly as dispatch admits it
+    /// ([`crate::transcribe::AdmittedAsrLanguage::admit`]): only Rev.AI takes
+    /// one, and only its English/Spanish model, so the refusal message is the
+    /// plan's own. Which commands take a pair at all was settled by
+    /// [`Self::validate_lang_command_pairing`], and every such command selects
+    /// an ASR engine; one that did not is refused rather than admitted.
+    fn validate_language_pair_support(&self) -> Result<(), ValidationError> {
+        let engine = self.selected_asr_engine().ok_or_else(|| {
+            ValidationError(format!(
+                "command '{}' has no ASR engine to recognize a code-switched pair",
+                self.command
+            ))
+        })?;
+        let backend = crate::transcribe::AsrBackend::try_from_engine(&engine)
+            .map_err(|refusal| ValidationError(refusal.to_string()))?;
+        crate::transcribe::AdmittedAsrLanguage::admit(backend, &self.lang)
+            .map(|_| ())
+            .map_err(|refusal| ValidationError(refusal.to_string()))
+    }
+
     fn validate_language_support(&self) -> Result<(), ValidationError> {
         // Auto-detect and per-file resolution both defer language to a later
         // stage, so submission-time engine-support checks can't run here. For
@@ -419,6 +451,7 @@ impl JobSubmission {
         // engine-tied processing this validator covers.
         let lang = match &self.lang {
             LanguageSpec::Auto | LanguageSpec::PerFile => return Ok(()),
+            LanguageSpec::Pair(_) => return self.validate_language_pair_support(),
             LanguageSpec::Resolved(code) => code,
         };
 
@@ -432,7 +465,7 @@ impl JobSubmission {
 
         // Check Rev.AI language support
         if let Some(AsrEngineName::RevAi) = &asr_engine
-            && try_revai_language_hint(lang).is_none()
+            && RevSupported::for_iso3(lang).is_none()
         {
             // Not derived like the UTR message below: ASR has no per-engine
             // language predicate to filter on, since Rev.AI is the only engine
@@ -849,7 +882,7 @@ const TENCENT_UTR_LANGUAGES: [&str; 6] = ["zho", "yue", "wuu", "nan", "hak", "cm
 /// restate the answer in an error string.
 fn utr_engine_supports_language(engine: &UtrEngine, lang: &LanguageCode3) -> bool {
     match engine {
-        UtrEngine::RevAi => try_revai_language_hint(lang).is_some(),
+        UtrEngine::RevAi => RevSupported::for_iso3(lang).is_some(),
         UtrEngine::HkTencent => TENCENT_UTR_LANGUAGES.contains(&lang.as_ref()),
         // Local Whisper is language-general.
         UtrEngine::Whisper => true,
@@ -931,6 +964,8 @@ pub fn validate_language_with_registry(
     // the registry validation happens per-file in stage_parse.
     let lang = match &submission.lang {
         LanguageSpec::Auto | LanguageSpec::PerFile => return Ok(()),
+        // A pair's Stanza stages run under its primary language.
+        LanguageSpec::Pair(pair) => pair.primary(),
         LanguageSpec::Resolved(code) => code,
     };
 
@@ -1063,7 +1098,7 @@ mod tests {
     fn transcribe_submission(lang: &str, asr_engine: AsrEngineName) -> JobSubmission {
         JobSubmission {
             command: ReleasedCommand::Transcribe,
-            lang: LanguageSpec::Resolved(LanguageCode3::try_new(lang).expect("test lang")),
+            lang: LanguageSpec::try_from(lang).expect("test lang"),
             num_speakers: NumSpeakers(1),
             files: vec![],
             media_files: vec![],
@@ -1180,7 +1215,7 @@ mod tests {
     // as "words" (');�'). Evidence is kept in an operational workspace
     // outside this repo; see the strategy doc for the procedure.
     //
-    // `try_revai_language_hint("mal")` maps to "ml" which Rev.AI accepts
+    // `RevSupported::for_iso3("mal")` maps to "ml" which Rev.AI accepts
     // but the result is cross-script garbage that no CHAT validator can
     // accept. Propagating that output produces confusing late-stage E220 /
     // E330 validation errors on arbitrary tokens; users have no way to tell
@@ -1215,6 +1250,46 @@ mod tests {
         );
     }
 
+    /// A code-switched pair is accepted by transcription on Rev.AI, whose
+    /// multilingual model is English/Spanish, and refused everywhere else, each
+    /// refusal saying why.
+    #[test]
+    fn a_language_pair_is_accepted_only_by_rev_transcription_of_english_and_spanish() {
+        transcribe_submission("eng,spa", AsrEngineName::RevAi)
+            .validate()
+            .expect("Rev.AI transcribes English/Spanish");
+        transcribe_submission("spa,eng", AsrEngineName::RevAi)
+            .validate()
+            .expect("either order: the order is the transcript's @Languages order");
+
+        let whisper = transcribe_submission("eng,spa", AsrEngineName::Whisper)
+            .validate()
+            .expect_err("Whisper recognizes one language at a time")
+            .to_string();
+        assert!(whisper.contains("--asr-engine rev"), "{whisper}");
+
+        let french = transcribe_submission("eng,fra", AsrEngineName::RevAi)
+            .validate()
+            .expect_err("Rev.AI has no English/French model")
+            .to_string();
+        assert!(french.contains("English and Spanish"), "{french}");
+
+        let mut utseg = utseg_submission("eng");
+        utseg.lang = LanguageSpec::try_from("eng,spa").expect("a pair");
+        let refused = utseg
+            .validate()
+            .expect_err("utseg runs under one language")
+            .to_string();
+        assert!(refused.contains("accepted only by transcribe"), "{refused}");
+
+        let mut morphotag = morphotag_submission();
+        morphotag.lang = LanguageSpec::try_from("eng,spa").expect("a pair");
+        assert!(
+            morphotag.validate().is_err(),
+            "per-file commands take no language"
+        );
+    }
+
     #[test]
     fn auto_speakers_refuses_unsupported_engine_at_submission() {
         let mut submission = transcribe_submission("eng", AsrEngineName::Whisper);
@@ -1240,7 +1315,7 @@ mod tests {
 
     /// Diarization with a speaker count of one is refused at SUBMISSION.
     ///
-    /// Franklin's ruling, 2026-09-15: a diarization count is exactly N (N at
+    /// Policy: a diarization count is exactly N (N at
     /// least 2) or automatic. One is neither. It is refused rather than quietly
     /// read as automatic, because asking to separate speakers while asserting
     /// there is one speaker is a contradiction, and inferring the count would

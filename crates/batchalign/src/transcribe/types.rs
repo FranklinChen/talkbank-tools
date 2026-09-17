@@ -1,6 +1,10 @@
 //! ASR response types, backend selection, and transcribe options.
 
-use crate::api::{DurationSeconds, LanguageCode3, LanguageSpec};
+use crate::api::{
+    AsrLanguageRequest, DurationSeconds, LanguageCode3, LanguagePair, LanguageSpec,
+    PerFileHasNoAsrLanguage, WorkerLanguage,
+};
+use crate::types::revai_language::{RevLanguage, RevLanguageRefusal};
 // `SelectableEngine` is imported for its `ALL` associated constant, which is
 // what makes the "engines that do work" list derived rather than restated.
 use crate::types::engines::{AsrEngineName, SelectableEngine};
@@ -363,8 +367,92 @@ pub(crate) enum RevSpeakerCount {
     Fixed(std::num::NonZeroU32),
 }
 
-/// Backend and speaker policy admitted together. Non-Rev inference cannot
-/// carry automatic counts, and fixed counts cannot be zero or truncated.
+/// A language request for an engine that recognizes one language at a time:
+/// every ASR engine but Rev.AI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SingleAsrLanguage {
+    /// One known language.
+    One(LanguageCode3),
+    /// The engine detects the language.
+    Detect,
+}
+
+impl SingleAsrLanguage {
+    /// The requested language, when one was requested rather than detected.
+    pub(crate) fn requested(&self) -> Option<&LanguageCode3> {
+        match self {
+            Self::One(code) => Some(code),
+            Self::Detect => None,
+        }
+    }
+}
+
+impl From<&SingleAsrLanguage> for AsrLanguageRequest {
+    fn from(language: &SingleAsrLanguage) -> Self {
+        match language {
+            SingleAsrLanguage::One(code) => Self::One(code.clone()),
+            SingleAsrLanguage::Detect => Self::Detect,
+        }
+    }
+}
+
+impl From<&SingleAsrLanguage> for WorkerLanguage {
+    /// What a worker-hosted engine is started with: the language, or `auto`.
+    fn from(language: &SingleAsrLanguage) -> Self {
+        match language {
+            SingleAsrLanguage::One(code) => Self::Resolved(code.clone()),
+            SingleAsrLanguage::Detect => Self::Auto,
+        }
+    }
+}
+
+/// A job's language admitted for one backend, with that backend.
+///
+/// The one admission of a language against an engine: plan construction uses
+/// it, and submission validation calls it for a code-switched pair, so the two
+/// refuse with the same message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AdmittedAsrLanguage {
+    /// Rev.AI, with a language it recognizes.
+    RevAi(RevLanguage),
+    /// Another engine, with one language or detection.
+    NonRev {
+        backend: NonRevAsrBackend,
+        language: SingleAsrLanguage,
+    },
+}
+
+impl AdmittedAsrLanguage {
+    /// Admit `language` for `backend`, or say why not.
+    pub(crate) fn admit(
+        backend: AsrBackend,
+        language: &LanguageSpec,
+    ) -> Result<Self, TranscribeAsrPlanError> {
+        let request = AsrLanguageRequest::try_from(language)?;
+        match backend.as_non_rev() {
+            None => Ok(Self::RevAi(RevLanguage::admit(&request)?)),
+            Some(backend) => Ok(Self::NonRev {
+                backend,
+                language: match request {
+                    AsrLanguageRequest::One(code) => SingleAsrLanguage::One(code),
+                    AsrLanguageRequest::Detect => SingleAsrLanguage::Detect,
+                    AsrLanguageRequest::Pair(pair) => {
+                        return Err(TranscribeAsrPlanError::PairRequiresRev(pair));
+                    }
+                },
+            }),
+        }
+    }
+}
+
+/// Backend, speaker policy and language admitted together. Non-Rev inference
+/// cannot carry automatic counts, fixed counts cannot be zero or truncated,
+/// and only Rev.AI takes a code-switched language pair: each engine's plan
+/// holds the language type that engine accepts, so a pair cannot reach an
+/// engine that recognizes one language at a time.
+///
+/// The representation is private: [`Self::from_request`] is the only way to
+/// build a live plan. Stages read it through [`Self::inference`].
 ///
 /// The checkpoint a request selected is admitted here too, by
 /// [`AsrBackend::admit_checkpoint`], but it is not STORED. Admission is a
@@ -373,11 +461,30 @@ pub(crate) enum RevSpeakerCount {
 /// records the models a run loaded, and a requested checkpoint travelling
 /// beside an observed identity is the disagreeing pair this workstream removes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TranscribeAsrPlan {
-    RevAi(RevSpeakerCount),
+pub(crate) struct TranscribeAsrPlan(AsrPlanKind);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AsrPlanKind {
+    RevAi {
+        speakers: RevSpeakerCount,
+        language: RevLanguage,
+    },
     NonRev {
         backend: NonRevAsrBackend,
         speakers: std::num::NonZeroU32,
+        language: SingleAsrLanguage,
+    },
+}
+
+/// What the ASR stage runs for a plan.
+pub(crate) enum AsrInference<'p> {
+    /// Rev.AI, through its evidence cache.
+    RevAi { language: &'p RevLanguage },
+    /// Another engine.
+    NonRev {
+        backend: NonRevAsrBackend,
+        speakers: std::num::NonZeroU32,
+        language: &'p SingleAsrLanguage,
     },
 }
 
@@ -400,6 +507,18 @@ pub enum TranscribeAsrPlanError {
         /// Why the value is not stamp-safe text.
         reason: crate::api::InvalidStampSafeText,
     },
+    /// Transcription always has a job-level language.
+    #[error(transparent)]
+    NoJobLanguage(#[from] PerFileHasNoAsrLanguage),
+    /// Rev.AI cannot take the requested language.
+    #[error(transparent)]
+    RevLanguage(#[from] RevLanguageRefusal),
+    /// A code-switched pair was requested from an engine that recognizes one
+    /// language at a time.
+    #[error(
+        "the language pair '{0}' requires the Rev.AI ASR engine (--asr-engine rev); other engines recognize one language at a time"
+    )]
+    PairRequiresRev(LanguagePair),
 }
 
 impl TranscribeAsrPlan {
@@ -408,6 +527,7 @@ impl TranscribeAsrPlan {
         automatic: bool,
         count: usize,
         engine_extras: &std::collections::BTreeMap<String, String>,
+        language: &LanguageSpec,
     ) -> Result<Self, TranscribeAsrPlanError> {
         // Called for its REFUSAL, not for its value. A checkpoint override that
         // could not be written into a stamp fails the job here, before any work
@@ -415,33 +535,70 @@ impl TranscribeAsrPlan {
         // value itself is discarded: provenance names the models the run
         // loaded, never the one the request asked for.
         let _ = backend.admit_checkpoint(engine_extras)?;
-        match (backend.as_non_rev(), automatic) {
-            (None, true) => Ok(Self::RevAi(RevSpeakerCount::Automatic)),
-            (Some(_), true) => Err(TranscribeAsrPlanError::UnsupportedAutomaticCount),
-            (non_rev, false) => {
-                let raw = u32::try_from(count)
-                    .map_err(|_| TranscribeAsrPlanError::InvalidFixedCount(count))?;
-                let count = std::num::NonZeroU32::new(raw)
-                    .ok_or(TranscribeAsrPlanError::InvalidFixedCount(count))?;
-                Ok(match non_rev {
-                    None => Self::RevAi(RevSpeakerCount::Fixed(count)),
-                    Some(backend) => Self::NonRev {
-                        backend,
-                        speakers: count,
+        let language = AdmittedAsrLanguage::admit(backend, language)?;
+        match (language, automatic) {
+            (AdmittedAsrLanguage::RevAi(language), true) => Ok(Self(AsrPlanKind::RevAi {
+                speakers: RevSpeakerCount::Automatic,
+                language,
+            })),
+            (AdmittedAsrLanguage::NonRev { .. }, true) => {
+                Err(TranscribeAsrPlanError::UnsupportedAutomaticCount)
+            }
+            (language, false) => {
+                let speakers = Self::fixed_count(count)?;
+                Ok(Self(match language {
+                    AdmittedAsrLanguage::RevAi(language) => AsrPlanKind::RevAi {
+                        speakers: RevSpeakerCount::Fixed(speakers),
+                        language,
                     },
-                })
+                    AdmittedAsrLanguage::NonRev { backend, language } => AsrPlanKind::NonRev {
+                        backend,
+                        speakers,
+                        language,
+                    },
+                }))
             }
         }
     }
 
+    fn fixed_count(count: usize) -> Result<std::num::NonZeroU32, TranscribeAsrPlanError> {
+        let raw =
+            u32::try_from(count).map_err(|_| TranscribeAsrPlanError::InvalidFixedCount(count))?;
+        std::num::NonZeroU32::new(raw).ok_or(TranscribeAsrPlanError::InvalidFixedCount(count))
+    }
+
+    /// What the ASR stage runs.
+    pub(crate) fn inference(&self) -> AsrInference<'_> {
+        match &self.0 {
+            AsrPlanKind::RevAi { language, .. } => AsrInference::RevAi { language },
+            AsrPlanKind::NonRev {
+                backend,
+                speakers,
+                language,
+            } => AsrInference::NonRev {
+                backend: *backend,
+                speakers: *speakers,
+                language,
+            },
+        }
+    }
+
+    /// The language this plan asks recognition for.
+    pub(crate) fn language(&self) -> AsrLanguageRequest {
+        match &self.0 {
+            AsrPlanKind::RevAi { language, .. } => language.request(),
+            AsrPlanKind::NonRev { language, .. } => AsrLanguageRequest::from(language),
+        }
+    }
+
     pub(crate) fn backend(&self) -> AsrBackend {
-        match self {
-            Self::RevAi(_) => AsrBackend::RustRevAi,
-            Self::NonRev {
+        match &self.0 {
+            AsrPlanKind::RevAi { .. } => AsrBackend::RustRevAi,
+            AsrPlanKind::NonRev {
                 backend: NonRevAsrBackend::RustWhisperRs,
                 ..
             } => AsrBackend::RustWhisperRs,
-            Self::NonRev {
+            AsrPlanKind::NonRev {
                 backend: NonRevAsrBackend::Worker(mode),
                 ..
             } => AsrBackend::Worker(*mode),
@@ -449,44 +606,92 @@ impl TranscribeAsrPlan {
     }
 
     pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
-        match self {
-            Self::RevAi(RevSpeakerCount::Automatic) => None,
-            Self::RevAi(RevSpeakerCount::Fixed(count))
-            | Self::NonRev {
+        match &self.0 {
+            AsrPlanKind::RevAi {
+                speakers: RevSpeakerCount::Automatic,
+                ..
+            } => None,
+            AsrPlanKind::RevAi {
+                speakers: RevSpeakerCount::Fixed(count),
+                ..
+            }
+            | AsrPlanKind::NonRev {
                 speakers: count, ..
             } => Some(crate::api::NumSpeakers(count.get())),
         }
     }
 
     /// The ASR identity transcript provenance records for this plan: the
-    /// backend's engine name and the checkpoint admitted with the plan.
+    /// backend's engine name. A run adds the models it loaded.
     pub(crate) fn identity(&self) -> AsrIdentity {
-        match self {
-            Self::RevAi(_) => AsrIdentity {
-                engine: AsrBackend::RustRevAi.provenance_name(),
-                model: None,
-            },
-            Self::NonRev { .. } => AsrIdentity {
-                engine: self.backend().provenance_name(),
-                model: None,
-            },
+        AsrIdentity {
+            engine: self.backend().provenance_name(),
+            model: None,
         }
+    }
+}
+
+/// Replay has no live inference operation and accepts transcript languages.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReplayAsrPlan {
+    speakers: std::num::NonZeroU32,
+    language: AsrLanguageRequest,
+}
+
+impl ReplayAsrPlan {
+    pub(crate) fn for_legacy_replay(
+        count: usize,
+        language: &LanguageSpec,
+    ) -> Result<Self, TranscribeAsrPlanError> {
+        Ok(Self {
+            speakers: TranscribeAsrPlan::fixed_count(count)?,
+            language: AsrLanguageRequest::try_from(language)?,
+        })
+    }
+}
+
+/// Shared post-processing policy, sealed to the two admitted execution modes.
+pub(crate) trait TranscribePlan: Clone + sealed::Sealed {
+    const REPLAY: bool;
+    fn language(&self) -> AsrLanguageRequest;
+    fn expected_speakers(&self) -> Option<crate::api::NumSpeakers>;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::TranscribeAsrPlan {}
+    impl Sealed for super::ReplayAsrPlan {}
+}
+
+impl TranscribePlan for TranscribeAsrPlan {
+    const REPLAY: bool = false;
+    fn language(&self) -> AsrLanguageRequest {
+        self.language()
+    }
+    fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
+        self.expected_speakers()
+    }
+}
+
+impl TranscribePlan for ReplayAsrPlan {
+    const REPLAY: bool = true;
+    fn language(&self) -> AsrLanguageRequest {
+        self.language.clone()
+    }
+    fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
+        Some(crate::api::NumSpeakers(self.speakers.get()))
     }
 }
 
 /// Options controlling the transcribe pipeline after ASR-policy admission.
 #[derive(Clone)]
-pub struct TranscribeOptions {
-    pub(crate) asr: TranscribeAsrPlan,
+pub(crate) struct TranscribeOptions<P = TranscribeAsrPlan> {
+    pub(crate) asr: P,
     /// Whether the command requested diarized speaker attribution.
     pub diarize: bool,
     /// Concrete speaker backend selected by Rust when dedicated diarization is needed.
     pub speaker_backend: Option<SpeakerBackendV2>,
-    /// Language specification: `Auto` for ASR auto-detect, or a resolved code.
-    ///
-    /// The type system enforces that post-ASR stages (utseg, morphotag) must
-    /// resolve `Auto` to a concrete language before calling NLP workers.
-    pub lang: LanguageSpec,
+
     /// Whether to run the production utterance-segmentation topology. When
     /// enabled for supported languages this includes both the pre-CHAT word
     /// boundary pass and the post-CHAT refinement pass.
@@ -514,16 +719,78 @@ pub struct TranscribeOptions {
     pub engine_extras: std::collections::BTreeMap<String, String>,
 }
 
-impl TranscribeOptions {
+impl<P: TranscribePlan> TranscribeOptions<P> {
     /// Provider/diarizer count hint; automatic mode never uses a numeric sentinel.
     pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
         self.asr.expected_speakers()
+    }
+
+    /// The language recognition is asked for, admitted with the engine in
+    /// [`TranscribeAsrPlan`], the only place it is held.
+    pub(crate) fn language(&self) -> AsrLanguageRequest {
+        self.asr.language()
     }
 }
 
 #[cfg(test)]
 mod speaker_plan_tests {
     use super::*;
+
+    fn english() -> LanguageSpec {
+        LanguageSpec::Resolved(LanguageCode3::eng())
+    }
+
+    fn english_spanish() -> LanguageSpec {
+        LanguageSpec::Pair(
+            LanguagePair::new(LanguageCode3::eng(), LanguageCode3::spa()).expect("two languages"),
+        )
+    }
+
+    /// Each engine's plan holds only the language requests that engine can
+    /// take: Rev.AI takes one language, detection or the English/Spanish pair;
+    /// every other engine takes one language or detection. Transcription is
+    /// never per-file.
+    #[test]
+    fn the_language_is_admitted_with_the_engine() {
+        let none = std::collections::BTreeMap::new();
+        let whisper = AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2);
+
+        let rev_pair = TranscribeAsrPlan::from_request(
+            AsrBackend::RustRevAi,
+            true,
+            2,
+            &none,
+            &english_spanish(),
+        )
+        .expect("Rev.AI takes English/Spanish");
+        assert_eq!(rev_pair.language().to_string(), "eng,spa");
+
+        assert!(matches!(
+            TranscribeAsrPlan::from_request(whisper, false, 2, &none, &english_spanish()),
+            Err(TranscribeAsrPlanError::PairRequiresRev(_))
+        ));
+
+        let english_french = LanguageSpec::Pair(
+            LanguagePair::new(LanguageCode3::eng(), LanguageCode3::fra()).expect("two languages"),
+        );
+        assert!(matches!(
+            TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, true, 2, &none, &english_french),
+            Err(TranscribeAsrPlanError::RevLanguage(
+                RevLanguageRefusal::UnsupportedPair(_)
+            ))
+        ));
+
+        for backend in [AsrBackend::RustRevAi, whisper] {
+            assert!(matches!(
+                TranscribeAsrPlan::from_request(backend, false, 1, &none, &LanguageSpec::PerFile),
+                Err(TranscribeAsrPlanError::NoJobLanguage(_))
+            ));
+            let detect =
+                TranscribeAsrPlan::from_request(backend, false, 1, &none, &LanguageSpec::Auto)
+                    .expect("every engine takes detection");
+            assert_eq!(detect.language(), AsrLanguageRequest::Detect);
+        }
+    }
 
     #[test]
     fn asr_response_requires_declared_language_instead_of_inventing_english() {
@@ -538,38 +805,60 @@ mod speaker_plan_tests {
         );
     }
 
+    /// Replay calls no provider, so its language is not checked against any
+    /// provider's table: a language Rev.AI does not transcribe, and a pair,
+    /// both replay. Only per-file, which no transcript has, is refused.
+    #[test]
+    fn a_legacy_replay_plan_takes_any_transcript_language() {
+        for lang in ["yue", "eng,spa", "auto"] {
+            let spec = LanguageSpec::try_from(lang).expect("a spec");
+            let plan =
+                ReplayAsrPlan::for_legacy_replay(2, &spec).expect("replay takes the language");
+            assert_eq!(plan.language().to_string(), lang);
+        }
+        assert!(matches!(
+            ReplayAsrPlan::for_legacy_replay(2, &LanguageSpec::PerFile),
+            Err(TranscribeAsrPlanError::NoJobLanguage(_))
+        ));
+    }
+
     #[test]
     fn backend_count_admission_preserves_automatic_and_fixed_policies() {
         let none = std::collections::BTreeMap::new();
         let automatic =
-            TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, true, 2, &none).unwrap();
-        assert_eq!(
-            automatic,
-            TranscribeAsrPlan::RevAi(RevSpeakerCount::Automatic)
-        );
+            TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, true, 2, &none, &english())
+                .unwrap();
+        assert_eq!(automatic.backend(), AsrBackend::RustRevAi);
         assert_eq!(automatic.expected_speakers(), None);
         for backend in [
             AsrBackend::RustRevAi,
             AsrBackend::RustWhisperRs,
             AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2),
         ] {
-            let fixed = TranscribeAsrPlan::from_request(backend, false, 3, &none).unwrap();
+            let fixed =
+                TranscribeAsrPlan::from_request(backend, false, 3, &none, &english()).unwrap();
             assert_eq!(fixed.backend(), backend);
             assert_eq!(fixed.expected_speakers(), Some(crate::api::NumSpeakers(3)));
             assert!(matches!(
-                TranscribeAsrPlan::from_request(backend, false, 0, &none),
+                TranscribeAsrPlan::from_request(backend, false, 0, &none, &english()),
                 Err(TranscribeAsrPlanError::InvalidFixedCount(0))
             ));
             if backend != AsrBackend::RustRevAi {
                 assert!(matches!(
-                    TranscribeAsrPlan::from_request(backend, true, 3, &none),
+                    TranscribeAsrPlan::from_request(backend, true, 3, &none, &english()),
                     Err(TranscribeAsrPlanError::UnsupportedAutomaticCount)
                 ));
             }
         }
         if usize::BITS > 32 {
             assert!(matches!(
-                TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, false, usize::MAX, &none),
+                TranscribeAsrPlan::from_request(
+                    AsrBackend::RustRevAi,
+                    false,
+                    usize::MAX,
+                    &none,
+                    &english()
+                ),
                 Err(TranscribeAsrPlanError::InvalidFixedCount(_))
             ));
         }
@@ -603,15 +892,15 @@ mod speaker_plan_tests {
             "the same override must not attach to a backend that reads no checkpoint"
         );
         // Both are still admissible plans; the override simply does not attach.
-        TranscribeAsrPlan::from_request(funaudio, false, 1, &paraformer).unwrap();
-        TranscribeAsrPlan::from_request(whisper, false, 1, &paraformer).unwrap();
+        TranscribeAsrPlan::from_request(funaudio, false, 1, &paraformer, &english()).unwrap();
+        TranscribeAsrPlan::from_request(whisper, false, 1, &paraformer, &english()).unwrap();
 
         let padded = std::collections::BTreeMap::from([(
             crate::types::engines::FUNAUDIO_MODEL_OVERRIDE_KEY.to_owned(),
             "paraformer-zh ".to_owned(),
         )]);
         assert!(matches!(
-            TranscribeAsrPlan::from_request(funaudio, false, 1, &padded),
+            TranscribeAsrPlan::from_request(funaudio, false, 1, &padded, &english()),
             Err(TranscribeAsrPlanError::InvalidCheckpoint { .. })
         ));
     }

@@ -1,7 +1,7 @@
 # Benchmarks
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-16 22:04 EDT
 
 Batchalign provides a `benchmark` command to evaluate ASR accuracy against
 gold transcripts. It transcribes each audio file, compares the result
@@ -18,14 +18,58 @@ perfect, 100% means every word was wrong or missing.
 WER  = (insertions + deletions) / total_gold_words
 cWER = (order-insensitive edits) / total_gold_words
 Accuracy = 1.0 − WER  (clamped to [0, 1])
+WER with substitutions = (substitutions + deletions + insertions) / total_gold_words
 ```
+
+`wer` counts a wrong word twice: the gold word as a deletion and the word
+recognized in its place as an insertion. It is kept exactly as it was, so
+numbers already reported from it stay comparable. `wer_with_substitutions`
+counts that word once, which is the definition most published WER figures use.
+
+## Substitutions
+
+Between two consecutive matches of the alignment, a deleted gold word and an
+inserted main word are one wrong word, so up to `min(deletions, insertions)` of
+them pair into substitutions. Pairing never crosses a match; utterance
+boundaries do not split the whole-file alignment. This is the edit count for compare's own alignment, which maximizes
+matches; a pure Levenshtein alignment can occasionally trade a match for
+substitutions and report a slightly lower number.
+
+## Scoring by language
+
+Every compared word carries the language that governs it: its own `@s`, else an
+enclosing `<...> [@s]` span, else its utterance (a `[- lang]` precode, else the
+first `@Languages` entry). The resolution is chatter's, so `@s` means "the other
+language" relative to the utterance it sits in, and a word inside a span is
+scored in the span's language even though it carries no marker of its own.
+From that, `.compare.csv` reports, for code-switched and multilingual gold:
+
+| Rows | What they measure |
+|---|---|
+| `language:<code>:gold_words`, `matches`, `substitutions`, `deletions`, `insertions`, `wer_with_substitutions` | Error rate per gold language. A gold word's errors belong to its language; an unpaired insertion belongs to the language of the next gold word in the alignment. |
+| `unattributed_insertions` | Insertions against a gold with no compared words, where there is no gold language to charge. Never charged to the main transcript's language, which is exactly the evidence under test. |
+| `utterance_language:scored`, `agreeing`, `indeterminate`, `accuracy`, `gold=<g>:main=<m>`, `unplaced:<code>` | Whether each gold utterance's language matches that of the main utterance holding most of its matched words. An utterance compare could not place is counted apart, not as a disagreement. |
+| `word_language:scored`, `agreeing`, `indeterminate`, `accuracy`, `gold=<g>:main=<m>` | Word language agreement over matched words. |
+| `switch:both`, `gold_only`, `main_only`, `neither`, `precision`, `recall` | Code-switch marking over matched words: a word is a switch when its own `@s` or a span marks it with a language other than its utterance's, or with a language that could not be resolved. |
+
+A language is written as CHAT writes it: a code (`spa`), a mix (`eng+spa`), an
+ambiguity (`eng&spa`), or `unresolved`. Agreement has three values: the same,
+different, or indeterminate when either side is unresolved or ambiguous. Two
+transcripts that both fail to give a language have not agreed, so
+indeterminate pairs are counted but left out of `accuracy`. A rate with
+nothing to divide by prints `NA`, never `0`. Every count is printed, so a
+corpus roll-up sums rows and recomputes rates rather than averaging per-file
+ratios.
 
 ## WER and cWER: read them as a pair
 
 `cwer` counts the same errors as `wer` except that a word recognised
-correctly but placed in the wrong position **within its utterance** cancels,
+correctly but placed in the wrong position **within its gold utterance** cancels,
 instead of being charged twice, once as a deletion where it should have been
-and once as an insertion where it landed.
+and once as an insertion where it landed. A word that lands at the boundary
+between two gold utterances may cancel against either, since the alignment
+cannot say which one it drifted from; a word that reappears further away is
+charged in both.
 
 | Reading | Means |
 |---|---|
@@ -33,24 +77,40 @@ and once as an insertion where it landed.
 | `cwer` close to `wer` | The words themselves are wrong. Look at the ASR engine. |
 
 Plain WER conflates those two failure modes, and for diarized output the
-distinction is most of the diagnostic value.
+distinction is most of the diagnostic value. Neither rate measures
+segmentation: where the main transcript puts its utterance boundaries costs
+nothing in either, so segmentation quality needs a measure of its own.
 
 > **Accuracy changed on 2026-07-30, and older numbers are not comparable.**
 > Until then, compare aligned only inside a bag-of-words window chosen per gold
 > utterance and silently discarded any hypothesis word outside it. Those words
 > were counted in no category, so reported WER was systematically LOWER than the
-> truth by an amount that varied with how ragged the transcript was. The
-> two-phase compare aligns each main utterance's full token span, so those words
-> are now charged as insertions. Expect WER on the same file to RISE relative to
-> a pre-2026-07-30 run; the new number is the honest one.
+> truth by an amount that varied with how ragged the transcript was. The fix
+> aligned every hypothesis word, so those words are now charged as insertions.
+> Expect WER on the same file to RISE relative to a pre-2026-07-30 run; the new
+> number is the honest one.
+
+> **Accuracy changed again on 2026-09-16, and older numbers are not
+> comparable.** Gold utterances used to be placed by a window search that
+> preferred the LATEST matching window anywhere in the remaining transcript,
+> with a cursor that only moved forward. A short utterance near the start (for
+> example `yeah .`) could be placed at the end of the file and leave every later
+> gold utterance unplaced, charging all of its words as errors. Each main
+> utterance was then aligned only against the gold placed on it, so a
+> recognizer that split one reference utterance in two was charged for where it
+> put the boundary. Every count, `cwer` and language attribution now come from
+> one alignment of the whole file, and against a complete gold, where the main
+> transcript puts its utterance boundaries changes none of them. Six 30-minute recordings
+> scored 32 matches before the change and 4,074 after. Expect WER to FALL
+> relative to an earlier run, dramatically on long files.
 
 ## What the gold claims to cover
 
-Compare maps each gold utterance onto a main utterance, and some main
-utterances are left over. Whether THEIR words count as errors is not something
+Compare aligns the two transcripts word for word, and some main utterances
+match no gold word at all. Whether THEIR words count as errors is not something
 compare can work out from the two files, so the caller states it:
 
-| Coverage | Meaning | Leftover main words |
+| Coverage | Meaning | Words of unmatched main utterances |
 |---|---|---|
 | `Complete` | The gold is a full reference for this recording | Charged as insertions |
 | `Partial` | The gold covers only a slice, one timepoint, one speaker | Not scored |
@@ -64,10 +124,21 @@ sampled or single-speaker reference should pass `Partial`, and should say so
 when it reports its numbers: a `Partial` WER describes the covered part only.
 
 Word normalization is applied before comparison: compound splitting
-(`airplane` → `air plane`), contraction expansion (`he's` → `he is`),
-filler normalization (all fillers → `um`), abbreviation expansion
-(`FBI` → `F B I`), and proper name replacement (all names → `name`).
-The normalization logic lives in `crates/batchalign-transform/src/wer_conform.rs`.
+(`airplane` → `air plane`), contraction expansion (`he's` → `he is`), filler
+normalization (all fillers → `um`), abbreviation expansion (`FBI` → `F B I`),
+and proper name replacement (all names → `name`). One normalization
+(`WerNormalization` in `crates/batchalign-transform/src/wer_conform.rs`) is
+chosen per comparison, from what the gold transcript declares, and applied to
+both transcripts. A gold declaring English alone, or declaring nothing, gets
+every rule. A gold declaring any other language keeps names: the name list
+holds everyday Spanish words such as `linda` and `clara`, so name replacement
+turned different Spanish words into the same token and scored them as matches.
+
+It is never chosen per word or per transcript from language labels. A
+recognizer that heard `linda` correctly but labeled it English would otherwise
+have its word normalized differently from the gold's and be charged a
+recognition error for a labeling error, which the language rows already report
+on their own.
 
 ## Pipeline
 

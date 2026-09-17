@@ -488,7 +488,9 @@ pub struct TranscribeArgs {
     #[arg(long)]
     pub utseg_fallback_stanza: bool,
 
-    /// Language (3-letter ISO code).
+    /// Language: a 3-letter ISO code, `auto` to detect, or a code-switched
+    /// pair such as `eng,spa`, primary language first (Rev.AI's
+    /// English/Spanish model only).
     #[arg(long, default_value = "eng")]
     pub lang: String,
 

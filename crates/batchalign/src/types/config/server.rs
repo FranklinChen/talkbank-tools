@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::{JobTtlDays, MemoryGatePollSeconds, WorkerStartupLimit};
 use super::serde_helpers::zero_as_none;
 use crate::api::{LanguageCode3, MemoryMb};
 
@@ -15,14 +16,14 @@ use crate::api::{LanguageCode3, MemoryMb};
 ///
 /// Deserialized from the runtime-owned `server.yaml`. All fields have sensible
 /// defaults so an empty YAML file (or a missing file) produces a working
-/// configuration.  The [`validate`](Self::validate) method clamps out-of-range
-/// values and returns non-fatal warnings.
+/// configuration.  Scalar constructors clamp out-of-range values;
+/// [`validate`](Self::validate) reports those corrections without I/O.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Filesystem directories the server searches when resolving media files
-    /// for transcribe/align.  Paths that do not exist at startup produce a
-    /// validation warning but are not fatal.
+    /// for transcribe/align.  Availability is checked only when media is requested,
+    /// never while loading configuration.
     #[serde(default)]
     pub media_roots: Vec<batchalign_types::paths::ServerPath>,
     /// Named media directory mappings (e.g. `{"childes-data": "/nfs/childes"}`).
@@ -108,9 +109,9 @@ pub struct ServerConfig {
     pub max_workers_per_job: Option<u32>,
     /// Number of days to retain completed/failed job metadata in SQLite
     /// before automatic purge.  Must be >= 1; values < 1 are clamped to 1
-    /// by `validate()`.  Default: 7.
+    /// during admission.  Default: 7.
     #[serde(default = "default_job_ttl_days")]
-    pub job_ttl_days: i32,
+    pub job_ttl_days: JobTtlDays,
     /// Whether the CLI should auto-spawn a local daemon when no explicit
     /// `--server` is configured. Default: `true`.
     #[serde(default = "default_true")]
@@ -139,7 +140,7 @@ pub struct ServerConfig {
     /// Maximum number of local worker/model startups allowed at once across all
     /// participating batchalign3 processes on the host. Default: 1.
     #[serde(default = "default_max_concurrent_worker_startups")]
-    pub max_concurrent_worker_startups: u32,
+    pub max_concurrent_worker_startups: WorkerStartupLimit,
 
     /// Operator override for the maximum Python worker processes per
     /// `(profile, lang, engine)` key. `None` (the canonical
@@ -196,7 +197,7 @@ pub struct ServerConfig {
 
     /// Seconds between host-memory reservation polling checks. Default: 5.
     #[serde(default = "default_memory_gate_poll_s")]
-    pub memory_gate_poll_s: u64,
+    pub memory_gate_poll_s: MemoryGatePollSeconds,
 
     /// Low-memory warning threshold in MB. Default: 4096.
     #[serde(default = "default_memory_warning_mb")]
@@ -322,16 +323,16 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
-pub(crate) fn default_job_ttl_days() -> i32 {
-    7
+pub(crate) fn default_job_ttl_days() -> JobTtlDays {
+    JobTtlDays::new(7)
 }
 
 pub(crate) fn default_worker_health_interval_s() -> u64 {
     30
 }
 
-pub(crate) fn default_max_concurrent_worker_startups() -> u32 {
-    1
+pub(crate) fn default_max_concurrent_worker_startups() -> WorkerStartupLimit {
+    WorkerStartupLimit::new(1)
 }
 
 pub(crate) fn default_worker_ready_timeout_s() -> u64 {
@@ -351,8 +352,8 @@ pub(crate) fn default_memory_gate_timeout_s() -> u64 {
     120
 }
 
-pub(crate) fn default_memory_gate_poll_s() -> u64 {
-    5
+pub(crate) fn default_memory_gate_poll_s() -> MemoryGatePollSeconds {
+    MemoryGatePollSeconds::new(5)
 }
 
 pub(crate) fn default_memory_warning_mb() -> MemoryMb {
@@ -376,7 +377,7 @@ impl Default for ServerConfig {
             force_cpu: None,
             allow_mps: None,
             max_workers_per_job: None,
-            job_ttl_days: 7,
+            job_ttl_days: default_job_ttl_days(),
             auto_daemon: true,
             memory_gate_mb: None,
             worker_health_interval_s: default_worker_health_interval_s(),

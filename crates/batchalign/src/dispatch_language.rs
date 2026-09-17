@@ -34,7 +34,9 @@ use crate::api::{LanguageCode3, LanguageSpec, ReleasedCommand};
 pub(crate) enum CommandLanguageSource {
     /// No job-level language: the file, or a constant the command owns.
     PerFile,
-    /// One resolved ISO code for the whole job.
+    /// A job-level language: one resolved code, `auto`, or, for transcription
+    /// only, a code-switched pair (see [`language_pair_support`]). Commands
+    /// dispatched through [`DispatchLanguage`] need exactly one code.
     JobLevel,
 }
 
@@ -53,7 +55,8 @@ pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguage
             CommandLanguageSource::PerFile
         }
         // Everything else carries a real job-level language (or `auto`, which
-        // ASR resolves before any language-bearing stage runs).
+        // ASR resolves before any language-bearing stage runs, or, for
+        // transcription, a pair; see `language_pair_support`).
         ReleasedCommand::Align
         | ReleasedCommand::Transcribe
         | ReleasedCommand::TranscribeS
@@ -64,6 +67,36 @@ pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguage
         | ReleasedCommand::Avqi
         | ReleasedCommand::Diarize
         | ReleasedCommand::SpeakerIdentify => CommandLanguageSource::JobLevel,
+    }
+}
+
+/// Whether one command accepts a code-switched language pair such as `eng,spa`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LanguagePairSupport {
+    /// The command recognizes speech in both languages of a pair.
+    Accepted,
+    /// The command runs under one language, or none.
+    Refused,
+}
+
+/// The one owner of which commands take a language pair.
+///
+/// Only transcription does: a pair describes a recording, and transcription is
+/// what recognizes one. No catch-all arm, so a new command states its answer.
+pub(crate) const fn language_pair_support(command: ReleasedCommand) -> LanguagePairSupport {
+    match command {
+        ReleasedCommand::Transcribe | ReleasedCommand::TranscribeS => LanguagePairSupport::Accepted,
+        ReleasedCommand::Morphotag
+        | ReleasedCommand::Translate
+        | ReleasedCommand::Coref
+        | ReleasedCommand::Align
+        | ReleasedCommand::Utseg
+        | ReleasedCommand::Benchmark
+        | ReleasedCommand::Opensmile
+        | ReleasedCommand::Compare
+        | ReleasedCommand::Avqi
+        | ReleasedCommand::Diarize
+        | ReleasedCommand::SpeakerIdentify => LanguagePairSupport::Refused,
     }
 }
 
@@ -138,7 +171,7 @@ impl DispatchLanguage {
         match language_source(command) {
             CommandLanguageSource::PerFile => match lang {
                 LanguageSpec::PerFile => Ok(Self::PerFile),
-                LanguageSpec::Auto | LanguageSpec::Resolved(_) => {
+                LanguageSpec::Auto | LanguageSpec::Resolved(_) | LanguageSpec::Pair(_) => {
                     Err(DispatchLanguageError::UnexpectedJobLanguage {
                         command,
                         lang: lang.clone(),
@@ -147,7 +180,7 @@ impl DispatchLanguage {
             },
             CommandLanguageSource::JobLevel => match lang {
                 LanguageSpec::Resolved(code) => Ok(Self::Job(JobLanguage(code.clone()))),
-                LanguageSpec::Auto | LanguageSpec::PerFile => {
+                LanguageSpec::Auto | LanguageSpec::Pair(_) | LanguageSpec::PerFile => {
                     Err(DispatchLanguageError::MissingJobLanguage {
                         command,
                         lang: lang.clone(),

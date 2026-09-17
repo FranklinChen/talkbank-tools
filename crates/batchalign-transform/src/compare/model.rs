@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 /// Status of a compared token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareStatus {
@@ -35,10 +33,10 @@ pub struct UtteranceComparison {
 
 /// What a gold transcript claims to cover, stated by the caller.
 ///
-/// Compare maps each gold utterance onto a main utterance. Some main
-/// utterances are left over, mapped to by nothing, and whether their words are
-/// ERRORS is not a fact compare can work out from the two files: it depends on
-/// what the gold was made to be.
+/// Compare aligns the two transcripts word for word, and some main utterances
+/// match no gold word at all. Whether their words are ERRORS is not a fact
+/// compare can work out from the two files: it depends on what the gold was
+/// made to be.
 ///
 /// There is deliberately no `Default`. A wrong answer here moves the headline
 /// WER in a direction nobody would notice, so the caller states it and the
@@ -50,47 +48,29 @@ pub enum GoldCoverage {
     /// Main material the gold does not account for is material the system
     /// produced and the reference does not contain, so it is charged as
     /// insertions. This is the right answer for a gold companion that is a
-    /// re-transcription of the same recording.
+    /// re-transcription of the same recording. Nothing is decided from main
+    /// utterance boundaries, so the scores are the same however the main
+    /// transcript is split into utterances.
     Complete,
     /// The gold covers only part of what the main transcript covers.
     ///
-    /// Main material outside that part is not scored at all, because the
-    /// reference makes no claim about it. This is the right answer for a
-    /// sampled slice, a single timepoint, or a single-speaker reference.
-    /// Reported WER then describes the covered part only.
+    /// A main utterance that matched no gold word is not scored at all,
+    /// because the reference makes no claim about it. This is the right answer
+    /// for a sampled slice, a single timepoint, or a single-speaker reference.
+    /// Reported WER then describes the covered part only, and, unlike
+    /// [`Self::Complete`], depends on where the main transcript puts its
+    /// utterance boundaries, since that is how the covered part is found.
+    ///
+    /// Known limit: what is in scope is decided per main utterance from one
+    /// alignment of the whole file, which maximizes matched words without
+    /// regard to how spread out they are. With a single-speaker gold, one
+    /// chance match of a common word in another speaker's utterance brings that
+    /// whole utterance into scope, and its other words are charged as
+    /// insertions. No production caller passes `Partial` today.
     Partial,
 }
 
-/// Aggregate comparison metrics.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompareMetrics {
-    /// Word Error Rate: (insertions + deletions) / total_gold_words.
-    pub wer: f64,
-    /// Order-insensitive word error rate: like [`Self::wer`], but a word that
-    /// was recognised correctly and merely placed in the wrong position within
-    /// its utterance cancels instead of being charged as both an insertion and
-    /// a deletion.
-    ///
-    /// Read the pair, not either alone. `cwer` well below `wer` means the
-    /// recognition is good and the PLACEMENT is wrong, which points at the
-    /// merge and diarization stages; `cwer` close to `wer` means the words
-    /// themselves are wrong, which points at the ASR engine.
-    pub cwer: f64,
-    /// 1.0 - wer (clamped to [0, 1]).
-    pub accuracy: f64,
-    /// Number of matching words.
-    pub matches: usize,
-    /// Words in main but not in gold.
-    pub insertions: usize,
-    /// Words in gold but not in main.
-    pub deletions: usize,
-    /// Total words in the gold transcript (matches + deletions).
-    pub total_gold_words: usize,
-    /// Total words in the main transcript (matches + insertions).
-    pub total_main_words: usize,
-    /// Per-POS error breakdown keyed by uppercased POS label.
-    pub pos_counts: BTreeMap<String, PosErrorCounts>,
-}
+pub use super::metrics::CompareMetrics;
 
 /// Per-POS compare counters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

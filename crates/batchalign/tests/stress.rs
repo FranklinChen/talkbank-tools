@@ -48,7 +48,7 @@ fn stress_server_config() -> ServerConfig {
     ServerConfig {
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
-        job_ttl_days: 7,
+        job_ttl_days: batchalign::config::JobTtlDays::new(7),
         memory_gate_mb: Some(MemoryMb(0)),
         ..Default::default()
     }
@@ -65,7 +65,7 @@ async fn start_stress_server() -> Option<StressServer> {
 async fn start_stress_server_with_config(mut config: ServerConfig) -> Option<StressServer> {
     config.host = "127.0.0.1".into();
     config.port = batchalign::config::PortRequest::from_u16(0);
-    config.job_ttl_days = 7;
+    config.job_ttl_days = batchalign::config::JobTtlDays::new(7);
     config.memory_gate_mb = Some(MemoryMb(0));
     let session = acquire_test_server_session_with_config(config).await?;
     Some(StressServer { session })

@@ -1,7 +1,7 @@
 # Type-Driven Design
 
 **Status:** Current
-**Last updated:** 2026-09-15 18:27 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 Batchalign uses Rust's type system to encode domain invariants at compile time. This document catalogs the patterns in use, explains when to reach for each one, and records the serde techniques that keep the wire format stable while the internal types evolve.
 
@@ -41,11 +41,14 @@ All generated types use `#[serde(transparent)]`: the wire format stays as bare s
 | `CommandName` | `String` | `crates/batchalign-types/src/domain.rs` | Batchalign command (`"morphotag"`, `"align"`) |
 | `ReleasedCommand` | enum | `crates/batchalign-types/src/domain.rs` | Closed released command vocabulary |
 | `LanguageCode3` | `String` | `crates/batchalign-types/src/domain.rs` | Validated ISO 639-3 code (3 ASCII alpha, lowercased) |
-| `LanguageSpec` | enum | `crates/batchalign-types/src/domain.rs` | `Auto` or `Resolved(LanguageCode3)`: language at job boundary |
+| `LanguageSpec` | enum | `crates/batchalign-types/src/domain.rs` | `Auto`, `Resolved(LanguageCode3)`, `Pair(LanguagePair)` or `PerFile`: language at job boundary |
+| `LanguagePair` | struct | `crates/batchalign-types/src/domain.rs` | Two different codes of one code-switched recording, primary first; `LanguagePair::new` and `parse` refuse the same language twice |
+| `AsrLanguageRequest` | enum | `crates/batchalign-types/src/domain.rs` | What recognition is asked for: `One`, `Detect` or `Pair`; no per-file state |
+| `TranscriptLanguage` | enum | `crates/batchalign-types/src/domain.rs` | What a transcript resolved to: `One` or `Pair`; `primary()` and `declared()` |
 | `DisplayPath` | `String` | `crates/batchalign-types/src/domain.rs` | Display-oriented file path within a job (`"sample.cha"`, `"subdir/sample.cha"`) |
 | `NodeId` | `String` | `crates/batchalign-types/src/domain.rs` | Server/fleet node identity |
 | `BuildOwnedNamespace` | `Cow<'static, str>` | `crates/batchalign/src/cache/mod.rs` | The one representation behind the cache namespace and revisions this build owns: `UtrAsrCacheNamespace`, `RevAsrModelRevision`, `SpeakerEvidenceModelRevision` and `SpeakerNormalizationRevision`. Built as a literal (`const fn literal`) or derived from literals and files compiled into the binary (`derived`). Each wrapper keeps its own newtype, so a cache task constant still refuses one where another belongs. It replaced `EngineVersion`, a worker-version type deleted from `batchalign-types` once nothing used it |
-| `StampSafeText` | `Cow<'static, str>` | `crates/batchalign-types/src/domain.rs` | Text that cannot change a provenance stamp's structure. Refuses blank text, surrounding whitespace (`StampSafeText::WHITESPACE`, the Unicode `White_Space` set) and the stamp structure characters (`StampSafeText::STAMP_STRUCTURE`: vertical bar, semicolon, closing bracket, newline, carriage return), with `InvalidStampSafeText`. Routes in: `TryFrom` (also serde), `const fn from_static` (a literal checked at compile time inside `const { }`) and `join` with a `StampJoiner` (`Concat`, `Plus`, `Colon`, `At`). Its JSON Schema `pattern` is generated from the same two lists. Provenance's `StampFieldValue` wraps it |
+| `StampSafeText` | `Cow<'static, str>` | `crates/batchalign-types/src/domain.rs` | Text that cannot change a provenance stamp's structure. Refuses blank text, surrounding whitespace (`StampSafeText::WHITESPACE`, the Unicode `White_Space` set) and the stamp structure characters (`StampSafeText::STAMP_STRUCTURE`: vertical bar, semicolon, closing bracket, newline, carriage return), with `InvalidStampSafeText`. Routes in: `TryFrom` (also serde), `const fn from_static` (a literal checked at compile time inside `const { }`) and `join` with a `StampJoiner` (`Concat`, `Plus`, `Colon`, `At`, `Comma`). Its JSON Schema `pattern` is generated from the same two lists. Provenance's `StampFieldValue` wraps it |
 | `ReportedEngineName` | `StampSafeText` | `crates/batchalign-types/src/domain.rs` | An engine identity a worker reported, in a capability report or on a result. A wrapper over `StampSafeText`; the only constructor is `TryFrom`, shared by deserialization, which applies the `StampSafeText` check; there is no infallible `From` |
 | `CorrelationId` | `String` | `crates/batchalign-types/src/domain.rs` | Cross-service tracing ID |
 | `NumSpeakers` | `u32` | `crates/batchalign-types/src/domain.rs` | Speaker count for diarization |
@@ -87,10 +90,38 @@ impl LanguageCode3 {
 pub enum LanguageSpec {
     Auto,
     Resolved(LanguageCode3),
+    Pair(LanguagePair),
+    PerFile,
 }
 ```
 
-Serde: `"auto"` → `Auto` (case-insensitive), any valid 3-letter code → `Resolved`. Invalid strings are rejected at deserialization.
+Serde and text: `"auto"` → `Auto` (case-insensitive), `"per-file"` → `PerFile`, text with a comma such as `"eng,spa"` → `Pair`, any valid 3-letter code → `Resolved`. Invalid strings, including a pair naming one language twice, are rejected at deserialization.
+
+**Transcription's language graph.** Planning admits the language for its engine. The ASR transition then owns the resolved language alongside the response and observed identity; downstream stages consume that state:
+
+```mermaid
+graph LR
+    spec["LanguageSpec<br/>(wire, job record)"] -->|"AdmittedAsrLanguage::admit<br/>per-file refused"| admitted["AdmittedAsrLanguage"]
+    admitted -->|"RevLanguage::admit"| rev["TranscribeAsrPlan (RevAi)<br/>RevLanguage: one | detect | English/Spanish"]
+    admitted -->|"pair refused"| single["TranscribeAsrPlan (NonRev)<br/>SingleAsrLanguage: One | Detect"]
+    spec -->|"for_legacy_replay<br/>no provider table"| replay["ReplayAsrPlan<br/>AsrLanguageRequest"]
+    rev -->|"RevLanguage::resolve<br/>stored with the evidence"| resolved["TranscriptLanguage<br/>One | Pair"]
+    single -->|"response language"| resolved
+    replay --> resolved
+    resolved -->|"One or Pair request"| headers["@Languages, provenance lang="]
+    resolved -->|"AsrTextLanguage"| post["post-processing<br/>(a pair keeps numerals as digits)"]
+    resolved -->|"primary()"| nlp["utseg, morphotag,<br/>speaker routing"]
+```
+
+- Live options own a `TranscribeAsrPlan`, built by `from_request`; replay options own a separate `ReplayAsrPlan`, built by `for_legacy_replay`. The live entry point cannot accept replay options. `TranscribeOptions::language()` reads the plan's language rather than a duplicate field.
+- The consuming sequence is `PendingAsr` to `Recognized` to `Postprocessed` to `ChatReady`. `Recognized` owns the response, resolved language and observed identity. Required stage inputs are present in their state type. Optional CHAT refinements operate on `ChatReady` through the existing stage observer.
+- `AdmittedAsrLanguage::admit` is the one admission of a language against an engine; plan construction and submission validation both call it, so they refuse with one message.
+- `RevLanguage`'s representation is private too, built only by `admit`, `detect` and `identified`, over one table (`REV_LANGUAGES`) read in both directions. It replaced a conversion that sent an unmapped language to Rev.AI as `auto` with a logged warning, and two hand-kept tables that had to agree.
+- A Rev.AI transcript's language comes from its evidence. Both fresh commit and cached replay admit it against the request with `check_stored_resolution`. Only admitted evidence becomes `CompletedRevAsrEvidence`; raw deserialization cannot construct that type.
+- `AsrLanguageRequest`, `TranscriptLanguage` and `RevLanguage` write their text through `LanguageSpec`'s (`eng`, `auto`, `eng,spa`), by construction, because Rev evidence cache keys are built from that text; existing keys did not move. `TranscriptLanguage` reads through `LanguageSpec`'s one parser, so Rev evidence stored before pairs existed still replays.
+- Under detection, `@Languages` is not the resolved language alone: per-utterance detection adds any second language it finds in enough utterances.
+- `AsrTextLanguage` (in `batchalign-transform`) is what post-processing takes: structural rules run under its primary, and the two steps that write words in a language (number expansion, the percent split) do nothing for code-switched text.
+- `LanguageSpec::to_worker_language` maps a pair to its primary language: workers load models per language, and a code-switched transcript's worker stages run under its primary.
 
 **Where each type lives:**
 
@@ -99,9 +130,7 @@ Serde: `"auto"` → `Auto` (case-insensitive), any valid 3-letter code → `Reso
 | `LanguageSpec` | `JobSubmission.lang`, `JobDispatchConfig.lang`, `RunnerDispatchConfig.lang`, `JobInfo.lang`, `JobListItem.lang` | Worker IPC, cache keys, `MorphosyntaxParams`, `TranscribeOptions` |
 | `LanguageCode3` | Worker IPC, cache keys, `MorphosyntaxParams`, FA params, all domain-internal language references |, |
 
-**Resolution:** `LanguageSpec::Auto` is resolved to a concrete `LanguageCode3` at two points:
-1. **Dispatch layer**: `resolve_or(&fallback)` for commands that need a known language (FA, morphotag, compare).
-2. **Transcribe pipeline**: `stage_build_chat` uses `AsrResponse.lang` (the ASR engine's detected language) when `opts.lang == "auto"`.
+**Resolution:** a job-level command's language is resolved once by `DispatchLanguage::resolve`, which refuses `Auto`, `Pair` and `PerFile` for commands that need one code. Transcription resolves `Detect` after ASR, from `AsrResponse.lang` (the engine's detected language) or offline detection over the transcript, and never defaults to English.
 
 **When to use this pattern:** Any domain identifier that has a sentinel/wildcard value (`"auto"`, `"all"`, `"*"`) that must not leak into output. Split the sentinel into an enum variant and validate the concrete type on construction.
 
@@ -388,6 +417,7 @@ serde attribute changes the wire format, the snapshot diff will catch it.
 | 2026-03 | Boundary conversion patterns | All | Codified convert-once-at-boundary: HTTP→`JobId`, DB→deref, IPC→`to_string_lossy`, CLI→`From<bool>` |
 | 2026-03 | `LanguageSpec` enum + validated `LanguageCode3` | Sentinel enum | `"auto"` sentinel leaked into `@Languages` header (job 696870c7); split into `Auto`/`Resolved` enum with validated construction |
 | 2026-03 | `ClientPath`, `ServerPath`, `RepoRelativePath`, `MediaMappingKey` | Path provenance | Untyped paths allowed mixing client/server filesystems; `ClientPath` omits `AsRef<Path>` to prevent accidental I/O; [details](path-provenance.md) |
+| 2026-09 | `LanguagePair`, `AsrLanguageRequest`, `AdmittedAsrLanguage`, `RevLanguage`, `SingleAsrLanguage`, `TranscriptLanguage`, `AsrTextLanguage` | Typestate graph | Code-switched transcription: a pair can reach only Rev.AI, per-file cannot reach transcription, Rev.AI's unmapped-language `auto` fallback and its second table were deleted, and a pair's numerals are never written out in a guessed language |
 
 ## Guidelines
 

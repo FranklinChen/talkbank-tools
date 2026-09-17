@@ -5,6 +5,9 @@
 //! timed tokens from the selected backend, and inject timing bullets back into
 //! the AST. Python is only used for the worker-hosted ASR path.
 
+#[cfg(test)]
+use crate::revai::FetchedRevAsrEvidence;
+
 use std::path::Path;
 
 use super::options::ResolvedUtrStrategy;
@@ -436,7 +439,10 @@ async fn infer_utr_asr_response(
 ) -> Result<crate::transcribe::AsrResponse, crate::error::ServerError> {
     match crate::transcribe::AsrBackend::from(context.engine).as_non_rev() {
         None => {
-            let lang = crate::api::LanguageSpec::Resolved(context.lang.clone());
+            let lang = crate::types::revai_language::RevLanguage::admit(
+                &crate::api::AsrLanguageRequest::One(context.lang.clone()),
+            )
+            .map_err(|refusal| crate::error::ServerError::Validation(refusal.to_string()))?;
             let provider_media = crate::revai::PreparedRevProviderMedia::from_source(audio_path)
                 .await
                 .map_err(|error| crate::error::ServerError::Persistence(error.to_string()))?;
@@ -472,7 +478,7 @@ async fn infer_utr_asr_response(
                 &crate::transcribe::AsrInferParams {
                     backend,
                     audio_path,
-                    lang: &crate::api::LanguageSpec::Resolved(context.lang.clone()),
+                    lang: &crate::transcribe::SingleAsrLanguage::One(context.lang.clone()),
                     num_speakers: NumSpeakers(1),
                     extras: &empty_extras,
                 },
@@ -947,13 +953,12 @@ mod utr_token_conversion_tests {
 #[cfg(test)]
 mod utr_evidence_cache_tests {
     use super::*;
-    use crate::api::LanguageSpec;
     use crate::cache::UtteranceCache;
     use crate::chat_ops::CacheKey;
     use crate::error::ServerError;
     use crate::revai::{
-        AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RevAsrEvidenceInference,
-        RevAsrEvidenceRequest, RevAsrModelRevision,
+        AuthorizedRevEvidenceRun, RevAsrEvidenceInference, RevAsrEvidenceRequest,
+        RevAsrModelRevision,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -968,8 +973,8 @@ mod utr_evidence_cache_tests {
             _run: AuthorizedRevEvidenceRun,
         ) -> Result<crate::revai::RevAsrInferenceOutcome, ServerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(crate::revai::RevAsrInferenceOutcome::Completed(
-                CompletedRevAsrEvidence {
+            Ok(crate::revai::RevAsrInferenceOutcome::Fetched(
+                FetchedRevAsrEvidence {
                     transcript_evidence:
                         crate::revai::RevTranscriptEvidence::from_legacy_transcript(
                             serde_json::from_str(
@@ -988,7 +993,7 @@ mod utr_evidence_cache_tests {
                             )
                             .expect("valid Rev transcript"),
                         ),
-                    resolved_language: LanguageCode3::eng(),
+                    resolved_language: crate::api::TranscriptLanguage::One(LanguageCode3::eng()),
                 },
             ))
         }
@@ -1007,7 +1012,10 @@ mod utr_evidence_cache_tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &crate::types::revai_language::RevLanguage::admit(
+                &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
+            )
+            .expect("Rev.AI recognizes English"),
             NumSpeakers(1),
             &RevAsrModelRevision::current(),
         )

@@ -533,7 +533,89 @@ impl schemars::JsonSchema for WorkerLanguage {
 }
 
 // ---------------------------------------------------------------------------
-// LanguageSpec: Auto vs Resolved(LanguageCode3)
+// LanguagePair: the two languages of one code-switched recording
+// ---------------------------------------------------------------------------
+
+/// Two different languages spoken in one recording, primary first.
+///
+/// The order is CHAT's `@Languages` order: the primary language is the one an
+/// unmarked utterance is in, and the secondary is the one a bare `@s` switches
+/// to. Built only by [`LanguagePair::new`] and [`LanguagePair::parse`], both of
+/// which refuse the same language twice, so no pair is one language in
+/// disguise.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LanguagePair {
+    primary: LanguageCode3,
+    secondary: LanguageCode3,
+}
+
+/// Why text or two codes do not make a [`LanguagePair`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum InvalidLanguagePair {
+    /// Both positions name the same language.
+    #[error("a language pair names \"{0}\" twice; name two different languages")]
+    SameLanguage(LanguageCode3),
+    /// The text is not two codes separated by one comma.
+    #[error(
+        "expected two language codes separated by a comma, primary first (for example \"eng,spa\"); got \"{0}\""
+    )]
+    Shape(String),
+    /// One of the two codes is not a valid ISO 639-3 code.
+    #[error(transparent)]
+    Code(#[from] InvalidLanguageCode),
+}
+
+impl LanguagePair {
+    /// The separator between the two codes wherever a pair is written as text:
+    /// `--lang eng,spa`, the job record and the provenance stamp.
+    pub const SEPARATOR: char = ',';
+
+    /// Pair two languages, primary first.
+    pub fn new(
+        primary: LanguageCode3,
+        secondary: LanguageCode3,
+    ) -> Result<Self, InvalidLanguagePair> {
+        match primary == secondary {
+            true => Err(InvalidLanguagePair::SameLanguage(primary)),
+            false => Ok(Self { primary, secondary }),
+        }
+    }
+
+    /// Read a pair written as `primary,secondary`.
+    pub fn parse(text: &str) -> Result<Self, InvalidLanguagePair> {
+        match text.split_once(Self::SEPARATOR) {
+            Some((primary, secondary)) if !secondary.contains(Self::SEPARATOR) => Self::new(
+                LanguageCode3::try_new(primary)?,
+                LanguageCode3::try_new(secondary)?,
+            ),
+            Some(_) | None => Err(InvalidLanguagePair::Shape(text.to_owned())),
+        }
+    }
+
+    /// The language an unmarked utterance is in.
+    pub fn primary(&self) -> &LanguageCode3 {
+        &self.primary
+    }
+
+    /// The other language.
+    pub fn secondary(&self) -> &LanguageCode3 {
+        &self.secondary
+    }
+
+    /// Both languages, in `@Languages` order.
+    pub fn declared(&self) -> [&LanguageCode3; 2] {
+        [&self.primary, &self.secondary]
+    }
+}
+
+impl std::fmt::Display for LanguagePair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}{}", self.primary, Self::SEPARATOR, self.secondary)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LanguageSpec: Auto, one resolved code, a pair, or per-file
 // ---------------------------------------------------------------------------
 
 /// Language specification from the CLI or job submission.
@@ -541,6 +623,10 @@ impl schemars::JsonSchema for WorkerLanguage {
 /// `Auto` means the ASR engine should detect the language. This variant must
 /// be resolved to a concrete [`LanguageCode3`] before any CHAT construction
 /// or NLP dispatch that requires a known language.
+///
+/// `Pair` declares a code-switched recording in two languages, primary first.
+/// Only transcription accepts it; submission validation refuses it for every
+/// other command, and for engines that recognize one language at a time.
 ///
 /// `PerFile` means the command has no job-level language at all: each input
 /// file's processing language is read from its `@Languages:` header at the
@@ -553,44 +639,46 @@ impl schemars::JsonSchema for WorkerLanguage {
 /// then leaked into the job record, the dashboard, and the Stanza
 /// pre-warming key. `PerFile` makes the absence of a job-level language a
 /// first-class state in the type system.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, ToSchema)]
+///
+/// Written as text (the wire, the job record, `--lang`) it is `auto`,
+/// `per-file`, a code such as `eng`, or a pair such as `eng,spa`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LanguageSpec {
     /// Let the ASR engine auto-detect the language.
     Auto,
     /// A concrete ISO 639-3 language code.
     Resolved(LanguageCode3),
+    /// Two languages of one code-switched recording, primary first.
+    Pair(LanguagePair),
     /// No job-level language; resolve per-file from each CHAT file's
     /// `@Languages:` header. Used by morphotag, translate, and coref
     /// none of which take a `--lang` CLI flag.
     PerFile,
 }
 
+/// Why text is not a [`LanguageSpec`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum InvalidLanguageSpec {
+    /// Not `auto`, `per-file` or a pair, and not a valid code either.
+    #[error(transparent)]
+    Code(#[from] InvalidLanguageCode),
+    /// Written as a pair, but not a valid one.
+    #[error(transparent)]
+    Pair(#[from] InvalidLanguagePair),
+}
+
 impl LanguageSpec {
-    /// Return the resolved language code, or `None` if `Auto` or `PerFile`.
+    /// Return the one resolved language code, or `None` for `Auto`, `Pair`
+    /// and `PerFile`.
     ///
-    /// Both `Auto` and `PerFile` represent "no job-level resolved language"
-    /// from the inference-dispatch perspective, but they reach that state
-    /// for different reasons. Callers that need to distinguish them must
-    /// match on the variant directly.
+    /// None of those three has a single job-level code, each for its own
+    /// reason. Callers that need to tell them apart must match on the variant
+    /// directly; a caller that can receive a `Pair` must not use this.
     pub fn as_resolved(&self) -> Option<&LanguageCode3> {
         match self {
-            Self::Auto | Self::PerFile => None,
+            Self::Auto | Self::Pair(_) | Self::PerFile => None,
             Self::Resolved(code) => Some(code),
         }
-    }
-
-    /// Return the resolved language code, falling back to `fallback` if
-    /// `Auto` or `PerFile`.
-    pub fn resolve_or(&self, fallback: &LanguageCode3) -> LanguageCode3 {
-        match self {
-            Self::Auto | Self::PerFile => fallback.clone(),
-            Self::Resolved(code) => code.clone(),
-        }
-    }
-
-    /// Return `true` if this is `Auto`.
-    pub fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto)
     }
 
     /// Return `true` if this is `PerFile`.
@@ -610,30 +698,45 @@ impl LanguageSpec {
     /// plain string: would receive `"auto"` for both cases and try to
     /// load Stanza models for the literal string `"auto"`, crashing
     /// before ready.
+    ///
+    /// A `Pair` maps to its PRIMARY language, deliberately: workers are keyed
+    /// by the language their models load for, and a code-switched transcript's
+    /// language-bearing worker stages (segmentation, morphosyntax) run under
+    /// its primary language. Nothing marks an utterance or word as the
+    /// secondary language yet, so those stages treat the whole transcript as
+    /// the primary.
     pub fn to_worker_language(&self) -> WorkerLanguage {
         match self {
             Self::Auto => WorkerLanguage::Auto,
             Self::Resolved(code) => WorkerLanguage::Resolved(code.clone()),
+            Self::Pair(pair) => WorkerLanguage::Resolved(pair.primary().clone()),
             Self::PerFile => WorkerLanguage::PerFile,
         }
     }
 
+    /// Parse text written by [`Display`](std::fmt::Display): `auto`,
+    /// `per-file`, a pair such as `eng,spa`, or a code.
+    fn parse(text: &str) -> Result<Self, InvalidLanguageSpec> {
+        match text.trim() {
+            text if text.eq_ignore_ascii_case("auto") => Ok(Self::Auto),
+            text if text.eq_ignore_ascii_case("per-file") => Ok(Self::PerFile),
+            text if text.contains(LanguagePair::SEPARATOR) => {
+                Ok(Self::Pair(LanguagePair::parse(text)?))
+            }
+            text => Ok(Self::Resolved(LanguageCode3::try_new(text)?)),
+        }
+    }
+
     /// Parse from a DB string column. `"auto"` → `Auto`, `"per-file"`
-    /// → `PerFile`, anything else → `Resolved`.
+    /// → `PerFile`, `"eng,spa"` → `Pair`, anything else → `Resolved`.
     ///
     /// Returns `(spec, true)` if the value was valid, `(spec, false)` if
     /// the stored value was invalid and fell back to `eng`. Callers should
     /// log the fallback so corrupt DB values are visible.
     pub fn parse_from_db(s: &str) -> (Self, bool) {
-        if s.eq_ignore_ascii_case("auto") {
-            (Self::Auto, true)
-        } else if s.eq_ignore_ascii_case("per-file") {
-            (Self::PerFile, true)
-        } else {
-            match LanguageCode3::try_new(s) {
-                Ok(code) => (Self::Resolved(code), true),
-                Err(_) => (Self::Resolved(LanguageCode3::eng()), false),
-            }
+        match Self::parse(s) {
+            Ok(spec) => (spec, true),
+            Err(_) => (Self::Resolved(LanguageCode3::eng()), false),
         }
     }
 }
@@ -643,6 +746,7 @@ impl std::fmt::Display for LanguageSpec {
         match self {
             Self::Auto => write!(f, "auto"),
             Self::Resolved(code) => write!(f, "{code}"),
+            Self::Pair(pair) => write!(f, "{pair}"),
             Self::PerFile => write!(f, "per-file"),
         }
     }
@@ -655,15 +759,9 @@ impl From<LanguageCode3> for LanguageSpec {
 }
 
 impl TryFrom<&str> for LanguageSpec {
-    type Error = InvalidLanguageCode;
+    type Error = InvalidLanguageSpec;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        if s.eq_ignore_ascii_case("auto") {
-            Ok(Self::Auto)
-        } else if s.eq_ignore_ascii_case("per-file") {
-            Ok(Self::PerFile)
-        } else {
-            LanguageCode3::try_new(s).map(Self::Resolved)
-        }
+        Self::parse(s)
     }
 }
 
@@ -672,11 +770,31 @@ impl Serialize for LanguageSpec {
     where
         S: serde::Serializer,
     {
-        match self {
-            Self::Auto => serializer.serialize_str("auto"),
-            Self::Resolved(code) => serializer.serialize_str(&code.0),
-            Self::PerFile => serializer.serialize_str("per-file"),
-        }
+        serializer.collect_str(self)
+    }
+}
+
+/// The schema of what `LanguageSpec` writes: one string.
+///
+/// Written by hand because a derived schema describes the Rust enum
+/// (`{"Resolved": "eng"}`), which is not what serde writes and never was.
+impl utoipa::PartialSchema for LanguageSpec {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .description(Some(
+                "Job language: `auto` (the ASR engine detects one language), `per-file` \
+                 (each file's `@Languages:` header decides), an ISO 639-3 code such as \
+                 `eng`, or a code-switched pair such as `eng,spa`, primary language first.",
+            ))
+            .examples(["eng", "auto", "per-file", "eng,spa"])
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for LanguageSpec {
+    fn name() -> Cow<'static, str> {
+        Cow::Borrowed("LanguageSpec")
     }
 }
 
@@ -686,15 +804,173 @@ impl<'de> Deserialize<'de> for LanguageSpec {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        if s.eq_ignore_ascii_case("auto") {
-            Ok(Self::Auto)
-        } else if s.eq_ignore_ascii_case("per-file") {
-            Ok(Self::PerFile)
-        } else {
-            LanguageCode3::try_new(&s)
-                .map(Self::Resolved)
-                .map_err(serde::de::Error::custom)
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AsrLanguageRequest and TranscriptLanguage: speech recognition's language,
+// before and after recognition
+// ---------------------------------------------------------------------------
+
+/// What speech recognition is asked to recognize: one language, detection, or
+/// a declared pair.
+///
+/// The ASR side of [`LanguageSpec`], without `PerFile`: a recognizer always
+/// has a job-level answer, so the per-file state is refused once, where this
+/// is built ([`TryFrom<&LanguageSpec>`]), instead of being re-checked by every
+/// stage that reads it. Written as text it is exactly what the matching
+/// `LanguageSpec` writes (`eng`, `auto`, `eng,spa`), which matters: evidence
+/// cache keys are built from that text, and a request must key where the same
+/// request always has.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AsrLanguageRequest {
+    /// One known language.
+    One(LanguageCode3),
+    /// The recognizer detects the language.
+    Detect,
+    /// A code-switched recording in two languages, primary first.
+    Pair(LanguagePair),
+}
+
+/// A per-file language spec reached a speech recognizer.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "speech recognition needs a job-level language (a code, `auto`, or a pair such as \"eng,spa\"); \
+     `per-file` is only for commands that read `@Languages:` from each file"
+)]
+pub struct PerFileHasNoAsrLanguage;
+
+impl TryFrom<&LanguageSpec> for AsrLanguageRequest {
+    type Error = PerFileHasNoAsrLanguage;
+
+    fn try_from(spec: &LanguageSpec) -> Result<Self, Self::Error> {
+        match spec {
+            LanguageSpec::Resolved(code) => Ok(Self::One(code.clone())),
+            LanguageSpec::Auto => Ok(Self::Detect),
+            LanguageSpec::Pair(pair) => Ok(Self::Pair(pair.clone())),
+            LanguageSpec::PerFile => Err(PerFileHasNoAsrLanguage),
         }
+    }
+}
+
+impl From<&AsrLanguageRequest> for LanguageSpec {
+    fn from(request: &AsrLanguageRequest) -> Self {
+        match request {
+            AsrLanguageRequest::One(code) => Self::Resolved(code.clone()),
+            AsrLanguageRequest::Detect => Self::Auto,
+            AsrLanguageRequest::Pair(pair) => Self::Pair(pair.clone()),
+        }
+    }
+}
+
+impl AsrLanguageRequest {
+    /// The language processing will run under when it is known before
+    /// recognition: the one requested, or a pair's primary. `None` only for
+    /// detection.
+    pub fn primary_if_known(&self) -> Option<&LanguageCode3> {
+        match self {
+            Self::One(code) => Some(code),
+            Self::Pair(pair) => Some(pair.primary()),
+            Self::Detect => None,
+        }
+    }
+}
+
+impl std::fmt::Display for AsrLanguageRequest {
+    /// Exactly the text of the matching [`LanguageSpec`], by construction.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        LanguageSpec::from(self).fmt(f)
+    }
+}
+
+/// The language or languages of a finished transcript.
+///
+/// What recognition resolves an [`AsrLanguageRequest`] to: detection becomes
+/// the language detected, and one language or a pair stays what was asked.
+/// There is no undetermined state; a recognizer that could not say which
+/// language it heard is refused before one of these exists. Written as text it
+/// is a code (`eng`) or a pair (`eng,spa`), so a value stored before pairs
+/// existed still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TranscriptLanguage {
+    /// One language.
+    One(LanguageCode3),
+    /// Two languages, primary first.
+    Pair(LanguagePair),
+}
+
+impl TranscriptLanguage {
+    /// The language an unmarked utterance is in, and the one the transcript's
+    /// language-bearing processing (number expansion, segmentation,
+    /// morphosyntax) runs under.
+    pub fn primary(&self) -> &LanguageCode3 {
+        match self {
+            Self::One(code) => code,
+            Self::Pair(pair) => pair.primary(),
+        }
+    }
+
+    /// Every language, in `@Languages` order.
+    pub fn declared(&self) -> Vec<&LanguageCode3> {
+        match self {
+            Self::One(code) => vec![code],
+            Self::Pair(pair) => pair.declared().to_vec(),
+        }
+    }
+}
+
+impl From<&TranscriptLanguage> for LanguageSpec {
+    fn from(language: &TranscriptLanguage) -> Self {
+        match language {
+            TranscriptLanguage::One(code) => Self::Resolved(code.clone()),
+            TranscriptLanguage::Pair(pair) => Self::Pair(pair.clone()),
+        }
+    }
+}
+
+/// A language spec that is not a transcript's language: `auto` or `per-file`.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "\"{0}\" is not a transcript language: expected a code such as \"eng\" or a pair such as \"eng,spa\""
+)]
+pub struct NotATranscriptLanguage(LanguageSpec);
+
+impl TryFrom<LanguageSpec> for TranscriptLanguage {
+    type Error = NotATranscriptLanguage;
+
+    fn try_from(spec: LanguageSpec) -> Result<Self, Self::Error> {
+        match spec {
+            LanguageSpec::Resolved(code) => Ok(Self::One(code)),
+            LanguageSpec::Pair(pair) => Ok(Self::Pair(pair)),
+            LanguageSpec::Auto | LanguageSpec::PerFile => Err(NotATranscriptLanguage(spec)),
+        }
+    }
+}
+
+impl std::fmt::Display for TranscriptLanguage {
+    /// Exactly the text of the matching [`LanguageSpec`], by construction.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        LanguageSpec::from(self).fmt(f)
+    }
+}
+
+impl Serialize for TranscriptLanguage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for TranscriptLanguage {
+    /// Read through [`LanguageSpec`]'s one parser.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::try_from(LanguageSpec::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1117,6 +1393,14 @@ impl From<&LanguageCode3> for StampSafeText {
     /// padded or structure.
     fn from(code: &LanguageCode3) -> Self {
         Self(Cow::Owned(code.0.clone()))
+    }
+}
+
+impl From<&LanguagePair> for StampSafeText {
+    /// Total: two language codes and [`LanguagePair::SEPARATOR`], none of which
+    /// is whitespace or stamp structure. The pair's own text (`eng,spa`).
+    fn from(pair: &LanguagePair) -> Self {
+        Self(Cow::Owned(pair.to_string()))
     }
 }
 
@@ -1690,20 +1974,6 @@ mod tests {
     }
 
     #[test]
-    fn language_spec_resolve_or_returns_resolved() {
-        let spec = LanguageSpec::Resolved(LanguageCode3::spa());
-        let fallback = LanguageCode3::eng();
-        assert_eq!(spec.resolve_or(&fallback), LanguageCode3::spa());
-    }
-
-    #[test]
-    fn language_spec_resolve_or_returns_fallback_for_auto() {
-        let spec = LanguageSpec::Auto;
-        let fallback = LanguageCode3::eng();
-        assert_eq!(spec.resolve_or(&fallback), LanguageCode3::eng());
-    }
-
-    #[test]
     fn language_spec_display() {
         assert_eq!(LanguageSpec::Auto.to_string(), "auto");
         assert_eq!(
@@ -1805,9 +2075,82 @@ mod tests {
         assert_eq!(LanguageSpec::PerFile.as_resolved(), None);
     }
 
+    // ---- LanguagePair, AsrLanguageRequest, TranscriptLanguage ----
+
+    /// A pair is two different valid codes separated by one comma, primary
+    /// first; anything else is refused with the reason.
     #[test]
-    fn language_spec_per_file_is_not_auto() {
-        assert!(!LanguageSpec::PerFile.is_auto());
+    fn a_language_pair_is_two_different_codes() {
+        let pair = LanguagePair::parse("eng,spa").expect("a pair");
+        assert_eq!(pair.primary(), &LanguageCode3::eng());
+        assert_eq!(pair.secondary(), &LanguageCode3::spa());
+        assert_eq!(pair.to_string(), "eng,spa");
+        assert_eq!(
+            LanguagePair::parse("SPA, eng")
+                .expect("case and spacing")
+                .to_string(),
+            "spa,eng"
+        );
+
+        assert!(matches!(
+            LanguagePair::parse("eng,eng"),
+            Err(InvalidLanguagePair::SameLanguage(_))
+        ));
+        assert!(matches!(
+            LanguagePair::parse("eng,spa,fra"),
+            Err(InvalidLanguagePair::Shape(_))
+        ));
+        assert!(matches!(
+            LanguagePair::parse("eng,sp"),
+            Err(InvalidLanguagePair::Code(_))
+        ));
+    }
+
+    /// A pair round-trips through every text form a job record is kept in:
+    /// display, JSON and the database column.
+    #[test]
+    fn a_language_spec_pair_round_trips_through_its_text_forms()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let spec = LanguageSpec::try_from("eng,spa")?;
+        assert!(matches!(spec, LanguageSpec::Pair(_)));
+        assert_eq!(spec.to_string(), "eng,spa");
+        let json = serde_json::to_string(&spec)?;
+        assert_eq!(json, "\"eng,spa\"");
+        assert_eq!(serde_json::from_str::<LanguageSpec>(&json)?, spec);
+        assert_eq!(LanguageSpec::parse_from_db("eng,spa"), (spec.clone(), true));
+        assert!(serde_json::from_str::<LanguageSpec>("\"eng,eng\"").is_err());
+        Ok(())
+    }
+
+    /// A pair has no single code, and its workers load for its primary.
+    #[test]
+    fn a_language_spec_pair_has_no_single_code_and_routes_workers_by_primary() {
+        let spec = LanguageSpec::try_from("spa,eng").expect("a pair");
+        assert_eq!(spec.as_resolved(), None);
+        assert_eq!(
+            spec.to_worker_language(),
+            WorkerLanguage::Resolved(LanguageCode3::spa())
+        );
+    }
+
+    /// A transcript language stored before pairs existed, a bare code, still
+    /// reads; a pair reads as a pair; `auto` is never a transcript language.
+    #[test]
+    fn a_transcript_language_reads_old_codes_and_pairs() -> Result<(), Box<dyn std::error::Error>> {
+        let old: TranscriptLanguage = serde_json::from_str("\"eng\"")?;
+        assert_eq!(old, TranscriptLanguage::One(LanguageCode3::eng()));
+        assert_eq!(old.declared(), vec![&LanguageCode3::eng()]);
+
+        let pair: TranscriptLanguage = serde_json::from_str("\"spa,eng\"")?;
+        assert_eq!(pair.primary(), &LanguageCode3::spa());
+        assert_eq!(
+            pair.declared(),
+            vec![&LanguageCode3::spa(), &LanguageCode3::eng()]
+        );
+        assert_eq!(serde_json::to_string(&pair)?, "\"spa,eng\"");
+
+        assert!(serde_json::from_str::<TranscriptLanguage>("\"auto\"").is_err());
+        Ok(())
     }
 
     // ---- DisplayPath ----

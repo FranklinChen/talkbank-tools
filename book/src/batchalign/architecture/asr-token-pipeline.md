@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-09-16 04:34 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -266,15 +266,16 @@ count.
 | 2 | Timed word extraction + separator strip | `prepare_words_pre_expansion()` | Seconds → ms, pause markers filtered, MOR_PUNCT (`,` `„` `‡`) and RTL separators trimmed from word boundaries. **Case is preserved**: see "Casing" below. |
 | 2d | **Cantonese normalization** (lang=yue only) | `prepare_words_pre_expansion()` | The monologue's words are normalized as ONE run through `AlignedNormalization` (simplified → traditional plus the 31-entry domain table), and each word gets back exactly its own characters. It runs before stage 3 because that stage interpolates timestamps across a token's characters and must see final text, and because normalizing afterwards would normalize one character at a time and lose every multi-character replacement. A conversion that changed the character count refuses the file (`NormalizationChangedLength`, carrying both counts) rather than re-cutting words away from their timings. |
 | 3 | Multi-word splitting | `prepare_words_pre_expansion()` | Space-containing tokens split, timestamps interpolated, hyphens joined |
-| 3b | **Percent-suffix split** | `split_percent_suffix_words()` | `"80%"` → `"80"` + per-language percent word ("percent" for eng, 11 languages covered) with proportional timing. `%` is the CHAT dep-tier sigil and structurally illegal on the main tier in any language. Dormant for en/es (see below); fires for languages where Rev.AI applies ITN. |
-| 4 | **Number expansion** | `expand_number()` per word | Single Rust pass: cardinals via per-language `NUM2LANG` (47 langs); CJK via `num2chinese`; English ordinals/decades via `ordinal_year_eng`; currency via `try_expand_currency`; percent via per-lang table; dash-ranges split and recurse; digit-leading hyphen compounds (`"17-year-old"` → `"seventeen-year-old"` in digit-rejecting languages) via `try_expand_digit_leading_hyphen`. |
+| 3b | **Percent-suffix split** | `split_percent_suffix_words()` | `"80%"` → `"80"` + per-language percent word ("percent" for eng, 11 languages covered) with proportional timing. `%` is the CHAT dep-tier sigil and structurally illegal on the main tier in any language. Dormant for single-language en/es (see below); fires for languages where Rev.AI applies ITN. For code-switched text (`AsrTextLanguage::CodeSwitched`) the digit group is kept and `%` dropped, because no language is known to write the percent word in. |
+| 4 | **Number expansion** | `expand_number()` per word | Single Rust pass: cardinals via per-language `NUM2LANG` (47 langs); CJK via `num2chinese`; English ordinals/decades via `ordinal_year_eng`; currency via `try_expand_currency`; percent via per-lang table; dash-ranges split and recurse; digit-leading hyphen compounds (`"17-year-old"` → `"seventeen-year-old"` in digit-rejecting languages) via `try_expand_digit_leading_hyphen`. **Skipped for code-switched text**: nothing says which language a numeral was spoken in, so digits stay digits and are reported for review rather than written out as words the speaker may not have said. |
 | 4.5 | **Post-expansion re-split** | `split_words_with_whitespace()` | Expansion can produce multi-word text (`"100"` → `"one hundred"`, `"$80"` → `"eighty dollars"`). A `ChatWordText` holds one main-tier token, so whitespace-bearing entries are split into separate `AsrWord`s with proportionally distributed timing. |
 
 ### Rev.AI and the stage-3b/4/4.5 defense-in-depth
 
 For Rev.AI in English and Spanish, BA3 sends
-`skip_postprocessing=true` (see
-`batchalign/src/revai/preflight.rs::skip_postprocessing_hint`).
+`skip_postprocessing=true` (see `rev_submit_options` in
+`crates/batchalign/src/revai/asr.rs`, driven by the option column of
+`REV_LANGUAGES`).
 Per Rev.AI's docs this tells the service to skip Inverse Text
 Normalization (ITN): the response comes back in **spoken form**,
 `"eighty"`, `"percent"`, `"seventeen"`, `"year"`, `"old"`: rather
@@ -288,8 +289,12 @@ These stages remain in the pipeline for two reasons:
 1. **Other languages.** Per the Rev.AI API docs,
    `skip_postprocessing` is available only for English and Spanish.
    For every other language Rev.AI applies ITN by default and the
-   request body omits the flag (the helper returns `None`). The
-   normalizer stages still fire for those responses.
+   request body omits the flag. The normalizer stages still fire for
+   those responses. (The live API's refusal message also lists French
+   and Portuguese as accepting the flag; BA3 does not send it for them.)
+   Rev.AI's multilingual English/Spanish model (`en/es`) refuses the
+   flag outright (HTTP 400), so a code-switched transcript arrives in
+   written form; there stages 3b and 4 keep the digits, as above.
 2. **Defense in depth.** A future Rev.AI behavior change, a swap to
    an ASR provider that also applies ITN, or a regression in the
    flag-setting policy would reintroduce the input class these stages

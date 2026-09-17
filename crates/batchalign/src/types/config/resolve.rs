@@ -51,41 +51,12 @@ impl ServerConfig {
         }
     }
 
-    /// Return a list of warnings (non-fatal) about the config.
-    pub fn validate(&mut self) -> Vec<String> {
-        let mut warnings = Vec::new();
-
-        for root in &self.media_roots {
-            if !root.as_path().is_dir() {
-                warnings.push(format!("media_root does not exist: {root}"));
-            }
-        }
-        for (key, root) in &self.media_mappings {
-            if !root.as_path().is_dir() {
-                warnings.push(format!("media_mapping '{key}' root does not exist: {root}"));
-            }
-        }
-        // `port` needs no validation: `PortRequest` admits no invalid value.
-        // Every `u16` names a request, with 0 meaning "let the OS choose"
-        // rather than "invalid, substitute 8000". The rewrite that used to
-        // live here was the reason an ephemeral request could not be written
-        // down at all: it warned and silently pointed the server at the one
-        // port most likely to be already occupied.
-        if self.job_ttl_days < 1 {
-            warnings.push(format!(
-                "job_ttl_days must be >= 1 (got {}), defaulting to 1",
-                self.job_ttl_days
-            ));
-            self.job_ttl_days = 1;
-        }
-        if self.memory_gate_poll_s == 0 {
-            warnings.push("memory_gate_poll_s must be >= 1, defaulting to 1".into());
-            self.memory_gate_poll_s = 1;
-        }
-        if self.max_concurrent_worker_startups == 0 {
-            warnings.push("max_concurrent_worker_startups must be >= 1, defaulting to 1".into());
-            self.max_concurrent_worker_startups = 1;
-        }
-        warnings
+    /// Report admission corrections without mutation or filesystem access.
+    pub fn validate(&self) -> Vec<String> {
+        [
+            self.job_ttl_days.warning(),
+            self.memory_gate_poll_s.warning(),
+            self.max_concurrent_worker_startups.warning(),
+        ].into_iter().flatten().collect()
     }
 }

@@ -1,4 +1,4 @@
-use super::{AsrNormalizedText, AsrWord, WordKind, expand_number};
+use super::{AsrNormalizedText, AsrTextLanguage, AsrWord, WordKind, expand_number};
 
 /// Expand digit strings to word form in all words.
 ///
@@ -10,7 +10,16 @@ use super::{AsrNormalizedText, AsrWord, WordKind, expand_number};
 /// inside a single word makes the fragment parser reject it as two
 /// tokens glued together. Timing is distributed proportionally by
 /// text length so downstream FA can realign if needed.
-pub(super) fn expand_numbers_in_words(words: Vec<AsrWord>, lang: &str) -> Vec<AsrWord> {
+///
+/// Code-switched text keeps its digits: see [`AsrTextLanguage`].
+pub(super) fn expand_numbers_in_words(
+    words: Vec<AsrWord>,
+    language: AsrTextLanguage<'_>,
+) -> Vec<AsrWord> {
+    let lang = match language {
+        AsrTextLanguage::One(lang) => lang,
+        AsrTextLanguage::CodeSwitched { .. } => return words,
+    };
     words
         .into_iter()
         .flat_map(|w| {

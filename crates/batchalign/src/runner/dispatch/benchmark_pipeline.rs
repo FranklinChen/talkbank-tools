@@ -62,6 +62,8 @@ struct BenchmarkFileContext<'a> {
     planned_units: &'a HashMap<String, BenchmarkWorkUnit>,
     /// Whether output should pass through merge-abbrev before persistence.
     should_merge_abbrev: bool,
+    /// The one language the job is scored in, settled by the plan.
+    lang: &'a crate::api::LanguageCode3,
 }
 
 /// Dispatch benchmark through the Rust-owned benchmark pipeline.
@@ -76,6 +78,7 @@ pub(crate) async fn dispatch_benchmark_infer(
         base_options,
         mwt,
         should_merge_abbrev,
+        lang,
     } = plan;
     let planned_units: Arc<HashMap<String, BenchmarkWorkUnit>> = {
         let sink = host.sink().clone();
@@ -137,6 +140,7 @@ pub(crate) async fn dispatch_benchmark_infer(
         let mwt = mwt.clone();
         let planned_units = planned_units.clone();
         let filename = file.filename.clone();
+        let lang = lang.clone();
 
         tasks.push(spawn_supervised_file_task(
             filename,
@@ -151,6 +155,7 @@ pub(crate) async fn dispatch_benchmark_infer(
                     mwt: &mwt,
                     planned_units: planned_units.as_ref(),
                     should_merge_abbrev,
+                    lang: &lang,
                 };
                 process_one_benchmark_file(&file, &mut opts, context).await
             },
@@ -189,6 +194,7 @@ async fn process_one_benchmark_file(
         mwt,
         planned_units,
         should_merge_abbrev,
+        lang,
     } = context;
     let job_id = &job.identity.job_id;
     let file_index = file.file_index;
@@ -261,26 +267,10 @@ async fn process_one_benchmark_file(
         let progress_tx =
             spawn_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
 
-        // No silent eng fallback for benchmark either. If the job carries
-        // `Auto` (uncommon for benchmark) and ASR has not yet resolved a
-        // language, surface a typed error.
-        let bench_lang = match job.dispatch.lang.as_resolved() {
-            Some(code) => code.clone(),
-            None => {
-                let msg = format!(
-                    "benchmark requires a resolved `--lang <iso3>`; got '{}'.",
-                    job.dispatch.lang
-                );
-                lifecycle
-                    .fail(&msg, FailureCategory::Validation, unix_now())
-                    .await;
-                continue;
-            }
-        };
         match process_benchmark(BenchmarkRequest {
             audio_path: &audio_path,
             gold_text: crate::api::ChatText::from(gold_text.as_str()),
-            lang: &bench_lang,
+            lang,
             services,
             transcribe_options: opts,
             mwt,

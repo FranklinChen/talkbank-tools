@@ -915,7 +915,7 @@ fn mismatched_execute_request(request_id: &str, task: InferenceTaskV2) -> Execut
             },
             input: AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
                 media_path: "/tmp/mismatched-provider.wav".into(),
-                diarization: ProviderDiarizationV2::for_expected_speakers(NumSpeakers(2)),
+                diarization: ProviderDiarizationV2::for_backend(AsrBackendV2::HkTencent, NumSpeakers(2)),
             }),
             extras: std::collections::BTreeMap::new(),
             decode_budget_seconds: None,
@@ -1033,7 +1033,7 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
     };
     asr_request.input = AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
         media_path: "/tmp/provider.wav".into(),
-        diarization: ProviderDiarizationV2::for_expected_speakers(NumSpeakers(2)),
+        diarization: ProviderDiarizationV2::for_backend(AsrBackendV2::HkTencent, NumSpeakers(2)),
     });
     let error = validate_execute_request_invariants(&invalid_asr_transport)
         .expect_err("local whisper with provider_media should fail");

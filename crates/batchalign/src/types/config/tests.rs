@@ -12,7 +12,7 @@ fn default_config() {
     assert_eq!(cfg.port, crate::config::PortRequest::from_u16(8000));
     assert_eq!(cfg.host, "0.0.0.0");
     assert_eq!(cfg.default_lang, "eng"); // PartialEq<&str>
-    assert_eq!(cfg.job_ttl_days, 7);
+    assert_eq!(cfg.job_ttl_days.get(), 7);
     assert!(cfg.auto_daemon);
     assert_eq!(cfg.worker_health_interval_s, 30);
     // `memory_gate_mb` defaults to `None`. The fallback value is
@@ -26,12 +26,12 @@ fn default_config() {
         cfg.resolved_memory_gate_mb(),
         batchalign_types::memory::MIN_FREE_MEMORY_MB
     );
-    assert_eq!(cfg.max_concurrent_worker_startups, 1);
+    assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
     assert_eq!(cfg.max_workers_per_key, None);
     assert_eq!(cfg.worker_ready_timeout_s, 300);
     assert_eq!(cfg.max_body_bytes_mb, MemoryMb(512));
     assert_eq!(cfg.memory_gate_timeout_s, 120);
-    assert_eq!(cfg.memory_gate_poll_s, 5);
+    assert_eq!(cfg.memory_gate_poll_s.get(), 5);
     assert_eq!(cfg.memory_warning_mb, MemoryMb(4096));
     // `gpu_thread_pool_size` defaults to `None` post-host-facts-migration.
     // Production builders read from `EffectiveConfig` (which yields 4 on
@@ -90,23 +90,19 @@ warmup: false
 }
 
 #[test]
-fn validate_fixes_bad_values() {
-    // Several legacy validator clamps have moved into the type system
-    // via the host-facts `Option<u32>` migrations: `gpu_thread_pool_size`
-    // (C2.1) and `max_concurrent_jobs` (C2.4) no longer carry sentinel
-    // values that need clamping, `0` deserializes to `None` and
-    // negative values are no longer expressible. The remaining
-    // clamps below are for fields that have not yet migrated.
-    let mut cfg = ServerConfig {
-        job_ttl_days: 0,
-        memory_gate_poll_s: 0,
-        max_concurrent_worker_startups: 0,
+fn constructors_admit_bad_values_before_validation() {
+    // Constructors admit positive runtime values and preserve each correction
+    // for the pure warning pass. Validation no longer repairs mutable fields.
+    let cfg = ServerConfig {
+        job_ttl_days: JobTtlDays::new(0),
+        memory_gate_poll_s: MemoryGatePollSeconds::new(0),
+        max_concurrent_worker_startups: WorkerStartupLimit::new(0),
         ..Default::default()
     };
     let warnings = cfg.validate();
-    assert_eq!(cfg.job_ttl_days, 1);
-    assert_eq!(cfg.memory_gate_poll_s, 1);
-    assert_eq!(cfg.max_concurrent_worker_startups, 1);
+    assert_eq!(cfg.job_ttl_days.get(), 1);
+    assert_eq!(cfg.memory_gate_poll_s.get(), 1);
+    assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
     assert_eq!(warnings.len(), 3);
 }
 
@@ -143,9 +139,9 @@ fn load_validated_config_clamps_bad_values_but_not_the_port() {
     let (cfg, warnings) = load_validated_config_from_layout(&layout, None).unwrap();
     // NOT clamped to 8000: 0 is a legal request meaning "OS chooses".
     assert_eq!(cfg.port, crate::config::PortRequest::Ephemeral);
-    assert_eq!(cfg.job_ttl_days, 1);
-    assert_eq!(cfg.memory_gate_poll_s, 1);
-    assert_eq!(cfg.max_concurrent_worker_startups, 1);
+    assert_eq!(cfg.job_ttl_days.get(), 1);
+    assert_eq!(cfg.memory_gate_poll_s.get(), 1);
+    assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
     // Legacy `gpu_thread_pool_size: 0` in YAML now collapses to `None`
     // via the `zero_as_none` serde shim, no validator warning fires.
     assert_eq!(cfg.gpu_thread_pool_size, None);
@@ -757,4 +753,21 @@ fn explicit_memory_gate_overrides_tier_default() {
         ..Default::default()
     };
     assert_eq!(cfg.resolved_memory_gate_mb().0, 9_999);
+}
+
+#[test]
+fn config_admission_does_not_probe_media_paths() {
+    // A nonexistent path is no longer a warning: loading admits syntax and
+    // scalar policy, while on-demand media access owns availability.
+    let cfg: ServerConfig = serde_yaml::from_str(
+        "media_roots: [/unavailable-volume/media]\nmedia_mappings: {bank: /unavailable-volume/bank}\njob_ttl_days: -5\n"
+    ).unwrap();
+    assert_eq!(cfg.job_ttl_days.get(), 1);
+    let warnings = cfg.validate();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("job_ttl_days"));
+    let encoded = serde_yaml::to_string(&cfg).unwrap();
+    let admitted: ServerConfig = serde_yaml::from_str(&encoded).unwrap();
+    assert_eq!(admitted.job_ttl_days.get(), 1);
+    assert!(admitted.validate().is_empty());
 }

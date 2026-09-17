@@ -838,7 +838,7 @@ fn split_pipeline_matches_monolithic_simple() {
     for monologue in &output.monologues {
         let words = prepare_words_pre_expansion(&monologue.elements, "eng")
             .expect("test: ASR post-processing must not refuse this input");
-        let words = expand_numbers_in_words(words, "eng");
+        let words = expand_numbers_in_words(words, AsrTextLanguage::One("eng"));
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "eng"));
     }
 
@@ -849,6 +849,43 @@ fn split_pipeline_matches_monolithic_simple() {
         let s_texts: Vec<&str> = s.words.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(m_texts, s_texts, "chunk word texts differ");
     }
+}
+
+/// Code-switched text keeps the numerals and percent signs it was recognized
+/// with, where text in one language has them written out in that language.
+///
+/// In `tengo 25 años` nothing says whether `25` was said in English or in
+/// Spanish; `twenty five` in a Spanish utterance, or `veinticinco` in an
+/// English one, would be words the speaker may not have said.
+#[test]
+fn code_switched_text_keeps_numerals_rather_than_guessing_their_language() {
+    let output = AsrOutput {
+        monologues: vec![AsrMonologue {
+            speaker: SpeakerIndex(0),
+            elements: vec![
+                elem("tengo", 0.0, 0.3),
+                elem("25", 0.3, 0.6),
+                elem("años", 0.6, 0.9),
+                elem("80%", 0.9, 1.2),
+            ],
+        }],
+    };
+    let texts = |language: AsrTextLanguage<'_>| -> Vec<String> {
+        prepare_asr_chunks(&output, language)
+            .expect("test: ASR post-processing must not refuse this input")
+            .into_iter()
+            .flat_map(|chunk| chunk.words)
+            .map(|word| word.text.as_str().to_owned())
+            .collect()
+    };
+
+    assert_eq!(
+        texts(AsrTextLanguage::One("eng")),
+        vec!["tengo", "twenty-five", "años", "eighty", "percent"]
+    );
+
+    let switched = texts(AsrTextLanguage::CodeSwitched { primary: "eng" });
+    assert_eq!(switched, vec!["tengo", "25", "años", "80"]);
 }
 
 /// Split pipeline with Cantonese normalization.
@@ -872,7 +909,7 @@ fn split_pipeline_matches_monolithic_cantonese() {
     for monologue in &output.monologues {
         let words = prepare_words_pre_expansion(&monologue.elements, "yue")
             .expect("test: ASR post-processing must not refuse this input");
-        let words = expand_numbers_in_words(words, "yue");
+        let words = expand_numbers_in_words(words, AsrTextLanguage::One("yue"));
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "yue"));
     }
 
@@ -907,7 +944,7 @@ fn split_pipeline_matches_monolithic_multi_monologue() {
     for monologue in &output.monologues {
         let words = prepare_words_pre_expansion(&monologue.elements, "eng")
             .expect("test: ASR post-processing must not refuse this input");
-        let words = expand_numbers_in_words(words, "eng");
+        let words = expand_numbers_in_words(words, AsrTextLanguage::One("eng"));
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "eng"));
     }
 

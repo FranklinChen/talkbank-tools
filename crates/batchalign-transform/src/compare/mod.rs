@@ -7,6 +7,7 @@
 //! This module keeps compare concerns split by responsibility:
 //! - [`model`] defines the workflow data structures
 //! - [`engine`] owns alignment and bundle construction
+//! - [`language`] owns each word's resolved language and the language scores
 //! - [`metrics`] owns aggregate counters and CSV materialization
 //! - [`serialize`] owns `%xsrep` / `%xsmor` rendering
 //! - [`materialize`] owns CHAT-tier injection and gold projection
@@ -18,6 +19,7 @@ mod artifact;
 mod cross_mode;
 mod cross_run;
 mod engine;
+mod language;
 mod materialize;
 mod metrics;
 mod model;
@@ -49,10 +51,15 @@ pub use self::cross_run::{
     serialize_cross_run_csv, serialize_cross_run_json,
 };
 pub use self::engine::compare;
+pub use self::language::{
+    LanguageBucket, LanguageConfusion, LanguageErrorCounts, LanguagePair, LanguageScores, Rate,
+    SwitchAgreement, UtteranceLanguageAgreement,
+};
 pub use self::materialize::{clear_comparison, inject_comparison, project_gold_structurally};
 pub use self::metrics::{
-    CompareCsvHeader, CompareMetricName, CompareMetricValue, CompareMetricsCsvRow,
-    CompareMetricsCsvTable, ComparePosMetricKind, format_metrics_csv,
+    AgreementMetricKind, AgreementScope, CompareCsvHeader, CompareMetricName, CompareMetricValue,
+    CompareMetricsCsvRow, CompareMetricsCsvTable, ComparePosMetricKind, LanguageMetricKind,
+    SwitchMetricKind, format_metrics_csv,
 };
 pub use self::model::{
     CompareMetrics, CompareResult, CompareStatus, CompareToken, ComparisonBundle, GoldCoverage,
@@ -65,5 +72,7 @@ pub use self::serialize::{
     XsrepTierContent, format_xsmor, format_xsrep,
 };
 
+#[cfg(test)]
+mod language_tests;
 #[cfg(test)]
 mod tests;

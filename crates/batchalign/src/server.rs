@@ -111,7 +111,7 @@ pub async fn create_app_with_prepared_workers(
     if !interrupted.is_empty() {
         info!(count = interrupted.len(), "Recovered interrupted jobs");
     }
-    let expired_dirs = db.prune_expired(config.job_ttl_days).await?;
+    let expired_dirs = db.prune_expired(config.job_ttl_days.get()).await?;
     for d in &expired_dirs {
         let _ = tokio::fs::remove_dir_all(d).await;
     }
@@ -201,7 +201,7 @@ pub async fn create_test_app_with_prepared_workers(
     if !interrupted.is_empty() {
         info!(count = interrupted.len(), "Recovered interrupted jobs");
     }
-    let expired_dirs = db.prune_expired(config.job_ttl_days).await?;
+    let expired_dirs = db.prune_expired(config.job_ttl_days.get()).await?;
     for d in &expired_dirs {
         let _ = tokio::fs::remove_dir_all(d).await;
     }

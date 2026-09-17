@@ -122,7 +122,7 @@ impl JobStore {
         };
 
         let rows = db.load_all_jobs().await?;
-        let ttl_cutoff = super::super::unix_now().0 - (self.config.job_ttl_days as f64 * 86400.0);
+        let ttl_cutoff = super::super::unix_now().0 - (self.config.job_ttl_days.get() as f64 * 86400.0);
         let (loaded, recovered_updates) = self
             .registry
             .mutate_all(move |jobs| {

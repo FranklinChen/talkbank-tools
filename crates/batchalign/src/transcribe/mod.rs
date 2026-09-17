@@ -60,7 +60,7 @@ pub(crate) async fn process_transcribe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{DurationSeconds, LanguageCode3, LanguageSpec, WorkerLanguage};
+    use crate::api::{DurationSeconds, LanguageCode3};
     use batchalign_transform::asr_postprocess::{self, SpeakerIndex};
     use batchalign_transform::build_chat;
     use batchalign_transform::serialize::to_chat_string;
@@ -141,41 +141,6 @@ mod tests {
                 engine.as_wire_name()
             );
         }
-    }
-
-    /// `Auto` jobs reach the ASR worker with no resolved fallback. The
-    /// downstream parser must surface a typed error if the worker
-    /// returns no language either, no silent eng fallback.
-    #[test]
-    fn asr_auto_uses_auto_worker_language_with_no_fallback() {
-        let (worker_lang, fallback_lang) =
-            asr_worker_languages(&LanguageSpec::Auto).expect("Auto is a legal transcribe spec");
-        assert_eq!(worker_lang, WorkerLanguage::Auto);
-        assert!(
-            fallback_lang.is_none(),
-            "Auto must have no concrete fallback, Stanza header must be \
-             driven by the ASR response, not silently substituted with eng",
-        );
-    }
-
-    #[test]
-    fn asr_resolved_language_preserves_worker_and_fallback_values() {
-        let lang = LanguageSpec::Resolved(LanguageCode3::fra());
-        let (worker_lang, fallback_lang) =
-            asr_worker_languages(&lang).expect("Resolved is a legal transcribe spec");
-        assert_eq!(worker_lang, WorkerLanguage::from(LanguageCode3::fra()));
-        assert_eq!(fallback_lang, Some(LanguageCode3::fra()));
-    }
-
-    /// `PerFile` is reserved for morphotag/translate/coref; transcribe
-    /// must reject it at the ASR-language helper level so a malformed
-    /// submission can't silently degrade.
-    #[test]
-    fn asr_per_file_is_rejected() {
-        let err = asr_worker_languages(&LanguageSpec::PerFile)
-            .expect_err("transcribe must reject PerFile");
-        let msg = err.to_string();
-        assert!(msg.contains("PerFile"), "{msg}");
     }
 
     #[test]
@@ -759,7 +724,7 @@ mod tests {
     /// → `into_transcript` → `build_chat` → `to_chat_string`.
     fn run_canned_response_to_chat(response: &AsrResponse, media_name: Option<&str>) -> String {
         let asr_output = convert_asr_response(response);
-        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang)
+        let utterances = asr_postprocess::process_raw_asr(&asr_output, response.lang.as_ref())
             .expect("test: ASR post-processing must not refuse this input");
         let desc = build_chat::NamedAsrUtterances::numbered(&utterances)
             .into_transcript(&[response.lang.to_string()], media_name, false)
@@ -953,7 +918,7 @@ mod tests {
     fn canned_revai_response_splits_on_embedded_periods() {
         let response = canned_revai_two_speaker_response();
         let asr_output = convert_asr_response(&response);
-        let utterances = asr_postprocess::process_raw_asr(&asr_output, &response.lang)
+        let utterances = asr_postprocess::process_raw_asr(&asr_output, response.lang.as_ref())
             .expect("test: ASR post-processing must not refuse this input");
 
         // "program." and "ago." should create utterance boundaries, so we

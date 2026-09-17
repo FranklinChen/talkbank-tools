@@ -1001,7 +1001,7 @@
           },
           "lang": {
             "$ref": "#/components/schemas/LanguageSpec",
-            "description": "Language specification: a resolved ISO 639-3 code or `\"auto\"`."
+            "description": "Job language: a resolved ISO 639-3 code, `\"auto\"`, `\"per-file\"`, or a\ncode-switched pair such as `\"eng,spa\"`."
           },
           "last_cancelled_at": {
             "oneOf": [
@@ -1172,7 +1172,7 @@
           },
           "lang": {
             "$ref": "#/components/schemas/LanguageSpec",
-            "description": "Language specification: a resolved ISO 639-3 code or `\"auto\"`."
+            "description": "Job language: a resolved ISO 639-3 code, `\"auto\"`, `\"per-file\"`, or a\ncode-switched pair such as `\"eng,spa\"`."
           },
           "next_eligible_at": {
             "oneOf": [
@@ -1309,7 +1309,7 @@
           },
           "lang": {
             "$ref": "#/components/schemas/LanguageSpec",
-            "description": "Language specification: a 3-letter ISO code or `\"auto\"` for\nASR-driven detection."
+            "description": "Job language: a 3-letter ISO code, `\"auto\"` for ASR-driven detection,\n`\"per-file\"`, or a code-switched pair such as `\"eng,spa\"`."
           },
           "media_files": {
             "description": "Media filenames for the server to resolve from media_roots (transcribe only).",
@@ -1362,41 +1362,15 @@
         ],
         "type": "object"
       },
-      "LanguageCode3": {
-        "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected, use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
-        "type": "string"
-      },
       "LanguageSpec": {
-        "description": "Language specification from the CLI or job submission.\n\n`Auto` means the ASR engine should detect the language. This variant must\nbe resolved to a concrete [`LanguageCode3`] before any CHAT construction\nor NLP dispatch that requires a known language.\n\n`PerFile` means the command has no job-level language at all: each input\nfile's processing language is read from its `@Languages:` header at the\nstart of the per-file pipeline. This is distinct from `Auto`: `Auto` is an\nASR-engine signal asking the model to detect the spoken language;\n`PerFile` is a routing signal for text-NLP commands (morphotag, translate,\ncoref) whose language source is the CHAT file itself, not the job\nsubmission. The 2026-05-03 morphotag incident happened because these\ncommands were forced to carry a placeholder `Resolved(eng)` value that\nthen leaked into the job record, the dashboard, and the Stanza\npre-warming key. `PerFile` makes the absence of a job-level language a\nfirst-class state in the type system.",
-        "oneOf": [
-          {
-            "description": "Let the ASR engine auto-detect the language.",
-            "enum": [
-              "Auto"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "A concrete ISO 639-3 language code.",
-            "properties": {
-              "Resolved": {
-                "$ref": "#/components/schemas/LanguageCode3",
-                "description": "A concrete ISO 639-3 language code."
-              }
-            },
-            "required": [
-              "Resolved"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "No job-level language; resolve per-file from each CHAT file's\n`@Languages:` header. Used by morphotag, translate, and coref\nnone of which take a `--lang` CLI flag.",
-            "enum": [
-              "PerFile"
-            ],
-            "type": "string"
-          }
-        ]
+        "description": "Job language: `auto` (the ASR engine detects one language), `per-file` (each file's `@Languages:` header decides), an ISO 639-3 code such as `eng`, or a code-switched pair such as `eng,spa`, primary language first.",
+        "examples": [
+          "eng",
+          "auto",
+          "per-file",
+          "eng,spa"
+        ],
+        "type": "string"
       },
       "LeaseRecord": {
         "description": "Lease metadata for a claimed schedulable unit.\n\nIn single-node mode this is coarse-grained and attached at the job level:\nthe local dispatcher claims a queued job for a node, records the lease, and\nlater clears it when the runner exits. Fleet mode will extend the same shape\nwith real cross-node renewal and expiry handling.",

@@ -896,7 +896,7 @@ mod auto_detect_tests {
             .try_place(SearchedPlace::InferredMediaMapping {
                 dir: search_dir.as_path().to_path_buf(),
             })
-            .await;
+            .await.unwrap();
         assert!(
             found.is_some(),
             "Should find 2256_T4.mp3 under {}",
@@ -949,7 +949,7 @@ mod auto_detect_tests {
             .try_place(SearchedPlace::InferredMediaMapping {
                 dir: search_dir.as_path().to_path_buf(),
             })
-            .await;
+            .await.unwrap();
 
         assert_eq!(found, Some(nested.join("p08aul13.mp3")));
     }

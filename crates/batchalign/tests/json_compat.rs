@@ -350,7 +350,7 @@ fn snapshot_server_config_full() {
         port: batchalign::config::PortRequest::from_u16(9000),
         host: "0.0.0.0".into(),
         max_workers_per_job: Some(2),
-        job_ttl_days: 14,
+        job_ttl_days: batchalign::config::JobTtlDays::new(14),
         auto_daemon: true,
         memory_gate_mb: Some(MemoryMb(2048)),
         worker_health_interval_s: 15,

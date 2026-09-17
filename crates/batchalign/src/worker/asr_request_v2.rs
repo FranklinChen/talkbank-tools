@@ -103,8 +103,10 @@ impl PreparedAsrRequestIdsV2 {
 pub struct AsrBuildInputV2<'a> {
     /// Stable ids for the request and prepared artifacts.
     pub ids: &'a PreparedAsrRequestIdsV2,
-    /// Typed input transport selected by Rust.
-    pub input: AsrInputSourceV2<'a>,
+    /// Source media; the backend determines its transport.
+    pub audio_path: &'a Path,
+    /// Expected count, used only if the backend offers integrated separation.
+    pub expected_speakers: crate::api::NumSpeakers,
     /// Worker-runtime language requested by the Rust control plane.
     pub lang: &'a WorkerLanguage,
     /// Concrete V2 ASR backend selected by Rust.
@@ -125,24 +127,6 @@ pub struct AsrBuildInputV2<'a> {
     pub extras: &'a std::collections::BTreeMap<String, String>,
 }
 
-/// Concrete ASR input transport selected by the Rust control plane.
-#[derive(Debug, Clone)]
-pub enum AsrInputSourceV2<'a> {
-    /// Rust-owned prepared audio for local model execution.
-    PreparedAudio {
-        /// Source audio file to transcribe.
-        audio_path: &'a Path,
-    },
-    /// Provider-local media path retained during the migration away from the
-    /// legacy batch-infer ASR route.
-    ProviderMedia {
-        /// Media file path readable by the worker host.
-        media_path: &'a Path,
-        /// Whether this provider must separate speakers, and into how many.
-        diarization: ProviderDiarizationV2,
-    },
-}
-
 /// Errors produced while building a live V2 ASR request.
 #[derive(Debug, Error)]
 pub enum AsrRequestBuildErrorV2 {
@@ -155,13 +139,15 @@ pub enum AsrRequestBuildErrorV2 {
     Artifact(#[from] PreparedArtifactErrorV2),
 }
 
-/// Build a live worker-protocol V2 ASR request from a typed input source.
+/// Derive transport and separation from the backend at the wire boundary.
+/// Callers cannot independently select a contradictory transport or capability.
 pub async fn build_asr_request_v2(
     store: &PreparedArtifactStoreV2,
     input: AsrBuildInputV2<'_>,
 ) -> Result<ExecuteRequestV2, AsrRequestBuildErrorV2> {
-    let (asr_input, attachments, decode_budget_seconds) = match input.input {
-        AsrInputSourceV2::PreparedAudio { audio_path } => {
+    let audio_path = input.audio_path;
+    let (asr_input, attachments, decode_budget_seconds) = match input.backend {
+        AsrBackendV2::LocalWhisper | AsrBackendV2::WhisperHub => {
             if audio_path.as_os_str().is_empty() {
                 return Err(AsrRequestBuildErrorV2::MissingAudioPath);
             }
@@ -187,10 +173,12 @@ pub async fn build_asr_request_v2(
                 decode_budget_seconds,
             )
         }
-        AsrInputSourceV2::ProviderMedia {
-            media_path,
-            diarization,
-        } => {
+        AsrBackendV2::Revai
+        | AsrBackendV2::HkTencent
+        | AsrBackendV2::HkAliyun
+        | AsrBackendV2::HkFunaudio
+        | AsrBackendV2::HkQwen => {
+            let media_path = audio_path;
             if media_path.as_os_str().is_empty() {
                 return Err(AsrRequestBuildErrorV2::MissingAudioPath);
             }
@@ -204,7 +192,10 @@ pub async fn build_asr_request_v2(
             (
                 AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
                     media_path: media_path.to_string_lossy().as_ref().into(),
-                    diarization,
+                    diarization: ProviderDiarizationV2::for_backend(
+                        input.backend,
+                        input.expected_speakers,
+                    ),
                 }),
                 Vec::new(),
                 decode_budget_seconds,
@@ -262,6 +253,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_backends_require_prepared_audio_instead_of_forwarding_a_path() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = PreparedArtifactStoreV2::new(tempdir.path().join("artifacts")).unwrap();
+        let ids = PreparedAsrRequestIdsV2::new("local-request", "local-audio");
+        let language = crate::api::LanguageCode3::eng();
+        let lang = WorkerLanguage::from(language.clone());
+        let extras = std::collections::BTreeMap::from([(
+            "model_id".to_owned(),
+            "example/whisper".to_owned(),
+        )]);
+        for backend in [AsrBackendV2::LocalWhisper, AsrBackendV2::WhisperHub] {
+            let models =
+                crate::model_manifest::resolve_asr_models(backend, Some(&language), &extras)
+                    .unwrap();
+            let result = build_asr_request_v2(
+                &store,
+                AsrBuildInputV2 {
+                    ids: &ids,
+                    audio_path: &tempdir.path().join("missing.wav"),
+                    expected_speakers: crate::api::NumSpeakers(2),
+                    lang: &lang,
+                    backend,
+                    models: &models,
+                    extras: &extras,
+                },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(AsrRequestBuildErrorV2::Artifact(_))),
+                "{backend:?}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn builds_provider_media_asr_request_without_prepared_attachments() {
         let tempdir = tempfile::tempdir().expect("tempdir should exist");
         let store = PreparedArtifactStoreV2::new(tempdir.path().join("artifacts"))
@@ -271,49 +297,54 @@ mod tests {
         let media_path = tempdir.path().join("sample.wav");
 
         let empty_extras = std::collections::BTreeMap::new();
-        let models = crate::types::worker_v2::AsrRequestedModelsV2::Tencent {
-            engine_model_type: crate::types::worker_v2::RequestedModelV2 {
-                id: crate::types::worker_v2::ModelIdV2::from_static("tencent-asr"),
-                revision: crate::types::worker_v2::RequestedRevisionV2::ProviderParameter {
-                    parameter: crate::types::worker_v2::ProviderParameterV2::from_static(
-                        "16k_zh_large",
-                    ),
+        for backend in [
+            AsrBackendV2::HkTencent,
+            AsrBackendV2::HkAliyun,
+            AsrBackendV2::HkFunaudio,
+            AsrBackendV2::HkQwen,
+        ] {
+            let models = crate::model_manifest::resolve_asr_models(
+                backend,
+                Some(&crate::api::LanguageCode3::yue()),
+                &empty_extras,
+            )
+            .expect("provider model plan");
+            let request = build_asr_request_v2(
+                &store,
+                AsrBuildInputV2 {
+                    ids: &ids,
+                    audio_path: &media_path,
+                    expected_speakers: crate::api::NumSpeakers(2),
+                    lang: &lang,
+                    backend,
+                    models: &models,
+                    extras: &empty_extras,
                 },
-            },
-        };
-        let request = build_asr_request_v2(
-            &store,
-            AsrBuildInputV2 {
-                ids: &ids,
-                input: AsrInputSourceV2::ProviderMedia {
-                    media_path: &media_path,
-                    diarization: ProviderDiarizationV2::for_expected_speakers(
-                        crate::api::NumSpeakers(2),
-                    ),
-                },
-                lang: &lang,
-                backend: AsrBackendV2::HkTencent,
-                models: &models,
-                extras: &empty_extras,
-            },
-        )
-        .await
-        .expect("provider-media request should build");
+            )
+            .await
+            .expect("provider-media request should build");
 
-        assert!(request.attachments.is_empty());
-        let TaskRequestV2::Asr(payload) = request.payload else {
-            panic!("expected ASR payload");
-        };
-        let AsrInputV2::ProviderMedia(provider_media) = payload.input else {
-            panic!("expected provider-media input");
-        };
-        assert_eq!(
-            &*provider_media.media_path,
-            media_path.to_string_lossy().as_ref()
-        );
-        assert_eq!(
-            provider_media.diarization,
-            ProviderDiarizationV2::for_expected_speakers(crate::api::NumSpeakers(2))
-        );
+            assert!(request.attachments.is_empty());
+            let TaskRequestV2::Asr(payload) = request.payload else {
+                panic!("expected ASR payload");
+            };
+            let AsrInputV2::ProviderMedia(provider_media) = payload.input else {
+                panic!("expected provider-media input");
+            };
+            assert_eq!(
+                &*provider_media.media_path,
+                media_path.to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                provider_media.diarization,
+                match backend {
+                    AsrBackendV2::HkTencent => ProviderDiarizationV2::Integrated {
+                        speakers: crate::types::worker_v2::SeparatedSpeakersV2::try_from(2u32)
+                            .unwrap(),
+                    },
+                    _ => ProviderDiarizationV2::NotRequested,
+                }
+            );
+        }
     }
 }

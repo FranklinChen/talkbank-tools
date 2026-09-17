@@ -1,7 +1,7 @@
 # Command Lifecycles
 
 **Status:** Current
-**Last updated:** 2026-09-15 19:40 EDT
+**Last updated:** 2026-09-16 22:04 EDT
 
 End-to-end sequence diagrams showing how jobs flow through the system,
 from CLI invocation to output files. Every batchalign command now fits one
@@ -319,7 +319,7 @@ sequenceDiagram
         Server->>Server: PostValidated::into_judged_document() -> AST_main
         Server->>Server: parse_lenient(raw gold) -> AST_gold
         Server->>Cmp: compare(AST_main, AST_gold)
-        Note over Cmp: conform -> per-gold window search -> local DP<br/>main view + gold view + structural word matches + metrics
+        Note over Cmp: conform -> one whole-file alignment -> per-utterance views projected from it<br/>main view + gold view + structural word matches + metrics
         Cmp-->>Server: ComparisonBundle
 
         Server->>Server: project_gold_structurally() on gold AST

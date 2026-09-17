@@ -6,16 +6,17 @@ type LanguageSpec = components["schemas"]["LanguageSpec"];
 /** Formatting helpers. */
 
 /**
- * Extract a display string from a LanguageSpec value.
+ * Display string for a job's language.
  *
- * `LanguageSpec` is `"Auto" | { Resolved: string }` on the wire.
- * Returns `"auto"` for auto-detection, or the resolved 3-letter code.
+ * `LanguageSpec` is one string on the wire: `auto`, `per-file`, a 3-letter code
+ * such as `eng`, or a code-switched pair such as `eng,spa`, which displays as
+ * written. An absent language displays as `eng`, the submission default.
+ *
+ * This used to test for `"Auto"` and `{ Resolved: ... }`, the shapes a derived
+ * OpenAPI schema claimed and the server never sent.
  */
 export function displayLang(spec: LanguageSpec | undefined): string {
-  if (!spec) return "eng";
-  if (spec === "Auto") return "auto";
-  if (typeof spec === "object" && "Resolved" in spec) return spec.Resolved;
-  return String(spec);
+  return spec ?? "eng";
 }
 
 /**

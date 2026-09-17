@@ -1,6 +1,7 @@
 use super::cantonese::{AlignedNormalization, NormalizationChangedLength};
 use super::{
-    AsrElement, AsrNormalizedText, AsrPipelineSnapshot, AsrWord, cleanup, merge_compounds, num2text,
+    AsrElement, AsrNormalizedText, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, cleanup,
+    merge_compounds, num2text,
 };
 
 /// Stages 1-3: compound merging, timed word extraction with separator strip,
@@ -13,11 +14,11 @@ use super::{
 /// Fallible for one reason: Cantonese normalization hands each word back its
 /// own characters, and a conversion that changed the character count is refused
 /// rather than re-cut (see [`AlignedNormalization`]).
-pub fn prepare_words_pre_expansion(
+pub fn prepare_words_pre_expansion<'a>(
     elements: &[AsrElement],
-    lang: &str,
+    language: impl Into<AsrTextLanguage<'a>>,
 ) -> Result<Vec<AsrWord>, NormalizationChangedLength> {
-    prepare_words_pre_expansion_with_snapshot(elements, lang, None)
+    prepare_words_pre_expansion_with_snapshot(elements, language, None)
 }
 
 /// Snapshot-aware variant of [`prepare_words_pre_expansion`].
@@ -30,11 +31,13 @@ pub fn prepare_words_pre_expansion(
 ///
 /// Callers who want stage 4 (number expansion) captured must record
 /// it themselves: this function returns BEFORE expansion runs.
-pub fn prepare_words_pre_expansion_with_snapshot(
+pub fn prepare_words_pre_expansion_with_snapshot<'a>(
     elements: &[AsrElement],
-    lang: &str,
+    language: impl Into<AsrTextLanguage<'a>>,
     mut snapshot: Option<&mut AsrPipelineSnapshot>,
 ) -> Result<Vec<AsrWord>, NormalizationChangedLength> {
+    let language = language.into();
+    let lang = language.rules();
     // Stage 1: compound merging
     let merged = merge_compounds(elements);
     if let Some(ref mut s) = snapshot {
@@ -103,7 +106,7 @@ pub fn prepare_words_pre_expansion_with_snapshot(
     // any language; this stage guarantees that property for every
     // downstream consumer, including the Python-routed number-expansion
     // path used by `transcribe`.
-    let result = split_percent_suffix_words(words, lang);
+    let result = split_percent_suffix_words(words, language);
 
     // NOTE: CHAT-illegal character sanitization runs in
     // `finalize_utterances`, not here, because Stage 4 number
@@ -436,7 +439,13 @@ pub(super) fn normalized_split_separator(ch: char) -> Option<Option<&'static str
 /// Purely structural: this runs before number expansion so the digit
 /// group can be expanded by the existing pipeline if the language
 /// supports it.
-fn split_percent_suffix_words(words: Vec<AsrWord>, lang: &str) -> Vec<AsrWord> {
+fn split_percent_suffix_words(words: Vec<AsrWord>, language: AsrTextLanguage<'_>) -> Vec<AsrWord> {
+    // The percent word is written only for text in one known language; see
+    // [`AsrTextLanguage`].
+    let percent_word = match language {
+        AsrTextLanguage::One(lang) => num2text::language_percent_word(lang),
+        AsrTextLanguage::CodeSwitched { .. } => None,
+    };
     let mut result: Vec<AsrWord> = Vec::with_capacity(words.len());
     for word in words {
         let Some(digit_prefix) = word.text.as_str().strip_suffix('%') else {
@@ -471,7 +480,7 @@ fn split_percent_suffix_words(words: Vec<AsrWord>, lang: &str) -> Vec<AsrWord> {
         let digit_word = AsrWord::new(digit_prefix, digit_start, digit_end);
         result.push(digit_word);
 
-        if let Some(percent_word) = num2text::language_percent_word(lang) {
+        if let Some(percent_word) = percent_word {
             result.push(AsrWord::new(percent_word, percent_start, percent_end));
         }
         // If no mapped percent word: we've already dropped the `%` by

@@ -479,7 +479,7 @@ async fn reserve_job_execution(
         job.dispatch.lang.to_worker_language()
     );
     let timeout = Duration::from_secs(host.config().memory_gate_timeout_s);
-    let poll_interval = Duration::from_secs(host.config().memory_gate_poll_s.max(1));
+    let poll_interval = Duration::from_secs(host.config().memory_gate_poll_s.get());
     let plan = tokio::task::spawn_blocking(move || {
         coordinator.wait_for_job_execution_plan(
             command,

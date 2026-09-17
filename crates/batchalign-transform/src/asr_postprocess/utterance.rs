@@ -1,7 +1,7 @@
 use super::cantonese::NormalizationChangedLength;
 use super::{
-    AsrNormalizedText, AsrOutput, AsrWord, ENDING_PUNCT, MOR_PUNCT, RTL_PUNCT, SpeakerIndex,
-    Utterance, cleanup, expand_numbers_in_words, finalize_words_to_chunks,
+    AsrNormalizedText, AsrOutput, AsrTextLanguage, AsrWord, ENDING_PUNCT, MOR_PUNCT, RTL_PUNCT,
+    SpeakerIndex, Utterance, cleanup, expand_numbers_in_words, finalize_words_to_chunks,
     prepare_words_pre_expansion,
 };
 
@@ -15,12 +15,13 @@ use super::{
 ///
 /// Fails only when Cantonese normalization changed a monologue's character
 /// count; see [`super::AlignedNormalization`].
-pub fn process_raw_asr(
+pub fn process_raw_asr<'a>(
     output: &AsrOutput,
-    lang: &str,
+    language: impl Into<AsrTextLanguage<'a>>,
 ) -> Result<Vec<Utterance>, NormalizationChangedLength> {
-    let mut all_utterances = utterances_from_prepared_chunks(prepare_asr_chunks(output, lang)?);
-    finalize_utterances(&mut all_utterances, lang);
+    let language = language.into();
+    let mut all_utterances = utterances_from_prepared_chunks(prepare_asr_chunks(output, language)?);
+    finalize_utterances(&mut all_utterances, language.rules());
     Ok(all_utterances)
 }
 
@@ -31,17 +32,22 @@ pub fn process_raw_asr(
 /// For pipelines that need to intercept the number expansion step (e.g. to
 /// route through Python IPC), use [`super::prepare_words_pre_expansion`] and
 /// [`super::finalize_words_to_chunks`] separately.
-pub fn prepare_asr_chunks(
+pub fn prepare_asr_chunks<'a>(
     output: &AsrOutput,
-    lang: &str,
+    language: impl Into<AsrTextLanguage<'a>>,
 ) -> Result<Vec<super::PreparedMonologueChunk>, NormalizationChangedLength> {
+    let language = language.into();
     let mut prepared = Vec::new();
 
     for monologue in &output.monologues {
-        let words = prepare_words_pre_expansion(&monologue.elements, lang)?;
+        let words = prepare_words_pre_expansion(&monologue.elements, language)?;
         // Stage 4: number expansion (Rust fallback tables + CJK + currency)
-        let words = expand_numbers_in_words(words, lang);
-        prepared.extend(finalize_words_to_chunks(words, monologue.speaker, lang));
+        let words = expand_numbers_in_words(words, language);
+        prepared.extend(finalize_words_to_chunks(
+            words,
+            monologue.speaker,
+            language.rules(),
+        ));
     }
 
     Ok(prepared)

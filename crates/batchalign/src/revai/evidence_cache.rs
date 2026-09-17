@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{LanguageCode3, LanguageSpec, NumSpeakers};
+use crate::api::{LanguageCode3, NumSpeakers, TranscriptLanguage};
 use crate::cache::{CacheError, CacheNamespace, InferenceLease, UtteranceCache, tasks};
 use crate::chat_ops::CacheKey;
 use crate::error::ServerError;
 use crate::params::CachePolicy;
+use crate::types::revai_language::RevLanguage;
 
 use super::Transcript;
 use super::types::{RevTranscriptEvidence, RevTranscriptFidelity};
@@ -20,15 +21,15 @@ const REV_ASR_TRACE_SCHEMA_VERSION: u32 = 2;
 
 /// A fetched provider response is retained even when it cannot be admitted.
 pub(crate) enum RevAsrInferenceOutcome {
-    Completed(CompletedRevAsrEvidence),
+    Fetched(FetchedRevAsrEvidence),
     UnresolvedLanguage(RejectedRevLanguageEvidence),
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct RejectedRevLanguageEvidence {
     pub(crate) transcript_evidence: RevTranscriptEvidence,
-    pub(crate) requested_language: LanguageSpec,
-    pub(crate) effective_language: LanguageSpec,
+    pub(crate) requested_language: RevLanguage,
+    pub(crate) effective_language: RevLanguage,
     pub(crate) detected_language: Option<String>,
 }
 
@@ -207,14 +208,14 @@ pub(crate) struct RevAsrEvidenceRequest {
     cache_key: CacheKey,
     model_revision: RevAsrModelRevision,
     provider_media: PreparedRevProviderMedia,
-    requested_language: LanguageSpec,
+    requested_language: RevLanguage,
     expected_speakers: Option<NumSpeakers>,
 }
 
 impl RevAsrEvidenceRequest {
     pub(crate) fn new(
         provider_media: PreparedRevProviderMedia,
-        requested_language: &LanguageSpec,
+        requested_language: &RevLanguage,
         expected_speakers: impl Into<Option<NumSpeakers>>,
         model_revision: &RevAsrModelRevision,
     ) -> Result<Self, RevAsrEvidenceCacheError> {
@@ -222,11 +223,6 @@ impl RevAsrEvidenceRequest {
         if expected_speakers.is_some_and(|count| count.0 == 0) {
             return Err(RevAsrEvidenceCacheError::InvalidRequest(
                 "expected speaker count must be positive or automatic".to_owned(),
-            ));
-        }
-        if requested_language.is_per_file() {
-            return Err(RevAsrEvidenceCacheError::InvalidRequest(
-                "Rev.AI transcribe evidence cannot use per-file language routing".to_owned(),
             ));
         }
         let material = RevAsrEvidenceKeyMaterial {
@@ -268,7 +264,7 @@ impl RevAsrEvidenceRequest {
     #[cfg(test)]
     pub(crate) async fn from_audio(
         audio_path: &Path,
-        requested_language: &LanguageSpec,
+        requested_language: &RevLanguage,
         expected_speakers: impl Into<Option<NumSpeakers>>,
         model_revision: &RevAsrModelRevision,
     ) -> Result<Self, RevAsrEvidenceCacheError> {
@@ -342,12 +338,42 @@ impl RevAsrEvidenceRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CompletedRevAsrEvidence {
+pub(crate) struct FetchedRevAsrEvidence {
     pub(crate) transcript_evidence: RevTranscriptEvidence,
-    pub(crate) resolved_language: LanguageCode3,
+    pub(crate) resolved_language: TranscriptLanguage,
 }
 
-fn validate_evidence(evidence: &CompletedRevAsrEvidence) -> Result<(), RevAsrEvidenceCacheError> {
+/// Evidence admitted against its request, never deserialized directly.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub(crate) struct CompletedRevAsrEvidence(FetchedRevAsrEvidence);
+
+impl CompletedRevAsrEvidence {
+    fn admit(
+        raw: FetchedRevAsrEvidence,
+        language: &RevLanguage,
+    ) -> Result<Self, RevAsrEvidenceCacheError> {
+        validate_evidence(&raw)?;
+        language
+            .check_stored_resolution(&raw.resolved_language)
+            .map_err(|error| RevAsrEvidenceCacheError::InvalidEvidence(error.to_string()))?;
+        Ok(Self(raw))
+    }
+
+    pub(crate) fn transcript_evidence(&self) -> &RevTranscriptEvidence {
+        &self.0.transcript_evidence
+    }
+    pub(crate) fn resolved_language(&self) -> &TranscriptLanguage {
+        &self.0.resolved_language
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admit_for_test(raw: FetchedRevAsrEvidence, language: &RevLanguage) -> Self {
+        Self::admit(raw, language).expect("admitted fixture evidence")
+    }
+}
+
+fn validate_evidence(evidence: &FetchedRevAsrEvidence) -> Result<(), RevAsrEvidenceCacheError> {
     for (monologue_index, monologue) in evidence
         .transcript_evidence
         .transcript()
@@ -390,10 +416,10 @@ fn validate_evidence(evidence: &CompletedRevAsrEvidence) -> Result<(), RevAsrEvi
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct StoredRevAsrEvidence {
+struct StoredRevAsrEvidence<E = FetchedRevAsrEvidence> {
     schema_version: u32,
     request_fingerprint: String,
-    evidence: CompletedRevAsrEvidence,
+    evidence: E,
 }
 
 impl StoredRevAsrEvidence {
@@ -423,11 +449,12 @@ impl StoredRevAsrEvidence {
                         RevAsrEvidenceCacheError::InvalidEvidence(error.to_string())
                     })?;
                 validate_request_fingerprint(&envelope.request_fingerprint, request)?;
-                CompletedRevAsrEvidence {
+                FetchedRevAsrEvidence {
                     transcript_evidence: RevTranscriptEvidence::from_legacy_transcript(
                         envelope.evidence.transcript,
                     ),
-                    resolved_language: envelope.evidence.resolved_language,
+                    // Schema 2 predates code-switched requests: one language.
+                    resolved_language: TranscriptLanguage::One(envelope.evidence.resolved_language),
                 }
             }
             unsupported => {
@@ -436,8 +463,7 @@ impl StoredRevAsrEvidence {
                 )));
             }
         };
-        validate_evidence(&evidence)?;
-        Ok(evidence)
+        CompletedRevAsrEvidence::admit(evidence, &request.requested_language)
     }
 }
 
@@ -588,7 +614,7 @@ struct RevAsrInferenceAuthorization {
 
 pub(crate) struct AuthorizedRevEvidenceRun {
     pub(super) provider_media: PreparedRevProviderMedia,
-    pub(super) requested_language: LanguageSpec,
+    pub(super) requested_language: RevLanguage,
     pub(super) expected_speakers: Option<NumSpeakers>,
 }
 
@@ -609,10 +635,11 @@ impl RevAsrInferenceAuthorization {
         (
             AuthorizedRevEvidenceRun {
                 provider_media,
-                requested_language,
+                requested_language: requested_language.clone(),
                 expected_speakers,
             },
             RevAsrEvidenceCommitPermit {
+                requested_language,
                 cache_key,
                 model_revision,
                 reason,
@@ -623,6 +650,7 @@ impl RevAsrInferenceAuthorization {
 }
 
 struct RevAsrEvidenceCommitPermit {
+    requested_language: RevLanguage,
     cache_key: CacheKey,
     model_revision: RevAsrModelRevision,
     reason: RevAsrEvidenceMissReason,
@@ -668,28 +696,46 @@ impl RevAsrEvidenceCommitPermit {
         })
     }
 
+    fn admit(
+        self,
+        raw: FetchedRevAsrEvidence,
+    ) -> Result<AdmittedRevAsrCommit, RevAsrEvidenceCacheError> {
+        let evidence = CompletedRevAsrEvidence::admit(raw, &self.requested_language)?;
+        Ok(AdmittedRevAsrCommit {
+            permit: self,
+            evidence,
+        })
+    }
+}
+
+/// The commit operation owns both the request permit and its admitted evidence.
+struct AdmittedRevAsrCommit {
+    permit: RevAsrEvidenceCommitPermit,
+    evidence: CompletedRevAsrEvidence,
+}
+
+impl AdmittedRevAsrCommit {
     async fn commit(
         self,
         cache: &UtteranceCache,
-        evidence: CompletedRevAsrEvidence,
     ) -> Result<CompletedRevAsrEvidence, RevAsrEvidenceCacheError> {
-        validate_evidence(&evidence)?;
+        let Self { permit, evidence } = self;
         let envelope = StoredRevAsrEvidence {
             schema_version: REV_ASR_EVIDENCE_STORAGE_SCHEMA_VERSION,
-            request_fingerprint: self.cache_key.to_string(),
-            evidence,
+            request_fingerprint: permit.cache_key.to_string(),
+            evidence: &evidence,
         };
         let value = serde_json::to_value(&envelope)?;
         cache
             .put(
-                self.cache_key.as_str(),
+                permit.cache_key.as_str(),
                 tasks::REV_ASR_EVIDENCE,
-                &self.model_revision,
+                &permit.model_revision,
                 &value,
             )
             .await?;
-        self._lease.mark_committed();
-        Ok(envelope.evidence)
+        permit._lease.mark_committed();
+        Ok(evidence)
     }
 }
 
@@ -733,7 +779,7 @@ impl RevAsrEvidenceResolution {
     ) -> RevAsrEvidenceTrace {
         self.trace_seed.clone().finish(
             self.cache_outcome(),
-            self.evidence.transcript_evidence.fidelity(),
+            self.evidence.transcript_evidence().fidelity(),
             projection_revision,
         )
     }
@@ -749,10 +795,13 @@ impl RevAsrEvidenceResolution {
     #[cfg(test)]
     pub(crate) fn replayed_for_test(
         request: &RevAsrEvidenceRequest,
-        evidence: CompletedRevAsrEvidence,
+        evidence: FetchedRevAsrEvidence,
     ) -> Self {
         Self {
-            evidence,
+            evidence: CompletedRevAsrEvidence::admit_for_test(
+                evidence,
+                &request.requested_language,
+            ),
             source: RevAsrEvidenceSource::Replayed,
             trace_seed: request.trace_seed(),
         }
@@ -777,7 +826,7 @@ pub(crate) async fn resolve_rev_asr_evidence<I: RevAsrEvidenceInference + ?Sized
             let (run, permit) = authorization.into_run();
             let reason = permit.reason;
             let evidence = match inference.infer(run).await? {
-                RevAsrInferenceOutcome::Completed(evidence) => evidence,
+                RevAsrInferenceOutcome::Fetched(evidence) => evidence,
                 RevAsrInferenceOutcome::UnresolvedLanguage(rejected) => {
                     let retained = permit
                         .retain_rejected_language(cache, &trace_seed, rejected)
@@ -785,7 +834,7 @@ pub(crate) async fn resolve_rev_asr_evidence<I: RevAsrEvidenceInference + ?Sized
                     return Err(RevAsrEvidenceResolutionError::UnresolvedLanguage(retained));
                 }
             };
-            let evidence = permit.commit(cache, evidence).await?;
+            let evidence = permit.admit(evidence)?.commit(cache).await?;
             Ok(RevAsrEvidenceResolution {
                 evidence,
                 source: RevAsrEvidenceSource::Inferred(reason),
@@ -858,13 +907,18 @@ pub(crate) enum RevAsrEvidenceCacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::LanguageCode3;
+    use crate::api::AsrLanguageRequest;
     use crate::cache::{CacheBackend, CacheStats};
+
+    fn english() -> RevLanguage {
+        RevLanguage::admit(&AsrLanguageRequest::One(LanguageCode3::eng()))
+            .expect("Rev.AI recognizes English")
+    }
     use crate::revai::types::{Element, Monologue};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn sample_evidence() -> CompletedRevAsrEvidence {
+    fn sample_evidence() -> FetchedRevAsrEvidence {
         let transcript = Transcript {
             monologues: vec![Monologue {
                 speaker: 0,
@@ -877,12 +931,12 @@ mod tests {
                 }],
             }],
         };
-        CompletedRevAsrEvidence {
+        FetchedRevAsrEvidence {
             transcript_evidence: RevTranscriptEvidence::from_provider_json(
                 serde_json::to_string(&transcript).expect("fixture transcript JSON"),
             )
             .expect("fixture provider transcript"),
-            resolved_language: LanguageCode3::eng(),
+            resolved_language: TranscriptLanguage::One(LanguageCode3::eng()),
         }
     }
 
@@ -945,7 +999,7 @@ mod tests {
     struct LanguageResponseService {
         raw: &'static str,
         detected: Option<&'static str>,
-        effective: LanguageSpec,
+        effective: RevLanguage,
     }
 
     #[async_trait::async_trait]
@@ -978,11 +1032,39 @@ mod tests {
         };
         RevAsrEvidenceRequest::new(
             media,
-            &LanguageSpec::Auto,
+            &RevLanguage::detect(),
             None,
             &RevAsrModelRevision::current(),
         )
         .unwrap()
+    }
+
+    /// A code-switched request is its own evidence: it keys apart from each
+    /// of its languages and from detection, and its trace names the pair.
+    #[test]
+    fn a_language_pair_request_keys_apart_from_its_languages() {
+        let pair = RevLanguage::admit(&AsrLanguageRequest::Pair(
+            crate::api::LanguagePair::new(LanguageCode3::eng(), LanguageCode3::spa())
+                .expect("two languages"),
+        ))
+        .expect("Rev.AI takes English/Spanish");
+        let spanish = RevLanguage::admit(&AsrLanguageRequest::One(LanguageCode3::spa()))
+            .expect("Rev.AI recognizes Spanish");
+        let media = language_request().provider_media;
+        let key = |language: &RevLanguage| {
+            RevAsrEvidenceRequest::new(
+                media.clone(),
+                language,
+                None,
+                &RevAsrModelRevision::current(),
+            )
+            .expect("request")
+        };
+        let pair_request = key(&pair);
+        for other in [english(), spanish, RevLanguage::detect()] {
+            assert_ne!(pair_request.cache_key(), key(&other).cache_key(), "{other}");
+        }
+        assert_eq!(pair_request.trace_seed().requested_language, "eng,spa");
     }
 
     #[tokio::test]
@@ -996,7 +1078,7 @@ mod tests {
             let service = LanguageResponseService {
                 raw,
                 detected,
-                effective: LanguageSpec::Auto,
+                effective: RevLanguage::detect(),
             };
             let error =
                 resolve_rev_asr_evidence(&request, &cache, CachePolicy::SkipCache, &service)
@@ -1046,11 +1128,11 @@ mod tests {
             );
             assert_eq!(
                 diagnostic["response"]["requested_language"],
-                serde_json::to_value(LanguageSpec::Auto).unwrap()
+                serde_json::to_value(RevLanguage::detect()).unwrap()
             );
             assert_eq!(
                 diagnostic["response"]["effective_language"],
-                serde_json::to_value(LanguageSpec::Auto).unwrap()
+                serde_json::to_value(RevLanguage::detect()).unwrap()
             );
             assert!(StoredRevAsrEvidence::decode_for(diagnostic.clone(), &request).is_err());
         }
@@ -1058,7 +1140,7 @@ mod tests {
         let service = LanguageResponseService {
             raw: empty,
             detected: None,
-            effective: LanguageSpec::Auto,
+            effective: RevLanguage::detect(),
         };
         assert!(matches!(
             resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service).await,
@@ -1071,7 +1153,7 @@ mod tests {
         let service = LanguageResponseService {
             raw: spoken,
             detected: None,
-            effective: LanguageSpec::Resolved(LanguageCode3::eng()),
+            effective: english(),
         };
         resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
             .await
@@ -1082,7 +1164,7 @@ mod tests {
                 .unwrap();
         assert_eq!(replay.source(), RevAsrEvidenceSource::Replayed);
         assert_eq!(
-            replay.evidence.transcript_evidence.exact_provider_json(),
+            replay.evidence.transcript_evidence().exact_provider_json(),
             Some(spoken)
         );
     }
@@ -1094,7 +1176,7 @@ mod tests {
         let service = LanguageResponseService {
             raw: r#"{"monologues":[]}"#,
             detected: None,
-            effective: LanguageSpec::Auto,
+            effective: RevLanguage::detect(),
         };
         let error = resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
             .await
@@ -1174,7 +1256,7 @@ mod tests {
             if self.delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             }
-            Ok(RevAsrInferenceOutcome::Completed(sample_evidence()))
+            Ok(RevAsrInferenceOutcome::Fetched(sample_evidence()))
         }
     }
 
@@ -1193,7 +1275,7 @@ mod tests {
                 upload_metadata: "fixture".to_owned(),
             },
         };
-        let language = LanguageSpec::Resolved(LanguageCode3::eng());
+        let language = english();
         let revision = RevAsrModelRevision::current();
         let automatic = RevAsrEvidenceRequest::new(media.clone(), &language, None, &revision)
             .expect("automatic request");
@@ -1228,57 +1310,37 @@ mod tests {
             .expect("write renamed mp3");
         let revision = RevAsrModelRevision::current();
 
-        let baseline = RevAsrEvidenceRequest::from_audio(
-            &first,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
-            NumSpeakers(2),
-            &revision,
-        )
-        .await
-        .expect("baseline request");
-        let copied = RevAsrEvidenceRequest::from_audio(
-            &renamed,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
-            NumSpeakers(2),
-            &revision,
-        )
-        .await
-        .expect("copied request");
-        let different_presentation = RevAsrEvidenceRequest::from_audio(
-            &renamed_mp3,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
-            NumSpeakers(2),
-            &revision,
-        )
-        .await
-        .expect("different presentation request");
+        let baseline =
+            RevAsrEvidenceRequest::from_audio(&first, &english(), NumSpeakers(2), &revision)
+                .await
+                .expect("baseline request");
+        let copied =
+            RevAsrEvidenceRequest::from_audio(&renamed, &english(), NumSpeakers(2), &revision)
+                .await
+                .expect("copied request");
+        let different_presentation =
+            RevAsrEvidenceRequest::from_audio(&renamed_mp3, &english(), NumSpeakers(2), &revision)
+                .await
+                .expect("different presentation request");
         let auto_language = RevAsrEvidenceRequest::from_audio(
             &first,
-            &LanguageSpec::Auto,
+            &RevLanguage::detect(),
             NumSpeakers(2),
             &revision,
         )
         .await
         .expect("auto-language request");
-        let three_speakers = RevAsrEvidenceRequest::from_audio(
-            &first,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
-            NumSpeakers(3),
-            &revision,
-        )
-        .await
-        .expect("three-speaker request");
+        let three_speakers =
+            RevAsrEvidenceRequest::from_audio(&first, &english(), NumSpeakers(3), &revision)
+                .await
+                .expect("three-speaker request");
         tokio::fs::write(&renamed, b"changed provider media")
             .await
             .expect("change copied media");
-        let changed_media = RevAsrEvidenceRequest::from_audio(
-            &renamed,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
-            NumSpeakers(2),
-            &revision,
-        )
-        .await
-        .expect("changed-media request");
+        let changed_media =
+            RevAsrEvidenceRequest::from_audio(&renamed, &english(), NumSpeakers(2), &revision)
+                .await
+                .expect("changed-media request");
 
         assert_eq!(baseline.cache_key(), copied.cache_key());
         assert_eq!(
@@ -1303,7 +1365,7 @@ mod tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1365,6 +1427,107 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 0);
     }
 
+    /// Evidence whose transcript language its request could not have resolved
+    /// to is refused at replay, not handed to the pipeline: an English request
+    /// never yields a Spanish transcript.
+    #[tokio::test]
+    async fn stored_evidence_in_a_language_its_request_cannot_resolve_to_is_refused() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let audio = tempdir.path().join("audio.wav");
+        tokio::fs::write(&audio, b"provider media")
+            .await
+            .expect("write audio");
+        let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
+            .await
+            .expect("cache");
+        let request = RevAsrEvidenceRequest::from_audio(
+            &audio,
+            &english(),
+            NumSpeakers(2),
+            &RevAsrModelRevision::current(),
+        )
+        .await
+        .expect("request");
+        request
+            .store_unchecked_for_test(
+                &cache,
+                serde_json::json!({
+                    "schema_version": 2,
+                    "request_fingerprint": request.cache_key().as_str(),
+                    "evidence": {
+                        "transcript": {"monologues": []},
+                        "resolved_language": "spa"
+                    }
+                }),
+            )
+            .await
+            .expect("seed contradictory evidence");
+        let service = CountingRevService {
+            calls: AtomicUsize::new(0),
+            delay_ms: 0,
+        };
+
+        let error = resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
+            .await
+            .expect_err("a Spanish transcript cannot answer an English request");
+        assert!(
+            error.to_string().contains("cannot come from a request"),
+            "{error}"
+        );
+        assert_eq!(service.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn contradictory_fresh_evidence_is_refused_before_commit() {
+        struct Contradictory;
+        #[async_trait::async_trait]
+        impl RevAsrEvidenceInference for Contradictory {
+            async fn infer(
+                &self,
+                _run: AuthorizedRevEvidenceRun,
+            ) -> Result<RevAsrInferenceOutcome, ServerError> {
+                let mut evidence = sample_evidence();
+                evidence.resolved_language = TranscriptLanguage::One(LanguageCode3::spa());
+                Ok(RevAsrInferenceOutcome::Fetched(evidence))
+            }
+        }
+        let mut request = language_request();
+        // Build the request through admission so its fingerprint is English too.
+        request = RevAsrEvidenceRequest::new(
+            request.provider_media,
+            &english(),
+            None,
+            &RevAsrModelRevision::current(),
+        )
+        .unwrap();
+        let backend = RecordingBackend::default();
+        let cache = UtteranceCache::from_backend(Box::new(backend.clone()));
+        let error =
+            resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &Contradictory)
+                .await
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("cannot come from a request"),
+            "{error}"
+        );
+        assert!(
+            backend.0.lock().unwrap().is_empty(),
+            "contradictory evidence must not become a cache hit"
+        );
+        // Rejection releases the miss lease, and a valid response can still complete.
+        let service = CountingRevService {
+            calls: AtomicUsize::new(0),
+            delay_ms: 0,
+        };
+        resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
+            .await
+            .unwrap();
+        resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service)
+            .await
+            .unwrap();
+        assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn prepared_media_refuses_bytes_changed_before_authorized_submission() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1417,7 +1580,7 @@ mod tests {
             .expect("write audio");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1425,7 +1588,7 @@ mod tests {
         .expect("request");
 
         let resolution = RevAsrEvidenceResolution {
-            evidence: sample_evidence(),
+            evidence: CompletedRevAsrEvidence::admit(sample_evidence(), &english()).unwrap(),
             source: RevAsrEvidenceSource::Inferred(RevAsrEvidenceMissReason::NotFound),
             trace_seed: request.trace_seed(),
         };
@@ -1476,7 +1639,7 @@ mod tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1522,7 +1685,7 @@ mod tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1561,7 +1724,7 @@ mod tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1596,7 +1759,7 @@ mod tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1638,7 +1801,7 @@ mod tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1681,7 +1844,7 @@ mod tests {
             .expect("cache");
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )
@@ -1712,7 +1875,7 @@ mod tests {
         let cache = UtteranceCache::from_backend(Box::new(FailingCommitBackend));
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
+            &english(),
             NumSpeakers(2),
             &RevAsrModelRevision::current(),
         )

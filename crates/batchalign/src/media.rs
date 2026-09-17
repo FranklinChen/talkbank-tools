@@ -7,6 +7,7 @@
 //! tools live below this module as [`tools`]. They are otherwise unrelated:
 //! nothing here spawns anything.
 
+pub(crate) mod access;
 pub mod declared;
 pub mod extensions;
 pub mod probe;
@@ -69,16 +70,51 @@ type CacheEntry = (Instant, Vec<MediaEntry>);
 /// Walk results are cached in a concurrent `DashMap` with a 60-second TTL
 /// to avoid rescanning large NFS volumes on every request. The cache can be
 /// invalidated per-root or globally via [`invalidate`](Self::invalidate).
+#[derive(Clone)]
 pub struct MediaResolver {
-    cache: DashMap<String, CacheEntry>,
+    cache: std::sync::Arc<DashMap<String, CacheEntry>>,
 }
 
 impl MediaResolver {
     /// Create a resolver with an empty walk cache.
     pub fn new() -> Self {
         Self {
-            cache: DashMap::new(),
+            cache: std::sync::Arc::new(DashMap::new()),
         }
+    }
+
+    /// List a selected mapping with bounded filesystem access.
+    pub(crate) async fn list_mapped_bounded(
+        &self, root: String, subdir: String,
+    ) -> Result<Vec<String>, access::MediaAccessError> {
+        let resolver = self.clone();
+        match access::access(root.into(), move |root| {
+            resolver.list_mapped(&root.path().to_string_lossy(), &subdir)
+        }).await {
+            Err(access::MediaAccessError::Missing { .. }) => Ok(Vec::new()),
+            result => result,
+        }
+    }
+
+    /// List configured roots on demand, failing explicitly on an unresponsive root.
+    pub(crate) async fn list_files_bounded(
+        &self, roots: Vec<String>, subdir: String,
+    ) -> Result<Vec<String>, access::MediaAccessError> {
+        let mut files = Vec::new();
+        for root in roots {
+            let resolver = self.clone();
+            let subdir = subdir.clone();
+            match access::access(root.into(), move |root| {
+                resolver.list_files(&[root.path().to_string_lossy().into_owned()], &subdir)
+            }).await {
+                Ok(found) => files.extend(found),
+                Err(access::MediaAccessError::Missing { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        files.sort();
+        files.dedup();
+        Ok(files)
     }
 
     /// Invalidate a specific root or the entire cache.
@@ -237,7 +273,7 @@ impl MediaResolver {
     }
 
     /// List audio/video filenames under a mapping root + subdir.
-    pub fn list_mapped(&self, mapping_root: &str, subdir: &str) -> Vec<String> {
+    fn list_mapped(&self, mapping_root: &str, subdir: &str) -> Vec<String> {
         let search_dir = if subdir.is_empty() {
             PathBuf::from(mapping_root)
         } else {
@@ -267,7 +303,7 @@ impl MediaResolver {
     }
 
     /// List audio/video filenames available under media_roots.
-    pub fn list_files(&self, media_roots: &[String], subdir: &str) -> Vec<String> {
+    fn list_files(&self, media_roots: &[String], subdir: &str) -> Vec<String> {
         let mut found = Vec::new();
 
         for root in media_roots {
@@ -324,6 +360,17 @@ mod tests {
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("deep.flac"), b"fake flac").unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn bounded_listing_uses_the_mapping_and_walk_cache() {
+        let dir = setup_media_dir();
+        let resolver = MediaResolver::new();
+        let root = dir.path().to_string_lossy().into_owned();
+        assert_eq!(resolver.list_mapped_bounded(root.clone(), "subdir".into()).await.unwrap(),
+            vec!["deep.flac"]);
+        let files = resolver.list_files_bounded(vec![root], String::new()).await.unwrap();
+        assert_eq!(files, vec!["audio.wav", "deep.flac", "song.mp3", "video.mp4"]);
     }
 
     #[test]

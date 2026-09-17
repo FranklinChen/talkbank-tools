@@ -1,7 +1,7 @@
 # Adding a New Command
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-09-16 22:04 EDT
 
 This guide walks through adding a new batchalign3 command end-to-end.
 
@@ -279,8 +279,8 @@ boundary.
 
 | BA2 Python (`compare.py`) | BA3 Rust | File |
 |---------------------------|----------|------|
-| `_find_best_segment()`: bag-of-words window search | `talkbank_transform::compare::find_best_segment` | `crates/batchalign-transform/src/compare/engine.rs:72` |
-| `CompareEngine.process()`: local window alignment + token status | `talkbank_transform::compare::compare()` | `crates/batchalign-transform/src/compare/engine.rs:173` |
+| `_find_best_segment()`: bag-of-words window search | retired; `compare()` aligns the whole file once (`WholeFileAlignment`) | `crates/batchalign-transform/src/compare/engine.rs` |
+| `CompareEngine.process()`: local window alignment + token status | `talkbank_transform::compare::compare()` | `crates/batchalign-transform/src/compare/engine.rs:564` |
 | `CompareAnalysisEngine.analyze()`: metrics CSV | `CompareMetricsCsvTable` / `CompareMetricsCsvRow` | `crates/batchalign-transform/src/compare/metrics.rs:8,103` |
 | gold document projection | `project_gold_structurally()` | `crates/batchalign-transform/src/compare/materialize.rs:209` |
 | compare data model (bundle, utterances, metrics, word matches) | `ComparisonBundle` / `UtteranceComparison` / `CompareMetrics` / `GoldWordMatch` | `crates/batchalign-transform/src/compare/model.rs:75,27,38,92` |
@@ -354,16 +354,19 @@ struct MainAnnotatedCompareOutputs {
 }
 ```
 
-### How the BA2 `_find_best_segment()` + local DP maps
+### How BA2's `CompareEngine.process()` maps
 
 BA2's `CompareEngine.process()` does everything in one 250-line method:
 extract words → conform → find windows → DP align → annotate gold → set timing.
+BA3 finds no windows: it aligns the whole file once and derives every metric
+and both per-utterance views from that alignment (see the BA2 compare
+migration page for why).
 
 BA3 splits this into layers:
 
 1. **`talkbank_transform::compare`** (`crates/batchalign-transform/src/compare/`): pure functions, no ML, no IO:
-   - `find_best_segment()` (`engine.rs:72`), same local-window idea as BA2
-   - `compare(&main, &gold)` (`engine.rs:173`) → `ComparisonBundle` with main/gold compare views,
+   - `WholeFileAlignment::of()` (`engine.rs`), the one alignment of the whole file
+   - `compare(&main, &gold)` (`engine.rs:564`) → `ComparisonBundle` with main/gold compare views,
      structural word matches, and metrics
    - `project_gold_structurally()` (`materialize.rs:209`), AST-first gold projection
    - `XsrepTierContent` / `XsmorTierContent` (`serialize.rs:186,228`), typed compare-tier models lowered

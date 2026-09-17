@@ -248,7 +248,7 @@ fn create_real_test_app(python_path: &str) -> RealAppHandle {
         let config = ServerConfig {
             host: "0.0.0.0".into(),
             port: batchalign::config::PortRequest::from_u16(8001),
-            job_ttl_days: 7,
+            job_ttl_days: batchalign::config::JobTtlDays::new(7),
             memory_gate_mb: Some(MemoryMb(0)),
             ..Default::default()
         };

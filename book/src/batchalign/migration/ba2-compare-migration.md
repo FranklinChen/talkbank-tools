@@ -1,7 +1,7 @@
 # BA2 Compare Migration
 
 **Status:** Current
-**Last updated:** 2026-05-01 22:47 EDT
+**Last updated:** 2026-09-16 22:04 EDT
 
 This page is for contributors who know `batchalign2-master` compare and want to
 judge the BA3 Rust reimplementation on its real semantics rather than on
@@ -9,8 +9,10 @@ superficial output shape.
 
 The shortest summary is:
 
-- BA3 keeps the important `batchalign2-master` compare behavior: per-gold local
-  window selection, local DP alignment, `%xsrep`, `%xsmor`, and `.compare.csv`.
+- BA3 keeps `batchalign2-master`'s compare outputs (`%xsrep`, `%xsmor`,
+  `.compare.csv`) and its gold companion convention, and deliberately replaces
+  its alignment: one alignment of the whole file instead of a local window per
+  gold utterance (see "Where BA3 departs from BA2" below).
 - BA3 intentionally changes *how* projection and serialization are implemented:
   the reimplementation keeps CHAT in a Rust AST, carries typed alignment
   metadata, materializes compare tiers through explicit typed content models,
@@ -35,8 +37,8 @@ Use these as the primary files when reviewing the rewrite:
     calls `compare()` and `project_gold_structurally()` from
     talkbank-transform and writes the projected CHAT and `.compare.csv`)
   - `crates/batchalign-transform/src/compare/engine.rs`
-    (`find_best_segment`, `compare()`: the local-window search and
-    DP-alignment core)
+    (`compare()` and `WholeFileAlignment`: one DP alignment of the whole
+    file, from which every metric and both per-utterance views are derived)
   - `crates/batchalign-transform/src/compare/materialize.rs`
     (`project_gold_structurally`, `inject_comparison`,
     `clear_comparison`)
@@ -67,7 +69,7 @@ flowchart LR
         ba3_gold["gold transcript"]
         ba3_mor["morphosyntax on main only"]
         ba3_parse["parse main + raw gold into ChatFile ASTs"]
-        ba3_cmp["compare()\nwindow selection + local DP\nmain/gold views + structural matches"]
+        ba3_cmp["compare()\none whole-file alignment\nmain/gold views + structural matches"]
         ba3_proj["project_gold_structurally()\nAST projection"]
         ba3_tiers["typed %xsrep/%xsmor models\n-> UserDefinedDependentTier"]
         ba3_csv["CompareMetricsCsvTable\n-> csv crate"]
@@ -89,12 +91,13 @@ These points were treated as the `batchalign2-master` compare semantics worth
 preserving:
 
 - gold companions still use the `FILE.gold.cha` convention
-- each gold utterance still selects a best local main window before DP runs
-- alignment is still local to that selected window, not one global flat pass
 - compare still produces `%xsrep`, `%xsmor`, and `.compare.csv`
-- skipped main tokens outside the selected window do **not** count as insertions
 - deleted gold tokens stay untagged (`?`) unless the reference side already has
   tags that can be reused structurally
+
+BA2's local window per gold utterance, and its rule that main words outside
+the window are not counted, are not carried over: see "Where BA3 departs from
+BA2" below.
 
 ## Semantics intentionally changed
 
@@ -131,12 +134,34 @@ These are the deliberate architectural differences from the Python compare path:
    projection on gold output. BA3 does not reproduce that when it would make the
    CHAT AST inconsistent. Unsafe partial projection stays conservative.
 
+## Where BA3 departs from BA2: one whole-file alignment
+
+BA2 placed each gold utterance with `_find_best_segment()`: a bag-of-words
+search over every window of the remaining main transcript, ties broken toward
+the latest window, followed by a cursor that only moves forward. BA3 matched it
+exactly until 2026-09-16, when scoring real 30-minute bilingual recordings
+showed the failure: a short gold utterance such as `yeah .` early in the file
+was placed on the LAST `yeah .` of the main transcript, the cursor jumped to
+the end, and every later gold utterance was left unplaced. A main transcript
+identical to its gold plus one trailing `yeah .` scored 1 match out of 10.
+
+BA3 now aligns every main token against every gold token once, and every
+count, `cwer`, language attribution and both per-utterance views (`%xsrep`,
+`%xsmor`) come from that alignment. Against a complete gold nothing reads main
+utterance boundaries, so a recognizer that puts a boundary somewhere else
+scores the same. A gold utterance is
+placed on the main utterance holding most of its matched tokens only to score
+utterance language agreement. There is no window and no cursor, so no early
+decision can move a later one. Compare output on long files, and on any file
+segmented differently from its gold, therefore differs from BA2's,
+deliberately.
+
 ## BA2-to-BA3 code map
 
 | Concern | BA2 | BA3 |
 |---|---|---|
 | Gold pairing | CLI / dispatch filename logic | compare planner + dispatch pairing |
-| Best-window search | `_find_best_segment()` | `find_best_segment()` |
+| Gold utterance placement | `_find_best_segment()` window search | `WholeFileAlignment::of()`, one whole-file alignment (BA2's window search retired 2026-09-16, see above) |
 | Local alignment core | `CompareEngine.process()` | `compare()` |
 | Metrics output | `CompareAnalysisEngine` | `CompareMetricsCsvTable` / `format_metrics_csv()` |
 | Gold-side projection | Python `Document` / serializer path | `project_gold_structurally()` |
@@ -151,7 +176,9 @@ Specifically, live `batchalign2-master` oracles let us fix these BA3
 mismatches:
 
 - BA3 had been counting skipped main tokens outside the chosen local window as
-  insertions; `batchalign2-master` did not
+  insertions; `batchalign2-master` did not (reversed on 2026-07-30, when
+  silently discarding those hypothesis words was found to make WER too low, and
+  the window itself retired on 2026-09-16)
 - BA3 had been morphotagging raw gold during compare artifact construction,
   causing deleted gold tokens to pick up invented POS tags instead of staying
   `?`
@@ -184,7 +211,8 @@ If compare keeps evolving in BA3, the safe rules are:
 If the question is "should we accept this Rust reimplementation instead of
 starting over?", the most useful review checklist is:
 
-- does `compare()` preserve the `batchalign2-master` local-window behavior?
+- does `compare()` keep BA2's outputs while scoring every word from one
+  whole-file alignment?
 - does the workflow keep gold raw and main morphotagged on purpose?
 - does projection stay on the CHAT AST instead of text reconstruction?
 - are `%xsrep`, `%xsmor`, and `.compare.csv` all driven from the same bundle and

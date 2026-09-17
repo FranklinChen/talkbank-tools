@@ -1,7 +1,7 @@
 # Algorithms, Language, and Alignment Migration
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:14 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 Comparison anchors:
 
@@ -480,8 +480,9 @@ migration introduced two regressions by trying to be "helpful":
 
 1. **Rev.AI truncation fallback**: `&other[..2]` silently produced wrong
    codes (e.g., `hak` → `ha`, `pol` → `po`). Replaced with a ~78-entry
-   explicit mapping table (`revai/preflight.rs::try_revai_language_hint`)
-   + `"auto"` fallback with `tracing::warn`.
+   explicit mapping table (now `REV_LANGUAGES` in `types/revai_language.rs`)
+   + `"auto"` fallback with `tracing::warn`. That fallback was itself
+   removed on 2026-09-16: an unmapped language is refused.
 
 2. **Whisper English fallback**: `return "english"` when `pycountry` found
    no match. This meant unknown languages were silently transcribed in
@@ -809,10 +810,10 @@ at all). Early BA3 Rust code introduced a silent truncation fallback
 - `ces` → `ce` (should be `cs`)
 
 BA3 replaces this with an explicit ~78-entry ISO 639-3 → Rev.AI
-mapping table in `revai/preflight.rs::try_revai_language_hint`, with
-an `"auto"` fallback for unmapped languages (logged as a
-`tracing::warn` recommending the operator add an explicit mapping for
-the language). The reverse mapping (`revai_code_to_iso639_3` in
+mapping table (now `REV_LANGUAGES` in `types/revai_language.rs`),
+originally with an `"auto"` fallback for unmapped languages (logged as a
+`tracing::warn`); since 2026-09-16 an unmapped language is refused
+instead. The reverse mapping (`revai_code_to_iso639_3` in
 `revai/asr.rs`) returns `Option<LanguageCode3>` rather than panicking
 on unknown codes.
 

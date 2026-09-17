@@ -28,16 +28,16 @@ pub fn load_config_from_layout(
     Ok(config)
 }
 
-/// Load [`ServerConfig`] and apply non-fatal validation/clamping.
+/// Load admitted [`ServerConfig`] and report non-fatal scalar corrections.
 ///
-/// Returns the validated config plus any warning messages produced by
+/// Returns the config plus any warning messages produced by
 /// [`ServerConfig::validate`]. Callers that need a working runtime config but
-/// still want to surface bad values should prefer this helper.
+/// still want to surface corrected input values should prefer this helper.
 pub fn load_validated_config_from_layout(
     layout: &RuntimeLayout,
     path: Option<&Path>,
 ) -> Result<(ServerConfig, Vec<String>), ConfigError> {
-    let mut config = load_config_from_layout(layout, path)?;
+    let config = load_config_from_layout(layout, path)?;
     let warnings = config.validate();
     Ok((config, warnings))
 }

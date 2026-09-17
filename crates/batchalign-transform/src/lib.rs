@@ -74,7 +74,6 @@ pub use talkbank_transform::*;
 // neural morphotag, forced-alignment decisions, utterance segmentation), so
 // they live on the Batchalign side, NOT in the generic talkbank-transform crate.
 pub mod asr_postprocess;
-pub mod benchmark;
 pub mod build_chat;
 pub mod compare;
 pub mod constituency;

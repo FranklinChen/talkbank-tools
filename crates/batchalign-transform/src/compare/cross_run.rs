@@ -10,15 +10,16 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 use talkbank_model::ErrorCollector;
-use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::ChatFile;
 use talkbank_parser::TreeSitterParser;
 
 use crate::dp_align::{self, AlignResult, MatchMode};
-use crate::extract;
 
 use super::artifact::{ComparisonSubject, ValidatedTranscriptionPlan};
-use super::engine::{conform_with_mapping, is_punct_or_filler};
+use crate::wer_conform::WerNormalization;
+
+use super::engine::is_punct_or_filler;
+use super::language::{Run, languaged_utterances};
 
 /// Version of the cross-run report artifact schema.
 pub const CROSS_RUN_REPORT_SCHEMA_VERSION: u32 = 1;
@@ -462,8 +463,9 @@ pub fn compare_transcripts_by_speaker(
     left: &ChatFile,
     right: &ChatFile,
 ) -> CrossRunTranscriptionReport {
-    let left_words = speaker_words(left, &BTreeSet::new());
-    let right_words = speaker_words(right, &BTreeSet::new());
+    let normalization = run_normalization(left, right);
+    let left_words = speaker_words(left, &BTreeSet::new(), normalization);
+    let right_words = speaker_words(right, &BTreeSet::new(), normalization);
     let correspondence = establish_speaker_correspondence(&left_words, &right_words);
     report_from_correspondence(
         left_words,
@@ -481,8 +483,10 @@ pub fn compare_transcripts_with_exclusions(
     exclusions: &BTreeSet<String>,
     explicit_map: Option<SpeakerMap>,
 ) -> Result<CrossRunTranscriptionReport, SpeakerMapApplicationError> {
-    let (left_words, left_excluded) = speaker_words_and_excluded(left, exclusions);
-    let (right_words, right_excluded) = speaker_words_and_excluded(right, exclusions);
+    let normalization = run_normalization(left, right);
+    let (left_words, left_excluded) = speaker_words_and_excluded(left, exclusions, normalization);
+    let (right_words, right_excluded) =
+        speaker_words_and_excluded(right, exclusions, normalization);
     let correspondence = explicit_map.map_or_else(
         || establish_speaker_correspondence(&left_words, &right_words),
         SpeakerCorrespondence::Established,
@@ -507,8 +511,9 @@ pub fn compare_transcripts_with_speaker_map(
     right: &ChatFile,
     map: SpeakerMap,
 ) -> Result<CrossRunTranscriptionReport, SpeakerMapApplicationError> {
-    let left_words = speaker_words(left, &BTreeSet::new());
-    let right_words = speaker_words(right, &BTreeSet::new());
+    let normalization = run_normalization(left, right);
+    let left_words = speaker_words(left, &BTreeSet::new(), normalization);
+    let right_words = speaker_words(right, &BTreeSet::new(), normalization);
     for left_speaker in map.assignments.keys() {
         if !left_words.contains_key(left_speaker) {
             return Err(SpeakerMapApplicationError::UnknownLeftSpeaker {
@@ -728,34 +733,43 @@ pub fn serialize_cross_run_csv(
     )?)
 }
 
-fn speaker_words(file: &ChatFile, exclusions: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
-    speaker_words_and_excluded(file, exclusions).0
+/// The one normalization both runs are conformed with: English only when both
+/// runs declare English alone, so neither run's labels normalize its words
+/// differently from the other's.
+fn run_normalization(left: &ChatFile, right: &ChatFile) -> WerNormalization {
+    WerNormalization::for_declared_languages(&left.languages)
+        .shared(WerNormalization::for_declared_languages(&right.languages))
+}
+
+fn speaker_words(
+    file: &ChatFile,
+    exclusions: &BTreeSet<String>,
+    normalization: WerNormalization,
+) -> BTreeMap<String, Vec<String>> {
+    speaker_words_and_excluded(file, exclusions, normalization).0
 }
 
 fn speaker_words_and_excluded(
     file: &ChatFile,
     exclusions: &BTreeSet<String>,
+    normalization: WerNormalization,
 ) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, usize>) {
-    let extracted = extract::extract_words(file, PositionalDomain::Mor);
+    let utterances = languaged_utterances::<Run>(file);
     let mut result = BTreeMap::new();
     let mut excluded = BTreeMap::new();
-    for utterance in extracted {
-        let words = result
-            .entry(utterance.speaker.as_str().to_string())
-            .or_insert_with(Vec::new);
-        for word in utterance.words {
-            let text = word.text.as_str();
+    for utterance in &utterances {
+        let speaker = utterance.speaker().as_str();
+        let words = result.entry(speaker.to_string()).or_insert_with(Vec::new);
+        for languaged in utterance.words() {
+            let text = languaged.extracted().text.as_str();
             if exclusions.contains(text) || exclusions.contains(&text.to_lowercase()) {
-                *excluded
-                    .entry(utterance.speaker.as_str().to_string())
-                    .or_insert(0) += 1;
+                *excluded.entry(speaker.to_string()).or_insert(0) += 1;
                 continue;
             }
             if is_punct_or_filler(text) {
                 continue;
             }
-            let (conformed, _) = conform_with_mapping(&[text.to_string()]);
-            words.extend(conformed);
+            normalization.conform_word_into(text, words);
         }
     }
     (result, excluded)

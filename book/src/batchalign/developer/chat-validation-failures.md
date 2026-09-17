@@ -1,7 +1,7 @@
 # CHAT Validation Failures
 
 **Status:** Current
-**Last updated:** 2026-09-07 19:45 EDT
+**Last updated:** 2026-09-16 22:56 EDT
 
 This document catalogs how CHAT validation failures arise, how they are handled
 in BA3 vs BA2, and what the correct behavior should be. It is the reference for
@@ -178,8 +178,11 @@ unparseable CHAT" class in three layers:
    possible, matching CHAT's semantics. For Rev.AI on English and
    Spanish this means `skip_postprocessing=true` (skip Inverse Text
    Normalization), so numerals / `%` / written-form date tokens never
-   appear in the response for those languages. See
-   `crates/batchalign/src/revai/preflight.rs::skip_postprocessing_hint`.
+   appear in the response for those languages. See `rev_submit_options`
+   in `crates/batchalign/src/revai/asr.rs`. Rev.AI's multilingual
+   `en/es` model refuses the flag, so a code-switched transcript's
+   numerals do reach the pipeline, which keeps them as digits for this
+   layer to report.
 
 2. **Fallible `ChatWordText` construction, with two distinct outcomes.**
    `transcript_from_asr_utterances` calls

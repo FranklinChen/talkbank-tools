@@ -1,78 +1,122 @@
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
-use std::ops::Range;
+//! One comparison: extraction, one whole-file alignment, and every metric and
+//! per-utterance view derived from it.
+//!
+//! Extraction and POS are owned by a ComparedDocument. Conformed sides borrow
+//! that document; one alignment borrows both sides and immediately resolves
+//! aligner indices into source-word references. Its render operation consumes
+//! those bound steps to produce metrics and views.
 
 use talkbank_model::WriteChat;
-use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::{ChatFile, Line};
 
 use crate::dp_align::{self, AlignResult, MatchMode};
-use crate::extract::{self, ExtractedUtterance};
-use crate::wer_conform;
 
-use super::metrics::MetricAccumulator;
+use crate::wer_conform::WerNormalization;
+
+use super::language::{
+    Gold, GoldNeighbour, InsertionAttribution, InsertionSite, LanguagedUtterance, LanguagedWord,
+    Main, PerUtterance, Side, SiteUtterances, UtteranceIndex, languaged_utterances,
+};
+use super::metrics::{MetricAccumulator, ScoredWord};
 use super::model::{
     CompareStatus, CompareToken, ComparisonBundle, GoldCoverage, GoldWordMatch, UtteranceComparison,
 };
 use super::pos::{GoldPos, GoldTag, MainTag};
 
-/// Where one token of the concatenated gold came from.
+/// A word's position among the compared words of its utterance.
 ///
-/// Named rather than a `(usize, usize)`: two same-typed indices in positional
-/// order is the shape that lets a silent swap survive review, which the
-/// workspace charter rules out at domain seams.
-#[derive(Debug, Clone, Copy)]
-struct GoldSource {
-    /// Gold utterance the token belongs to.
-    utterance: usize,
-    /// Index into the flattened gold word list.
-    word: usize,
+/// Counts only words that take part in the comparison, so it is also the
+/// position [`GoldWordMatch`] reports. Minted only by [`flatten_side`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ComparePosition(usize);
+
+/// Where a token is shown within one utterance's comparison tier.
+///
+/// An ordered position, not a numeric key: before the first word, at or just
+/// after a word, or the terminator, which sorts after everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Slot {
+    /// Before the utterance's first word.
+    BeforeFirst,
+    /// At, or just after, the word at this position.
+    Word {
+        position: ComparePosition,
+        placement: WordPlacement,
+    },
+    /// The utterance terminator.
+    Terminator,
 }
 
-/// One alignment: a main utterance, the gold utterances that mapped to it, or
-/// either one alone.
-///
-/// Phase 2 aligns units, not utterances, so that the three situations it has to
-/// cover are one situation with different inputs:
-///
-/// - both sides present: the ordinary stitch;
-/// - main alone (`gold` empty): a main utterance nothing mapped to, which
-///   `dp_align` renders as all-insertions against an empty reference;
-/// - gold alone (`main` `None`): a gold utterance phase 1 could not place,
-///   which `dp_align` renders as all-deletions against an empty hypothesis.
-///
-/// Writing the last two as their own emission loops is what let them drift
-/// apart from the first, and from each other, on the anchor rule and on the
-/// `cwer` bookkeeping.
-#[derive(Debug, Clone)]
-struct AlignmentUnit {
-    /// Main utterance being aligned, or `None` for unplaced gold.
-    main: Option<usize>,
-    /// Gold utterances concatenated into this alignment, in gold order.
-    gold: Vec<usize>,
+/// Whether a token takes a word's own slot or the one just after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum WordPlacement {
+    At,
+    After,
 }
 
+impl Slot {
+    fn at(position: ComparePosition) -> Self {
+        Self::Word {
+            position,
+            placement: WordPlacement::At,
+        }
+    }
+
+    fn after(position: ComparePosition) -> Self {
+        Self::Word {
+            position,
+            placement: WordPlacement::After,
+        }
+    }
+}
+
+/// Aligned words borrow their actual sources; no detached token index escapes.
+enum AlignStep<'w, 'a> {
+    Match {
+        key: String,
+        main: &'w FlattenedWord<'a, Main>,
+        gold: &'w FlattenedWord<'a, Gold>,
+    },
+    Insertion {
+        key: String,
+        main: &'w FlattenedWord<'a, Main>,
+        site: InsertionSite<&'w FlattenedWord<'a, Gold>>,
+    },
+    Deletion {
+        key: String,
+        gold: &'w FlattenedWord<'a, Gold>,
+    },
+}
+
+/// Extraction and POS are built from one source and cannot be paired separately.
+struct ComparedDocument<S: Side> {
+    utterances: PerUtterance<S, LanguagedUtterance<S>>,
+    pos: GoldPos,
+    terminators: Vec<Option<String>>,
+}
+
+impl<S: Side> ComparedDocument<S> {
+    fn of(file: &ChatFile) -> Self {
+        Self {
+            utterances: languaged_utterances(file),
+            pos: GoldPos::of(file),
+            terminators: collect_utterance_terminators(file),
+        }
+    }
+}
+
+/// One compared word: the languaged word itself and where it sits.
 #[derive(Debug, Clone)]
-struct FlattenedWordInfo {
-    utterance_index: usize,
-    word_position: usize,
-    compare_position: usize,
+struct FlattenedWord<'a, S: Side> {
+    word: &'a LanguagedWord<S>,
+    position: ComparePosition,
     pos: Option<String>,
 }
 
-/// One document, flattened for alignment, with the tagging evidence it carries.
-///
-/// The three travel together because they are all one document's. Pairing one
-/// side's words with the other side's tagging is the mistake this shape exists
-/// to prevent: [`flatten_side`] builds the [`GoldPos`] from the very file it is
-/// flattening, so no caller assembles the pair itself.
-struct FlattenedSide {
-    /// Cleaned text for every word that takes part in the comparison.
-    words: Vec<String>,
-    /// Position and `%mor` metadata for each entry of `words`.
-    info: Vec<FlattenedWordInfo>,
-    /// Whether this document tags parts of speech at all.
-    pos: GoldPos,
+impl GoldNeighbour for &FlattenedWord<'_, Gold> {
+    fn gold_utterance(self) -> UtteranceIndex<Gold> {
+        self.word.utterance()
+    }
 }
 
 /// Punctuation and fillers to exclude from comparison (matching BA2 behavior).
@@ -89,185 +133,386 @@ pub(in crate::compare) fn is_punct_or_filler(word: &str) -> bool {
         || FILLERS.contains(&w.to_lowercase().as_str())
 }
 
-/// Apply conform_words per word, returning expanded tokens and an index
-/// mapping back to the original word list.
+/// One side's compared words and the alignment tokens they conform to.
 ///
-/// `mapping[j]` = index into the original `words` list that `conformed[j]`
-/// originated from.
-pub(in crate::compare) fn conform_with_mapping(words: &[String]) -> (Vec<String>, Vec<usize>) {
-    let mut conformed = Vec::new();
-    let mut mapping = Vec::new();
-    for (idx, word) in words.iter().enumerate() {
-        let expanded = wer_conform::conform_words(std::slice::from_ref(word));
-        for token in expanded {
-            conformed.push(token);
-            mapping.push(idx);
-        }
-    }
-    (conformed, mapping)
+/// One word can conform to several tokens; `word_of_token[j]` is the word
+/// `tokens[j]` came from. A word is reached only through [`Self::word`], by a
+/// token index of the same side.
+struct ConformedSide<'a, S: Side> {
+    words: Vec<FlattenedWord<'a, S>>,
+    tokens: Vec<String>,
+    word_of_token: Vec<usize>,
+    document: &'a ComparedDocument<S>,
 }
 
-/// Find the best local main-token window for one gold utterance.
-///
-/// This follows the BA2 compare engine's rough-pass strategy:
-/// - compare contiguous windows using bag-of-words overlap
-/// - only consider windows near the gold utterance length
-/// - prefer better overlap, then more aligner matches (so order is respected
-///   and cross-utterance fragments that happen to be dense don't beat
-///   in-utterance matches), then fewer wasted tokens, then the latest window
-///
-/// Tiebreaker order matches BA2-master 86230ef (2026-04-17,
-/// "fix part 2 of compare").
-///
-/// `main_utts[i]` is the utterance index that `main_tokens[i]` belongs to.
-/// BA2 (compare.py:200-249) projects each candidate window to its majority
-/// utterance by trimming non-majority tokens from both ends before scoring,
-/// preventing cross-utterance bag-of-words inflation. The projection is a
-/// no-op for windows whose tokens all share one utterance index.
-pub(in crate::compare) fn find_best_segment(
-    gold_tokens: &[String],
-    main_tokens: &[String],
-    main_utts: &[usize],
-) -> (usize, usize) {
-    debug_assert_eq!(
-        main_tokens.len(),
-        main_utts.len(),
-        "main_tokens and main_utts must be parallel arrays",
-    );
-    if gold_tokens.is_empty() || main_tokens.is_empty() {
-        return (0, 0);
+impl<'a, S: Side> ConformedSide<'a, S> {
+    fn of(document: &'a ComparedDocument<S>, normalization: WerNormalization) -> Self {
+        let words = flatten_side(document);
+        let mut tokens = Vec::with_capacity(words.len());
+        let mut word_of_token = Vec::with_capacity(words.len());
+        for (word_index, word) in words.iter().enumerate() {
+            let before = tokens.len();
+            normalization.conform_word_into(word.word.extracted().text.as_str(), &mut tokens);
+            word_of_token.resize(word_of_token.len() + (tokens.len() - before), word_index);
+        }
+        Self {
+            words,
+            tokens,
+            word_of_token,
+            document,
+        }
     }
 
-    let gold_len = gold_tokens.len();
-    let main_len = main_tokens.len();
-    let min_window = std::cmp::max(1, gold_len.saturating_sub(2));
-    let max_window = std::cmp::min(main_len, gold_len + 2);
-    let gold_counts = token_counts(gold_tokens);
+    /// The word a token came from.
+    fn word(&self, token: usize) -> &FlattenedWord<'a, S> {
+        &self.words[self.word_of_token[token]]
+    }
 
-    // Comparing `overlap` is equivalent to BA2's float `score = overlap /
-    // gold_len` because `gold_len` is constant within the call, and lets us
-    // collapse all four tiebreaker axes into one tuple comparison. `Reverse`
-    // flips the lower-is-better waste axis.
-    let mut best_window = (0usize, std::cmp::min(main_len, gold_len));
-    let mut best_key: Option<(usize, usize, Reverse<usize>, usize)> = None;
+    /// Every token, in order, with the word it came from.
+    fn tokens_with_words(&self) -> impl Iterator<Item = (&str, &FlattenedWord<'a, S>)> {
+        self.tokens
+            .iter()
+            .zip(&self.word_of_token)
+            .map(|(token, &word)| (token.as_str(), &self.words[word]))
+    }
+}
 
-    for span in min_window..=max_window {
-        for start in 0..=(main_len - span) {
-            let end = start + span;
-            // Majority-project the candidate window before scoring (BA2
-            // compare.py:200-249). If trimming non-majority tokens from
-            // both ends empties the window, BA2 `continue`s the loop.
-            let (ts, te) = match majority_project(main_utts, start, end) {
-                Some(window) => window,
-                None => continue,
+/// Whether a main utterance matched any gold word in the whole-file alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainUtteranceEvidence {
+    Matched,
+    Unmatched,
+}
+
+/// Which main words a comparison scores as insertions.
+enum InsertionScope {
+    /// Every one: the gold is a full reference ([`GoldCoverage::Complete`]).
+    /// Main utterance boundaries play no part.
+    EveryMainWord,
+    /// Only those in main utterances that matched some gold word
+    /// ([`GoldCoverage::Partial`]); the rest lie outside what the gold covers.
+    MatchedMainUtterances(PerUtterance<Main, MainUtteranceEvidence>),
+}
+
+/// Whether one unmatched main word is scored.
+enum WordCoverage {
+    Scored,
+    OutsideGold,
+}
+
+impl InsertionScope {
+    fn coverage(&self, word: &FlattenedWord<'_, Main>) -> WordCoverage {
+        match self {
+            Self::EveryMainWord => WordCoverage::Scored,
+            Self::MatchedMainUtterances(evidence) => match evidence[word.word.utterance()] {
+                MainUtteranceEvidence::Matched => WordCoverage::Scored,
+                MainUtteranceEvidence::Unmatched => WordCoverage::OutsideGold,
+            },
+        }
+    }
+}
+
+/// Where one gold utterance landed, used for utterance language agreement only.
+///
+/// Three outcomes, not an `Option`: an utterance with no compared words and an
+/// utterance none of whose words were matched would both be `None`, and
+/// utterance language agreement has to tell them apart. The first had nothing
+/// to place; the second is an utterance the transcript lost.
+#[derive(Debug, Clone, Copy)]
+enum GoldPlacement {
+    /// No gold token of the utterance has been seen: it has no compared words.
+    NothingToPlace,
+    /// It has compared words, and the alignment matched none of them.
+    Unplaced,
+    /// Some of its words matched.
+    Placed(MajorityRun),
+}
+
+impl GoldPlacement {
+    fn deleted(self) -> Self {
+        match self {
+            Self::NothingToPlace | Self::Unplaced => Self::Unplaced,
+            Self::Placed(run) => Self::Placed(run),
+        }
+    }
+
+    fn matched(self, main: UtteranceIndex<Main>) -> Self {
+        match self {
+            Self::NothingToPlace | Self::Unplaced => Self::Placed(MajorityRun::starting(main)),
+            Self::Placed(run) => Self::Placed(run.with(main)),
+        }
+    }
+}
+
+/// The main utterance holding most of one gold utterance's matched tokens,
+/// reduced as the matches arrive.
+///
+/// A monotone alignment visits one gold utterance's matches in order and never
+/// returns to an earlier main utterance, so each main utterance's matches form
+/// one unbroken run and the longest run is the majority. Only a strictly longer
+/// run replaces the best, so a tie keeps the earlier main utterance and never
+/// reaches forward in the file.
+#[derive(Debug, Clone, Copy)]
+struct MajorityRun {
+    best: Run,
+    current: Run,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    main: UtteranceIndex<Main>,
+    matched: usize,
+}
+
+impl MajorityRun {
+    fn starting(main: UtteranceIndex<Main>) -> Self {
+        let run = Run { main, matched: 1 };
+        Self {
+            best: run,
+            current: run,
+        }
+    }
+
+    fn with(self, main: UtteranceIndex<Main>) -> Self {
+        let current = match self.current.main == main {
+            true => Run {
+                main,
+                matched: self.current.matched + 1,
+            },
+            false => Run { main, matched: 1 },
+        };
+        let best = match current.matched > self.best.matched {
+            true => current,
+            false => self.best,
+        };
+        Self { best, current }
+    }
+
+    fn main_utterance(self) -> UtteranceIndex<Main> {
+        self.best.main
+    }
+}
+
+/// The ONE alignment a comparison makes, and what follows from it.
+///
+/// Every main token is aligned against every gold token in a single monotone
+/// alignment, and every metric and both per-utterance views are derived from
+/// its steps. Under [`GoldCoverage::Complete`] nothing reads main utterance
+/// boundaries, so the counts, `cwer`, language attribution and the gold view
+/// are the same however the main transcript is split into utterances. Gold
+/// utterance placement feeds utterance language agreement only.
+///
+/// Cost: one alignment over the two files' token counts (Hirschberg, after
+/// stripping any common prefix and suffix).
+struct WholeFileAlignment<'w, 'a> {
+    main: &'w ConformedSide<'a, Main>,
+    gold: &'w ConformedSide<'a, Gold>,
+    coverage: GoldCoverage,
+    alignment: Alignment<'w, 'a>,
+}
+
+enum Alignment<'w, 'a> {
+    /// The gold has no compared words, so there is nothing to align against.
+    NoGoldWords,
+    Aligned {
+        steps: Vec<AlignStep<'w, 'a>>,
+        placements: PerUtterance<Gold, GoldPlacement>,
+        scope: InsertionScope,
+    },
+}
+
+impl<'w, 'a> WholeFileAlignment<'w, 'a> {
+    fn of(
+        main: &'w ConformedSide<'a, Main>,
+        gold: &'w ConformedSide<'a, Gold>,
+        coverage: GoldCoverage,
+    ) -> Self {
+        if gold.tokens.is_empty() {
+            return Self {
+                main,
+                gold,
+                coverage,
+                alignment: Alignment::NoGoldWords,
             };
-            let projected = &main_tokens[ts..te];
-            let projected_len = te - ts;
-            let overlap = token_overlap(projected, &gold_counts);
-            let waste = projected_len.saturating_sub(overlap);
-            let align_matches = count_alignment_matches(projected, gold_tokens);
+        }
+        let main_utterances = &main.document.utterances;
+        let gold_utterances = &gold.document.utterances;
+        let mut consumed = None;
+        let steps: Vec<_> = dp_align::align(&main.tokens, &gold.tokens, MatchMode::CaseInsensitive)
+            .into_iter()
+            .map(|result| match result {
+                AlignResult::Match {
+                    key,
+                    payload_idx,
+                    reference_idx,
+                } => {
+                    consumed = Some(reference_idx);
+                    AlignStep::Match {
+                        key,
+                        main: main.word(payload_idx),
+                        gold: gold.word(reference_idx),
+                    }
+                }
+                AlignResult::ExtraReference { key, reference_idx } => {
+                    consumed = Some(reference_idx);
+                    AlignStep::Deletion {
+                        key,
+                        gold: gold.word(reference_idx),
+                    }
+                }
+                AlignResult::ExtraPayload { key, payload_idx } => {
+                    let site = match consumed {
+                        None => InsertionSite::BeforeGold { next: gold.word(0) },
+                        Some(previous) if previous + 1 < gold.tokens.len() => {
+                            InsertionSite::BetweenGoldWords {
+                                previous: gold.word(previous),
+                                next: gold.word(previous + 1),
+                            }
+                        }
+                        Some(previous) => InsertionSite::AfterGold {
+                            previous: gold.word(previous),
+                        },
+                    };
+                    AlignStep::Insertion {
+                        key,
+                        main: main.word(payload_idx),
+                        site,
+                    }
+                }
+            })
+            .collect();
 
-            let key = (overlap, align_matches, Reverse(waste), te);
-            if best_key.is_none_or(|best| key > best) {
-                best_window = (ts, te);
-                best_key = Some(key);
+        let mut placements = gold_utterances.map_ref(|_| GoldPlacement::NothingToPlace);
+        for step in &steps {
+            match step {
+                AlignStep::Match {
+                    main: main_token,
+                    gold: gold_token,
+                    ..
+                } => {
+                    let placement = &mut placements[gold_token.word.utterance()];
+                    *placement = placement.matched(main_token.word.utterance());
+                }
+                AlignStep::Deletion {
+                    gold: gold_token, ..
+                } => {
+                    let placement = &mut placements[gold_token.word.utterance()];
+                    *placement = placement.deleted();
+                }
+                AlignStep::Insertion { .. } => {}
+            }
+        }
+
+        let scope = match coverage {
+            GoldCoverage::Complete => InsertionScope::EveryMainWord,
+            GoldCoverage::Partial => {
+                let mut evidence = main_utterances.map_ref(|_| MainUtteranceEvidence::Unmatched);
+                for step in &steps {
+                    match step {
+                        AlignStep::Match {
+                            main: main_token, ..
+                        } => {
+                            evidence[main_token.word.utterance()] = MainUtteranceEvidence::Matched;
+                        }
+                        AlignStep::Insertion { .. } | AlignStep::Deletion { .. } => {}
+                    }
+                }
+                InsertionScope::MatchedMainUtterances(evidence)
+            }
+        };
+
+        Self {
+            main,
+            gold,
+            coverage,
+            alignment: Alignment::Aligned {
+                steps,
+                placements,
+                scope,
+            },
+        }
+    }
+}
+
+/// A per-utterance view as it is built: each token with the slot it is shown at.
+type PositionedView<S> = PerUtterance<S, Vec<(Slot, CompareToken)>>;
+
+/// Where the main view shows the next deletion.
+enum MainAnchor<'w, 'a> {
+    /// No main word shown yet. Deletions wait, and are shown before the first
+    /// main word shown; if none ever is, they appear in the gold view only.
+    NothingShown { waiting: Vec<CompareToken> },
+    /// Just after this main word, the last one shown.
+    After(&'w FlattenedWord<'a, Main>),
+}
+
+impl<'w, 'a> MainAnchor<'w, 'a> {
+    /// Show a main word's token; deletions after it follow it.
+    fn show(
+        &mut self,
+        word: &'w FlattenedWord<'a, Main>,
+        token: CompareToken,
+        view: &mut PositionedView<Main>,
+    ) {
+        let utterance = &mut view[word.word.utterance()];
+        utterance.push((Slot::at(word.position), token));
+        match std::mem::replace(self, Self::After(word)) {
+            Self::NothingShown { waiting } => {
+                utterance.extend(waiting.into_iter().map(|token| (Slot::BeforeFirst, token)));
+            }
+            Self::After(_) => {}
+        }
+    }
+
+    fn deletion(&mut self, token: CompareToken, view: &mut PositionedView<Main>) {
+        match self {
+            Self::NothingShown { waiting } => waiting.push(token),
+            Self::After(word) => {
+                view[word.word.utterance()].push((Slot::after(word.position), token));
             }
         }
     }
-
-    // No tokens overlap at all → return an empty window so the caller doesn't
-    // consume main tokens that belong to a later gold utterance.
-    if best_key.is_none_or(|(overlap, ..)| overlap == 0) {
-        return (0, 0);
-    }
-
-    best_window
 }
 
-/// Trim a candidate window down to its majority-utterance subrange.
-///
-/// Mirrors BA2's `Counter(window_utts).most_common(1)` followed by
-/// leading/trailing non-majority-token trim. Returns `None` if the projected
-/// window is empty.
-fn majority_project(main_utts: &[usize], start: usize, end: usize) -> Option<(usize, usize)> {
-    if start >= end {
-        return None;
-    }
-
-    let majority = majority_utterance(&main_utts[start..end])?;
-
-    let mut ts = start;
-    while ts < end && main_utts[ts] != majority {
-        ts += 1;
-    }
-    let mut te = end;
-    while te > ts && main_utts[te - 1] != majority {
-        te -= 1;
-    }
-    if te <= ts {
-        return None;
-    }
-    Some((ts, te))
-}
-
-/// The utterance index holding the most tokens in `utts`, first-seen on ties.
-///
-/// The single owner of BA2's majority rule, used both by [`majority_project`]
-/// (which then trims to that utterance's subrange) and by phase 1 (which turns
-/// a chosen window into the one main utterance a gold utterance maps to).
-///
-/// Ties resolve to **first-seen** because BA2's `Counter.most_common` is
-/// insertion-ordered; `Iterator::max_by_key` would pick last-seen, the
-/// opposite. Stated once, here, so the two callers cannot drift apart on it.
-fn majority_utterance(utts: &[usize]) -> Option<usize> {
-    let mut counts: Vec<(usize, usize)> = Vec::new();
-    for &utt in utts {
-        match counts.iter_mut().find(|(idx, _)| *idx == utt) {
-            Some(entry) => entry.1 += 1,
-            None => counts.push((utt, 1)),
+/// Where the gold view shows an insertion: in its owner's utterance, just after
+/// the gold word before it when that word shares the utterance, otherwise before
+/// the utterance's first word.
+fn gold_view_slot(site: InsertionSite<&FlattenedWord<'_, Gold>>) -> (UtteranceIndex<Gold>, Slot) {
+    match site {
+        InsertionSite::BeforeGold { next } => (next.word.utterance(), Slot::BeforeFirst),
+        InsertionSite::AfterGold { previous } => {
+            (previous.word.utterance(), Slot::after(previous.position))
         }
+        InsertionSite::BetweenGoldWords { previous, .. } => match site.utterances() {
+            SiteUtterances::Within(utterance) => (utterance, Slot::after(previous.position)),
+            SiteUtterances::Across { after, .. } => (after, Slot::BeforeFirst),
+        },
     }
-    counts
-        .iter()
-        .fold(None::<(usize, usize)>, |best, &cur| match best {
-            Some(b) if b.1 >= cur.1 => Some(b),
-            _ => Some(cur),
-        })
-        .map(|(utt, _)| utt)
 }
 
-fn count_alignment_matches(window: &[String], gold_tokens: &[String]) -> usize {
-    dp_align::align(window, gold_tokens, MatchMode::CaseInsensitive)
-        .into_iter()
-        .filter(|item| matches!(item, AlignResult::Match { .. }))
-        .count()
-}
-
-fn token_counts(tokens: &[String]) -> HashMap<&str, usize> {
-    let mut counts = HashMap::new();
-    for token in tokens {
-        *counts.entry(token.as_str()).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn token_overlap(window: &[String], gold_counts: &HashMap<&str, usize>) -> usize {
-    let mut window_counts = HashMap::new();
-    for token in window {
-        *window_counts.entry(token.as_str()).or_insert(0) += 1;
-    }
-
-    window_counts
-        .iter()
-        .map(|(token, count)| std::cmp::min(*count, *gold_counts.get(token).unwrap_or(&0)))
-        .sum()
+/// Conform every compared word of one file as a gold side, for tests of the
+/// token-to-word mapping. Goes through the same extraction, flattening and
+/// normalization choice as [`compare`].
+#[cfg(test)]
+pub(in crate::compare) fn conform_file_words(chat_file: &ChatFile) -> (Vec<String>, Vec<usize>) {
+    let document = ComparedDocument::<Gold>::of(chat_file);
+    let ConformedSide {
+        tokens,
+        word_of_token,
+        ..
+    } = ConformedSide::of(
+        &document,
+        WerNormalization::for_declared_languages(&chat_file.languages),
+    );
+    (tokens, word_of_token)
 }
 
 /// Compare a main transcript against a gold-standard reference.
 ///
 /// Both inputs are parsed CHAT files. Words are extracted from the Mor
-/// domain (excluding punctuation and fillers), normalized via
-/// `conform_words`, then aligned with the Hirschberg DP aligner.
+/// domain (excluding punctuation and fillers), each with its resolved
+/// language, normalized with one normalization chosen from the gold, and
+/// aligned ONCE over the whole file (see [`WholeFileAlignment`]).
 ///
 /// Returns per-utterance comparison annotations and aggregate metrics.
 pub fn compare(
@@ -275,364 +520,189 @@ pub fn compare(
     gold_file: &ChatFile,
     gold_coverage: GoldCoverage,
 ) -> ComparisonBundle {
-    // 1. Extract words from both files
-    let main_utts = extract::extract_words(main_file, PositionalDomain::Mor);
-    let gold_utts = extract::extract_words(gold_file, PositionalDomain::Mor);
+    let main_document = ComparedDocument::<Main>::of(main_file);
+    let gold_document = ComparedDocument::<Gold>::of(gold_file);
+    let normalization = WerNormalization::for_declared_languages(&gold_file.languages);
+    let main = ConformedSide::of(&main_document, normalization);
+    let gold = ConformedSide::of(&gold_document, normalization);
+    WholeFileAlignment::of(&main, &gold, gold_coverage).render()
+}
 
-    // 2. Flatten words, filtering punctuation and fillers.
-    //
-    // Each side is flattened against its OWN tagging evidence. `gold_pos` is
-    // then the one thing that decides which side a matched pair's part of
-    // speech is read from; main's own copy governs only main's filter.
-    let FlattenedSide {
-        words: main_words,
-        info: main_info,
-        ..
-    } = flatten_side(main_file, &main_utts);
-    let FlattenedSide {
-        words: gold_words,
-        info: gold_info,
-        pos: gold_pos,
-    } = flatten_side(gold_file, &gold_utts);
-
-    // 3. Apply conform with index mapping
-    let (conformed_main, main_map) = conform_with_mapping(&main_words);
-    let (conformed_gold, gold_map) = conform_with_mapping(&gold_words);
-
-    // Per-conformed-token utterance index, parallel to `conformed_main`.
-    // `find_best_segment` needs this for BA2's majority-projection step
-    // (compare.py:200-249), which trims cross-utterance leaders/trailers
-    // before scoring each candidate window.
-    let conformed_main_utts: Vec<usize> = main_map
-        .iter()
-        .map(|&orig_idx| main_info[orig_idx].utterance_index)
-        .collect();
-
-    // 4. Partition conformed gold tokens by utterance so compare can work
-    // sequentially, one gold utterance at a time.
-    let mut gold_utt_tokens: Vec<Vec<String>> = vec![Vec::new(); gold_utts.len()];
-    let mut gold_utt_maps: Vec<Vec<usize>> = vec![Vec::new(); gold_utts.len()];
-    for (conformed_idx, token) in conformed_gold.iter().enumerate() {
-        let orig_gold_idx = gold_map[conformed_idx];
-        let gold_utt_idx = gold_info[orig_gold_idx].utterance_index;
-        gold_utt_tokens[gold_utt_idx].push(token.clone());
-        gold_utt_maps[gold_utt_idx].push(orig_gold_idx);
-    }
-
-    // 5. PHASE 1, the mapping pass.
-    //
-    // Run the window search for each gold utterance, but use its answer ONLY
-    // to decide which main utterance that gold utterance corresponds to. The
-    // window is a bag-of-words heuristic for locating material; it is not a
-    // decision about what deserves to be scored.
-    //
-    // This is the half that used to do everything. It aligned inside the
-    // chosen window and advanced past it, so any main token the window did not
-    // select was never emitted in any status: not a match, not an insertion,
-    // not anything. Reported WER was therefore systematically lower than the
-    // truth by however many hypothesis words the windows happened to miss.
-    let mut gold_to_main: Vec<Option<usize>> = vec![None; gold_utts.len()];
-    let mut search_start = 0usize;
-
-    for gold_utt_idx in 0..gold_utts.len() {
-        let g_tokens = &gold_utt_tokens[gold_utt_idx];
-        if g_tokens.is_empty() {
-            continue;
-        }
-
-        let remaining_main = &conformed_main[search_start..];
-        let remaining_main_utts = &conformed_main_utts[search_start..];
-        let (win_start, win_end) = find_best_segment(g_tokens, remaining_main, remaining_main_utts);
-        let abs_start = search_start + win_start;
-        let abs_end = search_start + win_end;
-
-        if abs_end > abs_start {
-            gold_to_main[gold_utt_idx] =
-                majority_utterance(&conformed_main_utts[abs_start..abs_end]);
-        }
-
-        // Advance past the window so a later gold utterance cannot re-consume
-        // main tokens an earlier one already claimed. The cursor still matters
-        // for MAPPING even though it no longer bounds what gets aligned.
-        search_start = abs_end;
-    }
-
-    // 6. PHASE 2, the stitch.
-    //
-    // One alignment per main utterance, over that utterance's FULL conformed
-    // token span, against the concatenated gold tokens of every gold utterance
-    // that mapped to it. Every main token now sits inside exactly one such
-    // span, so a token the window missed surfaces as an insertion instead of
-    // disappearing.
-    //
-    // No rotation here. Rotation existed to re-phase a window that had been
-    // cut at an arbitrary offset; aligning a whole utterance has no such
-    // offset, and rotating one would scramble real token order.
-    let mut main_to_gold: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (gold_utt_idx, mapped) in gold_to_main.iter().enumerate() {
-        if let Some(main_idx) = mapped {
-            main_to_gold
-                .entry(*main_idx)
-                .or_default()
-                .push(gold_utt_idx);
-        }
-    }
-
-    // Each main utterance's conformed tokens as a contiguous span.
-    //
-    // `flatten_side` walks utterances in order and `conform_with_mapping`
-    // expands each word in place, so `conformed_main_utts` is non-decreasing
-    // and one utterance's tokens are always adjacent. That makes a span of two
-    // indices enough, where a per-utterance index vector would be a heap
-    // allocation per utterance holding what `start..end` already says. The
-    // invariant is asserted rather than assumed, in the style
-    // `find_best_segment` uses for its own parallel-array precondition.
-    let mut main_utt_spans: Vec<Range<usize>> = vec![0..0; main_utts.len()];
-    for (conformed_idx, &utt_idx) in conformed_main_utts.iter().enumerate() {
-        let Some(span) = main_utt_spans.get_mut(utt_idx) else {
-            continue;
-        };
-        if span.start == span.end {
-            *span = conformed_idx..conformed_idx + 1;
-        } else {
-            debug_assert_eq!(
-                span.end, conformed_idx,
-                "conformed main tokens of one utterance must be contiguous",
-            );
-            span.end = conformed_idx + 1;
-        }
-    }
-
-    let mut main_positioned: Vec<Vec<(f64, CompareToken)>> = vec![Vec::new(); main_utts.len()];
-    let mut gold_positioned: Vec<Vec<(f64, CompareToken)>> = vec![Vec::new(); gold_utts.len()];
-    let mut gold_word_matches = Vec::new();
-    let mut metrics = MetricAccumulator::default();
-    let mut last_global_main_anchor: Option<(usize, usize)> = None;
-
-    // Every alignment the file needs, in one list.
-    //
-    // Main utterances in index order (each with the gold that mapped to it,
-    // possibly none), then the gold utterances nothing could place. Under
-    // `GoldCoverage::Partial` a main utterance with no gold is dropped here,
-    // which is the whole of what `Partial` means: a filter on the unit list
-    // rather than a branch wrapped around a duplicated emission block.
-    let mut units: Vec<AlignmentUnit> = Vec::new();
-    for main_idx in 0..main_utts.len() {
-        let gold = main_to_gold.get(&main_idx).cloned().unwrap_or_default();
-        if gold.is_empty() && gold_coverage == GoldCoverage::Partial {
-            continue;
-        }
-        units.push(AlignmentUnit {
-            main: Some(main_idx),
+impl WholeFileAlignment<'_, '_> {
+    fn render(self) -> ComparisonBundle {
+        let Self {
+            main,
             gold,
-        });
-    }
-    units.extend(
-        gold_to_main
-            .iter()
-            .enumerate()
-            .filter(|(_, mapped)| mapped.is_none())
-            .map(|(gold_utt_idx, _)| AlignmentUnit {
-                main: None,
-                gold: vec![gold_utt_idx],
-            }),
-    );
+            coverage: gold_coverage,
+            alignment,
+        } = self;
+        let main_utts = &main.document.utterances;
+        let gold_utts = &gold.document.utterances;
+        let mut metrics = MetricAccumulator::default();
+        let mut main_view: PositionedView<Main> = main_utts.map_ref(|_| Vec::new());
+        let mut gold_view: PositionedView<Gold> = gold_utts.map_ref(|_| Vec::new());
+        let mut gold_word_matches = Vec::new();
 
-    for unit in &units {
-        let main_span = unit
-            .main
-            .map_or(0..0, |main_idx| main_utt_spans[main_idx].clone());
-        let main_tokens = &conformed_main[main_span.clone()];
-
-        // Concatenated gold, with a parallel map back to the gold utterance and
-        // word each token came from, so an aligned gold token still knows its
-        // origin once several utterances have been joined. Parallel rather than
-        // one vector of pairs because `dp_align::align` wants a `&[String]`.
-        let mut gold_tokens: Vec<String> = Vec::new();
-        let mut gold_sources: Vec<GoldSource> = Vec::new();
-        for &gold_utt_idx in &unit.gold {
-            for (within, token) in gold_utt_tokens[gold_utt_idx].iter().enumerate() {
-                gold_tokens.push(token.clone());
-                gold_sources.push(GoldSource {
-                    utterance: gold_utt_idx,
-                    word: gold_utt_maps[gold_utt_idx][within],
-                });
-            }
-        }
-
-        // `Some` for any unit with a main utterance; `None` for a gold-only
-        // unit, which is why the anchor chain below still needs its last arm.
-        let default_main_anchor = main_tokens.first().map(|_| {
-            let info = &main_info[main_map[main_span.start]];
-            (info.utterance_index, info.word_position)
-        });
-
-        let alignment = dp_align::align(main_tokens, &gold_tokens, MatchMode::CaseInsensitive);
-        let mut local_main_cursor = 0usize;
-        let mut local_gold_cursor = 0usize;
-        let mut last_gold_word_position: Option<usize> = None;
-        let mut local_main_anchor: Option<(usize, usize)> = None;
-
-        for item in alignment {
-            match item {
-                AlignResult::Match { key, .. } => {
-                    let orig_main_idx = main_map[main_span.start + local_main_cursor];
-                    let main_word = &main_info[orig_main_idx];
-                    let GoldSource {
-                        utterance: gold_utt_idx,
-                        word: orig_gold_idx,
-                    } = gold_sources[local_gold_cursor];
-                    let gold_word = &gold_info[orig_gold_idx];
-
-                    // A tagged gold side attributes the gold form's POS to
-                    // every Match (BA2 compare.py:540-550): the gold standard
-                    // is what the reviewer needs to see, not the transcriber's
-                    // tag. An UNTAGGED gold side has no tag to attribute, and
-                    // the rule for that case belongs to `gold_pos` rather than
-                    // to a `None` read off this one form. See `super::pos`.
-                    let token = CompareToken {
-                        text: key,
-                        pos: gold_pos.pos_for_match(
-                            GoldTag(gold_word.pos.as_deref()),
-                            MainTag(main_word.pos.as_deref()),
-                        ),
-                        status: CompareStatus::Match,
-                    };
-                    metrics.record(&token);
-                    main_positioned[main_word.utterance_index]
-                        .push((main_word.word_position as f64, token.clone()));
-                    gold_positioned[gold_utt_idx].push((gold_word.word_position as f64, token));
-
-                    let structural_match = GoldWordMatch {
-                        gold_utterance_index: gold_utt_idx,
-                        gold_word_position: gold_word.compare_position,
-                        main_utterance_index: main_word.utterance_index,
-                        main_word_position: main_word.compare_position,
-                    };
-                    if gold_word_matches.last() != Some(&structural_match) {
-                        gold_word_matches.push(structural_match);
-                    }
-
-                    local_main_anchor = Some((main_word.utterance_index, main_word.word_position));
-                    last_global_main_anchor = local_main_anchor;
-                    last_gold_word_position = Some(gold_word.word_position);
-                    local_main_cursor += 1;
-                    local_gold_cursor += 1;
-                }
-                AlignResult::ExtraPayload { key, .. } => {
-                    let orig_main_idx = main_map[main_span.start + local_main_cursor];
-                    let main_word = &main_info[orig_main_idx];
-
-                    let token = CompareToken {
-                        text: key,
-                        pos: main_word.pos.clone(),
-                        status: CompareStatus::ExtraMain,
-                    };
-                    metrics.record(&token);
-                    main_positioned[main_word.utterance_index]
-                        .push((main_word.word_position as f64, token.clone()));
-                    // Attribute the insertion to the gold utterance the
-                    // alignment had reached, falling back to the first one
-                    // mapped here when it precedes every gold token.
-                    let owning_gold = gold_sources
-                        .get(local_gold_cursor)
-                        .or_else(|| gold_sources.last())
-                        .map(|source| source.utterance);
-                    if let Some(gold_utt_idx) = owning_gold {
-                        gold_positioned[gold_utt_idx].push((
-                            last_gold_word_position.map_or(-0.5, |pos| pos as f64 + 0.5),
-                            token,
+        // 3. One alignment of the whole file, then every step once, in order, into
+        // the metrics and both views.
+        match alignment {
+            Alignment::NoGoldWords => match gold_coverage {
+                // Nothing matched, so every main utterance is outside what a
+                // partial gold covers.
+                GoldCoverage::Partial => {}
+                GoldCoverage::Complete => {
+                    for (key, word) in main.tokens_with_words() {
+                        let token = metrics.record(ScoredWord::inserted(
+                            key.to_string(),
+                            word.pos.clone(),
+                            InsertionAttribution::NoGoldWords,
                         ));
+                        main_view[word.word.utterance()].push((Slot::at(word.position), token));
                     }
-
-                    local_main_anchor = Some((main_word.utterance_index, main_word.word_position));
-                    last_global_main_anchor = local_main_anchor;
-                    local_main_cursor += 1;
                 }
-                AlignResult::ExtraReference { key, .. } => {
-                    let GoldSource {
-                        utterance: gold_utt_idx,
-                        word: orig_gold_idx,
-                    } = gold_sources[local_gold_cursor];
-                    let gold_word = &gold_info[orig_gold_idx];
-
-                    let token = CompareToken {
-                        text: key,
-                        pos: gold_word.pos.clone(),
-                        status: CompareStatus::ExtraGold,
-                    };
-                    metrics.record(&token);
-                    gold_positioned[gold_utt_idx]
-                        .push((gold_word.word_position as f64, token.clone()));
-
-                    if let Some((target_utt, target_word_pos)) = local_main_anchor
-                        .or(default_main_anchor)
-                        .or(last_global_main_anchor)
-                        && let Some(target_tokens) = main_positioned.get_mut(target_utt)
-                    {
-                        target_tokens.push((target_word_pos as f64 + 0.5, token));
+            },
+            Alignment::Aligned {
+                steps,
+                placements,
+                scope,
+            } => {
+                for utterance in gold_utts {
+                    match placements[utterance.utterance_index()] {
+                        GoldPlacement::NothingToPlace => {}
+                        GoldPlacement::Placed(run) => metrics.placed_utterance(
+                            utterance.language(),
+                            main_utts[run.main_utterance()].language(),
+                        ),
+                        GoldPlacement::Unplaced => metrics.unplaced_utterance(utterance.language()),
                     }
+                }
 
-                    last_gold_word_position = Some(gold_word.word_position);
-                    local_gold_cursor += 1;
+                let mut anchor = MainAnchor::NothingShown {
+                    waiting: Vec::new(),
+                };
+
+                for step in steps {
+                    match step {
+                        AlignStep::Match {
+                            key,
+                            main: main_word,
+                            gold: gold_word,
+                        } => {
+                            // A tagged gold side attributes the gold form's POS to
+                            // every Match (BA2 compare.py:540-550): the gold
+                            // standard is what the reviewer needs to see, not the
+                            // transcriber's tag. An UNTAGGED gold side has no tag
+                            // to attribute, and the rule for that case belongs to
+                            // the gold's `GoldPos` rather than to a `None` read off
+                            // this one form. See `super::pos`.
+                            let token = metrics.record(ScoredWord::matched(
+                                key,
+                                gold.document.pos.pos_for_match(
+                                    GoldTag(gold_word.pos.as_deref()),
+                                    MainTag(main_word.pos.as_deref()),
+                                ),
+                                gold_word.word,
+                                main_word.word.language(),
+                            ));
+                            gold_view[gold_word.word.utterance()]
+                                .push((Slot::at(gold_word.position), token.clone()));
+                            anchor.show(main_word, token, &mut main_view);
+
+                            // A word conformed to several tokens matches once per
+                            // token, back to back; the structural match is the
+                            // word's, recorded once.
+                            let structural_match = GoldWordMatch {
+                                gold_utterance_index: gold_word.word.utterance().raw(),
+                                gold_word_position: gold_word.position.0,
+                                main_utterance_index: main_word.word.utterance().raw(),
+                                main_word_position: main_word.position.0,
+                            };
+                            if gold_word_matches.last() != Some(&structural_match) {
+                                gold_word_matches.push(structural_match);
+                            }
+                        }
+                        AlignStep::Insertion {
+                            key,
+                            main: main_word,
+                            site,
+                        } => match scope.coverage(main_word) {
+                            WordCoverage::OutsideGold => {}
+                            WordCoverage::Scored => {
+                                let token = metrics.record(ScoredWord::inserted(
+                                    key,
+                                    main_word.pos.clone(),
+                                    InsertionAttribution::InGold(site.map(|word| word.word)),
+                                ));
+                                let (utterance, slot) = gold_view_slot(site);
+                                gold_view[utterance].push((slot, token.clone()));
+                                anchor.show(main_word, token, &mut main_view);
+                            }
+                        },
+                        AlignStep::Deletion {
+                            key,
+                            gold: gold_word,
+                        } => {
+                            let token = metrics.record(ScoredWord::deleted(
+                                key,
+                                gold_word.pos.clone(),
+                                gold_word.word,
+                            ));
+                            gold_view[gold_word.word.utterance()]
+                                .push((Slot::at(gold_word.position), token.clone()));
+                            anchor.deletion(token, &mut main_view);
+                        }
+                    }
                 }
             }
         }
 
-        metrics.finish_utterance();
-    }
+        // 4. Append the gold utterance terminator as a PUNCT token so gold-projected
+        // `%xsrep` / `%xsmor` lines match batchalign2-master output shape.
+        for (utterance, terminator) in gold_utts
+            .iter()
+            .zip(gold.document.terminators.iter().cloned())
+        {
+            match terminator {
+                Some(terminator) => gold_view[utterance.utterance_index()].push((
+                    Slot::Terminator,
+                    CompareToken {
+                        text: terminator,
+                        pos: Some("PUNCT".to_string()),
+                        status: CompareStatus::Match,
+                    },
+                )),
+                None => {}
+            }
+        }
 
-    // 7. Append the gold utterance terminator as a PUNCT token so gold-projected
-    // `%xsrep` / `%xsmor` lines match batchalign2-master output shape.
-    for (gold_utt_idx, terminator) in collect_utterance_terminators(gold_file)
-        .into_iter()
-        .enumerate()
-    {
-        let Some(terminator) = terminator else {
-            continue;
-        };
-        gold_positioned[gold_utt_idx].push((
-            gold_utt_tokens[gold_utt_idx].len() as f64,
-            CompareToken {
-                text: terminator,
-                pos: Some("PUNCT".to_string()),
-                status: CompareStatus::Match,
-            },
-        ));
-    }
+        // 5. Order each utterance's tokens by slot. The sort is stable, so tokens
+        // sharing a slot, such as the several tokens of one word, keep alignment
+        // order.
+        for tokens in main_view.values_mut().chain(gold_view.values_mut()) {
+            tokens.sort_by_key(|(slot, _)| *slot);
+        }
 
-    // 8. Stabilize per-utterance token order.
-    for tokens in &mut main_positioned {
-        tokens.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    }
-    for tokens in &mut gold_positioned {
-        tokens.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    }
-
-    let main_utterances = build_utterance_comparisons(&main_utts, main_positioned);
-    let gold_utterances = build_utterance_comparisons(&gold_utts, gold_positioned);
-
-    ComparisonBundle {
-        main_utterances,
-        gold_utterances,
-        gold_word_matches,
-        metrics: metrics.finish(),
+        ComparisonBundle {
+            main_utterances: build_utterance_comparisons(main_utts, main_view),
+            gold_utterances: build_utterance_comparisons(gold_utts, gold_view),
+            gold_word_matches,
+            metrics: metrics.finish(),
+        }
     }
 }
 
-fn build_utterance_comparisons(
-    utterances: &[ExtractedUtterance],
-    positioned: Vec<Vec<(f64, CompareToken)>>,
+fn build_utterance_comparisons<S: Side>(
+    utterances: &PerUtterance<S, LanguagedUtterance<S>>,
+    mut view: PositionedView<S>,
 ) -> Vec<UtteranceComparison> {
     utterances
         .iter()
-        .enumerate()
-        .map(|(utt_idx, utt)| UtteranceComparison {
-            utterance_index: utt_idx,
-            speaker: utt.speaker.as_str().to_string(),
-            tokens: positioned[utt_idx]
-                .iter()
-                .map(|(_, token)| token.clone())
+        .map(|utterance| UtteranceComparison {
+            utterance_index: utterance.utterance_index().raw(),
+            speaker: utterance.speaker().as_str().to_string(),
+            tokens: std::mem::take(&mut view[utterance.utterance_index()])
+                .into_iter()
+                .map(|(_, token)| token)
                 .collect(),
         })
         .collect()
@@ -640,37 +710,34 @@ fn build_utterance_comparisons(
 
 /// Flatten one document's extracted utterances for alignment.
 ///
-/// Returns the cleaned text of every word that takes part in the comparison,
-/// the per-word metadata the alignment needs, and the document's own
-/// part-of-speech evidence. Both the punctuation filter and the recorded tag
-/// come from that evidence, so the file-level question is asked once, here,
-/// rather than rediscovered from a `None` at each consumer.
-fn flatten_side(chat_file: &ChatFile, utts: &[ExtractedUtterance]) -> FlattenedSide {
+/// Returns every word that takes part in the comparison, with its position
+/// among its utterance's compared words, and the document's own part-of-speech
+/// evidence. Both the punctuation filter and the recorded tag come from that
+/// evidence, so the file-level question is asked once, here, rather than
+/// rediscovered from a `None` at each consumer.
+fn flatten_side<'a, S: Side>(document: &'a ComparedDocument<S>) -> Vec<FlattenedWord<'a, S>> {
     let mut words = Vec::new();
-    let mut info = Vec::new();
-    let pos = GoldPos::of(chat_file);
+    let pos = &document.pos;
 
-    for utt in utts {
+    for utt in &document.utterances {
         let mut compare_position = 0usize;
-        for extracted in &utt.words {
-            let text = extracted.text.as_str();
-            let utterance_index = utt.utterance_index.raw();
+        let utterance = utt.utterance_index().raw();
+        for languaged in utt.words() {
+            let extracted = languaged.extracted();
             let word_position = extracted.utterance_word_index.raw();
-            if pos.excludes_from_comparison(utterance_index, word_position, text) {
+            if pos.excludes_from_comparison(utterance, word_position, extracted.text.as_str()) {
                 continue;
             }
-            words.push(text.to_string());
-            info.push(FlattenedWordInfo {
-                utterance_index,
-                word_position,
-                compare_position,
-                pos: pos.tag(utterance_index, word_position),
+            words.push(FlattenedWord {
+                word: languaged,
+                position: ComparePosition(compare_position),
+                pos: pos.tag(utterance, word_position),
             });
             compare_position += 1;
         }
     }
 
-    FlattenedSide { words, info, pos }
+    words
 }
 
 pub(in crate::compare) fn collect_utterance_terminators(
