@@ -77,6 +77,78 @@ struct NamedStructInfo {
 /// picks it up does not have to re-derive it.
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
+        path: "crates/batchalign-transform/src/retokenize/rebuild.rs",
+        struct_name: "RetokenizeContext",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RefactorTarget,
+        reason: "existing AST-walk context carries mappings, source slices and mutable cursors \
+                 independently; bind the mapping to its input collections before changing this path",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/recipe_runner/command_spec.rs",
+        struct_name: "CatalogEntry",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "static command catalog declares each command's planner, capabilities, I/O, \
+                 dispatch and output recipe explicitly; these are catalog facts, not stage flags",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/runner/dispatch/kernel_plan.rs",
+        struct_name: "CommandKernelPlan",
+        max_fields: 12,
+        max_bool_fields: 1,
+        disposition: WideStructDisposition::RefactorTarget,
+        reason: "constructor derives resource policy from command and host policy, but public \
+                 fields can contradict those derivations; seal construction and derive redundant views",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/runner/dispatch/options.rs",
+        struct_name: "TranscribeDispatchParams",
+        max_fields: 10,
+        max_bool_fields: 3,
+        disposition: WideStructDisposition::BoundaryShim,
+        reason: "extracted command policy before language/backend/speaker admission into the \
+                 transcription plan; this is not an executable ASR request or admitted evidence",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/runner/dispatch/utr.rs",
+        struct_name: "UtrPassContext",
+        max_fields: 11,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RefactorTarget,
+        reason: "immutable UTR inputs still carry audio path and audio identity separately; \
+                 a bound audio owner should replace the independently supplied recording facts",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/worker/pool/mod.rs",
+        struct_name: "WorkerGroup",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "one worker-key group owns idle transport queues, admission counts, bootstrap \
+                 serialization and return notifications; synchronized shared state is not a pipeline stage bag",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/worker/pool/shared_gpu/stdio.rs",
+        struct_name: "SharedGpuWorker",
+        max_fields: 11,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "owned process and stdio response router with request/control synchronization, \
+                 shutdown admission and dispatch capacity; lifecycle ownership differs from the TCP peer",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/worker/pool/shared_gpu/tcp.rs",
+        struct_name: "SharedGpuTcpWorker",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "TCP connection and response router own socket tasks and request/control admission, \
+                 but not the remote process; transport timeouts and capacity are independent configuration",
+    },
+    WideStructAllowance {
         path: "crates/batchalign/src/chat_ops/speaker_identity/evidence.rs",
         struct_name: "SpeakerIdentityProvenance",
         max_fields: 14,
