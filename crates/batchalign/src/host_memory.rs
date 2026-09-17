@@ -70,8 +70,9 @@ impl Default for HostMemoryRuntimeConfig {
             // so callers (mainly tests) get a sensible reserve without
             // building a `ServerConfig` themselves.
             reserve_mb: ServerConfig::default().resolved_memory_gate_mb(),
-            max_concurrent_worker_startups: ServerConfig::default().max_concurrent_worker_startups.get()
-                as usize,
+            max_concurrent_worker_startups: ServerConfig::default()
+                .max_concurrent_worker_startups
+                .get() as usize,
         }
     }
 }

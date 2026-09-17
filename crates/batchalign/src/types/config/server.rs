@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{JobTtlDays, MemoryGatePollSeconds, WorkerStartupLimit};
 use super::serde_helpers::zero_as_none;
+use super::{JobTtlDays, MemoryGatePollSeconds, WorkerStartupLimit};
 use crate::api::{LanguageCode3, MemoryMb};
 
 /// Configuration for the Batchalign processing server.

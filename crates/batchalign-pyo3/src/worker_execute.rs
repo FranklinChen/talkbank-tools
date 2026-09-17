@@ -195,7 +195,8 @@ fn validate_request(request: &ExecuteRequestV2) -> Result<ValidatedRequestV2<'_>
         && !batchalign_types::worker_v2::ProviderDiarizationV2::for_backend(
             asr.backend,
             batchalign_types::api::NumSpeakers(speakers.get()),
-        ).is_requested()
+        )
+        .is_requested()
     {
         return Err(ExecuteFailure::InvalidPayload(format!(
             "ASR backend {:?} does not offer integrated speaker separation",
@@ -295,18 +296,35 @@ mod tests {
         use batchalign_types::worker_v2::{AsrBackendV2, AsrInputV2, ProviderDiarizationV2};
         let mut request: ExecuteRequestV2 = serde_json::from_str(include_str!(
             "../../../tests/fixtures/worker_protocol_v2/execute_request_asr_provider_media.json"
-        )).unwrap();
-        for backend in [AsrBackendV2::HkTencent, AsrBackendV2::HkAliyun,
-            AsrBackendV2::HkFunaudio, AsrBackendV2::HkQwen] {
-            let TaskRequestV2::Asr(asr) = &mut request.payload else { panic!("ASR fixture") };
+        ))
+        .unwrap();
+        for backend in [
+            AsrBackendV2::HkTencent,
+            AsrBackendV2::HkAliyun,
+            AsrBackendV2::HkFunaudio,
+            AsrBackendV2::HkQwen,
+        ] {
+            let TaskRequestV2::Asr(asr) = &mut request.payload else {
+                panic!("ASR fixture")
+            };
             asr.backend = backend;
-            let AsrInputV2::ProviderMedia(media) = &mut asr.input else { panic!("media fixture") };
+            let AsrInputV2::ProviderMedia(media) = &mut asr.input else {
+                panic!("media fixture")
+            };
             media.diarization = ProviderDiarizationV2::for_backend(
-                AsrBackendV2::HkTencent, batchalign_types::api::NumSpeakers(2),
+                AsrBackendV2::HkTencent,
+                batchalign_types::api::NumSpeakers(2),
             );
-            assert_eq!(validate_request(&request).is_ok(), backend == AsrBackendV2::HkTencent);
-            let TaskRequestV2::Asr(asr) = &mut request.payload else { unreachable!() };
-            let AsrInputV2::ProviderMedia(media) = &mut asr.input else { unreachable!() };
+            assert_eq!(
+                validate_request(&request).is_ok(),
+                backend == AsrBackendV2::HkTencent
+            );
+            let TaskRequestV2::Asr(asr) = &mut request.payload else {
+                unreachable!()
+            };
+            let AsrInputV2::ProviderMedia(media) = &mut asr.input else {
+                unreachable!()
+            };
             media.diarization = ProviderDiarizationV2::NotRequested;
             assert!(validate_request(&request).is_ok());
         }

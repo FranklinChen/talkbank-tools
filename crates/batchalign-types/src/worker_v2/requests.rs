@@ -1183,9 +1183,11 @@ mod tests {
         for backend in AsrBackendV2::ALL {
             for count in [0, 1, 2, 3] {
                 let actual = ProviderDiarizationV2::for_backend(backend, NumSpeakers(count));
-                assert_eq!(actual.is_requested(), count >= 2 && matches!(
-                    backend, AsrBackendV2::HkTencent | AsrBackendV2::Revai
-                ), "{backend:?} with {count}");
+                assert_eq!(
+                    actual.is_requested(),
+                    count >= 2 && matches!(backend, AsrBackendV2::HkTencent | AsrBackendV2::Revai),
+                    "{backend:?} with {count}"
+                );
             }
         }
     }
@@ -1198,7 +1200,10 @@ mod tests {
         // the caller had asked to have separated.
         for count in [0, 1] {
             assert_eq!(
-                ProviderDiarizationV2::for_backend(super::AsrBackendV2::HkTencent, NumSpeakers(count)),
+                ProviderDiarizationV2::for_backend(
+                    super::AsrBackendV2::HkTencent,
+                    NumSpeakers(count)
+                ),
                 ProviderDiarizationV2::NotRequested,
             );
         }
@@ -1206,7 +1211,8 @@ mod tests {
 
     #[test]
     fn two_or_more_expected_speakers_asks_for_exactly_that_many() {
-        let diarization = ProviderDiarizationV2::for_backend(super::AsrBackendV2::HkTencent, NumSpeakers(3));
+        let diarization =
+            ProviderDiarizationV2::for_backend(super::AsrBackendV2::HkTencent, NumSpeakers(3));
 
         assert!(diarization.is_requested());
         assert_eq!(

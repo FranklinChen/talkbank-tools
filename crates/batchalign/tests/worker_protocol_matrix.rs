@@ -915,7 +915,10 @@ fn mismatched_execute_request(request_id: &str, task: InferenceTaskV2) -> Execut
             },
             input: AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
                 media_path: "/tmp/mismatched-provider.wav".into(),
-                diarization: ProviderDiarizationV2::for_backend(AsrBackendV2::HkTencent, NumSpeakers(2)),
+                diarization: ProviderDiarizationV2::for_backend(
+                    AsrBackendV2::HkTencent,
+                    NumSpeakers(2),
+                ),
             }),
             extras: std::collections::BTreeMap::new(),
             decode_budget_seconds: None,

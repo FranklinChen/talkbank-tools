@@ -57,6 +57,9 @@ impl ServerConfig {
             self.job_ttl_days.warning(),
             self.memory_gate_poll_s.warning(),
             self.max_concurrent_worker_startups.warning(),
-        ].into_iter().flatten().collect()
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }

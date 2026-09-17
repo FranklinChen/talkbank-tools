@@ -18,19 +18,26 @@ macro_rules! positive_config {
             /// Admit the legacy scalar, preserving a correction for reporting.
             pub const fn new(value: $raw) -> Self {
                 if value < 1 {
-                    Self { value: 1, corrected: Some(value) }
+                    Self {
+                        value: 1,
+                        corrected: Some(value),
+                    }
                 } else {
-                    Self { value, corrected: None }
+                    Self {
+                        value,
+                        corrected: None,
+                    }
                 }
             }
 
             /// The runtime value, always at least one.
-            pub const fn get(self) -> $raw { self.value }
+            pub const fn get(self) -> $raw {
+                self.value
+            }
 
             pub(super) fn warning(self) -> Option<String> {
-                self.corrected.map(|value| format!(
-                    "{} must be >= 1 (got {value}), defaulting to 1", $field
-                ))
+                self.corrected
+                    .map(|value| format!("{} must be >= 1 (got {value}), defaulting to 1", $field))
             }
         }
 
