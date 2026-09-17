@@ -126,7 +126,7 @@ fn trailing_insertions_belong_to_the_last_gold_word_whatever_utterance_holds_the
 
     let metrics = compare(&main, &gold, GoldCoverage::Complete).metrics;
 
-    let spanish = counts(&metrics.languages(), "spa").expect("Spanish reference words were scored");
+    let spanish = counts(metrics.languages(), "spa").expect("Spanish reference words were scored");
     assert_eq!(spanish.matches(), 2);
     assert_eq!(spanish.insertions(), 3);
     assert_eq!(metrics.languages().unattributed_insertions(), 0);
@@ -161,7 +161,7 @@ fn an_unmatched_stretch_opposite_reference_words_scores_as_substitutions() {
 
     let metrics = compare(&main, &gold, GoldCoverage::Complete).metrics;
 
-    let spanish = counts(&metrics.languages(), "spa").expect("Spanish reference words were scored");
+    let spanish = counts(metrics.languages(), "spa").expect("Spanish reference words were scored");
     assert_eq!(spanish.substitutions(), 2);
     assert_eq!(spanish.deletions(), 0);
     assert_eq!(spanish.insertions(), 1);
@@ -184,9 +184,9 @@ fn an_insertion_belongs_to_the_gold_word_reached_next() {
 
     let result = compare(&main, &gold, GoldCoverage::Complete);
 
-    let english = counts(&result.metrics.languages(), "eng").expect("English reference words");
+    let english = counts(result.metrics.languages(), "eng").expect("English reference words");
     assert_eq!(english.insertions(), 1);
-    let spanish = counts(&result.metrics.languages(), "spa").expect("Spanish reference words");
+    let spanish = counts(result.metrics.languages(), "spa").expect("Spanish reference words");
     assert_eq!(spanish.insertions(), 0);
     let gold_view = |index: usize| {
         XsrepTierContent::try_from(&result.gold_utterances[index])

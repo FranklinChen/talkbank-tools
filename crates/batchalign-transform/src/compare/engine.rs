@@ -662,16 +662,15 @@ impl WholeFileAlignment<'_, '_> {
             .iter()
             .zip(gold.document.terminators.iter().cloned())
         {
-            match terminator {
-                Some(terminator) => gold_view[utterance.utterance_index()].push((
+            if let Some(terminator) = terminator {
+                gold_view[utterance.utterance_index()].push((
                     Slot::Terminator,
                     CompareToken {
                         text: terminator,
                         pos: Some("PUNCT".to_string()),
                         status: CompareStatus::Match,
                     },
-                )),
-                None => {}
+                ));
             }
         }
 

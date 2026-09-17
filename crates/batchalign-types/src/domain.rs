@@ -2080,17 +2080,12 @@ mod tests {
     /// A pair is two different valid codes separated by one comma, primary
     /// first; anything else is refused with the reason.
     #[test]
-    fn a_language_pair_is_two_different_codes() {
-        let pair = LanguagePair::parse("eng,spa").expect("a pair");
+    fn a_language_pair_is_two_different_codes() -> Result<(), Box<dyn std::error::Error>> {
+        let pair = LanguagePair::parse("eng,spa")?;
         assert_eq!(pair.primary(), &LanguageCode3::eng());
         assert_eq!(pair.secondary(), &LanguageCode3::spa());
         assert_eq!(pair.to_string(), "eng,spa");
-        assert_eq!(
-            LanguagePair::parse("SPA, eng")
-                .expect("case and spacing")
-                .to_string(),
-            "spa,eng"
-        );
+        assert_eq!(LanguagePair::parse("SPA, eng")?.to_string(), "spa,eng");
 
         assert!(matches!(
             LanguagePair::parse("eng,eng"),
@@ -2104,6 +2099,7 @@ mod tests {
             LanguagePair::parse("eng,sp"),
             Err(InvalidLanguagePair::Code(_))
         ));
+        Ok(())
     }
 
     /// A pair round-trips through every text form a job record is kept in:
@@ -2124,13 +2120,15 @@ mod tests {
 
     /// A pair has no single code, and its workers load for its primary.
     #[test]
-    fn a_language_spec_pair_has_no_single_code_and_routes_workers_by_primary() {
-        let spec = LanguageSpec::try_from("spa,eng").expect("a pair");
+    fn a_language_spec_pair_has_no_single_code_and_routes_workers_by_primary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let spec = LanguageSpec::try_from("spa,eng")?;
         assert_eq!(spec.as_resolved(), None);
         assert_eq!(
             spec.to_worker_language(),
             WorkerLanguage::Resolved(LanguageCode3::spa())
         );
+        Ok(())
     }
 
     /// A transcript language stored before pairs existed, a bare code, still
