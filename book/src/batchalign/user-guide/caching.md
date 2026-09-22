@@ -1,7 +1,7 @@
 # Caching
 
 **Status:** Current
-**Last updated:** 2026-09-15 17:23 EDT
+**Last updated:** 2026-09-22 14:10 EDT
 
 ## What gets cached
 
@@ -309,7 +309,10 @@ entry from retained raw Rev evidence without a new provider call.
 | Media conversion cache | `~/Library/Application Support/batchalign3/media_cache/` | `~/.local/share/batchalign3/media_cache/` |
 
 The analysis cache is a single SQLite database file. The media cache
-stores converted WAV artifacts for inputs such as `.mp4` and `.m4a`.
+stores converted WAV artifacts for inputs such as `.mp4` and `.m4a`. Its key
+is a hash of every byte of the source, so a cache hit still reads the whole
+source file and skips only the conversion; on a network mount that read is a
+full transfer. See [Network and Transfer Costs](network-costs.md).
 
 For isolated runs or testing, you can relocate them with environment
 variables:

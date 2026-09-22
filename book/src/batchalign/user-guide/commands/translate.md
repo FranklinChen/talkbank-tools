@@ -67,7 +67,7 @@ Five backends are available:
   global endpoint at `mt.aliyuncs.com`, so the region only affects
   request signing). Quotas and pricing per Aliyun MT service terms.
 - **Meta NLLB-200-distilled-1.3B** (`nllb`), runs locally in the Python
-  worker. Model downloaded from HuggingFace on first use (~5 GB) and
+  worker. Model downloaded from HuggingFace on first use (~5.5 GB) and
   cached thereafter; no outbound network at inference time. **Best
   self-hosted fallback**: handles Cantonese first-class; for Mandarin
   short greetings prefer `tencent`. Long-form CJK is excellent. Runs
@@ -214,7 +214,7 @@ will say so.
 | --- | --- |
 | Google Translate unreachable (GFW block, network outage, DNS failure) | File marked failed with `translate failed for N item(s): item 0: Translation failed: ConnectionResetError ...`. Use `--translate-engine tencent` (best Mandarin quality, requires CAM credentials) or `--translate-engine nllb` (self-hosted, handles Cantonese). |
 | Rate-limit (429) on one or more items | File marked failed citing the 429 message verbatim. Retry; if persistent, switch to `--translate-engine tencent` or `--translate-engine nllb` or split the workload. |
-| Self-hosted model first-download (HuggingFace) fails | File marked failed with the underlying HF error. If on a host where the default HF endpoint is slow, set `HF_ENDPOINT=https://hf-mirror.com` before the worker starts. Applies to both `nllb` (~5 GB) and `seamless` (~1.2 GB). |
+| Self-hosted model first-download (HuggingFace) fails | File marked failed with the underlying HF error. If on a host where the default HF endpoint is slow, set `HF_ENDPOINT=https://hf-mirror.com` before the worker starts. Applies to both `nllb` (~5.5 GB) and `seamless` (~4.8 GB). |
 | Tencent CAM credentials missing / wrong | File marked failed citing `~/.batchalign.ini` parse error or `AuthFailure.UnauthorizedOperation`. Ensure `engine.tencent.id`/`key`/`region` are populated and the CAM user has `tmt:TextTranslate` policy attached. The TMT product itself must also be "opened" at the Tencent Cloud account level (`FailedOperation.UserNotRegistered` indicates this is missing). |
 | Tencent `yue→en` request | Raises `ValueError: Tencent TMT does not support source language 'yue'; use --translate-engine aliyun (cloud, supports Cantonese) or --translate-engine nllb (self-hosted local model)`. Switch the Cantonese run to `aliyun` or `nllb`. |
 | Aliyun MT credentials missing / wrong | File marked failed citing `~/.batchalign.ini` parse error or an Aliyun SDK `ClientException`/`ServerException`. Ensure `engine.aliyun.ak_id` / `ak_secret` are populated (same keys the Aliyun ASR backend uses); the Aliyun MT service must also be activated in the Alibaba Cloud console for the access key's account. |

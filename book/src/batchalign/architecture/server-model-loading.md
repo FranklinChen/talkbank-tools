@@ -133,7 +133,7 @@ count are part of the evidence identity.
 | Module / Backend | Model | Source | Size | Loaded When | HF Hub |
 |--------|-------|--------|------|-------------|--------|
 | `inference/translate.py`: Google (default) | None (Google Translate API) | remote | N/A | N/A | No |
-| `inference/translate.py`: Seamless | `facebook/hf-seamless-m4t-medium` | HF Hub | ~1.2 GB | Worker startup (immediate) | Yes |
+| `inference/translate.py`: Seamless | `facebook/hf-seamless-m4t-medium` | HF Hub | ~4.8 GB | Worker startup (immediate) | Yes |
 
 **Result caching:** SQLite utterance cache. Key = `BLAKE3(text + src_lang + tgt_lang)`.
 

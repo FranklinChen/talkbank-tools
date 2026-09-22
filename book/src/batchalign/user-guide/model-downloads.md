@@ -1,7 +1,7 @@
 # Model Downloads and Caching
 
 **Status:** Current
-**Last updated:** 2026-09-16 03:36 EDT
+**Last updated:** 2026-09-22 14:20 EDT
 
 ## The contract
 
@@ -38,17 +38,31 @@ local cache and the same command runs without any download.
 | `morphotag` (first time for a language) | Stanza language pack for that language | 250-500 MB | 30 s to 2 min |
 | `morphotag --retokenize` on a Cantonese file (`@Languages: yue`) | Nothing extra, PyCantonese is bundled | Not applicable | Instant |
 | `morphotag --retokenize` on a Mandarin file (`@Languages: cmn`/`zho`) | Stanza Chinese tokenizer | ~200 MB | 30-60 s |
-| `transcribe` (Whisper engine) | Whisper ASR model from HuggingFace | 0.5-3 GB depending on model size | 1-10 min |
-| `align` (Whisper engine) | Whisper FA model from HuggingFace | ~3 GB | 3-10 min |
+| `transcribe` (default `whisper_rs` engine, native Whisper) | `ggml-large-v3` from Hugging Face (`ggerganov/whisper.cpp`) | ~3.1 GB | 3-10 min |
+| `transcribe --asr-engine whisper` (Python Whisper) | Whisper ASR model from Hugging Face; `openai/whisper-large-v3` is ~3.1 GB | 0.5-3.1 GB depending on model size | 1-10 min |
+| `transcribe --asr-engine whisper_hub` | The selected fine-tune; the seeded default (`thennal/whisper-medium-ml`) is ~3.1 GB | varies | 3-10 min |
+| `transcribe --asr-engine funaudio` (SenseVoice) | `FunAudioLLM/SenseVoiceSmall` (~0.9 GB) plus its voice-activity model (a few MB), both from Hugging Face | ~1 GB | 1-5 min |
+| `transcribe --asr-engine paraformer` | The Paraformer checkpoint (~1.0 GB) plus its punctuation model (~0.3 GB) and voice-activity model (a few MB), from **ModelScope**, not Hugging Face; a network that blocks ModelScope blocks this engine | ~1.3 GB | 1-10 min |
+| `transcribe --asr-engine qwen` | `Qwen/Qwen3-ASR-1.7B-hf` (~4.1 GB; the 0.6B variant is ~1.6 GB) plus `Qwen/Qwen3-ForcedAligner-0.6B-hf` (~1.8 GB), which the worker always pairs with it | ~6 GB | 5-20 min |
+| `align` (Whisper engine) | Whisper FA model from Hugging Face | ~3 GB | 3-10 min |
 | `align` (Wave2Vec engine, default) | Wave2Vec MMS_FA bundle from torchaudio | ~1.2 GB | 1-5 min |
-| `align --lang yue` (Cantonese FA) | Wave2Vec Cantonese model | ~1 GB | 1-5 min |
+| `align --fa-engine qwen3` | `Qwen/Qwen3-ForcedAligner-0.6B-hf` | ~1.8 GB | 2-8 min |
+| `align --lang yue` (Cantonese FA) | Nothing extra: the Cantonese aligner reuses the default Wave2Vec MMS_FA bundle | Not applicable | Instant once the default aligner is cached |
 | `transcribe --diarization enabled --speaker-engine pyannote` or standalone `diarize` (local default) | Pyannote `talkbank/dia-fork` and its pinned dependencies (public, ungated) PLUS an unpinned PLDA artifact currently gated behind accepted terms + a Hugging Face token | ~500 MB | 1-3 min once authorized |
 | `transcribe --diarization enabled` (default speaker backend) or `diarize --speaker-engine pyannote-ai` | No local speaker model; uses paid pyannoteAI Precision-2 | N/A | Provider latency only |
-| `translate` (Seamless engine) | SeamlessM4T from HuggingFace | ~2.4 GB | 2-8 min |
-| `transcribe` (utterance segmentation, certain languages) | BERT utterance model from HuggingFace | ~400 MB | 1-3 min |
+| `translate --translate-engine nllb` | `facebook/nllb-200-distilled-1.3B` from Hugging Face | ~5.5 GB | 5-15 min |
+| `translate --translate-engine seamless` | `facebook/hf-seamless-m4t-medium` from Hugging Face | ~4.8 GB | 5-15 min |
+| `translate` (default `google` engine), `--translate-engine tencent` or `aliyun` | Nothing; these are cloud services, and the text is sent to them | N/A | Provider latency only |
+| `coref` (English) | Stanza English coreference model | ~1.5 GB | 2-5 min |
+| `diarize --speaker-engine nemo` | Three NeMo models (voice activity, speaker embedding, diarization) from NVIDIA | sizes not stated here | several minutes |
+| `transcribe` (utterance segmentation, certain languages) | BERT utterance model from Hugging Face | ~400 MB | 1-3 min |
 
-These sizes are ballpark. Real numbers depend on the upstream artifact and
-your network speed.
+These sizes are approximate; the Hugging Face figures were read from the
+hosting API on 2026-09-22 and are the size of the weight file the loader
+fetches. Your network speed decides the wait. What a run costs over the
+network apart from model downloads, including cloud-engine uploads and
+recordings read over a network mount, is on
+[Network and Transfer Costs](network-costs.md).
 
 ## Which revision you get
 
@@ -129,12 +143,14 @@ library follows its own platform conventions:
 | Stanza (1.11+) | `~/Library/Caches/stanza/<resver>/resources/` | `~/.cache/stanza/<resver>/resources/` | `%LocalAppData%\stanza\<resver>\resources\` |
 | HuggingFace (Whisper, Wave2Vec, SeamlessM4T, pyannote, BERT) | `~/.cache/huggingface/hub/` | `~/.cache/huggingface/hub/` | `%LocalAppData%\huggingface\hub\` |
 | torchaudio (Wave2Vec MMS_FA bundle) | `~/.cache/torch/hub/torchaudio/` | `~/.cache/torch/hub/torchaudio/` | `%LocalAppData%\torch\hub\torchaudio\` |
+| ModelScope (Paraformer and its companions) | ModelScope's own default cache; override with `MODELSCOPE_CACHE` | (same) | (same) |
 | PyCantonese | Bundled in the package, no separate cache | (same) | (same) |
 
 `<resver>` in the Stanza path is the resource-catalog version (e.g.
 `1.11.0`), which Stanza bumps independently of the package version.
 
-Combined cache size for a multi-language workflow can reach 10-30 GB.
+A single-language, single-engine workflow caches a few GB. Using every
+engine in the table above caches well over 20 GB.
 
 ## Customizing cache locations
 
@@ -175,7 +191,12 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 ```
 
-Stanza always tries the local cache first; no equivalent flag is needed.
+Stanza reads its models from the local cache, but every language-processing
+worker still refreshes Stanza's model catalog (`resources.json`, about 1 MB)
+when it starts, with a 10 second timeout; a failed refresh is tolerated and
+the cached catalog is used. Whether a Hugging Face loader makes a metadata
+request when the model is already cached depends on that library's own
+behaviour; the two variables above rule it out.
 
 In strict offline mode, the user-facing error for a missing model is along
 the lines of "model X not in local cache; offline mode is enabled",
@@ -193,7 +214,14 @@ Stanza catalog + English pack:
 python -c "import stanza; stanza.download('en')"
 ```
 
-HuggingFace models (download to a known local path you can rsync):
+The native Whisper model has its own prefetch command:
+
+```bash
+batchalign3 setup --prefetch-whisper-rs
+```
+
+Hugging Face models (download to a known local path you can rsync); keep
+only the engines you will use:
 
 ```bash
 python -c "
@@ -202,6 +230,10 @@ for repo in [
     'openai/whisper-large-v3',
     'talkbank/dia-fork',
     'facebook/hf-seamless-m4t-medium',
+    'facebook/nllb-200-distilled-1.3B',
+    'Qwen/Qwen3-ASR-1.7B-hf',
+    'Qwen/Qwen3-ForcedAligner-0.6B-hf',
+    'FunAudioLLM/SenseVoiceSmall',
 ]:
     snapshot_download(repo)
 "
@@ -209,6 +241,10 @@ for repo in [
 
 Then copy the cache directories listed above to the offline machine, set
 `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, and run.
+
+Not covered by that recipe: the torchaudio Wave2Vec bundle (run one `align`
+first), the Paraformer models on ModelScope (run one `--asr-engine
+paraformer` transcription first), and the NeMo diarization models.
 
 ## Disk-space management
 

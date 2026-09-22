@@ -1,7 +1,7 @@
 # Server Mode
 
 **Status:** Current
-**Last updated:** 2026-09-16 09:47 EDT
+**Last updated:** 2026-09-22 14:10 EDT
 
 Batchalign includes a built-in HTTP server managed by `batchalign3 serve ...`.
 Ordinary local processing commands can still run inline, but when
@@ -11,11 +11,25 @@ loopback daemon so warm workers survive across commands. `--no-server` and
 
 ## Current routing rules
 
-- With `--server URL`, the CLI submits supported jobs to that server in content mode.
-- `transcribe`, `transcribe_s`, `benchmark`, and `avqi` prefer the local daemon when `auto_daemon` is enabled.
-- Without an explicit remote target, `auto_daemon: true` makes the CLI reuse or start a loopback daemon before it falls back to direct local execution.
-- Local-daemon and auto-detected loopback-server paths use shared-filesystem `paths_mode` for local-audio commands such as `align`, `transcribe`, `benchmark`, `opensmile`, and `avqi`.
-- Explicit `--server` always stays on content mode, even when the URL is `localhost`.
+What a command's inputs ARE decides where it can run:
+
+- **Inputs are transcripts:** `morphotag`, `utseg`, `translate`, `coref`,
+  `compare`, `align`, `speaker-identify`. A `--server` on another host runs
+  them. The CLI sends the transcript text and receives the results as text;
+  for `align` and `speaker-identify` the server finds each recording on its
+  own filesystem (see "Remote use" below). No recording crosses the
+  connection.
+- **Inputs are recordings:** `transcribe`, `transcribe_s`, `benchmark`,
+  `opensmile`, `avqi`, `diarize`. No transport carries a recording to
+  another host, so a `--server` on another host is refused before anything
+  is sent. Run these where the recordings are.
+- A `--server` naming this machine (`localhost` or a loopback address) uses
+  the shared filesystem for every command: the CLI submits paths, the
+  server reads the inputs and writes the outputs in place.
+- Without `--server`, `auto_daemon: true` (the default) reuses or starts a
+  loopback daemon on the same shared-filesystem terms before falling back to
+  direct in-process execution. `--no-server` and `--sequential` force direct
+  execution.
 
 ## Build identity check
 
@@ -115,8 +129,8 @@ Important keys:
 - `host`: bind address (defaults to `0.0.0.0`)
 - `max_concurrent_jobs`: `0` means auto-tune
 - `auto_daemon`: reuse or start a loopback daemon for ordinary CLI processing
-- `media_roots`: local execution-host media lookup roots
-- `media_mappings`: local execution-host root mappings from corpus paths to mounted media paths
+- `media_roots`: directories the execution host searches for a transcript's recording when no mapping matched
+- `media_mappings`: corpus repository name to media directory, on the execution host; selected automatically when a submitted path contains the key (see "Remote use")
 - `memory_tier`: override auto-detected tier: `small`, `medium`, `large`, `fleet`
 - `memory_gate_mb`: host headroom reserve in MB (default: 2048)
 - `gpu_startup_mb` / `stanza_startup_mb` / `io_startup_mb`: per-profile startup reservation overrides
@@ -132,16 +146,50 @@ current key set.
 
 ## Remote use
 
-Commands that support explicit remote dispatch look like this:
+A server on another host runs the transcript commands. The transcript text
+crosses the connection, the results come back the same way, and recordings
+never cross it:
 
 ```bash
 batchalign3 --server http://myserver:8000 morphotag corpus/ -o output/
 batchalign3 --server http://myserver:8000 align corpus/ -o output/
 ```
 
-For audio commands, `--server` now means "run this on a host that can already
-see these filesystem paths." The clean operational model is to run the CLI on
-the execution host itself (or to reach it over SSH/VNC) rather than expecting
-the server to infer media from a different client machine's directory layout.
-When the corpus clone root and the mounted media root differ on that execution
-host, use local `media_mappings` or `--media-dir` as explicit root replacement.
+### How the server finds a recording
+
+For `align` and `speaker-identify` the execution host looks for a file with
+the transcript's stem, in this order, and stops at the first hit:
+
+1. `--media-dir`, if you gave one; it must name a directory on the server.
+2. Beside the transcript, when the server shares your filesystem (local runs
+   and loopback servers).
+3. The directory you submitted from, if that same path exists on the server.
+4. A `media_mappings` entry, selected by the path you submitted: when any
+   component of that path equals a mapping key, such as a corpus repository
+   name, that mapping's root is searched under the same subdirectory.
+5. The server's `media_roots`.
+6. Beside the transcript again, as a last resort.
+
+The same order, as the code walks it, is drawn on
+[Path Provenance](../architecture/path-provenance.md).
+
+Step 4 is the one to know. A transcript inside a checkout of
+`childes-eng-na-data/Brown/Adam/` aligns on a server whose `media_mappings`
+has a `childes-eng-na-data` entry, with no flag and nothing printed; a
+transcript in an arbitrary folder aligns only on a server that has
+`media_roots`. Both are configuration of the execution host, never of the
+client, and a client's private directory layout is never dereferenced. A
+recording that exists only on your machine cannot be aligned on a remote
+server: run `align` where the recording is, or against a loopback server.
+
+`transcribe` and the other recording-input commands cannot use a remote
+server at all; the CLI says so before contacting it. Run them on the host
+that holds the recordings.
+
+What each choice costs over the network, including the case where the
+server's own media root is a network mount, is on
+[Network and Transfer Costs](network-costs.md).
+
+Builds from 0.3.0 (2026-08-30) to 2026-09-22 refused `align` for every
+non-loopback server with "cannot send local audio to non-loopback server".
+That was a bug, not the design.

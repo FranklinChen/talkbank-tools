@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:56 EDT
+**Last updated:** 2026-09-22 14:10 EDT
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -31,8 +31,8 @@ batchalign3 transcribe interview.wav -o out/ --asr-engine whisper --diarization 
 # Keep all audio local and use the TalkBank-pinned Pyannote model
 batchalign3 transcribe interview.wav -o out/ --diarization enabled --speaker-engine pyannote
 
-# Use the remote server
-batchalign3 --server http://your-server:8001 transcribe corpus/ -o out/ --lang eng
+# Use a server on this machine (a server on another host is refused: recordings are never uploaded)
+batchalign3 --server http://127.0.0.1:8001 transcribe corpus/ -o out/ --lang eng
 ```
 
 Dedicated diarization defaults to the pyannoteAI Precision-2 cloud model. Set
@@ -613,14 +613,18 @@ indistinguishable from a correct transcript of a silent recording. If the
 recording does contain speech, the usual causes are the wrong `--lang` for the
 audio or an engine that has no model for it.
 
-**`--server` requires server-visible audio.** With `--server`, the server
-resolves audio paths on its own filesystem. Paths valid on your machine must
-also be reachable from the server, or you must use a shared media mount.
+**`--server` must name this machine.** `transcribe` takes recordings as its
+inputs, and no transport carries a recording to another host, so a `--server`
+on another host is refused before anything is sent. A loopback `--server`, or
+the automatic local daemon, reads the recordings by path. To transcribe
+recordings that live on another machine, run `transcribe` there. Cloud engines
+upload the recording to the provider from wherever `transcribe` runs; see
+[Network and Transfer Costs](../network-costs.md).
 
 **Memory on developer machines.** Each Whisper model instance uses 2-15 GB.
 For large corpus runs (more than a handful of files or >1 GB audio total),
-prefer a dedicated server with substantial RAM (via `--server`) over a
-developer laptop, and always pass `--workers 1` for local smoke tests.
+run on a dedicated machine with substantial RAM rather than a developer
+laptop, and always pass `--workers 1` for local smoke tests.
 
 ---
 

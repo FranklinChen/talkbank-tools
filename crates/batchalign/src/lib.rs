@@ -258,29 +258,6 @@ pub(crate) fn chat_parser() -> batchalign_transform::parse::TreeSitterParser {
         .expect("tree-sitter CHAT grammar must load")
 }
 
-/// Return whether one closed released command requires shared-filesystem audio access.
-pub fn released_command_uses_local_audio(command: ReleasedCommand) -> bool {
-    command_model::released_command_uses_local_audio(command)
-}
-
-/// Return whether one released command name requires shared-filesystem audio access.
-///
-/// This keeps the old stringly helper only for callers that still sit at a
-/// trust boundary. Contributor-facing Rust code should prefer
-/// [`released_command_uses_local_audio`].
-pub fn command_uses_local_audio(command: &str) -> bool {
-    command_model::command_uses_local_audio(command)
-}
-
-/// Return whether a command may use `paths_mode`, i.e. the CLI may
-/// send filesystem paths instead of file content when submitting to a
-/// local daemon. Covers audio commands (which already used paths_mode)
-/// plus batched-text commands where the server-side runner reads CHAT
-/// files by path.
-pub fn released_command_supports_paths_mode(command: ReleasedCommand) -> bool {
-    command_model::released_command_supports_paths_mode(command)
-}
-
 /// A `ChatCleanedText` built the way production builds one: by PARSING.
 ///
 /// chatter v0.12.0 removed `ChatCleanedText::test_unchecked` and the

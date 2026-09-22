@@ -268,8 +268,7 @@ rest of the crate reaches it.
 |---|---|
 | `command_spec(ReleasedCommand) -> &'static CatalogEntry` | The entry for any released command. Total: never `None` |
 | `command_specs() -> &'static [CatalogEntry]` | Every entry, in capability-advertisement order |
-| `released_command_uses_local_audio(command)` | Does the server need shared-filesystem audio? |
-| `released_command_supports_paths_mode(command)` | May the CLI send paths instead of bodies? |
+| `command_spec(command).io_profile` | What the inputs are: `Text`, `ResolvedAudio` or `MediaInput`. `ServerTarget::parse_explicit` matches it to decide whether a `--server` on another host may run the command |
 | `command_runner_dispatch_kind(command)` | Which server-side execution path owns it |
 
 ```rust,ignore

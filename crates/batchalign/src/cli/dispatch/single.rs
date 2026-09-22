@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ReleasedCommand;
 use crate::api::JobSubmission;
+use crate::command_model::{CommandIoProfile, command_spec};
 use crate::options::CommandOptions;
-use crate::{released_command_supports_paths_mode, released_command_uses_local_audio};
 
 use crate::cli::client::{BatchalignClient, server_label};
 use crate::cli::discover::{build_server_names, copy_nonmatching, infer_base_dir};
@@ -14,34 +14,34 @@ use crate::cli::error::CliError;
 use crate::cli::progress::BatchProgress;
 use crate::cli::tui::TuiProgress;
 
-/// How the client may transfer job inputs to one selected server.
+/// How the client transfers job inputs to one selected server.
 ///
-/// The private representation prevents call sites from passing an unexplained
-/// boolean. An explicit loopback URL is still an explicit producer choice, but
-/// it shares this machine's filesystem and therefore gets the same efficient,
-/// lossless path transport as an auto-discovered local daemon.
+/// Decided once, when the origin is parsed, and carried with the target: an
+/// explicit loopback URL shares this machine's filesystem and gets the same
+/// lossless path transport as an auto-discovered local daemon; any other
+/// origin receives the inputs as content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ServerTransport(ServerTransportKind);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServerTransportKind {
+enum ServerTransport {
     SharedFilesystem,
+    /// Transcript text over HTTP; the server needs nothing else.
     Content,
-}
-
-impl ServerTransport {
-    fn uses_paths_for(self, command: ReleasedCommand) -> bool {
-        self.0 == ServerTransportKind::SharedFilesystem
-            && released_command_supports_paths_mode(command)
-    }
+    /// Transcript text over HTTP, and the server must find each transcript's
+    /// recording itself, in its own media mappings and roots. The operator is
+    /// told so at submission, because a recording that exists only on this
+    /// machine will not be found there.
+    ContentResolvingAudio,
 }
 
 /// One validated explicit server paired with a transport that can carry the
 /// selected command's inputs.
 ///
-/// Construction refuses the currently impossible state "remote server plus
-/// client-local audio". Once BA3 gains media-body upload, that operation gets
-/// a new transport variant rather than weakening this proof.
+/// Construction refuses the one impossible state, "remote server plus
+/// recordings as inputs": no transport carries a recording to another host.
+/// It is keyed on what the command's inputs ARE, never on whether the command
+/// touches audio: `align` touches audio and still travels as a transcript,
+/// because the execution host resolves the recording itself. Once BA3 gains
+/// media-body upload, `MediaInput` gets a new transport variant rather than a
+/// weaker check here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ServerTarget {
     url: String,
@@ -79,13 +79,20 @@ impl ServerTarget {
     pub(super) fn parse_explicit(url: &str, command: ReleasedCommand) -> Result<Self, CliError> {
         let loopback = Self::parse_origin(url)?;
         let transport = if loopback {
-            ServerTransport(ServerTransportKind::SharedFilesystem)
-        } else if released_command_uses_local_audio(command) {
-            return Err(CliError::InvalidArgument(format!(
-                "cannot send local audio to non-loopback server {url}; remote media upload is not implemented"
-            )));
+            ServerTransport::SharedFilesystem
         } else {
-            ServerTransport(ServerTransportKind::Content)
+            match command_spec(command).io_profile {
+                CommandIoProfile::Text => ServerTransport::Content,
+                CommandIoProfile::ResolvedAudio => ServerTransport::ContentResolvingAudio,
+                CommandIoProfile::MediaInput => {
+                    return Err(CliError::InvalidArgument(format!(
+                        "cannot send local audio to non-loopback server {url}: `{command}` takes \
+                         recordings as its inputs, and no transport carries a recording to \
+                         another host. Run it there, or give --server a loopback origin; see \
+                         the Server Mode page."
+                    )));
+                }
+            }
         };
         Ok(Self {
             url: url.to_owned(),
@@ -102,16 +109,12 @@ impl ServerTarget {
         }
         Ok(Self {
             url: url.to_owned(),
-            transport: ServerTransport(ServerTransportKind::SharedFilesystem),
+            transport: ServerTransport::SharedFilesystem,
         })
     }
 
     pub(super) fn url(&self) -> &str {
         &self.url
-    }
-
-    fn uses_paths_for(&self, command: ReleasedCommand) -> bool {
-        self.transport.uses_paths_for(command)
     }
 }
 
@@ -186,113 +189,113 @@ pub(super) async fn dispatch_single_server(
         });
     }
 
-    // The transport state records whether the selected server shares this
-    // filesystem. Command metadata then decides whether that command supports
-    // path submissions. Producer selection was already resolved by dispatch.
-    let use_paths_mode = target.uses_paths_for(command);
-
-    let (submission, effective_out, result_map, paths_mode) = if use_paths_mode {
-        let Some(prepared) = prepare_paths_submission(
-            command,
-            lang,
-            num_speakers,
-            input_kind,
-            inputs,
-            out_dir,
-            options,
-            lexicon,
-            before,
-            &health.media_mapping_keys,
-        )?
-        else {
-            eprintln!("warning: no files found for {input_kind:?} input");
-            return Ok(());
-        };
-
-        eprintln!("Found {} file(s) to submit.\n", prepared.total_files);
-        crate::cli::discover::print_passthrough_skips(&prepared.passthrough);
-        eprintln!("Submitting shared-filesystem job to {server_url}...");
-        eprintln!(
-            "note: the server must be able to read these input paths. Successful outputs will also be copied back to this machine.\n"
-        );
-
-        (
-            prepared.submission,
-            prepared.effective_out,
-            HashMap::new(),
-            true,
-        )
-    } else {
-        let (files, outputs) =
-            crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
-        let (files, outputs) = filter_files_for_command(command, files, outputs);
-        let (files, outputs) = order_files_for_command(command, files, outputs)?;
-
-        if let Some(od) = out_dir {
-            let mut passthrough = crate::cli::discover::PassthroughReport::default();
-            for inp in inputs {
-                if Path::new(inp).is_dir() {
-                    let dir_report =
-                        copy_nonmatching(Path::new(inp), Path::new(od), input_kind, command)?;
-                    passthrough.extend_from(dir_report);
-                }
-            }
-            crate::cli::discover::print_passthrough_skips(&passthrough);
-        }
-
-        let base_dir = infer_base_dir(inputs)?;
-        let (server_names, result_map) = build_server_names(&files, &outputs, inputs)?;
-        let (file_payloads, media_file_names) = classify_files(&files, &server_names)?;
-        if file_payloads.is_empty() && media_file_names.is_empty() {
-            eprintln!("warning: no files found for {input_kind:?} input");
-            return Ok(());
-        }
-
-        let total_count = file_payloads.len() + media_file_names.len();
-        eprintln!("Found {total_count} file(s) to submit.\n");
-
-        let mut opts = options.cloned().unwrap_or_else(|| {
-            CommandOptions::Morphotag(crate::options::MorphotagOptions {
-                common: Default::default(),
-
-                ..Default::default()
-            })
-        });
-        inject_lexicon(&mut opts, lexicon)?;
-        let debug_traces = opts.common().debug_dir.is_some();
-
-        let effective_out = out_dir
-            .map(PathBuf::from)
-            .unwrap_or_else(|| base_dir.clone());
-
-        (
-            JobSubmission {
+    // The transport was decided when the origin was parsed and alone decides
+    // path versus content submission. Producer selection was already resolved
+    // by dispatch.
+    let (submission, effective_out, result_map) = match target.transport {
+        ServerTransport::SharedFilesystem => {
+            let Some(prepared) = prepare_paths_submission(
                 command,
-                lang: crate::api::LanguageSpec::try_from(lang)
-                    .map_err(|e| CliError::InvalidArgument(format!("invalid language: {e}")))?,
-                num_speakers: num_speakers.into(),
-                files: file_payloads,
-                media_files: media_file_names,
-                media_mapping: Default::default(),
-                media_subdir: Default::default(),
-                source_dir: base_dir.to_string_lossy().to_string().into(),
-                options: opts,
-                paths_mode: false,
-                source_paths: vec![],
-                output_paths: vec![],
-                display_names: vec![],
-                debug_traces,
-                before_paths: vec![],
-            },
-            effective_out,
-            result_map,
-            false,
-        )
+                lang,
+                num_speakers,
+                input_kind,
+                inputs,
+                out_dir,
+                options,
+                lexicon,
+                before,
+                &health.media_mapping_keys,
+            )?
+            else {
+                eprintln!("warning: no files found for {input_kind:?} input");
+                return Ok(());
+            };
+
+            eprintln!("Found {} file(s) to submit.\n", prepared.total_files);
+            crate::cli::discover::print_passthrough_skips(&prepared.passthrough);
+            eprintln!("Submitting shared-filesystem job to {server_url}...");
+            eprintln!(
+                "note: the server must be able to read these input paths. Successful outputs will also be copied back to this machine.\n"
+            );
+
+            (prepared.submission, prepared.effective_out, HashMap::new())
+        }
+        ServerTransport::Content | ServerTransport::ContentResolvingAudio => {
+            let (files, outputs) =
+                crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
+            let (files, outputs) = filter_files_for_command(command, files, outputs);
+            let (files, outputs) = order_files_for_command(command, files, outputs)?;
+
+            if let Some(od) = out_dir {
+                let mut passthrough = crate::cli::discover::PassthroughReport::default();
+                for inp in inputs {
+                    if Path::new(inp).is_dir() {
+                        let dir_report =
+                            copy_nonmatching(Path::new(inp), Path::new(od), input_kind, command)?;
+                        passthrough.extend_from(dir_report);
+                    }
+                }
+                crate::cli::discover::print_passthrough_skips(&passthrough);
+            }
+
+            let base_dir = infer_base_dir(inputs)?;
+            let (server_names, result_map) = build_server_names(&files, &outputs, inputs)?;
+            let (file_payloads, media_file_names) = classify_files(&files, &server_names)?;
+            if file_payloads.is_empty() && media_file_names.is_empty() {
+                eprintln!("warning: no files found for {input_kind:?} input");
+                return Ok(());
+            }
+
+            let total_count = file_payloads.len() + media_file_names.len();
+            eprintln!("Found {total_count} file(s) to submit.\n");
+            eprintln!("Submitting to {server_url}...");
+            if let ServerTransport::ContentResolvingAudio = target.transport {
+                eprintln!(
+                    "note: the server finds each transcript's recording in its own media \
+                     mappings and roots; a recording that exists only on this machine will \
+                     not be found there.\n"
+                );
+            }
+
+            let mut opts = options.cloned().unwrap_or_else(|| {
+                CommandOptions::Morphotag(crate::options::MorphotagOptions {
+                    common: Default::default(),
+
+                    ..Default::default()
+                })
+            });
+            inject_lexicon(&mut opts, lexicon)?;
+            let debug_traces = opts.common().debug_dir.is_some();
+
+            let effective_out = out_dir
+                .map(PathBuf::from)
+                .unwrap_or_else(|| base_dir.clone());
+
+            (
+                JobSubmission {
+                    command,
+                    lang: crate::api::LanguageSpec::try_from(lang)
+                        .map_err(|e| CliError::InvalidArgument(format!("invalid language: {e}")))?,
+                    num_speakers: num_speakers.into(),
+                    files: file_payloads,
+                    media_files: media_file_names,
+                    media_mapping: Default::default(),
+                    media_subdir: Default::default(),
+                    source_dir: base_dir.to_string_lossy().to_string().into(),
+                    options: opts,
+                    paths_mode: false,
+                    source_paths: vec![],
+                    output_paths: vec![],
+                    display_names: vec![],
+                    debug_traces,
+                    before_paths: vec![],
+                },
+                effective_out,
+                result_map,
+            )
+        }
     };
 
-    if !paths_mode {
-        eprintln!("Submitting to {server_url}...");
-    }
     let info = client.submit_job(server_url, &submission).await?;
     let job_id = &info.job_id;
     let total_files = info.total_files;
@@ -377,7 +380,7 @@ pub(super) async fn dispatch_single_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerTarget, ServerTransportKind};
+    use super::{ServerTarget, ServerTransport};
     use crate::ReleasedCommand;
 
     #[test]
@@ -385,20 +388,45 @@ mod tests {
         assert_eq!(
             ServerTarget::parse_explicit("http://127.0.0.1:8002", ReleasedCommand::Transcribe)
                 .unwrap()
-                .transport
-                .0,
-            ServerTransportKind::SharedFilesystem
+                .transport,
+            ServerTransport::SharedFilesystem
         );
     }
 
+    /// One command per `CommandIoProfile` variant; which commands hold which
+    /// profile is the catalog pin table's job. `align` is the transcript-input
+    /// command whose recording the server resolves itself, and its transport
+    /// says so.
     #[test]
-    fn explicit_remote_text_server_constructs_content_transport() {
-        assert_eq!(
-            ServerTarget::parse_explicit("https://worker.example.org", ReleasedCommand::Morphotag)
-                .unwrap()
-                .transport
-                .0,
-            ServerTransportKind::Content
+    fn explicit_remote_server_admits_transcript_input_commands_as_content() {
+        for (command, transport) in [
+            (ReleasedCommand::Morphotag, ServerTransport::Content),
+            (
+                ReleasedCommand::Align,
+                ServerTransport::ContentResolvingAudio,
+            ),
+        ] {
+            assert_eq!(
+                ServerTarget::parse_explicit("http://media-host.example.org:8001", command)
+                    .unwrap_or_else(|error| panic!("{command} must reach a remote server: {error}"))
+                    .transport,
+                transport,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_remote_server_refuses_recording_input_commands() {
+        let error = ServerTarget::parse_explicit(
+            "http://media-host.example.org:8001",
+            ReleasedCommand::Transcribe,
+        )
+        .err()
+        .expect("transcribe must be refused for a remote server");
+        assert!(
+            error.to_string().contains("recordings"),
+            "the refusal must say why: {error}"
         );
     }
 

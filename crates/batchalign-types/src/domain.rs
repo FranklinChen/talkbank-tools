@@ -101,19 +101,6 @@ impl ReleasedCommand {
     pub const fn as_wire_name(self) -> &'static str {
         self.as_str()
     }
-
-    /// Return whether this released command requires client-local audio access.
-    pub const fn uses_local_audio(self) -> bool {
-        matches!(
-            self,
-            Self::Transcribe
-                | Self::TranscribeS
-                | Self::Benchmark
-                | Self::Avqi
-                | Self::Diarize
-                | Self::SpeakerIdentify
-        )
-    }
 }
 
 impl std::fmt::Display for ReleasedCommand {

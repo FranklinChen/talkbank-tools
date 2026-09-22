@@ -22,8 +22,8 @@ use predicates::prelude::*;
 
 use batchalign::media::tools::MediaTool;
 use cli_common::{
-    CliHarness, MINIMAL_CHAT, cli_cmd as cmd, resolve_python, start_live_server,
-    transcode_audio_to_mp4, write_silent_mp4, write_silent_wav,
+    CliHarness, MEDIA_CHAT, MINIMAL_CHAT, RemoteStub, RemoteStubOutcome, cli_cmd as cmd,
+    resolve_python, start_live_server, transcode_audio_to_mp4, write_silent_mp4, write_silent_wav,
 };
 use common::test_server_fixture::acquire_test_server_session;
 
@@ -810,6 +810,60 @@ fn cli_transcribe_explicit_remote_server_refuses_unshippable_audio() {
     );
 }
 
+/// `align` ships only the transcript; the execution host resolves the
+/// recording itself. A remote server is therefore a legitimate target, and
+/// the CLI must get as far as contacting it rather than refusing up front.
+/// The witness is a stub on this machine's non-loopback address that answers
+/// the health check with 503: the CLI reaches it, is turned away without a
+/// retry, and submits nothing. Skipped where the machine has no non-loopback
+/// address.
+#[test]
+fn cli_align_explicit_remote_server_is_contacted_not_refused() {
+    let Some(stub) = RemoteStub::answering("HTTP/1.1 503 Service Unavailable") else {
+        eprintln!("SKIP: no non-loopback IPv4 address on this machine");
+        return;
+    };
+
+    let harness = CliHarness::new();
+    let in_dir = harness.home_dir().join("input");
+    let out_dir = harness.home_dir().join("output");
+    std::fs::create_dir_all(&in_dir).expect("mkdir input");
+    std::fs::write(in_dir.join("sample.cha"), MEDIA_CHAT).expect("write input");
+
+    let result = harness
+        .cmd()
+        .args([
+            "align",
+            in_dir.to_str().unwrap(),
+            "-o",
+            out_dir.to_str().unwrap(),
+            "--server",
+            stub.origin(),
+        ])
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
+        .output()
+        .expect("spawn CLI");
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        !stderr.contains("cannot send local audio to non-loopback server"),
+        "align must not be refused as unshippable audio. stderr: {stderr}"
+    );
+    assert_eq!(
+        stub.outcome(),
+        RemoteStubOutcome::Contacted,
+        "the CLI must contact the remote server. stderr: {stderr}"
+    );
+    assert!(
+        !result.status.success(),
+        "a 503 from the server must fail the command. stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Submitting"),
+        "nothing may be submitted to a server that refused the health check. stderr: {stderr}"
+    );
+}
+
 #[test]
 fn cli_align_explicit_loopback_uses_shared_paths_mode() {
     let Some(python_path) = resolve_python() else {
@@ -825,11 +879,7 @@ fn cli_align_explicit_loopback_uses_shared_paths_mode() {
     std::fs::create_dir_all(&in_dir).expect("mkdir input");
     std::fs::create_dir_all(&out_dir).expect("mkdir output");
     write_silent_wav(&media_dir.join("sample.wav"));
-    std::fs::write(
-        in_dir.join("sample.cha"),
-        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\tsample, audio\n*PAR:\thello world .\n@End\n",
-    )
-    .expect("write input");
+    std::fs::write(in_dir.join("sample.cha"), MEDIA_CHAT).expect("write input");
 
     let port = start_daemon_on_ephemeral_port(
         &harness,

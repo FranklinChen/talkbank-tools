@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-09-15 09:28 EDT
+**Last updated:** 2026-09-22 14:10 EDT
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -539,10 +539,17 @@ and idempotent. The experimental `rebuild-from-evidence` policy deliberately
 does not make that guarantee; use it only when testing whether prior boundaries
 are stale, with evidence retention and output comparison.
 
-**Audio must be visible to the execution host.** With `--server`, the server
-resolves `@Media` against its own filesystem. Paths that are valid on your
-machine may not be valid on the server. Use `--media-dir` to point to a
-server-visible path, or use the server's `media_mappings` configuration.
+**With `--server` on another host, only the transcript is sent; the server
+finds the recording itself.** It searches its `media_mappings`, selected
+automatically when a component of your input path equals a mapping key such
+as a corpus repository name, and then its `media_roots`. Paths valid on your
+machine mean nothing on the server, so a `--media-dir` must name a
+server-visible directory. A recording that exists only on your machine cannot
+be aligned on a remote server; run `align` where the recording is, or against
+a loopback server. What `align` reads and uploads, including the whole-file
+upload to Rev.AI for utterance timing, is on
+[Network and Transfer Costs](../network-costs.md); the routing rules are on
+[Server Mode](../server-mode.md).
 
 **`--utr-strategy global` is the default behavior anyway.** Since the
 `auto` routing currently always returns `GlobalUtr` (see §"UTR strategy

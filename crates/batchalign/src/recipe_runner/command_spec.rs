@@ -201,47 +201,6 @@ impl CommandFamily {
     }
 }
 
-/// What kind of source file one command consumes.
-///
-/// DECLARED AND PINNED, BUT NOT YET READ IN PRODUCTION: it states a real
-/// per-command fact that a reader would otherwise reconstruct, and an unpinned
-/// declared field reads as authoritative while nothing would notice it going
-/// wrong. Its pin test is `every_command_declares_its_source_kind`.
-///
-/// It survives the deletion of `CapabilityPlan::additional_infer_tasks`, which
-/// had the same "declared but unread" standing, because the two are not the
-/// same case. That one restated something the stage recipes already declare and
-/// could only ever have been checked against the wrong worker; this one is
-/// derivable from nothing else in the entry, as the paragraphs below spell out.
-///
-/// Submission validation deliberately does NOT key on it. Refusing a CHAT
-/// source for every `Media` command is not sound in this repository: the
-/// server tests drive `transcribe` with CHAT fixtures against the test-echo
-/// worker, in both submission modes, so that rule breaks 45 tests in
-/// `cli_integration_suite`. `JobSubmission::validate_source_kinds` keys on
-/// `PlannerKind::BenchmarkPairs` instead, which is the narrow case that is
-/// genuinely contradictory.
-///
-/// It is NOT derivable from the two fields that look like they should carry
-/// it:
-///
-/// - `PlannerKind::AudioInputs` covers `align` and `speaker_identify`, whose
-///   sources are CHAT transcripts with the media resolved beside them. The
-///   planner says how work units are PAIRED, not what may arrive.
-/// - `CommandIoProfile::PathsModeAudio` means "needs shared-filesystem audio
-///   access", which is also true of those same two.
-///
-/// A source check keyed to either one therefore answers a different question,
-/// and can only be made to work by naming one planner by hand. That was the
-/// first shape of the benchmark fix, and naming a single planner was the tell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandSourceKind {
-    /// The command's sources are CHAT transcripts.
-    Chat,
-    /// The command's sources are media recordings.
-    Media,
-}
-
 /// Which planner shape owns source discovery for a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlannerKind {
@@ -327,41 +286,28 @@ pub(crate) enum RunnerDispatchKind {
     SpeakerIdentity,
 }
 
-/// How the CLI should ship inputs to the server for this command.
+/// What one command's inputs are, and therefore what the CLI has to put on
+/// the wire to run it somewhere else.
 ///
-/// Makes the content/paths-mode superset structural: a command either
-/// uploads file bodies over HTTP, sends paths for CHAT-only inputs, or
-/// sends paths plus requires shared-filesystem audio access. The illegal
-/// combination "needs local audio but cannot use paths mode" is
-/// unrepresentable.
+/// The CLI's `--server` decision (`ServerTarget::parse_explicit`) reads this
+/// and nothing else: a command whose inputs are transcripts can be shipped to
+/// any server as content, and one whose inputs are recordings can run only
+/// where the recordings are. Whether a CHAT source may be submitted to a
+/// `MediaInput` command is a separate question, answered at
+/// `JobSubmission::validate_source_kinds`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandIoProfile {
-    /// CLI uploads full file bodies over HTTP; server never reads client paths.
-    ///
-    /// Unconstructed today. Kept because it is the only way to express a
-    /// command that cannot use paths mode at all, the correct shape for a
-    /// REMOTE daemon (paths mode needs a shared filesystem). Its absence is
-    /// why `supports_paths_mode()` is currently true for every released
-    /// command.
-    #[allow(dead_code, reason = "expresses remote-daemon-only commands; see above")]
-    ContentOnly,
-    /// CLI sends filesystem paths for text inputs; server reads CHAT directly.
-    PathsModeText,
-    /// CLI sends filesystem paths and the command also needs client-local
-    /// audio on the shared filesystem (only valid for a local daemon).
-    PathsModeAudio,
-}
-
-impl CommandIoProfile {
-    /// Whether the server-side runner needs shared-filesystem audio access.
-    pub const fn uses_local_audio(self) -> bool {
-        matches!(self, Self::PathsModeAudio)
-    }
-
-    /// Whether the CLI may send paths instead of inlined content to a local daemon.
-    pub const fn supports_paths_mode(self) -> bool {
-        matches!(self, Self::PathsModeText | Self::PathsModeAudio)
-    }
+    /// CHAT in, CHAT out. No recording is opened anywhere.
+    Text,
+    /// CHAT in; the execution host resolves each transcript's recording
+    /// itself, from `media_roots`, `media_mappings` or `--media-dir`. The
+    /// client ships only the transcript, so any server can be the execution
+    /// host, provided it can see the media, and the CLI tells the operator so
+    /// when it submits one of these to a remote server.
+    ResolvedAudio,
+    /// The recordings are the inputs. No transport carries a recording to
+    /// another host, so only a server on this filesystem can run it.
+    MediaInput,
 }
 
 /// Static command metadata for the recipe-runner catalog.
@@ -389,12 +335,10 @@ pub(crate) struct CatalogEntry {
     pub family: CommandFamily,
     /// Planner shape used to derive work units.
     pub planner: PlannerKind,
-    /// What kind of source file this command consumes.
-    pub source_kind: CommandSourceKind,
     /// Whether the command is advertised straight from one infer task or
     /// synthesized by the server from lower-level capability.
     pub capability_kind: CommandCapabilityKind,
-    /// How the CLI ships inputs and whether paths mode is eligible.
+    /// What the inputs are; decides what the CLI ships and where it may run.
     pub io_profile: CommandIoProfile,
     /// Which server-side runtime path currently owns this command.
     pub runner_dispatch_kind: RunnerDispatchKind,

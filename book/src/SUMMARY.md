@@ -27,6 +27,7 @@
 - [Introduction](batchalign/introduction.md)
 - [Installation](batchalign/user-guide/installation.md)
 - [Model Downloads and Caching](batchalign/user-guide/model-downloads.md)
+- [Network and Transfer Costs](batchalign/user-guide/network-costs.md)
 - [Batchalign Desktop (Experimental)](batchalign/user-guide/desktop-app.md)
 - [Web Dashboard](batchalign/user-guide/dashboard.md)
 - [Progress and Feedback](batchalign/user-guide/progress-and-feedback.md)

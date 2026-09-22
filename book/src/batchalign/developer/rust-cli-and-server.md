@@ -67,11 +67,14 @@ The CLI layer now exposes two contributor-facing named seams:
   command profile, I/O settings, and runtime flags into the
   dispatcher as one named boundary object.
 
-The dispatcher also consults
-`batchalign::released_command_uses_local_audio()` and the shared released
-command catalog to decide whether a requested command uses the shared-filesystem
-audio path under an explicit `--server` submission or can use ordinary
-content-mode submission.
+`ServerTarget::parse_explicit` matches the command's `CommandIoProfile`
+(`command_spec(command).io_profile`) to decide what an explicit `--server` on
+another host may run: transcript-input commands go as content,
+recording-input commands are refused before any HTTP. A loopback `--server`
+uses the shared-filesystem path transport for every command. The decision is
+made once and carried on the target as a typestate; the content transport
+for `ResolvedAudio` commands also carries the operator note that the server
+must find the recording itself.
 
 On the app side, the current execution split is now:
 

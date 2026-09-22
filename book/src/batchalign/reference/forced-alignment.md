@@ -71,9 +71,13 @@ mode share the same FA pipeline**.
 
 - Without `--server`, the CLI runs `align` through `DirectHost`. No HTTP server
   or daemon is spawned for that path.
-- With `--server`, `align` submits a shared-filesystem `paths_mode` job. The
-  execution host must be able to read the submitted source path, resolve media
-  from that host's local filesystem view, and write the requested output path.
+- With a loopback `--server`, `align` submits a shared-filesystem `paths_mode`
+  job: the execution host reads the submitted source path, resolves media from
+  its own filesystem view, and writes the requested output path.
+- With a `--server` on another host, `align` submits the transcript text
+  (content mode) and the server resolves the recording through its own
+  `media_mappings` and `media_roots`; see
+  [Server Mode](../user-guide/server-mode.md).
 
 Both routes end up in `process_one_fa_file()` in
 `crates/batchalign/src/runner/dispatch/fa_pipeline.rs`.

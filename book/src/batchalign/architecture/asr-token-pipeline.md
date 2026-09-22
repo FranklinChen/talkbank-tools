@@ -15,6 +15,26 @@ dedicated newtype that encodes what transformations the text has undergone.
 > per-language gap analysis, see
 > [Retokenization, Overview](../reference/retokenization-overview.md).
 
+## Segmentation admission travels with the ASR plan
+
+`AdmittedTranscribePlan<P>` owns the ASR plan and its segmentation admission.
+The constructor resolves a requested language before inference, records a
+separate disabled state, or defers resolution until automatic language
+detection completes. Callers cannot replace the language or fallback policy
+independently of that admission.
+
+`Recognized::admit` pairs each ASR result with its admitted route. It carries a
+known route forward unchanged and refuses a different primary language. For
+automatic detection it resolves the deferred route once. The recognized state
+then travels through post-processing and CHAT assembly; both segmentation
+stages take their language and fallback policy from that state.
+
+HTTP request validation still rejects unsupported requests before creating a
+job. Stored jobs are admitted again at dispatch against the current build;
+capability proofs are runtime values and are not serialized as durable
+authority. Live transcription, benchmark ASR and offline replay all construct
+the same owning plan, with their existing segmentation policies.
+
 ## Type Progression
 
 ```mermaid

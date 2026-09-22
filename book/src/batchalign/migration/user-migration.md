@@ -223,12 +223,12 @@ for the three-state framing):
     normal end-user workflow
 - daemon/server routing:
   - released Feb 9 BA2 already had richer local runtime controls
-  - current BA3: dispatch distinguishes commands that prefer the local daemon
-    from commands that can target a remote server directly. The set that
-    prefers local-daemon execution is `transcribe`, `transcribe_s`,
-    `benchmark`, and `avqi`; for these, an explicit `--server` flag is
-    ignored in favor of the local daemon. (See `command_prefers_local_daemon`
-    in `crates/batchalign/src/cli/dispatch/mod.rs`.) A separate sidecar
+  - current BA3: dispatch distinguishes commands by what their inputs are.
+    Transcript-input commands can target a `--server` on another host, which
+    receives the transcript text and resolves any recording itself;
+    recording-input commands run where the recordings are, and a `--server`
+    on another host is refused for them. The rule and the per-command table
+    are on the Server Mode and Command I/O pages. A separate sidecar
     daemon profile exists in `cli/daemon.rs` for transcribe workloads that
     need a different Python environment, but the current dispatch code does
     not auto-route commands to it on capability mismatch, it is started

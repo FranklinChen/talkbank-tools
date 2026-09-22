@@ -694,28 +694,100 @@ impl TranscribePlan for ReplayAsrPlan {
     }
 }
 
+/// ASR and segmentation admitted together, with no independently mutable
+/// language or fallback policy for a consumer to substitute.
+#[derive(Clone)]
+pub(crate) struct AdmittedTranscribePlan<P> {
+    asr: P,
+    segmentation: SegmentationAdmission,
+}
+
+#[derive(Clone)]
+enum SegmentationAdmission {
+    Disabled,
+    Known(crate::utseg_route::UtsegRoute),
+    Detect(crate::params::UtsegFallbackPolicy),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SegmentationResolutionError {
+    #[error(transparent)]
+    Unavailable(#[from] crate::utseg_route::UtsegUnavailable),
+    #[error("recognized language '{actual}' differs from admitted segmentation language '{expected}'")]
+    ChangedLanguage {
+        expected: LanguageCode3,
+        actual: LanguageCode3,
+    },
+}
+
+impl<P: TranscribePlan> AdmittedTranscribePlan<P> {
+    pub(crate) fn admit(
+        asr: P,
+        enabled: bool,
+        fallback: crate::params::UtsegFallbackPolicy,
+    ) -> Result<Self, crate::utseg_route::UtsegUnavailable> {
+        use crate::utseg_route::UtsegRoute;
+        let segmentation = if !enabled {
+            SegmentationAdmission::Disabled
+        } else {
+            match asr.language() {
+                AsrLanguageRequest::One(code) => {
+                    SegmentationAdmission::Known(UtsegRoute::resolve(&code, fallback)?)
+                }
+                AsrLanguageRequest::Pair(pair) => {
+                    SegmentationAdmission::Known(UtsegRoute::resolve(pair.primary(), fallback)?)
+                }
+                AsrLanguageRequest::Detect => SegmentationAdmission::Detect(fallback),
+            }
+        };
+        Ok(Self { asr, segmentation })
+    }
+
+    pub(crate) fn asr(&self) -> &P {
+        &self.asr
+    }
+
+    pub(crate) fn with_utseg(&self) -> bool {
+        !matches!(self.segmentation, SegmentationAdmission::Disabled)
+    }
+
+    /// Recognition finishes only the deferred route. A known route is carried
+    /// forward unchanged; disagreement is refused instead of re-admitted.
+    pub(crate) fn resolve_segmentation(
+        &self,
+        language: &crate::api::TranscriptLanguage,
+    ) -> Result<Option<crate::utseg_route::UtsegRoute>, SegmentationResolutionError> {
+        match &self.segmentation {
+            SegmentationAdmission::Disabled => Ok(None),
+            SegmentationAdmission::Known(route) if route.language() == language.primary() => {
+                Ok(Some(route.clone()))
+            }
+            SegmentationAdmission::Known(route) => {
+                Err(SegmentationResolutionError::ChangedLanguage {
+                    expected: route.language().clone(),
+                    actual: language.primary().clone(),
+                })
+            }
+            SegmentationAdmission::Detect(fallback) => {
+                Ok(Some(crate::utseg_route::UtsegRoute::resolve(language.primary(), *fallback)?))
+            }
+        }
+    }
+}
+
 /// Options controlling the transcribe pipeline after ASR-policy admission.
 #[derive(Clone)]
 pub(crate) struct TranscribeOptions<P = TranscribeAsrPlan> {
-    pub(crate) asr: P,
+    pub(crate) plan: AdmittedTranscribePlan<P>,
     /// Whether the command requested diarized speaker attribution.
     pub diarize: bool,
     /// Concrete speaker backend selected by Rust when dedicated diarization is needed.
     pub speaker_backend: Option<SpeakerBackendV2>,
 
-    /// Whether to run the production utterance-segmentation topology. When
-    /// enabled for supported languages this includes both the pre-CHAT word
-    /// boundary pass and the post-CHAT refinement pass.
-    pub with_utseg: bool,
     /// Whether to run morphosyntax after CHAT assembly.
     pub with_morphosyntax: bool,
     /// Independent inference/replay policy for Rev and speaker evidence.
     pub(crate) cache_policies: TranscribeCachePolicies,
-    /// Operator opt-in to the legacy Stanza constituency-parser
-    /// fallback for utseg when no language-specific TalkBank BERT
-    /// model is configured. Set by `--utseg-fallback-stanza` on the
-    /// transcribe / transcribe-s CLI surface. Defaults to `false`.
-    pub allow_stanza_fallback_utseg: bool,
     /// Whether to generate `%wor` tiers in the transcribe output.
     ///
     /// Defaults to `false` (BA2 parity: `--wor` was opt-in for transcribe).
@@ -733,13 +805,53 @@ pub(crate) struct TranscribeOptions<P = TranscribeAsrPlan> {
 impl<P: TranscribePlan> TranscribeOptions<P> {
     /// Provider/diarizer count hint; automatic mode never uses a numeric sentinel.
     pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
-        self.asr.expected_speakers()
+        self.plan.asr().expected_speakers()
     }
 
     /// The language recognition is asked for, admitted with the engine in
     /// [`TranscribeAsrPlan`], the only place it is held.
     pub(crate) fn language(&self) -> AsrLanguageRequest {
-        self.asr.language()
+        self.plan.asr().language()
+    }
+}
+
+#[cfg(test)]
+mod transcribe_segmentation_tests {
+    use super::*;
+    use crate::api::TranscriptLanguage;
+    use crate::params::UtsegFallbackPolicy::{AllowStanza, Refuse};
+
+    fn asr(language: LanguageSpec) -> TranscribeAsrPlan {
+        TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, false, 2, &Default::default(), &language)
+            .expect("ASR admission")
+    }
+
+    #[test]
+    fn transcribe_segmentation_requires_explicit_language_admission() {
+        assert!(AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), true, Refuse).is_err());
+        let plan = AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), true, AllowStanza)
+            .expect("authorized fallback");
+        let route = plan.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa()))
+            .unwrap().unwrap();
+        assert_eq!(route.language(), &LanguageCode3::spa());
+        assert_eq!(route.fallback(), AllowStanza);
+        assert!(!route.uses_boundary_model());
+        assert!(matches!(plan.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng())),
+            Err(SegmentationResolutionError::ChangedLanguage { .. })));
+    }
+
+    #[test]
+    fn transcribe_segmentation_distinguishes_disabled_and_detected_language() {
+        let disabled = AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), false, Refuse).unwrap();
+        assert!(!disabled.with_utseg());
+        assert!(disabled.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())).unwrap().is_none());
+        let deferred = AdmittedTranscribePlan::admit(asr(LanguageSpec::Auto), true, Refuse).unwrap();
+        assert!(deferred.with_utseg());
+        assert!(deferred.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng())).unwrap().unwrap().uses_boundary_model());
+        assert!(matches!(deferred.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())),
+            Err(SegmentationResolutionError::Unavailable(_))));
+        let allowed = AdmittedTranscribePlan::admit(asr(LanguageSpec::Auto), true, AllowStanza).unwrap();
+        assert_eq!(allowed.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())).unwrap().unwrap().fallback(), AllowStanza);
     }
 }
 

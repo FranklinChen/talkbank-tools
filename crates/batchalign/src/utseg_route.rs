@@ -51,17 +51,23 @@ fn has_boundary_model(lang: &LanguageCode3) -> bool {
 
 /// How utterance segmentation will be performed for one language.
 ///
-/// Both variants are RUNNABLE. "No route" is not a third variant here: it is
+/// Both private route kinds are runnable. "No route" is not a third variant:
+/// it is
 /// [`UtsegUnavailable`], the error arm of [`UtsegRoute::resolve`], so a route
 /// that cannot run cannot be constructed, cannot be stored in a plan, and
 /// cannot be handed to a worker. A `Refused` variant would have been a value
 /// every consumer had to remember to reject, which is the shape that let the
 /// old refusal be skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UtsegRoute {
+    language: LanguageCode3,
+    fallback: UtsegFallbackPolicy,
+    kind: RouteKind,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UtsegRoute {
-    /// The TalkBank per-word boundary model for this language.
+enum RouteKind {
     BoundaryModel,
-    /// Stanza constituency parsing, explicitly authorized by the operator.
     StanzaFallback,
 }
 
@@ -82,6 +88,20 @@ pub(crate) struct UtsegUnavailable {
 }
 
 impl UtsegRoute {
+    /// The language whose segmentation capability this value proves.
+    pub(crate) fn language(&self) -> &LanguageCode3 {
+        &self.language
+    }
+
+    /// The exact operator policy admitted with this language.
+    pub(crate) fn fallback(&self) -> UtsegFallbackPolicy {
+        self.fallback
+    }
+
+    pub(crate) fn uses_boundary_model(&self) -> bool {
+        self.kind == RouteKind::BoundaryModel
+    }
+
     /// Decide how this language will be segmented, or refuse.
     ///
     /// The ONE constructor, and it consults only the language and the operator's
@@ -93,10 +113,18 @@ impl UtsegRoute {
         fallback: UtsegFallbackPolicy,
     ) -> Result<Self, UtsegUnavailable> {
         if has_boundary_model(lang) {
-            return Ok(Self::BoundaryModel);
+            return Ok(Self {
+                language: lang.clone(),
+                fallback,
+                kind: RouteKind::BoundaryModel,
+            });
         }
         match fallback {
-            UtsegFallbackPolicy::AllowStanza => Ok(Self::StanzaFallback),
+            UtsegFallbackPolicy::AllowStanza => Ok(Self {
+                language: lang.clone(),
+                fallback,
+                kind: RouteKind::StanzaFallback,
+            }),
             UtsegFallbackPolicy::Refuse => Err(UtsegUnavailable { lang: lang.clone() }),
         }
     }
@@ -119,11 +147,10 @@ mod tests {
                 UtsegFallbackPolicy::Refuse,
                 UtsegFallbackPolicy::AllowStanza,
             ] {
-                assert_eq!(
-                    UtsegRoute::resolve(&lang(code), policy),
-                    Ok(UtsegRoute::BoundaryModel),
-                    "{code} has a boundary model and must use it"
-                );
+                let route = UtsegRoute::resolve(&lang(code), policy).expect("boundary model");
+                assert!(route.uses_boundary_model());
+                assert_eq!(route.language(), &lang(code));
+                assert_eq!(route.fallback(), policy);
             }
         }
     }
@@ -166,11 +193,11 @@ mod tests {
     #[test]
     fn the_operator_opt_in_selects_the_stanza_fallback() {
         for code in ["spa", "fra", "jpn", "cat", "nld"] {
-            assert_eq!(
-                UtsegRoute::resolve(&lang(code), UtsegFallbackPolicy::AllowStanza),
-                Ok(UtsegRoute::StanzaFallback),
-                "{code} has no boundary model, so the opt-in selects Stanza"
-            );
+            let route = UtsegRoute::resolve(&lang(code), UtsegFallbackPolicy::AllowStanza)
+                .expect("authorized fallback");
+            assert!(!route.uses_boundary_model());
+            assert_eq!(route.language(), &lang(code));
+            assert_eq!(route.fallback(), UtsegFallbackPolicy::AllowStanza);
         }
     }
 

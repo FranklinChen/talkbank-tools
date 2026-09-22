@@ -601,25 +601,9 @@ pub(crate) fn apply_sequential_config(cfg: &mut ServerConfig) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::api::MemoryMb;
     use crate::config::ServerConfig;
-    use crate::{ReleasedCommand, released_command_uses_local_audio};
-
-    use super::*;
-
-    #[test]
-    fn benchmark_and_align_are_treated_as_local_audio_commands() {
-        assert!(released_command_uses_local_audio(
-            ReleasedCommand::Benchmark
-        ));
-        assert!(released_command_uses_local_audio(
-            ReleasedCommand::Transcribe
-        ));
-        assert!(released_command_uses_local_audio(ReleasedCommand::Align));
-        assert!(!released_command_uses_local_audio(
-            ReleasedCommand::Morphotag
-        ));
-    }
 
     /// `--sequential` effectively disables the memory gate (threshold = 1 MB).
     /// `Some(MemoryMb(1))` keeps the resolved value at 1 MB; `None`

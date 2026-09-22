@@ -1,7 +1,7 @@
 # Cantonese Engines
 
 **Status:** Current
-**Last updated:** 2026-09-16 01:41 EDT
+**Last updated:** 2026-09-22 14:20 EDT
 
 Batchalign includes alternative ASR and forced alignment engines for Cantonese.
 These are built-in modules shipped in the base package, selected with the
@@ -11,7 +11,7 @@ per-category engine flags below.
 
 | Engine | Task | Description |
 |--------|------|-------------|
-| `qwen` | ASR | Qwen3-ASR-1.7B local model (Alibaba). Open-weight Cantonese-capable ASR; external evaluations report competitive CER on per-utterance child speech. Downloads ~3.4 GB weights on first use; no cloud credentials. |
+| `qwen` | ASR | Qwen3-ASR-1.7B local model (Alibaba). Open-weight Cantonese-capable ASR; external evaluations report competitive CER on per-utterance child speech. Downloads ~4.1 GB of weights on first use, plus ~1.8 GB for the forced aligner it is paired with; no cloud credentials. |
 | `tencent` | ASR | Tencent Cloud speech recognition with speaker diarization. |
 | `aliyun` | ASR | Alibaba Cloud NLS real-time speech recognition (Cantonese only). |
 | `funaudio` | ASR | FunASR/SenseVoice local model (no cloud credentials needed). |
@@ -229,7 +229,12 @@ attribution is needed with those engines.
 
 ### FunASR/SenseVoice
 
-- Local model, no cloud credentials, no network required
+- Local model, no cloud credentials, no network at inference time
+- SenseVoice (~0.9 GB) and its voice-activity model download from Hugging
+  Face; the Paraformer checkpoint (~1.0 GB) and its voice-activity and
+  punctuation (~0.3 GB) companions download from ModelScope. A host that can
+  reach Hugging Face but not ModelScope can run `funaudio` and cannot run
+  `paraformer`.
 - Default model is `FunAudioLLM/SenseVoiceSmall`. Pass
   `--asr-engine funaudio --engine-overrides '{"funaudio_model": "<hf-id>"}'`
   to swap to a different FunASR model (e.g. a Paraformer variant); the
@@ -256,8 +261,9 @@ attribution is needed with those engines.
 - Default model is `Qwen/Qwen3-ASR-1.7B-hf`. The 0.6B variant is
   noticeably faster (smaller model, lighter compute) at some
   accuracy cost.
-- First run downloads ~3.4 GB (1.7B fp16) or ~1.2 GB (0.6B) from
-  HuggingFace; subsequent runs read from the local cache.
+- First run downloads ~4.1 GB (1.7B) or ~1.6 GB (0.6B) from Hugging Face,
+  plus ~1.8 GB for `Qwen/Qwen3-ForcedAligner-0.6B-hf`, which the worker
+  always loads beside it; subsequent runs read from the local cache.
 - The `qwen-asr` package handles long-audio chunking internally;
   no per-utterance pre-segmentation is required at the call site.
 - Word-level timestamps emitted when the model returns them; falls

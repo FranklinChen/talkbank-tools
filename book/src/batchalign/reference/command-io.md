@@ -1,7 +1,7 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-09-15 09:28 EDT
+**Last updated:** 2026-09-22 14:10 EDT
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
@@ -455,14 +455,15 @@ the local-daemon path the CLI uses paths mode and no file contents cross
 the process boundary for any command listed here; see
 [Submission Modes](#submission-modes-paths_modetrue-vs-paths_modefalse).
 
-| Direction | Text/CHAT commands (morphotag, compare, ...) | Explicit remote audio commands (`align`, `transcribe`, `opensmile`, ...) |
+| Direction | Transcript-input commands (`morphotag`, `compare`, `align`, `speaker-identify`, ...) | Recording-input commands (`transcribe`, `transcribe_s`, `benchmark`, `opensmile`, `avqi`, `diarize`) |
 |-----------|----------------------------------------------|----------------------------------------------------|
-| **Client → Server** | Full `.cha` text (~2KB each) | `.cha` text for `align`, or media filenames for media-input commands |
-| **Server → Client** | Processed `.cha` text | Processed outputs returned over HTTP and written locally by the client |
-| **Media** | No media transfer | Execution host still resolves media from its own visible filesystem |
+| **Client → Server** | Full `.cha` text (~2KB each) | Refused before any HTTP: no transport carries a recording to another host |
+| **Server → Client** | Processed outputs returned over HTTP and written locally by the client | n/a |
+| **Media** | Never transferred. For `align` and `speaker-identify` the execution host resolves the recording from its own `media_mappings` and `media_roots` | n/a |
 
-Audio/video payload bytes **do not** cross the network in the current explicit
-server path. The execution host must already have a way to resolve the media.
+Audio/video payload bytes **never** cross the network in the explicit server
+path. A remote server runs only commands whose sources are transcripts, and
+must already have a way to resolve any recording they need.
 
 ---
 
@@ -474,47 +475,47 @@ differ in what crosses the HTTP boundary and what the server reads from disk.
 ### Selection rule
 
 ```text
-paths_mode = allow_paths_mode
-          && released_command_supports_paths_mode(command)
-          && is_local_server(server_url)
+transport  = SharedFilesystem   if the server is the local daemon or a loopback --server origin
+           = Content            otherwise, when the command's sources are transcripts
+           = refused            otherwise, when the command's sources are recordings
+paths_mode = (transport == SharedFilesystem)
 ```
 
-- `allow_paths_mode` is set by the CLI dispatch layer. It is `true` for the
-  local-daemon path and for an auto-detected loopback server; it is `false`
-  for an explicit `--server URL`, even if that URL happens to resolve to
-  localhost.
-- `released_command_supports_paths_mode(command)` is the authoritative
-  predicate, defined at
-  `crates/batchalign/src/commands/mod.rs` and re-exported from
-  `batchalign::lib.rs`. It reads each command's `io_profile`
-  (the `io_profile` field of the command's `CatalogEntry`, declared in
-  `crates/batchalign/src/recipe_runner/catalog.rs`) and returns `true` for
-  the `PathsModeText` and `PathsModeAudio` variants.
-- `is_local_server(url)` at
-  `crates/batchalign/src/cli/dispatch/single.rs` returns `true` only for
-  `localhost`, `127.0.0.1`, and `::1` (loopback). Any non-loopback host is
-  treated as remote, so a `--server http://<your-server>:8001`
-  submission stays on content mode even when the CLI is running on
-  that server itself.
+- `ServerTarget::parse_explicit` in
+  `crates/batchalign/src/cli/dispatch/single.rs` makes this decision once,
+  when the `--server` origin is parsed, and the transport travels with the
+  target as a typestate: nothing downstream re-decides it.
+- The origin is loopback only for `localhost`, `127.0.0.1`, `::1` and their
+  kin. A `--server http://<your-server>:8001` submission is remote even when
+  the CLI runs on that server itself; use the loopback address there.
+- What a command's inputs are is its `io_profile` (the `CommandIoProfile`
+  field of its `CatalogEntry` in
+  `crates/batchalign/src/recipe_runner/catalog.rs`): `Text` and
+  `ResolvedAudio` are transcript-input, `MediaInput` is recording-input.
 
 Paths mode is therefore strictly a **local, same-filesystem** routing mode.
-Remote submissions always use content mode.
+Remote submissions use content mode, and only transcript-sourced commands
+reach a remote server at all.
 
 ### Per-command paths_mode support
 
-| Command | `io_profile` | Why |
-|---------|--------------|-----|
-| `align` | `PathsModeAudio` | Forced alignment needs audio paths the server can open |
-| `transcribe` / `transcribe_s` | `PathsModeAudio` | ASR runs on server-visible media files |
-| `benchmark` | `PathsModeAudio` | Composite of transcribe + compare over server-visible media |
-| `diarize` | `PathsModeAudio` | Runs speaker inference over server-visible media and writes turns JSON |
-| `avqi` | `PathsModeAudio` | Reads paired `.cs`/`.sv` audio directly from the filesystem |
-| `morphotag` | `PathsModeText` | Server-side runner reads CHAT input from `source_paths` |
-| `utseg` | `PathsModeText` | Same runner as morphotag |
-| `translate` | `PathsModeText` | Same runner as morphotag |
-| `coref` | `PathsModeText` | Same runner as morphotag |
-| `compare` | `PathsModeText` | Reads main `.cha` + gold `.cha` pair by path |
-| `opensmile` | `ContentOnly` | Intentional: kept on content mode this round |
+| Command | `io_profile` | Sources | Remote `--server` |
+|---------|--------------|---------|-------------------|
+| `align` | `ResolvedAudio` | Transcript; the execution host resolves the recording | Yes, as content; the server resolves the recording from its mappings and roots |
+| `speaker-identify` | `ResolvedAudio` | Transcript; recording resolved as for `align` | Yes, as content |
+| `transcribe` / `transcribe_s` | `MediaInput` | The recording | Refused |
+| `benchmark` | `MediaInput` | The recording; its gold transcript is derived beside it | Refused |
+| `diarize` | `MediaInput` | The recording | Refused |
+| `avqi` | `MediaInput` | Paired `.cs`/`.sv` recordings | Refused |
+| `opensmile` | `MediaInput` | The recording | Refused |
+| `morphotag` | `Text` | Transcript | Yes, as content |
+| `utseg` | `Text` | Transcript | Yes, as content |
+| `translate` | `Text` | Transcript | Yes, as content |
+| `coref` | `Text` | Transcript | Yes, as content |
+| `compare` | `Text` | Main `.cha` plus its gold `.cha` | Yes, as content |
+
+Every released command uses paths mode against a loopback server or the
+local daemon.
 
 Earlier in the project, only the five audio-first commands opted
 in. Text-command local submissions were forced onto content mode, which
@@ -522,7 +523,7 @@ shipped full CHAT text in the request body. A single 500-file chunk of a
 large corpus routinely exceeded `max_body_bytes_mb` (default 100 MB
 previously, now 512 MB) and failed the whole chunk with
 HTTP 413 Payload Too Large.
-Extending paths-mode eligibility to the text commands (via `PathsModeText`)
+Extending paths-mode eligibility to the text commands (the `Text` profile)
 is the **structural
 fix**: on the local path, the request body no longer contains file
 contents, so a 413 from a local submission is now unreachable. The 512 MB
@@ -545,14 +546,14 @@ entry [`server returned 413: length limit exceeded`](../user-guide/troubleshooti
 sequenceDiagram
     autonumber
     participant CLI as "CLI dispatch<br/>(crates/batchalign/src/cli/dispatch/single.rs)"
-    participant Gate as "Gate: supports_paths_mode(cmd)<br/>&& is_local_server(url)<br/>(single.rs:105-107)"
+    participant Gate as "Gate: ServerTarget::parse_explicit<br/>loopback origin? transcript sources?<br/>(single.rs)"
     participant Paths as "CLI paths builder<br/>(crates/batchalign/src/cli/dispatch/paths.rs)"
     participant Content as "CLI content builder<br/>(crates/batchalign/src/cli/dispatch/single.rs:140-201)"
     participant Srv as "POST /jobs handler<br/>(crates/batchalign/src/routes/jobs/mod.rs:161)"
     participant Runner as "Runner file read<br/>(crates/batchalign/src/runner/dispatch/infer_batched.rs:112)"
 
     CLI->>Gate: choose mode for (command, url)
-    alt Local daemon + supports_paths_mode
+    alt Local daemon or loopback --server
         Gate-->>CLI: paths_mode = true
         CLI->>Paths: prepare_paths_submission(...)
         Paths-->>CLI: JobSubmission { paths_mode=true,<br/>source_paths=[...], output_paths=[...] }
@@ -562,7 +563,7 @@ sequenceDiagram
         Runner->>Runner: read_to_string(source_paths[i])
         Runner->>Runner: write outputs to output_paths[i]
         Note over CLI,Runner: CLI does not download results;<br/>outputs land directly on shared FS.
-    else Remote --server (or opensmile)
+    else Remote --server, transcript-sourced command
         Gate-->>CLI: paths_mode = false
         CLI->>Content: classify_files + FilePayload {filename, content}
         Content-->>CLI: JobSubmission { paths_mode=false,<br/>files=[FilePayload{..}], media_files=[..] }
@@ -709,7 +710,7 @@ requirement in either direction and was never affected.
 | Command | I/O parity | Options parity | Direct local path | Notes |
 |---------|------------|----------------|-------------------|-------|
 | align | Full | Full | Full | Media resolution differs (local path vs server lookup) but equivalent |
-| transcribe | Full | Full | Full | With `auto_daemon: true`, the CLI tries the local daemon first and only warns when that reroute succeeds; otherwise explicit `--server` uses remote content mode with server-side media lookup |
+| transcribe | Full | Full | Full | The recording is the input: a loopback `--server` or the local daemon reads it by path; a `--server` on another host is refused before HTTP |
 | transcribe_s | Full | Full | Full | Triggered by `--diarize`; follows the same local-daemon-vs-explicit-server rules as `transcribe` |
 | morphotag | Full | Full | Full | Lexicon CSV read on client, sent as parsed dict |
 | utseg | Full | Full | Full | |

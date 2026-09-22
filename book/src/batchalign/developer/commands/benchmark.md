@@ -57,8 +57,8 @@ given:
   The planner is the right key for exactly this case, and only this case: it is
   the planner that derives the gold companion by replacing the source's
   extension, so a `.cha` under it is its own gold. It is NOT a proxy for "takes
-  audio": `align` and `speaker_identify` are `PlannerKind::AudioInputs` and
-  `CommandIoProfile::PathsModeAudio` yet consume CHAT.
+  audio": `align` and `speaker_identify` are `PlannerKind::AudioInputs` yet
+  consume CHAT (`CommandIoProfile::ResolvedAudio`).
 
 ### Known gap: the same shape is still open for the media commands
 
@@ -68,8 +68,8 @@ hands it to ffmpeg; `runner/policy.rs` deliberately leaves `MediaAnalysisV2`
 outside the dispatch-time CHAT gate, so nothing classifies the source in
 between.
 
-Generalizing the submission check to every command whose declared
-`CommandSourceKind` is `Media` was implemented and then withdrawn, because it
+Generalizing the submission check to every command whose I/O profile is
+`MediaInput` was implemented and then withdrawn, because it
 is not sound against this repository's own tests: the server suites drive
 `transcribe` with CHAT fixtures against the test-echo worker, in both content
 mode (`FilePayload { filename: "test.cha" }`) and paths mode
@@ -78,9 +78,10 @@ The generalized rule failed 45 tests in `cli_integration_suite`.
 
 Closing it properly therefore needs a decision this change did not make: either
 the test harness stops using CHAT as a stand-in for media, or the check
-distinguishes a real submission from a test-echo one. `CommandSourceKind` is
-declared and pinned per command in `recipe_runner/catalog.rs` so that the fact
-is stated wherever that decision is taken.
+distinguishes a real submission from a test-echo one. Whether a command's
+sources are transcripts or recordings is stated by its `CommandIoProfile` in
+`recipe_runner/catalog.rs` (`MediaInput` means recordings), so the fact is
+there wherever that decision is taken.
 - **`BenchmarkWorkUnit` has private fields and a `pub(super)` constructor**, so
   `plan_benchmark_pairs` is the only place one is built. `benchmark_pipeline.rs`
   and `planning/` read it through `audio()` and `gold_chat()` accessors and

@@ -443,6 +443,118 @@ pub const MINIMAL_CHAT: &str = "\
 @End
 ";
 
+/// [`MINIMAL_CHAT`] with a declared recording, which is what `align` looks for.
+pub const MEDIA_CHAT: &str = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant
+@ID:\teng|test|PAR|||||Participant|||
+@Media:\tsample, audio
+*PAR:\thello world .
+@End
+";
+
+/// This machine's own non-loopback IPv4 address, or `None` where it has none.
+///
+/// A UDP `connect` to a documentation address chooses the outbound interface
+/// without sending anything; the socket's local address is the answer.
+pub fn non_loopback_local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("192.0.2.1:9").ok()?;
+    match probe.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+/// Whether the CLI ever reached a [`RemoteStub`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteStubOutcome {
+    Contacted,
+    NeverContacted,
+}
+
+/// An HTTP stub the CLI classifies as REMOTE: bound on this machine's
+/// non-loopback address, it answers exactly one request with a canned status
+/// line and no body, and reports whether that request ever came.
+///
+/// `answering` is the only constructor and [`outcome`](Self::outcome) the only
+/// way to finish, so a test that starts a stub also settles it: on the path
+/// where the CLI never connected, `outcome` connects once itself to release
+/// the listener's `accept`, so nothing is left parked.
+#[must_use = "settle the stub with `outcome`, which also releases its listener"]
+pub struct RemoteStub {
+    origin: String,
+    address: std::net::SocketAddr,
+    contacted: std::sync::mpsc::Receiver<()>,
+}
+
+impl RemoteStub {
+    /// Start a stub answering its one request with `status_line`, or `None`
+    /// where this machine has no non-loopback address to bind.
+    pub fn answering(status_line: &'static str) -> Option<Self> {
+        let ip = non_loopback_local_ipv4()?;
+        let listener = std::net::TcpListener::bind((ip, 0)).expect("bind the remote stub");
+        let address = listener.local_addr().expect("remote stub address");
+        let (contacted_tx, contacted) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Read to the end of the request head before answering; a client
+            // still writing can lose a reply sent earlier.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while let Ok(n) = stream.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            // The release connection from `outcome` sends nothing and is not
+            // a contact.
+            if request.is_empty() {
+                return;
+            }
+            let _ = write!(
+                stream,
+                "{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = contacted_tx.send(());
+        });
+        Some(Self {
+            origin: format!("http://{address}"),
+            address,
+            contacted,
+        })
+    }
+
+    /// The `--server` origin to hand the CLI.
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// Settle the stub once the CLI has exited. The one-second grace covers
+    /// only the gap between the stub's reply and its own report.
+    pub fn outcome(self) -> RemoteStubOutcome {
+        match self
+            .contacted
+            .recv_timeout(std::time::Duration::from_secs(1))
+        {
+            Ok(()) => RemoteStubOutcome::Contacted,
+            Err(_) => {
+                let _ = std::net::TcpStream::connect(self.address);
+                RemoteStubOutcome::NeverContacted
+            }
+        }
+    }
+}
+
 /// CHAT content with @Options: dummy header.
 pub const DUMMY_CHAT: &str = "\
 @UTF8

@@ -405,12 +405,12 @@ impl JobSubmission {
     /// companion by replacing its extension. A `.cha` under that planner is
     /// therefore its own gold, which is a contradiction no other command's
     /// planner can produce. It is not keyed on "does this command take audio":
-    /// `align` and `speaker_identify` are `PlannerKind::AudioInputs` and
-    /// `CommandIoProfile::PathsModeAudio` yet consume CHAT, so neither field
-    /// answers that question.
+    /// `align` and `speaker_identify` are `PlannerKind::AudioInputs` yet
+    /// consume CHAT (`CommandIoProfile::ResolvedAudio`), so the planner does
+    /// not answer that question.
     ///
     /// A generalized version of this check, over every command whose declared
-    /// [`CommandSourceKind`] is `Media`, was written and then withdrawn. It is
+    /// I/O profile is `MediaInput`, was written and then withdrawn. It is
     /// not sound here: this repository's server tests drive `transcribe`
     /// against the test-echo worker using CHAT fixtures, in both submission
     /// modes (content-mode `files` and paths-mode `source_paths`), because
@@ -420,7 +420,6 @@ impl JobSubmission {
     /// (`opensmile`, `avqi`, `diarize`) is NOT closed by this check; see the
     /// benchmark developer page for what is left open and why.
     ///
-    /// [`CommandSourceKind`]: crate::recipe_runner::command_spec::CommandSourceKind
     fn validate_source_kinds(&self) -> Result<(), ValidationError> {
         use crate::recipe_runner::command_spec::PlannerKind;
 

@@ -51,9 +51,9 @@ Source verified by reading code on 2026-05-06.
 | 5 | Whisper ASR | `batchalign/inference/asr.py:119` `load_whisper_asr` | `transformers.pipeline + WhisperProcessor.from_pretrained` | HF |
 | 6 | Whisper FA | `batchalign/inference/fa.py:114` `load_whisper_fa` | `WhisperForConditionalGeneration.from_pretrained` + `WhisperProcessor.from_pretrained` | HF |
 | 7 | Wave2Vec FA | `batchalign/inference/fa.py:198` `load_wave2vec_fa` | `torchaudio.pipelines.MMS_FA.get_model()` | torchaudio hub |
-| 8 | Cantonese FA | `batchalign/inference/languages/cantonese/_cantonese_fa.py` `load_cantonese_fa` | `Wav2Vec2ForCTC.from_pretrained` | HF |
+| 8 | Cantonese FA | `batchalign/inference/languages/cantonese/_cantonese_fa.py` `load_cantonese_fa` | Reuses row 7: it calls `load_wave2vec_fa` (torchaudio `MMS_FA`) and adds jyutping preprocessing; no separate download | torchaudio hub |
 | 9 | SeamlessM4T translation | `batchalign/worker/_model_loading/translation.py::_load_seamless_translate` | `AutoProcessor.from_pretrained` + `SeamlessM4TModel.from_pretrained` | HF |
-| 9b | NLLB-200 translation | `batchalign/worker/_model_loading/translation.py::_load_nllb_translate` | `AutoTokenizer.from_pretrained` + `AutoModelForSeq2SeqLM.from_pretrained` (`facebook/nllb-200-distilled-1.3B`, ~5 GB) | HF |
+| 9b | NLLB-200 translation | `batchalign/worker/_model_loading/translation.py::_load_nllb_translate` | `AutoTokenizer.from_pretrained` + `AutoModelForSeq2SeqLM.from_pretrained` (`facebook/nllb-200-distilled-1.3B`, ~5.5 GB) | HF |
 | 10 | pyannote diarization | `batchalign/inference/speaker.py:350` | `Pipeline.from_pretrained("talkbank/dia-fork")` | HF |
 | 10b | Pyannote speaker embedding | `batchalign/inference/speaker_embedding.py::load_speaker_embedding_model` | `PretrainedSpeakerEmbedding(<pinned local ONNX path>)` | HF |
 | 11 | NeMo speaker (fallback) | `batchalign/inference/speaker.py` (NeMo branch) | `EncDecSpeakerLabelModel.from_pretrained(...)` | NeMo cache |

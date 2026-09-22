@@ -278,19 +278,19 @@ async fn dispatch_batched_text_command(
             // used to discover it at the worker, which named the wire format
             // rather than the missing model.
             let fallback = job.dispatch.options.utseg_fallback_policy();
-            if let Err(unavailable) =
-                crate::utseg_route::UtsegRoute::resolve(job_language.code(), fallback)
-            {
-                fail_job(job, host, unavailable.to_string()).await;
-                return Ok(());
-            }
+            let route = match crate::utseg_route::UtsegRoute::resolve(job_language.code(), fallback) {
+                Ok(route) => route,
+                Err(unavailable) => {
+                    fail_job(job, host, unavailable.to_string()).await;
+                    return Ok(());
+                }
+            };
             dispatch_utseg_job(
                 job,
                 host,
                 Arc::new(gateway),
                 plan.should_merge_abbrev,
-                &job_language,
-                fallback.is_allowed(),
+                &route,
             )
             .await
         }

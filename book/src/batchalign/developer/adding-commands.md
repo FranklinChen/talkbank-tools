@@ -117,7 +117,7 @@ CatalogEntry {
     family: CommandFamily::BatchedText,
     planner: PlannerKind::TextInputs,
     capability_kind: CommandCapabilityKind::DirectInfer,
-    io_profile: CommandIoProfile::PathsModeText,
+    io_profile: CommandIoProfile::Text,
     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
     capabilities: CapabilityPlan {
         primary_infer_task: InferTask::YourTask,

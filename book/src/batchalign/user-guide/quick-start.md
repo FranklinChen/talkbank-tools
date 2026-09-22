@@ -1,7 +1,7 @@
 # Quick Start
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-09-22 14:10 EDT
 
 This chapter covers the most common `batchalign3` workflows from the terminal.
 The examples assume the `batchalign3` binary is installed and that local
@@ -55,9 +55,10 @@ batchalign3 transcribe ~/recordings/ -o ~/transcripts/ \
   --asr-engine whisper --lang eng
 ```
 
-Important routing note: explicit `--server` now submits shared-filesystem
-`paths_mode` jobs for `transcribe`. The target server must be able to read the
-same input paths and write the requested output paths.
+Routing note: `transcribe` runs where the recording is. A loopback
+`--server`, or the automatic local daemon, reads the recording by path; a
+`--server` on another host is refused, because recordings are never uploaded.
+See [Server Mode](server-mode.md).
 
 ## Align transcripts against audio
 
@@ -119,11 +120,14 @@ batchalign3 --server http://yourserver:8000 morphotag ~/corpus/ -o ~/tagged/
 batchalign3 --server http://yourserver:8000 align ~/corpus/ -o ~/aligned/
 ```
 
-`transcribe`, `transcribe_s`, `benchmark`, and `avqi` always prefer
-the local daemon and ignore `--server` (see `command_prefers_local_daemon`
-in `crates/batchalign/src/cli/dispatch/mod.rs`). The remaining text and
-analysis commands (`morphotag`, `align`, `compare`, etc.) honor explicit
-`--server` routing.
+A `--server` on another host runs the commands whose inputs are transcripts,
+such as `morphotag` and `align`, and ships only the transcript text; for
+`align` the server finds the recording itself. Commands whose inputs are
+recordings, such as `transcribe`, are refused for a remote server and run
+where the recording is. The rule and the per-command table: [Server
+Mode](server-mode.md) and [Command I/O](../reference/command-io.md); what
+each choice costs over the network: [Network and Transfer
+Costs](network-costs.md).
 
 ## Next steps
 

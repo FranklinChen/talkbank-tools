@@ -21,7 +21,9 @@ use crate::api::{
     AsrLanguageRequest, ChatText, LanguageCode3, NumSpeakers, TranscriptLanguage, WorkerLanguage,
 };
 use crate::error::{EmptyTranscription, ServerError};
-use crate::params::{MorphosyntaxParams, UtsegFallbackPolicy};
+use crate::params::MorphosyntaxParams;
+#[cfg(test)]
+use crate::params::UtsegFallbackPolicy;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::plan::{StageId, observe_stage};
 use crate::revai::{
@@ -50,7 +52,21 @@ struct PendingAsr;
 struct Recognized {
     response: AsrResponse,
     language: TranscriptLanguage,
+    segmentation: Option<crate::utseg_route::UtsegRoute>,
     identity: crate::transcribe::types::AsrIdentity,
+}
+
+impl Recognized {
+    fn admit<P: TranscribePlan>(
+        response: AsrResponse,
+        language: TranscriptLanguage,
+        identity: crate::transcribe::types::AsrIdentity,
+        plan: &crate::transcribe::types::AdmittedTranscribePlan<P>,
+    ) -> Result<Self, ServerError> {
+        let segmentation = plan.resolve_segmentation(&language)
+            .map_err(|error| ServerError::Validation(error.to_string()))?;
+        Ok(Self { response, language, segmentation, identity })
+    }
 }
 
 struct Postprocessed {
@@ -172,7 +188,7 @@ impl<'a> TranscribePipelineContext<'a, PendingAsr> {
             opts,
             dumper,
             sink,
-            TranscribeUtsegExecution::production(opts.with_utseg),
+            TranscribeUtsegExecution::production(opts.plan.with_utseg()),
             PendingAsr,
         )
     }
@@ -183,12 +199,9 @@ impl<'a> TranscribePipelineContext<'a, PendingAsr> {
         response: AsrResponse,
     ) -> Result<TranscribePipelineContext<'a, Recognized>, ServerError> {
         let language = resolved_asr_language(self.opts, &response)?;
-        let identity = self.opts.asr.identity();
-        Ok(self.map_state(|_| Recognized {
-            response,
-            language,
-            identity,
-        }))
+        let identity = self.opts.plan.asr().identity();
+        let recognized = Recognized::admit(response, language, identity, &self.opts.plan)?;
+        Ok(self.map_state(|_| recognized))
     }
 }
 
@@ -297,7 +310,7 @@ async fn run_transcribe_pipeline_with_rev_inference<'a>(
     debug_dir: Option<&Path>,
     rev_inference: &'a dyn RevAsrEvidenceInference,
 ) -> Result<CompletedTranscribePipeline, ServerError> {
-    let execution = TranscribeUtsegExecution::production(opts.with_utseg);
+    let execution = TranscribeUtsegExecution::production(opts.plan.with_utseg());
     let (tail, mut progress) = prepare_tail(&services, opts, execution, progress)?;
     let ctx = TranscribePipelineContext::new(
         audio_path,
@@ -329,8 +342,9 @@ pub(crate) async fn run_transcribe_pipeline_with_legacy_replay<'a>(
         let response = replay.asr_response().clone();
         let language = resolved_asr_language(opts, &response)?;
         let identity = crate::transcribe::types::AsrIdentity::of_replay(replay.producer());
+        let recognized = Recognized::admit(response, language, identity, &opts.plan)?;
         let mut ctx = TranscribePipelineContext::new(&audio_path, services, opts, DebugDumper::new(debug_dir),
-            UtsegEvidenceSink::new(debug_dir), execution, Recognized { response, language, identity });
+            UtsegEvidenceSink::new(debug_dir), execution, recognized);
         if opts.diarize {
             ctx.speaker_segments = Some(replay.speaker_segments().ok_or_else(|| ServerError::Validation(
                 format!("replay {} requested diarization but its manifest has no speaker-turn artifact", replay.recording_id())
@@ -459,7 +473,7 @@ async fn stage_asr_infer<'a>(
 
     let opts = ctx.opts;
     let mut evidence_language = None;
-    let response = match opts.asr.inference() {
+    let response = match opts.plan.asr().inference() {
         crate::transcribe::AsrInference::NonRev {
             backend,
             speakers,
@@ -535,16 +549,13 @@ async fn stage_asr_infer<'a>(
         Some(language) => language,
         None => resolved_asr_language(opts, &response)?,
     };
-    let planned = opts.asr.identity();
+    let planned = opts.plan.asr().identity();
     let identity = match response.model.clone() {
         Some(model) => planned.with_loaded_models(model),
         None => planned,
     };
-    Ok(ctx.map_state(|_| Recognized {
-        response,
-        language,
-        identity,
-    }))
+    let recognized = Recognized::admit(response, language, identity, &opts.plan)?;
+    Ok(ctx.map_state(|_| recognized))
 }
 
 async fn stage_asr_postprocess<'a, P: TranscribePlan>(
@@ -659,28 +670,6 @@ fn resolved_asr_language<P: TranscribePlan>(
     }
 }
 
-/// How this run will segment utterances, decided from the resolved language.
-///
-/// This replaces a bare `matches!(lang.as_ref(), "eng" | "cmn" | "zho" | "yue")`
-/// that was one of two copies of the boundary-model language set, the other
-/// being the Python resolver's key set. The route now comes from the one table
-/// in [`crate::utseg_route`].
-///
-/// Fallible because a language with no boundary model and no authorized
-/// fallback has no segmenter at all. For an explicit `--lang` that case was
-/// already refused at plan time, before ASR; reaching it here means `--lang
-/// auto` detected such a language, which cannot be known any earlier.
-fn resolve_utseg_route<P: TranscribePlan>(
-    opts: &TranscribeOptions<P>,
-    lang: &LanguageCode3,
-) -> Result<crate::utseg_route::UtsegRoute, ServerError> {
-    crate::utseg_route::UtsegRoute::resolve(
-        lang,
-        crate::params::UtsegFallbackPolicy::from(opts.allow_stanza_fallback_utseg),
-    )
-    .map_err(|unavailable| ServerError::Validation(unavailable.to_string()))
-}
-
 pub(crate) fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Vec<UtsegBatchItem> {
     chunks
         .iter()
@@ -769,10 +758,9 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     // pre-CHAT Stanza path, so an authorized Stanza fallback segments only
     // after CHAT is built, and this pass hands its chunks to punctuation
     // retokenization exactly as it always did for a language with no model.
-    if !matches!(
-        resolve_utseg_route(ctx.opts, resolved_lang)?,
-        crate::utseg_route::UtsegRoute::BoundaryModel
-    ) {
+    let route = ctx.state.segmentation.as_ref().ok_or_else(||
+        ServerError::Validation("pre-CHAT segmentation requested from a disabled plan".into()))?;
+    if !route.uses_boundary_model() {
         let chunks = project_speakers(prepare_asr_chunks_with_snapshot(
             asr_output,
             text_language,
@@ -798,9 +786,9 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     let items = build_prechat_utseg_items(&prepared_chunks);
     let predictions = crate::utseg::infer_utseg_predictions_with_policy(
         ctx.services.pool,
-        resolved_lang,
+        route.language(),
         &items,
-        ctx.opts.allow_stanza_fallback_utseg,
+        route.fallback().is_allowed(),
         pre_chat_policy,
         // `TranscribePipelineContext` has no job cancellation token wired
         // yet (see `stage_run_morphosyntax`'s identical note); genuinely
@@ -1236,7 +1224,8 @@ async fn stage_run_utseg<P: TranscribePlan>(
     ctx: &mut TranscribePipelineContext<'_, ChatReady, P>,
     post_chat_policy: crate::utseg::UtsegDecisionPolicy,
 ) -> Result<(), ServerError> {
-    let utseg_lang = ctx.state.asr.language.primary().clone();
+    let route = ctx.state.asr.segmentation.as_ref().ok_or_else(||
+        ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into()))?;
     let input = ctx.state.text.as_str();
     let filename = ctx
         .audio_path
@@ -1248,9 +1237,9 @@ async fn stage_run_utseg<P: TranscribePlan>(
     let result =
         crate::utseg::process_utseg_with_evidence(crate::utseg::EvidenceRetainingUtsegRequest {
             chat_text: ChatText::from(input),
-            lang: &utseg_lang,
+            lang: route.language(),
             services: ctx.services,
-            fallback_policy: UtsegFallbackPolicy::from(ctx.opts.allow_stanza_fallback_utseg),
+            fallback_policy: route.fallback(),
             decision_policy: post_chat_policy,
             evidence_filename: evidence_filename.as_ref(),
             evidence_sink: &ctx.utseg_evidence_sink,
@@ -1369,22 +1358,20 @@ mod tests {
         language: crate::api::LanguageSpec,
     ) -> TranscribeOptions {
         TranscribeOptions {
-            asr: crate::transcribe::TranscribeAsrPlan::from_request(
+            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(crate::transcribe::TranscribeAsrPlan::from_request(
                 AsrBackend::RustRevAi,
                 false,
                 2,
                 &std::collections::BTreeMap::new(),
                 &language,
             )
-            .unwrap(),
+            .unwrap(), false, UtsegFallbackPolicy::Refuse).unwrap(),
             diarize: true,
             speaker_backend,
-            with_utseg: false,
             with_morphosyntax: false,
             cache_policies: crate::transcribe::TranscribeCachePolicies::uniform(
                 crate::params::CachePolicy::UseCache,
             ),
-            allow_stanza_fallback_utseg: false,
             write_wor: false,
             media_name: Some("sample".into()),
             engine_extras: std::collections::BTreeMap::new(),
@@ -1624,20 +1611,20 @@ mod tests {
         let live = test_transcribe_options(None);
         let pair = crate::api::LanguageSpec::try_from("eng,spa").expect("a pair");
         let opts = TranscribeOptions {
-            asr: ReplayAsrPlan::for_legacy_replay(2, &pair).unwrap(),
+            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
+                ReplayAsrPlan::for_legacy_replay(2, &pair).unwrap(), false, UtsegFallbackPolicy::Refuse,
+            ).unwrap(),
             diarize: false,
             speaker_backend: None,
-            with_utseg: live.with_utseg,
             with_morphosyntax: live.with_morphosyntax,
             cache_policies: live.cache_policies,
-            allow_stanza_fallback_utseg: live.allow_stanza_fallback_utseg,
             write_wor: live.write_wor,
             media_name: live.media_name,
             engine_extras: live.engine_extras,
         };
         let chat = run_transcribe_pipeline_with_legacy_replay(
             replay,
-            TranscribeUtsegExecution::production(opts.with_utseg),
+            TranscribeUtsegExecution::production(opts.plan.with_utseg()),
             PipelineServices::new(&pool, &cache),
             &opts,
             None,
@@ -1736,20 +1723,20 @@ mod tests {
             LanguageCode3::fra().into(),
         );
         let opts = TranscribeOptions {
-            asr: ReplayAsrPlan::for_legacy_replay(2, &LanguageCode3::fra().into()).unwrap(),
+            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
+                ReplayAsrPlan::for_legacy_replay(2, &LanguageCode3::fra().into()).unwrap(), false, UtsegFallbackPolicy::Refuse,
+            ).unwrap(),
             diarize: opts.diarize,
             speaker_backend: opts.speaker_backend,
-            with_utseg: opts.with_utseg,
             with_morphosyntax: opts.with_morphosyntax,
             cache_policies: opts.cache_policies,
-            allow_stanza_fallback_utseg: opts.allow_stanza_fallback_utseg,
             write_wor: opts.write_wor,
             media_name: opts.media_name,
             engine_extras: opts.engine_extras,
         };
         let chat = run_transcribe_pipeline_with_legacy_replay(
             replay,
-            TranscribeUtsegExecution::production(opts.with_utseg),
+            TranscribeUtsegExecution::production(opts.plan.with_utseg()),
             PipelineServices::new(&pool, &cache),
             &opts,
             None,
@@ -1857,7 +1844,6 @@ mod tests {
         let audio_path = tempdir.path().join("sample.wav");
         let mut opts = test_transcribe_options(None);
         opts.diarize = false;
-        opts.with_utseg = false;
         let ctx = TranscribePipelineContext::new_with_rev_inference(
             &audio_path,
             services,

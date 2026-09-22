@@ -61,6 +61,27 @@ nothing to divide by prints `NA`, never `0`. Every count is printed, so a
 corpus roll-up sums rows and recomputes rates rather than averaging per-file
 ratios.
 
+## Scoring retained transcript pairs
+
+The `batchalign-transform` example `compare_metrics` scores existing
+hypothesis/gold CHAT pairs without inference:
+
+```sh
+cargo run -p batchalign-transform --example compare_metrics -- main.cha gold.cha
+```
+
+It admits every file through parsing and model validation before comparison.
+A parser-recovered document or invalid model is refused with the input role,
+path, admission stage and diagnostic codes. It performs no repairs and treats
+the supplied gold as a complete reference, not proof of transcription quality.
+All comparisons and CSV serialization finish before output is published, so a
+bad later pair cannot leave a seemingly usable partial report on stdout.
+
+The output retains `pair,metric,value` rows and `ALL` count totals. Rates are
+not summed; recompute corpus rates from their aggregate numerators and
+denominators. A failed input must be adjudicated separately before rerunning
+its comparison.
+
 ## WER and cWER: read them as a pair
 
 `cwer` counts the same errors as `wer` except that a word recognised

@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-09-16 09:47 EDT
+**Last updated:** 2026-09-22 14:10 EDT
 
 This page documents the current public `batchalign3` CLI surface. For anything
 you are scripting against, confirm with `batchalign3 <command> --help`.
@@ -24,7 +24,7 @@ Global options go before the command name.
 | `-v`, `-vv`, `-vvv` | Increase verbosity |
 | `--workers N` | Maximum concurrent files per job (default: auto-tune; GPU commands default to 1). Auto-tune is `(ram_total_mb / 16 GB).clamp(1, 8)` for GPU-bound work. |
 | `--force-cpu` | Disable MPS/CUDA and force CPU-only models |
-| `--server URL` | Remote server URL. Env fallback: `BATCHALIGN_SERVER` |
+| `--server URL` | Server to submit to. Env fallback: `BATCHALIGN_SERVER`. A loopback URL reads inputs by path; another host receives transcript text only, so commands whose inputs are recordings are refused for it. See [Server Mode](server-mode.md). |
 | `--override-media-cache` | Bypass the media analysis cache (audio tasks only; text NLP tasks are not cached at all) |
 | `--require-media-cache` | Require reusable evidence at cache-backed media stages; a miss fails instead of authorizing inference. Conflicts with both cache-override forms. |
 | `--override-media-cache-tasks TASKS` | Bypass only named audio-evidence caches (comma-separated: `forced_alignment`, `utr_asr`, `rev_asr_evidence`, `speaker_diarization_raw_evidence`) |

@@ -215,25 +215,24 @@ server looks for a file with the same stem and a known media extension:
 input/ACWT01a.cha  →  input/ACWT01a.mp4  (or .wav, .mp3, etc.)
 ```
 
-### shared-filesystem server mode (`--server` for audio commands)
+### `--server` on this machine (loopback)
 
-The CLI no longer asks the server to infer remote media from client-specific
-path mappings. For audio commands, explicit `--server` submits filesystem paths
+For every command, an explicit loopback `--server` submits filesystem paths
 via `paths_mode`:
 
 - `source_paths`: absolute input paths the server must be able to read
 - `output_paths`: absolute output paths the server must be able to write
 
-This means the clean operational model is:
+Media is resolved from the execution host's own view, as above.
 
-- run the CLI on the execution host itself, or
-- use a standardized shared mount layout so the server sees the same paths
+### `--server` on another host (content mode)
 
-For direct HTTP content-mode submissions, Batchalign only trusts server-visible
-local paths such as `source_dir`, local `media_mappings`, or an explicit
-`--media-dir`. The important rule is that the mapping is local to the execution
-host, not a way to dereference an arbitrary remote client's private directory
-layout.
+Only transcript-input commands reach a remote server, and the CLI posts the
+transcript text; recording-input commands are refused before anything is
+sent. The server resolves media from server-visible places only, in the
+order given on [Server Mode](../user-guide/server-mode.md#how-the-server-finds-a-recording);
+a client's private directory layout is never dereferenced, so a recording
+that exists only on the client cannot be used.
 
 ## MP4 Media on Network Volumes
 

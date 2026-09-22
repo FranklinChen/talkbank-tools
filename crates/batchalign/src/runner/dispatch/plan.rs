@@ -241,33 +241,18 @@ impl TranscribeDispatchPlan {
             &job.dispatch.lang,
         )?;
 
-        // Refuse a language with no segmenter for a requested language, and
-        // for a pair's primary language, which segmentation runs under. Under
-        // detection the language is not known until ASR returns, so this
-        // refusal cannot happen before ASR for that case, and the pipeline
-        // resolves the same route once the detected language exists. That is a
-        // real limit of detection, not a gap in the check.
-        let fallback = crate::params::UtsegFallbackPolicy::from(allow_stanza_fallback_utseg);
-        match (with_utseg, asr.language()) {
-            (true, crate::api::AsrLanguageRequest::One(code)) => {
-                crate::utseg_route::UtsegRoute::resolve(&code, fallback)?;
-            }
-            (true, crate::api::AsrLanguageRequest::Pair(pair)) => {
-                crate::utseg_route::UtsegRoute::resolve(pair.primary(), fallback)?;
-            }
-            (true, crate::api::AsrLanguageRequest::Detect) | (false, _) => {}
-        }
+        let plan = crate::transcribe::types::AdmittedTranscribePlan::admit(
+            asr, with_utseg, allow_stanza_fallback_utseg.into(),
+        )?;
 
         Ok(Self {
             kernel_plan: kernel_plan_for_job(job, config),
             base_options: TranscribeOptions {
-                asr,
+                plan,
                 diarize,
                 speaker_backend,
-                with_utseg,
                 with_morphosyntax,
                 cache_policies,
-                allow_stanza_fallback_utseg,
                 write_wor: wor_tier.should_write(),
                 media_name: None,
                 engine_extras,
@@ -330,19 +315,17 @@ impl BenchmarkDispatchPlan {
                 // front, so reaching this arm means the job predates the
                 // check. The refusal is PROPAGATED: `.ok()?` used to turn it
                 // into `None`, which routing dropped silently.
-                asr: crate::transcribe::TranscribeAsrPlan::from_request(
+                plan: crate::transcribe::types::AdmittedTranscribePlan::admit(crate::transcribe::TranscribeAsrPlan::from_request(
                     AsrBackend::try_from_engine(&asr_engine)?,
                     false,
                     job.dispatch.num_speakers.0 as usize,
                     &engine_extras,
                     &job.dispatch.lang,
-                )?,
+                )?, false, crate::params::UtsegFallbackPolicy::Refuse)?,
                 diarize: false,
                 speaker_backend: None,
-                with_utseg: false,
                 with_morphosyntax: false,
                 cache_policies: TranscribeCachePolicies::uniform(cache_policy),
-                allow_stanza_fallback_utseg: false,
                 write_wor: wor_tier.should_write(),
                 media_name: None,
                 engine_extras,
@@ -552,7 +535,7 @@ mod tests {
         job.dispatch.num_speakers = NumSpeakers(2);
         let plan = TranscribeDispatchPlan::from_job(&job, &ServerConfig::default())
             .expect("dispatch plan");
-        assert_eq!(plan.base_options.asr.backend(), AsrBackend::RustRevAi);
+        assert_eq!(plan.base_options.plan.asr().backend(), AsrBackend::RustRevAi);
         assert_eq!(plan.base_options.expected_speakers(), None);
         // A persisted job bypasses HTTP validation, but cannot bypass plan admission.
         let mut invalid = job.clone();
@@ -674,7 +657,7 @@ mod tests {
             .expect("transcribe plan");
 
         assert!(matches!(
-            plan.base_options.asr.backend(),
+            plan.base_options.plan.asr().backend(),
             AsrBackend::Worker(AsrWorkerMode::HkAliyunV2)
         ));
         assert!(plan.base_options.diarize);
@@ -687,7 +670,7 @@ mod tests {
             crate::api::AsrLanguageRequest::One(LanguageCode3::eng())
         );
         assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
-        assert!(!plan.base_options.with_utseg);
+        assert!(!plan.base_options.plan.with_utseg());
         assert!(plan.base_options.with_morphosyntax);
         assert_eq!(
             plan.base_options.cache_policies,
@@ -717,7 +700,7 @@ mod tests {
             .expect("transcribe_s plan");
 
         assert!(matches!(
-            plan.base_options.asr.backend(),
+            plan.base_options.plan.asr().backend(),
             AsrBackend::RustRevAi
         ));
         assert!(plan.base_options.diarize);
@@ -730,7 +713,7 @@ mod tests {
             crate::api::AsrLanguageRequest::One(LanguageCode3::eng())
         );
         assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
-        assert!(plan.base_options.with_utseg);
+        assert!(plan.base_options.plan.with_utseg());
         assert!(!plan.base_options.with_morphosyntax);
         assert_eq!(
             plan.base_options.cache_policies,
@@ -1001,11 +984,11 @@ mod tests {
             .expect("benchmark plan");
 
         assert!(matches!(
-            plan.base_options.asr.backend(),
+            plan.base_options.plan.asr().backend(),
             AsrBackend::RustRevAi
         ));
         assert_eq!(plan.base_options.expected_speakers(), Some(NumSpeakers(3)));
-        assert!(!plan.base_options.with_utseg);
+        assert!(!plan.base_options.plan.with_utseg());
         assert!(!plan.base_options.with_morphosyntax);
         assert!(plan.base_options.write_wor);
         assert!(plan.should_merge_abbrev);

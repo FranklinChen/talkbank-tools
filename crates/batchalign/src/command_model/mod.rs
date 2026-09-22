@@ -16,8 +16,9 @@
 mod catalog;
 
 pub(crate) use crate::recipe_runner::command_spec::{
-    BatchingPolicy, CapabilityPlan, CatalogEntry, CommandCapabilityKind, ConstrainedHostPolicy,
-    ModelSharingPolicy, ParallelismPolicy, ResourceLane, RunnerDispatchKind, SchedulingPolicy,
+    BatchingPolicy, CapabilityPlan, CatalogEntry, CommandCapabilityKind, CommandIoProfile,
+    ConstrainedHostPolicy, ModelSharingPolicy, ParallelismPolicy, ResourceLane, RunnerDispatchKind,
+    SchedulingPolicy,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::recipe_runner::materialize::{
@@ -32,33 +33,6 @@ pub(crate) use crate::recipe_runner::recipe::{
 pub(crate) use catalog::{command_spec, command_specs, commands_stamped_by};
 
 use crate::ReleasedCommand;
-
-/// Return whether one closed released command requires shared-filesystem audio access.
-pub fn released_command_uses_local_audio(command: ReleasedCommand) -> bool {
-    command_spec(command).io_profile.uses_local_audio()
-}
-
-/// Return whether one released command requires shared-filesystem audio access.
-///
-/// An unrecognised name is not an audio command, which is the conservative
-/// answer: it keeps the CLI from sending paths for something the server may not
-/// be able to resolve locally.
-pub fn command_uses_local_audio(command: &str) -> bool {
-    match ReleasedCommand::try_from(command) {
-        Ok(command) => released_command_uses_local_audio(command),
-        Err(_) => false,
-    }
-}
-
-/// Return whether a command may use `paths_mode`: that is, have the CLI
-/// send filesystem paths instead of file content when submitting to a
-/// local daemon. A superset of `released_command_uses_local_audio`:
-/// every audio command supports paths_mode, and text commands
-/// (morphotag, utseg, translate, coref, compare) also opt in because
-/// the server-side runner already reads their input CHAT by path.
-pub fn released_command_supports_paths_mode(command: ReleasedCommand) -> bool {
-    command_spec(command).io_profile.supports_paths_mode()
-}
 
 /// Return the runner dispatch kind for one released command.
 ///

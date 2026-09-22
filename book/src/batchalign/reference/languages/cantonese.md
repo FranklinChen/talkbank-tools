@@ -126,7 +126,7 @@ input.
 
 The Qwen3-ASR worker always pairs the ASR model with
 `Qwen/Qwen3-ForcedAligner-0.6B`, Qwen's companion forced-aligner
-model. The aligner is loaded at worker bootstrap (~1.2 GB
+model. The aligner is loaded at worker bootstrap (~1.8 GB
 additional download on first use, then cached) so the ASR pipeline
 emits word-level timestamps the downstream FA stage can consume.
 This pairing is required, not optional: the `qwen-asr` library

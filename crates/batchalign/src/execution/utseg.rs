@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use crate::dispatch_language::JobLanguage;
 use crate::planning;
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage};
 use crate::scheduling::WorkUnitKind;
 use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::utseg_route::UtsegRoute;
 
 use super::text_io::{load_text_inputs, write_text_results};
 use super::worker_gateway::WorkerGateway;
@@ -38,8 +38,7 @@ pub(crate) async fn dispatch_utseg_job(
     host: &DispatchHostContext,
     gateway: Arc<dyn WorkerGateway>,
     should_merge_abbrev: bool,
-    job_language: &JobLanguage,
-    allow_stanza_fallback: bool,
+    route: &UtsegRoute,
 ) -> Result<(), crate::error::ServerError> {
     let plan = planning::build_job_plan(job).map_err(|error| {
         crate::error::ServerError::Validation(format!("Utseg planning failed: {error}"))
@@ -59,15 +58,8 @@ pub(crate) async fn dispatch_utseg_job(
             .await;
     }
 
-    // The language is handed in, not asked for. Utseg is a job-level command
-    // ([`crate::dispatch_language`]), so the router resolved its language once
-    // and a `JobLanguage` exists only because that resolution succeeded. This
-    // used to be an `as_resolved().ok_or_else(...)` check here, one of several
-    // copies of the same question; coref's copy of it could never pass.
-    //
-    // Each spawned per-file task owns its own clone (the `JoinSet` requires
-    // `'static`), so the code is cloned in the loop below rather than bound
-    // here and cloned again.
+    // Admission owns the language and fallback together. Execution cannot
+    // substitute either part or dispatch without a runnable route.
 
     // Bounded-parallelism per-file dispatch. Same shape as
     // `fa_pipeline.rs`: Semaphore caps the number of concurrent file
@@ -103,7 +95,7 @@ pub(crate) async fn dispatch_utseg_job(
             }
         };
         let gateway_for_task = Arc::clone(&gateway);
-        let lang = job_language.code().clone();
+        let route = route.clone();
         let host_for_task = host.clone();
         let job_for_task = job.clone();
         let plan_for_task = Arc::clone(&plan);
@@ -114,8 +106,8 @@ pub(crate) async fn dispatch_utseg_job(
             let results = gateway_for_task
                 .utseg_batch(
                     &single,
-                    &lang,
-                    allow_stanza_fallback,
+                    route.language(),
+                    route.fallback().is_allowed(),
                     crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
                 )
                 .await;
@@ -178,6 +170,7 @@ mod tests {
     struct FakeUtsegState {
         batch_calls: usize,
         batch_sizes: Vec<usize>,
+        routes: Vec<(LanguageCode3, bool)>,
     }
 
     #[async_trait]
@@ -209,13 +202,14 @@ mod tests {
         async fn utseg_batch(
             &self,
             files: &[TextBatchFileInput],
-            _lang: &LanguageCode3,
-            _allow_stanza_fallback: bool,
+            lang: &LanguageCode3,
+            allow_stanza_fallback: bool,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             let mut state = self.state.lock().unwrap();
             state.batch_calls += 1;
             state.batch_sizes.push(files.len());
+            state.routes.push((lang.clone(), allow_stanza_fallback));
             files
                 .iter()
                 .map(|file| {
@@ -315,19 +309,9 @@ mod tests {
         )))
     }
 
-    /// The language utseg's dispatch is handed, built through the one
-    /// constructor rather than assembled here, so these tests exercise the
-    /// real resolution instead of a shape it would refuse.
-    fn job_language() -> JobLanguage {
-        let resolved = crate::dispatch_language::DispatchLanguage::resolve(
-            ReleasedCommand::Utseg,
-            &LanguageSpec::Resolved(LanguageCode3::eng()),
-        )
-        .expect("utseg submits a resolved language");
-        let crate::dispatch_language::DispatchLanguage::Job(language) = resolved else {
-            panic!("utseg is a job-level command")
-        };
-        language
+    fn route() -> UtsegRoute {
+        UtsegRoute::resolve(&LanguageCode3::eng(), crate::params::UtsegFallbackPolicy::Refuse)
+            .expect("English boundary model")
     }
 
     /// Per-file dispatch: each file produces its own gateway call, never
@@ -346,20 +330,44 @@ mod tests {
             &host,
             Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
             false,
-            &job_language(),
-            false,
+            &route(),
         )
         .await
         .expect("utseg dispatch");
 
         let state = gateway.state.lock().unwrap();
         assert_eq!(state.batch_calls, 2, "one gateway call per file");
+        assert_eq!(state.routes, vec![(LanguageCode3::eng(), false); 2]);
         // Each call carries exactly one file. With parallelism, the
         // per-call payload is single-file regardless of order; sort the
         // observed sizes for a stable assertion.
         let mut sizes = state.batch_sizes.clone();
         sizes.sort();
         assert_eq!(sizes, vec![1, 1], "each call carries one file");
+    }
+
+    #[tokio::test]
+    async fn utseg_admitted_fallback_reaches_each_gateway_call() {
+        for code in ["eng", "spa"] {
+            let temp = tempfile::tempdir().unwrap();
+            let host = host();
+            let gateway = Arc::new(FakeUtsegGateway::default());
+            let mut job = utseg_snapshot(temp.path(), false);
+            let language = LanguageCode3::try_new(code).unwrap();
+            job.dispatch.lang = LanguageSpec::Resolved(language.clone());
+            let route = UtsegRoute::resolve(&language, crate::params::UtsegFallbackPolicy::AllowStanza)
+                .expect("model or authorized fallback");
+            dispatch_utseg_job(
+                &job,
+                &host,
+                Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
+                false,
+                &route,
+            )
+            .await
+            .expect("admitted route dispatched");
+            assert_eq!(gateway.state.lock().unwrap().routes, vec![(language, true); 2]);
+        }
     }
 
     #[tokio::test]
@@ -374,8 +382,7 @@ mod tests {
             &host,
             gateway as Arc<dyn WorkerGateway>,
             true,
-            &job_language(),
-            false,
+            &route(),
         )
         .await
         .expect("utseg dispatch");

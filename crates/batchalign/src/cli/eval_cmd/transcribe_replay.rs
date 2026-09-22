@@ -112,15 +112,17 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
             .and_then(|name| name.to_str())
             .map(ToOwned::to_owned);
         let opts = TranscribeOptions {
-            asr: crate::transcribe::ReplayAsrPlan::for_legacy_replay(args.num_speakers, &lang)?,
+            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
+                crate::transcribe::ReplayAsrPlan::for_legacy_replay(args.num_speakers, &lang)?,
+                utseg_execution.pre_chat_policy().is_some() || utseg_execution.post_chat_policy().is_some(),
+                args.utseg_fallback_stanza.into(),
+            ).map_err(|error| CliError::InvalidArgument(error.to_string()))?,
             diarize: args.diarize,
             speaker_backend: args.diarize.then_some(SpeakerBackendV2::PyannoteAi),
-            with_utseg: utseg_execution.pre_chat_policy().is_some(),
             with_morphosyntax: false,
             // These policies are unreachable in the replay typestate. Keeping
             // them fail-closed protects against a future routing regression.
             cache_policies: TranscribeCachePolicies::uniform(CachePolicy::RequireCache),
-            allow_stanza_fallback_utseg: args.utseg_fallback_stanza,
             write_wor: args.wor,
             media_name,
             engine_extras: Default::default(),

@@ -129,7 +129,8 @@ class FunAudioRecognizer:
             stage="downloading_funaudio_asr",
             user_message=(
                 f"Loading FunASR model {self.model_name} ({self.device}); "
-                f"first-run HuggingFace download may take several minutes…"
+                f"the first run downloads it (SenseVoice from Hugging Face, "
+                f"Paraformer from ModelScope), which may take several minutes…"
             ),
         )
 
