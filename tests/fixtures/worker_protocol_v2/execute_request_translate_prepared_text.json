@@ -5,6 +5,7 @@
     "kind": "translate",
     "source_lang": "eng",
     "target_lang": "spa",
+    "engine": "google",
     "payload_ref_id": "text-ref-0003",
     "item_count": 2
   },

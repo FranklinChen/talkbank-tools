@@ -38,6 +38,16 @@ pub(crate) async fn dispatch_translate_job(
     let plan = planning::build_job_plan(job).map_err(|error| {
         crate::error::ServerError::Validation(format!("Translate planning failed: {error}"))
     })?;
+    // The engine the job selected. A translate job whose persisted options are
+    // another command's is a programming error in submission or recovery, and
+    // is refused here rather than served by a defaulted engine.
+    let Some(options) = job.dispatch.options.as_translate() else {
+        return Err(crate::error::ServerError::Validation(format!(
+            "translate job carries {} options",
+            job.dispatch.options.command_name()
+        )));
+    };
+    let engine = options.effective_translate_engine();
     let sink = host.sink().clone();
     let started_at = unix_now();
 
@@ -71,9 +81,10 @@ pub(crate) async fn dispatch_translate_job(
                 // cross-file pooling on purpose: per-file lang correctness
                 // > batching speedup.
                 let mut results = gateway
-                    .translate_batch(
-                        std::slice::from_ref(&file_input),
+                    .translate_file(
+                        &file_input,
                         &src_lang,
+                        &engine,
                         crate::infer_retry::Cancellation::Token(&job.cancel_token),
                     )
                     .await;
@@ -134,8 +145,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeTranslateState {
-        batch_calls: usize,
-        batch_sizes: Vec<usize>,
+        calls: usize,
     }
 
     #[async_trait]
@@ -174,28 +184,23 @@ mod tests {
             unreachable!()
         }
 
-        async fn translate_batch(
+        async fn translate_file(
             &self,
-            files: &[TextBatchFileInput],
+            file: &TextBatchFileInput,
             _lang: &LanguageCode3,
+            _engine: &crate::types::engines::TranslateEngineName,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             let mut state = self.state.lock().unwrap();
-            state.batch_calls += 1;
-            state.batch_sizes.push(files.len());
-            files
-                .iter()
-                .map(|file| {
-                    let translated = file.chat_text.replace("@End", "%xtra:\ttranslated\n@End");
-                    TextBatchFileResult::ok(
-                        file.filename.clone(),
-                        crate::pipeline::post_validate::PostValidated::for_test(
-                            translated,
-                            crate::api::ReleasedCommand::Translate,
-                        ),
-                    )
-                })
-                .collect()
+            state.calls += 1;
+            let translated = file.chat_text.replace("@End", "%xtra:\ttranslated\n@End");
+            vec![TextBatchFileResult::ok(
+                file.filename.clone(),
+                crate::pipeline::post_validate::PostValidated::for_test(
+                    translated,
+                    crate::api::ReleasedCommand::Translate,
+                ),
+            )]
         }
 
         async fn coref_batch(
@@ -298,13 +303,8 @@ mod tests {
 
         let state = gateway.state.lock().unwrap();
         assert_eq!(
-            state.batch_calls, 2,
-            "one gateway call per file (BA2 parity); pooled batching is gone"
-        );
-        assert_eq!(
-            state.batch_sizes,
-            vec![1, 1],
-            "each per-file call carries exactly one file"
+            state.calls, 2,
+            "one gateway call per file (BA2 parity); the gateway takes one file by signature"
         );
     }
 

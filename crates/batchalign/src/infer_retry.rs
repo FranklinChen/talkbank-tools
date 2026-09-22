@@ -55,6 +55,20 @@ impl Cancellation<'_> {
             Self::NotWired { .. } => std::future::pending().await,
         }
     }
+
+    /// Sleep for `duration`, unless cancellation wins first.
+    ///
+    /// Cancellation is polled first (`biased`), so a token cancelled before
+    /// the call returns at once, and the sleep is dropped rather than
+    /// finished. Every wait a dispatch takes on a job's behalf goes through
+    /// here, so none of them can outlive a stop.
+    pub(crate) async fn sleep(&self, duration: Duration) -> Result<(), ServerError> {
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Err(ServerError::Cancelled),
+            () = tokio::time::sleep(duration) => Ok(()),
+        }
+    }
 }
 
 /// Dispatch one `execute_v2` request with automatic retries for transient worker
@@ -129,11 +143,9 @@ pub(crate) async fn dispatch_execute_v2_with_retry_and_progress(
                         %backoff_ms,
                         "Retrying execute_v2 after transient worker failure"
                     );
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => return Err(ServerError::Cancelled),
-                        () = tokio::time::sleep(Duration::from_millis(backoff_ms.0)) => {}
-                    }
+                    cancellation
+                        .sleep(Duration::from_millis(backoff_ms.0))
+                        .await?;
                     continue;
                 }
 

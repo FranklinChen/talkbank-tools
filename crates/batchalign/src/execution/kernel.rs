@@ -619,13 +619,14 @@ mod tests {
             unreachable!("compare tests do not call utseg_batch")
         }
 
-        async fn translate_batch(
+        async fn translate_file(
             &self,
-            _files: &[crate::text_batch::TextBatchFileInput],
+            _file: &crate::text_batch::TextBatchFileInput,
             _lang: &crate::api::LanguageCode3,
+            _engine: &crate::types::engines::TranslateEngineName,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> crate::text_batch::TextBatchFileResults {
-            unreachable!("compare tests do not call translate_batch")
+            unreachable!("compare tests do not call translate_file")
         }
 
         async fn coref_batch(

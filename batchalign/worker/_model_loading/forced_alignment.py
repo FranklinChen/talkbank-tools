@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typing
 
+from batchalign.inference._domain_types import parse_choice
 from batchalign.inference.qwen_forced_alignment import QWEN_FORCED_ALIGNER_MODEL_ID
 from batchalign.worker._types import FaEngine, WorkerBootstrapRuntime, _state
 
@@ -108,13 +109,7 @@ def resolve_fa_engine(engine_overrides: dict[str, str] | None) -> FaEngine:
     legacy = _LEGACY_FA_WIRE_NAMES.get(choice)
     if legacy is not None:
         return legacy
-    try:
-        return FaEngine(choice)
-    except ValueError as exc:
-        supported = ", ".join(e.value for e in FaEngine)
-        raise ValueError(
-            f"unknown fa engine {choice!r}; expected one of: {supported}"
-        ) from exc
+    return parse_choice(FaEngine, choice, "fa engine")
 
 
 __all__ = [

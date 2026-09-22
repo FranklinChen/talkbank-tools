@@ -1,16 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "WhisperChunkSpanV2",
-  "description": "One raw Whisper chunk span returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+  "description": "One raw Whisper chunk span as a producer emitted it.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat each bound is a finite non-negative duration, which its type proves.",
   "type": "object",
   "properties": {
     "end_s": {
       "description": "End timestamp in seconds.",
-      "$ref": "#/$defs/DurationSeconds"
+      "$ref": "#/$defs/NonNegativeSeconds"
     },
     "start_s": {
       "description": "Start timestamp in seconds.",
-      "$ref": "#/$defs/DurationSeconds"
+      "$ref": "#/$defs/NonNegativeSeconds"
     },
     "text": {
       "description": "Surface text for the chunk.",
@@ -23,10 +23,11 @@
     "end_s"
   ],
   "$defs": {
-    "DurationSeconds": {
-      "description": "Duration measured in fractional seconds.",
+    "NonNegativeSeconds": {
+      "description": "A finite, non-negative number of seconds.",
       "type": "number",
-      "format": "double"
+      "format": "double",
+      "minimum": 0.0
     }
   }
 }

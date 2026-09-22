@@ -336,7 +336,7 @@ class TestFunaudioDownloadEvents:
     TUI show "Loading FunASR model…" instead of dead air during the
     multi-minute first-time HuggingFace download.
 
-    Per CLAUDE.md §11 (talkbank-tools/CLAUDE.md), every operation that
+    Per AGENTS.md §11 (talkbank-tools/AGENTS.md), every operation that
     takes more than ~1 second must surface to all UI channels via
     ``emit_download_event``. FunASR's lazy ``_get_model()`` was an
     observability gap: this test pins the start/complete event pair

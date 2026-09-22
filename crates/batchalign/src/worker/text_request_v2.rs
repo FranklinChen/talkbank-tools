@@ -13,8 +13,9 @@ use thiserror::Error;
 use crate::api::LanguageCode3;
 use crate::chat_ops::morphosyntax_ops::{MorphosyntaxBatchItem, MwtDict};
 use crate::types::worker_v2::{
-    ArtifactRefV2, CorefRequestV2, ExecuteRequestV2, InferenceTaskV2, MorphosyntaxRequestV2,
-    TaskRequestV2, TranslateRequestV2, UtsegRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2,
+    ArtifactRefV2, CorefRequestV2, ExecuteRequestV2, InferenceTaskV2, InlineJsonRefV2,
+    MorphosyntaxRequestV2, TaskRequestV2, TranslateBackendV2, TranslateRequestV2, UtsegRequestV2,
+    WorkerArtifactIdV2, WorkerRequestIdV2,
 };
 use batchalign_transform::coref::CorefBatchItem;
 use batchalign_transform::translate::TranslateBatchItem;
@@ -101,6 +102,10 @@ pub enum TextRequestBuildErrorV2 {
     /// Prepared-text artifact creation failed.
     #[error("failed to write worker protocol V2 prepared text artifact: {0}")]
     Artifact(#[from] std::io::Error),
+
+    /// An inline payload could not be encoded as JSON.
+    #[error("failed to encode worker protocol V2 inline payload: {0}")]
+    Inline(#[from] serde_json::Error),
 }
 
 /// Build a batched morphosyntax V2 request.
@@ -159,28 +164,38 @@ pub fn build_utseg_request_v2(
     })
 }
 
-/// Build a batched translation V2 request.
+/// Build a one-item translation V2 request.
+///
+/// Translate sends one utterance per request (see `batchalign::translate`),
+/// and the item is carried inline in the envelope: a prepared-text file per
+/// utterance was seven syscalls and an inode of pure waste, and the inline
+/// attachment kind exists for exactly this size of payload. No store is
+/// needed, so none is taken.
 pub fn build_translate_request_v2(
-    store: &PreparedArtifactStoreV2,
     ids: &PreparedTextRequestIdsV2,
     source_lang: &LanguageCode3,
     target_lang: &LanguageCode3,
-    items: &[TranslateBatchItem],
+    engine: TranslateBackendV2,
+    item: &TranslateBatchItem,
 ) -> Result<ExecuteRequestV2, TextRequestBuildErrorV2> {
     let payload = PreparedTranslateBatchV2 {
-        items: items.to_vec(),
+        items: vec![item.clone()],
     };
-    let attachment = store.write_prepared_text_json(&ids.payload_ref_id, &payload)?;
+    let attachment = InlineJsonRefV2 {
+        id: ids.payload_ref_id.clone(),
+        value: serde_json::to_value(&payload)?,
+    };
     Ok(ExecuteRequestV2 {
         request_id: ids.request_id.clone(),
         task: InferenceTaskV2::Translate,
         payload: TaskRequestV2::Translate(TranslateRequestV2 {
             source_lang: source_lang.clone(),
             target_lang: target_lang.clone(),
+            engine,
             payload_ref_id: attachment.id.clone(),
-            item_count: item_count(items.len())?,
+            item_count: 1,
         }),
-        attachments: vec![ArtifactRefV2::PreparedText(attachment)],
+        attachments: vec![ArtifactRefV2::InlineJson(attachment)],
     })
 }
 

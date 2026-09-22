@@ -80,7 +80,7 @@ macro_rules! string_id {
 /// and skip validation. They exist for trusted boundaries (HTTP path params
 /// extracted by axum, DB rows, test code). Untrusted input goes through the
 /// validating `Deserialize` impl. A full `TryFrom` migration is tracked but
-/// would touch hundreds of call sites, see CLAUDE.md rule 6a.
+/// would touch hundreds of call sites, see AGENTS.md rule 6a.
 ///
 /// Generates: `From<String>`, `From<&str>`, custom `Deserialize` (rejects
 /// empty), `Display`, `Deref<Target=str>`, `AsRef<str>`.
@@ -171,6 +171,88 @@ macro_rules! validated_string_id {
                 let s = String::deserialize(deserializer)?;
                 let $v = s.as_str();
                 if $check { Ok(Self(s)) } else { Err(serde::de::Error::custom(format!($msg))) }
+            }
+        }
+    };
+}
+
+/// Declare a numeric newtype whose value is proven at construction.
+///
+/// The field is private and the only route in is `TryFrom<inner>`, which
+/// serde also deserializes through, so an out-of-range number is refused at
+/// the boundary rather than checked downstream. The JSON Schema is written
+/// by hand because the derive reads the schema off the `try_from` type and
+/// drops the range, which would leave the Python conformance check blind to
+/// the bound the constructor enforces.
+///
+/// ```ignore
+/// validated_numeric!(
+///     /// docs
+///     pub NonNegativeSeconds(f64 = "f64"), InvalidSeconds,
+///     |v| v.is_finite() && v >= 0.0, "seconds must be finite and non-negative",
+///     { "type": "number", "format": "double", "minimum": 0.0 }
+/// );
+/// ```
+/// The inner type is written twice, as a type and as the string serde's
+/// `try_from`/`into` attributes require. Append `[Eq]` after the schema for
+/// integer types that also need `Eq` and `Hash`.
+macro_rules! validated_numeric {
+    ($(#[$meta:meta])* $vis:vis $name:ident($inner:ty = $inner_str:literal), $error:ident,
+     |$v:ident| $pred:expr, $msg:literal, { $($schema:tt)* } [Eq]) => {
+        validated_numeric!(@base $(#[$meta])* $vis $name($inner = $inner_str), $error, |$v| $pred, $msg, { $($schema)* });
+
+        impl Eq for $name {}
+
+        impl std::hash::Hash for $name {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.0.hash(state);
+            }
+        }
+    };
+    ($(#[$meta:meta])* $vis:vis $name:ident($inner:ty = $inner_str:literal), $error:ident,
+     |$v:ident| $pred:expr, $msg:literal, { $($schema:tt)* }) => {
+        validated_numeric!(@base $(#[$meta])* $vis $name($inner = $inner_str), $error, |$v| $pred, $msg, { $($schema)* });
+    };
+    (@base $(#[$meta:meta])* $vis:vis $name:ident($inner:ty = $inner_str:literal), $error:ident,
+     |$v:ident| $pred:expr, $msg:literal, { $($schema:tt)* }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+        #[serde(try_from = $inner_str, into = $inner_str)]
+        $vis struct $name($inner);
+
+        #[doc = concat!("Why a value was refused as a `", stringify!($name), "`: ", $msg, ".")]
+        #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+        #[error("{}, got {}", $msg, .0)]
+        $vis struct $error(pub $inner);
+
+        impl $name {
+            /// The proven value.
+            pub const fn get(self) -> $inner {
+                self.0
+            }
+        }
+
+        impl TryFrom<$inner> for $name {
+            type Error = $error;
+
+            fn try_from($v: $inner) -> Result<Self, Self::Error> {
+                if $pred { Ok(Self($v)) } else { Err($error($v)) }
+            }
+        }
+
+        impl From<$name> for $inner {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({ $($schema)* })
             }
         }
     };

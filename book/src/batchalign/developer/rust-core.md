@@ -1,7 +1,7 @@
 # Rust Core (`batchalign_core`)
 
 **Status:** Current
-**Last updated:** 2026-09-16 03:36 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 
 For new contributors, start with:
 
@@ -127,7 +127,7 @@ This regenerates `parser.c`, which the tree-sitter parser depends on.
 
 After grammar changes, always test against real corpus data in
 addition to the curated test suite. See the parent
-`talkbank-tools/CLAUDE.md` "Grammar Change Workflow" section for the
+`talkbank-tools/AGENTS.md` "Grammar Change Workflow" section for the
 full mandatory sequence.
 
 ## Building for development

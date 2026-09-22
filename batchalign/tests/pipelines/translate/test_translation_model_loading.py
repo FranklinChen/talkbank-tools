@@ -18,6 +18,31 @@ from batchalign.inference._domain_types import TranslationBackend
 from batchalign.worker._model_loading.translation import resolve_translate_engine
 
 
+def _loaded_engine_name() -> str:
+    """The reported engine name of the translation the worker holds.
+
+    ``LoadedTranslation`` carries no backend selector any more (pacing moved
+    to the Rust control plane, which was its only reader), so which loader ran
+    is witnessed by the name every translated item reports.
+    """
+    from batchalign.worker._types import _state
+
+    assert _state.translation is not None
+    return _state.translation.engine
+
+
+# The reported engine name each backend's loader installs. A backend whose
+# name changed must change here too: these are the identities provenance
+# stamps carry.
+EXPECTED_ENGINE_NAME: dict[TranslationBackend, str] = {
+    TranslationBackend.GOOGLE: "googletrans-v1",
+    TranslationBackend.SEAMLESS: "facebook/hf-seamless-m4t-medium",
+    TranslationBackend.NLLB: "facebook/nllb-200-distilled-1.3B",
+    TranslationBackend.TENCENT: "tencent-tmt",
+    TranslationBackend.ALIYUN: "aliyun-mt",
+}
+
+
 class TestResolveTranslateEngine:
     """Engine selection must stay deterministic, typed, and loud on bad input."""
 
@@ -206,7 +231,7 @@ class TestLoadAliyunTranslate:
 
         assert _state.translation is not None
 
-        assert _state.translation.backend is TranslationBackend.ALIYUN
+        assert _loaded_engine_name() == EXPECTED_ENGINE_NAME[TranslationBackend.ALIYUN]
         assert _state.translation is not None
         result = _state.translation.translate("你好", LanguageCode("yue"))
 
@@ -325,7 +350,7 @@ def _load_translate_engine_fixture(
     )
     assert (
         _state.translation is not None
-        and _state.translation.backend is expected_backend
+        and _state.translation.engine == EXPECTED_ENGINE_NAME[expected_backend]
     ), f"fixture failed to select {expected_backend.name}; got {_state.translation!r}"
     assert _state.translation is not None
     try:
@@ -488,7 +513,10 @@ class TestSeamlessRuntimeInvariants:
                 )
             )
             assert _state.translation is not None
-            assert _state.translation.backend is TranslationBackend.SEAMLESS
+            assert (
+                _loaded_engine_name()
+                == EXPECTED_ENGINE_NAME[TranslationBackend.SEAMLESS]
+            )
             assert _state.translation is not None
             assert callable(_state.translation.translate)
         finally:
@@ -517,7 +545,9 @@ class TestSeamlessRuntimeInvariants:
                 )
             )
             assert _state.translation is not None
-            assert _state.translation.backend is TranslationBackend.GOOGLE
+            assert (
+                _loaded_engine_name() == EXPECTED_ENGINE_NAME[TranslationBackend.GOOGLE]
+            )
             google_translation = _state.translation
 
             load_translation_engine(
@@ -529,7 +559,10 @@ class TestSeamlessRuntimeInvariants:
                 )
             )
             assert _state.translation is not None
-            assert _state.translation.backend is TranslationBackend.SEAMLESS
+            assert (
+                _loaded_engine_name()
+                == EXPECTED_ENGINE_NAME[TranslationBackend.SEAMLESS]
+            )
             assert _state.translation is not google_translation, (
                 "Seamless load must replace ``_state.translation``, "
                 "leaving the Google fn in place would silently route "
@@ -624,7 +657,9 @@ class TestNllbRuntimeInvariants:
                 )
             )
             assert _state.translation is not None
-            assert _state.translation.backend is TranslationBackend.NLLB
+            assert (
+                _loaded_engine_name() == EXPECTED_ENGINE_NAME[TranslationBackend.NLLB]
+            )
             assert _state.translation is not None
             assert callable(_state.translation.translate)
         finally:

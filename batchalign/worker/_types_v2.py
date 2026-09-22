@@ -22,7 +22,12 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, FiniteFloat, StringConstraints, model_validator
 
-from batchalign.inference._domain_types import LanguageCode, NumSpeakers, SpeakerId
+from batchalign.inference._domain_types import (
+    LanguageCode,
+    NumSpeakers,
+    SpeakerId,
+    TranslationBackend,
+)
 from batchalign.worker._types import ReportedEngineName, WorkerJSONValue
 
 WorkerRequestIdV2: TypeAlias = Annotated[str, StringConstraints(min_length=1)]
@@ -352,6 +357,9 @@ class TranslateRequestV2(BaseModel):
     kind: Literal["translate"] = "translate"
     source_lang: LanguageCode
     target_lang: LanguageCode
+    # The job's engine; keys the worker that serves the request. Mirrors
+    # `crates/batchalign-types/src/worker_v2/requests.rs::TranslateBackendV2`.
+    engine: TranslationBackend
     payload_ref_id: WorkerArtifactIdV2
     item_count: int = Field(ge=0)
 
@@ -731,17 +739,18 @@ ExecuteRequestV2.model_rebuild()
 
 
 class WhisperChunkSpanV2(BaseModel):
-    """One raw Whisper chunk span returned by Python."""
+    """One raw Whisper chunk span as the producer emitted it.
+
+    Raw on purpose: chunks may overlap at a seam or arrive inverted, and the
+    Rust consumer settles every producer's spans in one place
+    (`batchalign::worker::chunk_spans::MonotoneChunkSpans`). The only
+    invariant the wire carries is that each bound is a finite non-negative
+    duration.
+    """
 
     text: str
     start_s: FiniteNonNegativeFloat
     end_s: FiniteNonNegativeFloat
-
-    @model_validator(mode="after")
-    def _validate_range(self) -> WhisperChunkSpanV2:
-        if self.end_s < self.start_s:
-            raise ValueError("Whisper chunk end_s must be >= start_s")
-        return self
 
 
 class WhisperChunkResultPayloadV2(BaseModel):
@@ -1069,15 +1078,40 @@ class TranslationBlankInputItemV2(BaseModel):
     kind: Literal["blank_input"] = "blank_input"
 
 
+class TranslationProviderStatusItemV2(BaseModel):
+    """The provider answered an HTTP status instead of a translation.
+
+    The worker reports and never retries: the Rust control plane decides
+    whether the status is waited out, where the wait is visible to the job's
+    deadline and cancellation.
+    """
+
+    kind: Literal["provider_status"] = "provider_status"
+    status: Annotated[int, Field(ge=100, le=599)]
+    retry_after_s: FiniteNonNegativeFloat | None = None
+    error: str
+
+
+class TranslationNoResponseItemV2(BaseModel):
+    """The request reached no provider answer: a transport failure."""
+
+    kind: Literal["no_response"] = "no_response"
+    error: str
+
+
 class TranslationFailedItemV2(BaseModel):
-    """An item that could not be translated, with the reason."""
+    """The engine failed the item with no provider semantics; final."""
 
     kind: Literal["failed"] = "failed"
     error: str
 
 
 TranslationItemResultV2: TypeAlias = Annotated[
-    TranslationTranslatedItemV2 | TranslationBlankInputItemV2 | TranslationFailedItemV2,
+    TranslationTranslatedItemV2
+    | TranslationBlankInputItemV2
+    | TranslationProviderStatusItemV2
+    | TranslationNoResponseItemV2
+    | TranslationFailedItemV2,
     Field(discriminator="kind"),
 ]
 """One translation item outcome (internally tagged on ``kind``)."""

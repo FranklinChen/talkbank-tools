@@ -1,7 +1,7 @@
 # Command Lifecycles
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:04 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 End-to-end sequence diagrams showing how jobs flow through the system,
 from CLI invocation to output files. Every batchalign command now fits one
@@ -20,7 +20,8 @@ Contributor rule of thumb: if you are adding new command semantics, start in
 | Workflow Family | Commands | Parallelism | Key shape |
 |------------------|----------|-------------|-----------|
 | **Per-file transform** | `align`, `transcribe`, `transcribe_s`, `morphotag` | Concurrent files (semaphore-bounded by `num_workers`) | One file in, one primary output out |
-| **Cross-file batch transform** | `utseg`, `translate`, `coref` | Cross-file batching: pool utterances, group by language, dispatch languages concurrently, chunk large language groups across multiple workers | Two-level parallelism: cross-language × intra-language chunking (up to `max_workers_per_key` per language) |
+| **Cross-file batch transform** | `utseg`, `coref` | Cross-file batching: pool utterances, group by language, dispatch languages concurrently, chunk large language groups across multiple workers | Two-level parallelism: cross-language × intra-language chunking (up to `max_workers_per_key` per language) |
+| **Per-file, per-utterance** | `translate` | One gateway call per file (the source language is read from that file's `@Languages:` header), one worker request per utterance, paced and retried on the server by the engine's provider policy; the file stops at its first failed utterance | One file in, one primary output out |
 | **Reference projection** | `compare` | Concurrent files, but with two primary CHAT inputs per file | Main+gold comparison bundle plus AST-first materializers |
 | **Composite workflow** | `benchmark` | Concurrent files (semaphore-bounded by `num_workers`) | Transcribe first, then compare via typed command composition |
 | **Media analysis V2** | `opensmile`, `avqi` | Concurrent files (semaphore-bounded by `num_workers`) | Rust prepares audio, sends typed `execute_v2` requests, Python returns raw analysis payloads |
@@ -53,7 +54,7 @@ pipelines. The API now exposes that state in two parallel fields:
 `progress_stage` for stable client logic and `progress_label` as the derived
 operator-facing display string.
 
-Batched text commands (`utseg`, `translate`, `coref`) take a
+Batched text commands (`utseg`, `coref`) take a
 different approach: they **pool all utterances from all files**, group them by
 per-item language, and dispatch with **two levels of bounded parallelism**. At
 the outer level, language groups run concurrently but bounded by a semaphore

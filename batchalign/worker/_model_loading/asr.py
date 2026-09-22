@@ -9,7 +9,12 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, TypeAdapter
 
-from batchalign.inference._domain_types import LanguageCode, RevAiApiKey
+from batchalign.inference._domain_types import (
+    LanguageCode,
+    RevAiApiKey,
+    WhisperCpuPrecision,
+    parse_choice,
+)
 from batchalign.inference.asr import iso3_to_language_name
 from batchalign.worker._model_loading.pinned_hub import (
     hub_commit_of,
@@ -431,6 +436,7 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
             base=path,
             language=language,
             device_policy=bootstrap.device_policy,
+            cpu_precision=WhisperCpuPrecision.from_overrides(engine_overrides),
         )
         handle.model_identity = WhisperModelIdentityV2(asr=loaded)
         _state.whisper_asr_model = handle
@@ -485,14 +491,7 @@ def resolve_asr_engine(
     bug Fix 3 closes.
     """
     if engine_overrides and "asr" in engine_overrides:
-        choice = engine_overrides["asr"]
-        try:
-            return AsrEngine(choice)
-        except ValueError as exc:
-            supported = ", ".join(e.value for e in AsrEngine)
-            raise ValueError(
-                f"unknown asr engine {choice!r}; expected one of: {supported}"
-            ) from exc
+        return parse_choice(AsrEngine, engine_overrides["asr"], "asr engine")
     if rev_api_key:
         return AsrEngine.REV
     return _LANG_DEFAULTS.get(lang, AsrEngine.WHISPER)

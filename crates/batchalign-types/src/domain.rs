@@ -1125,6 +1125,31 @@ numeric_id!(
     pub DurationSeconds(f64)
 );
 
+validated_numeric!(
+    /// A finite, non-negative number of seconds, proven at construction.
+    ///
+    /// [`DurationSeconds`] admits any `f64`, negative and non-finite included,
+    /// so a wire type that promises a usable timestamp could not use it
+    /// without a check at every consumer, and the checks drifted: the Python
+    /// path ran two (a Pydantic bound and a PyO3 loop) while the in-process
+    /// whisper.cpp path ran none. This type carries the proof instead.
+    pub NonNegativeSeconds(f64 = "f64"), InvalidSeconds,
+    |v| v.is_finite() && v >= 0.0, "seconds must be finite and non-negative",
+    {
+        "type": "number",
+        "format": "double",
+        "minimum": 0.0,
+        "description": "A finite, non-negative number of seconds."
+    }
+);
+
+/// Widening: every proven value is a duration, so this cannot fail.
+impl From<NonNegativeSeconds> for DurationSeconds {
+    fn from(value: NonNegativeSeconds) -> Self {
+        Self(value.0)
+    }
+}
+
 numeric_id!(
     /// Unix timestamp as fractional seconds since epoch.
     pub UnixTimestamp(f64)

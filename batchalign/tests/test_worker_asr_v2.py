@@ -308,23 +308,19 @@ def test_invalid_provider_asr_host_output_becomes_runtime_failure() -> None:
     assert response.result is None
 
 
-def test_whisper_chunk_inverted_timestamps_are_clamped(tmp_path: Path) -> None:
-    """Whisper occasionally returns chunks with end_s < start_s on long audio.
-
-    The inference layer must swap them rather than letting the Pydantic
-    validator reject the entire response. Regression test for job 696870c7-02b
-    (maria16.wav).
+def test_whisper_chunk_inverted_timestamps_travel_raw(tmp_path: Path) -> None:
+    """Whisper occasionally returns chunks with end_s < start_s on long audio
+    (job 696870c7-02b, maria16.wav). The executor passes them through as
+    emitted: the Rust consumer settles every producer's spans in one place, so
+    a per-chunk refusal or swap here would be a second, guessing copy.
     """
 
     def runner(audio: np.ndarray, lang: str) -> WhisperChunkResultPayloadV2:
-        # The clamping happens in infer_whisper_prepared_audio *before*
-        # building WhisperChunkSpanV2 objects. This test verifies the V2
-        # executor accepts already-clamped data (i.e. swapped to valid range).
         return WhisperChunkResultPayloadV2(
             lang=lang,
             text=" Thank you.",
             chunks=[
-                WhisperChunkSpanV2(text=" Thank you.", start_s=2017.0, end_s=2020.0),
+                WhisperChunkSpanV2(text=" Thank you.", start_s=2020.0, end_s=2017.0),
             ],
             model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
         )
@@ -336,17 +332,5 @@ def test_whisper_chunk_inverted_timestamps_are_clamped(tmp_path: Path) -> None:
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, WhisperChunkResultV2)
-    assert response.result.chunks[0].start_s == 2017.0
-    assert response.result.chunks[0].end_s == 2020.0
-
-
-def test_whisper_chunk_span_v2_rejects_inverted_timestamps() -> None:
-    """Verify the Pydantic validator catches inverted timestamps.
-
-    This is the safety net, if the clamping in infer_whisper_prepared_audio
-    is ever bypassed, the validator must reject.
-    """
-    import pytest
-
-    with pytest.raises(Exception, match="end_s must be >= start_s"):
-        WhisperChunkSpanV2(text="bad", start_s=2020.0, end_s=2017.0)
+    assert response.result.chunks[0].start_s == 2020.0
+    assert response.result.chunks[0].end_s == 2017.0

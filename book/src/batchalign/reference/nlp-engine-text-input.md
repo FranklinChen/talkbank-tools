@@ -1,7 +1,7 @@
 # NLP Engine Text Input Expectations
 
 **Status:** Current
-**Last updated:** 2026-09-15 20:20 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 Comprehensive reference for what text format each NLP engine/tool in batchalign3
 expects as input, what preprocessing is applied, and what would break if raw
@@ -524,7 +524,7 @@ which is why a filled pause arrives as `um` rather than `&-um`.
 
 **Source files:**
 - `batchalign/inference/translate.py` (Python: `batch_infer_translate()`)
-- `crates/batchalign/src/translate.rs` (Rust: payload collection and injection)
+- `crates/batchalign/src/translate/mod.rs` (Rust: payload collection and injection)
 
 ---
 

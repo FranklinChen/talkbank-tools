@@ -20,6 +20,7 @@ pub mod artifacts_v2;
 pub mod asr_request_v2;
 pub mod asr_result_v2;
 pub mod avqi_request_v2;
+pub(crate) mod chunk_spans;
 pub mod error;
 pub mod execute_result_v2;
 pub mod fa_result_v2;

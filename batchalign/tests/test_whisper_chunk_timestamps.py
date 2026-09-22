@@ -105,3 +105,10 @@ def test_dropped_chunks_are_reported_not_silent(
             ]
         )
     assert any("timestamp" in record.message.lower() for record in caplog.records)
+
+
+def test_an_inverted_chunk_travels_raw_for_rust_to_settle() -> None:
+    """Order is not this producer's to guess: the Rust consumer projects every
+    producer's spans in one place, so an inverted chunk is passed as emitted."""
+    result = _run([{"text": "x", "timestamp": (2.0, 1.0)}])
+    assert [(c.start_s, c.end_s) for c in result.chunks] == [(2.0, 1.0)]

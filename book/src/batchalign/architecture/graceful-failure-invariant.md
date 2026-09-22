@@ -1,7 +1,7 @@
 # Graceful Failure Invariant
 
 **Status:** Current
-**Last updated:** 2026-09-15 20:20 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 ## The rule
 
@@ -137,7 +137,7 @@ Today the rule is enforced at these seams:
 | Driver (per-file) | `crates/batchalign/src/pipeline/text_infer.rs` | `run_text_pipeline` | Single-file flow; per-item Err collapses to one typed `ServerError::Validation` |
 | Driver (cross-file) | `crates/batchalign/src/pipeline/text_infer.rs` | `run_text_batch_pipeline` | Cross-file flow; per-item Err attributed back to source file via `per_file_info` |
 | Shared helper | `crates/batchalign/src/text_batch.rs` | `unwrap_per_item_results` | Collapses `Vec<Result<R, ItemFailure<S>>>` → `Result<Vec<R>, TextWorkflowFileError>` |
-| translate worker | `crates/batchalign/src/translate.rs` | `parse_translate_item_results` | Per-item parsing; engine error, protocol violation and a translation with nothing to apply all → `Err` |
+| translate worker | `crates/batchalign/src/translate/items.rs` | `translate_items` | Per-item admission; a provider answer the policy gives up on, an engine error, and a translation with nothing to apply all → `Err`, and the file stops there; a result count other than one is a protocol `Err` (`single_item`) |
 | utseg worker | `crates/batchalign/src/utseg.rs` | `infer_admitted_batch` | Same shape; the projection to bare responses (`infer_batch`) is gone, so the batch keeps each prediction's evidence |
 | coref worker | `crates/batchalign/src/coref.rs` | `infer_batch` | Per-document (one item per file) |
 | morphotag worker | `crates/batchalign/src/morphosyntax/worker.rs` | `infer_batch_single` | Per-item; Stanza-parse-failure folded into per-item Err |

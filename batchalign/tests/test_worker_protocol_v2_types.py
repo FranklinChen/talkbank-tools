@@ -31,7 +31,6 @@ from batchalign.worker._types_v2 import (
     ProgressEventV2,
     ShutdownRequestV2,
     SpeakerSegmentV2,
-    WhisperChunkSpanV2,
     WhisperTokenTimingV2,
 )
 
@@ -111,10 +110,9 @@ def test_worker_protocol_v2_fixtures_roundtrip_in_python(entry: dict[str, str]) 
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     [
-        (
-            WhisperChunkSpanV2,
-            {"text": "hello", "start_s": 0.5, "end_s": 0.25},
-        ),
+        # `WhisperChunkSpanV2` is deliberately absent: its spans travel raw and
+        # the Rust consumer settles their order (`worker::chunk_spans`), so a
+        # reversed span is admitted here and repaired there.
         (
             WhisperTokenTimingV2,
             {"text": "hello", "time_s": float("nan")},

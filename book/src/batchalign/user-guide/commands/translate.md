@@ -1,7 +1,7 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-09-15 20:20 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 Add English translations to non-English CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only, no audio involved.
@@ -44,7 +44,15 @@ Five backends are available:
 - **Google Translate** (`googletrans`), calls the public Google Translate
   endpoint. Requires outbound reachability to `translate.google.com`;
   unsuitable for hosts behind the Great Firewall unless a VPN is active.
-  Rate-limited to one item per 1.5 seconds inside the worker. **Default.**
+  Requests are sent one utterance at a time, 1.5 seconds apart. A non-200
+  answer fails the item, never passes through: the library's own default is
+  to return the INPUT text as the translation on any error, and BA3 turns
+  that off. A 429, 502, 503 or 504, or a request that reached no answer at
+  all, is waited out twice, 5 s then 15 s or the server's `Retry-After` if
+  that is longer; a cooldown above 60 s, or a third such answer, fails the
+  item with the answer in the message. The waits happen on the server, not
+  in the worker, so a cancelled job stops during a wait and the file stops
+  at the first failed utterance rather than paying for the rest. **Default.**
 - **Tencent Cloud TMT** (`tencent`), China-friendly cloud API. Strong
   quality on Mandarin (`zh→en`); produces correct "Hello world" for
   `你好世界` where NLLB renders it "Good day". **Does NOT support
@@ -55,7 +63,7 @@ Five backends are available:
   `region`), or via the `BATCHALIGN_TENCENT_{ID,KEY,REGION}`
   environment variables that the Rust control plane uses to inject
   fleet-managed credentials. Free tier: 5M characters/month;
-  throttled to 5 QPS in-worker (0.2 s/item).
+  requests are sent 0.2 s apart (5 QPS).
 - **Aliyun Machine Translation** (`aliyun`), China-friendly cloud API
   via Alibaba Cloud's `alimt` General service. **Supports Cantonese
   (`yue→en`)**: the canonical cloud option for HK material, where
@@ -144,7 +152,7 @@ fixed to English. To "override" the source language, edit the file's
 flowchart TD
     start([translate invoked]) --> parse[Parse all files → ASTs]
     parse --> collect[collect_payloads\nSpoken words and terminator per utterance]
-    collect --> worker[execute_v2(task="translate")\nprepared_text batch → raw translations]
+    collect --> worker[execute_v2(task="translate"), one utterance per request\npaced and retried by the engine's provider policy → raw translation]
     worker --> inject[inject %xtra tiers with translated text]
     inject --> merge_check{--merge-abbrev?}
     merge_check -->|Yes| merge[merge_abbreviations]
@@ -155,7 +163,7 @@ flowchart TD
 
 Translation results are not cached: the `CacheTaskName` enum (at
 `crates/batchalign/src/chat_ops/cache_key.rs:58`) only has
-`ForcedAlignment` and `UtrAsr` variants, and `translate.rs` does not
+`ForcedAlignment` and `UtrAsr` variants, and `translate/mod.rs` does not
 call `cache.put`. Repeated `translate` runs on the same input
 re-invoke the worker.
 
@@ -196,12 +204,13 @@ them adds one. See [Processing Provenance](../provenance.md).
 ## Failure modes
 
 batchalign3 translate fails fast on engine failures rather than emitting
-partial output. When the worker reports a per-utterance error (engine
-network failure, GFW block on Google, rate-limit exhaustion, model
-runtime error), the affected file is marked failed with a typed
-`ItemErrors` message naming the first few offending items and the
-total count. Other files in the same batch continue normally, one
-bad file does not poison the rest (BA2-parity multi-file semantics).
+partial output. When an utterance fails (engine network failure, GFW block
+on Google, rate-limit exhaustion, model runtime error), the file stops
+there: the utterances after it are not sent, and the file is marked failed
+with a typed `ItemErrors` message naming the first few items (the failed one
+and the ones not attempted) and the total count. Other files in the same job
+continue normally, one bad file does not poison the rest (BA2-parity
+multi-file semantics).
 
 The output `.cha` for a failed file is **not** written. There is no
 silent path where a job appears successful but produced a `.cha`
@@ -212,8 +221,9 @@ will say so.
 
 | Situation | What happens |
 | --- | --- |
-| Google Translate unreachable (GFW block, network outage, DNS failure) | File marked failed with `translate failed for N item(s): item 0: Translation failed: ConnectionResetError ...`. Use `--translate-engine tencent` (best Mandarin quality, requires CAM credentials) or `--translate-engine nllb` (self-hosted, handles Cantonese). |
-| Rate-limit (429) on one or more items | File marked failed citing the 429 message verbatim. Retry; if persistent, switch to `--translate-engine tencent` or `--translate-engine nllb` or split the workload. |
+| Google Translate unreachable (GFW block, network outage, DNS failure) | The request is waited out like a rate limit (5 s, then 15 s), then the file is marked failed with `translate failed for N item(s): item 0: translate engine google answered no HTTP response (a transport failure before any reply) again after 2 retries; the item was not translated (...): ConnectionResetError ...`. Use `--translate-engine tencent` (best Mandarin quality, requires CAM credentials) or `--translate-engine nllb` (self-hosted, handles Cantonese). |
+| Rate-limit (429), or 502/503/504 | BA3 waits (5 s, then 15 s, or the server's `Retry-After` if longer, up to a 60 s ceiling) and sends the same utterance again, twice; then the item fails citing the status (`translate engine google answered HTTP 429 again after 2 retries`), and the file is marked failed. If persistent, switch to `--translate-engine tencent` or `--translate-engine nllb` or split the workload. |
+| Any other non-200 from Google (403 blocked, 400, 500) | Item fails at once with `translate engine google answered HTTP <status>; the item was not translated (...)`, the utterances after it are reported `not attempted: the file stopped at item <n>, which failed`, and the file is marked failed. Before 2026-09-22 such an item silently received the source text as its "translation". |
 | Self-hosted model first-download (HuggingFace) fails | File marked failed with the underlying HF error. If on a host where the default HF endpoint is slow, set `HF_ENDPOINT=https://hf-mirror.com` before the worker starts. Applies to both `nllb` (~5.5 GB) and `seamless` (~4.8 GB). |
 | Tencent CAM credentials missing / wrong | File marked failed citing `~/.batchalign.ini` parse error or `AuthFailure.UnauthorizedOperation`. Ensure `engine.tencent.id`/`key`/`region` are populated and the CAM user has `tmt:TextTranslate` policy attached. The TMT product itself must also be "opened" at the Tencent Cloud account level (`FailedOperation.UserNotRegistered` indicates this is missing). |
 | Tencent `yue→en` request | Raises `ValueError: Tencent TMT does not support source language 'yue'; use --translate-engine aliyun (cloud, supports Cantonese) or --translate-engine nllb (self-hosted local model)`. Switch the Cantonese run to `aliyun` or `nllb`. |

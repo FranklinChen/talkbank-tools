@@ -1,7 +1,7 @@
 # Command Contracts: Input Preconditions and Output Guarantees
 
 **Status:** Current
-**Last updated:** 2026-09-15 20:20 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 This document specifies, for each batchalign3 command that operates
 on CHAT files, the minimum input validity required, what the command
@@ -15,7 +15,7 @@ following commands:
 
 - `morphotag` (`crates/batchalign/src/morphosyntax/`)
 - `utseg` (`crates/batchalign/src/utseg.rs`)
-- `translate` (`crates/batchalign/src/translate.rs`)
+- `translate` (`crates/batchalign/src/translate/mod.rs`)
 - `coref` (`crates/batchalign/src/coref.rs`)
 - `align` (`crates/batchalign/src/fa/`)
 

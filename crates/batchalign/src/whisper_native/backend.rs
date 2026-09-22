@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use batchalign_types::api::{DurationSeconds, LanguageCode3};
+use batchalign_types::api::{LanguageCode3, NonNegativeSeconds};
 use batchalign_types::worker_v2::requests::WhisperChunkSpanV2;
 use batchalign_types::worker_v2::responses::WhisperChunkResultV2;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -15,6 +15,12 @@ use super::audio::{TARGET_SAMPLE_RATE, pcm_decode, resample};
 use super::cache::PathKeyedCache;
 use super::config::WhisperNativeConfig;
 use super::error::WhisperNativeError;
+
+/// One whisper.cpp segment timestamp (centiseconds) as a proven time.
+fn segment_seconds(centiseconds: i64) -> Result<NonNegativeSeconds, WhisperNativeError> {
+    NonNegativeSeconds::try_from(centiseconds as f64 / 100.0)
+        .map_err(|_| WhisperNativeError::SegmentTimestampNegative { centiseconds })
+}
 
 /// Process-level cache for the loaded `WhisperContext`. First call
 /// pays the ~3 s + 3 GB load; every subsequent call clones an `Arc`
@@ -119,11 +125,13 @@ pub(super) fn transcribe_impl(
         if trimmed.is_empty() {
             continue;
         }
-        // whisper.cpp returns timestamps in centiseconds (10 ms units).
+        // whisper.cpp returns timestamps in centiseconds (10 ms units). A
+        // negative one is a library defect, refused as such rather than
+        // carried into the pipeline as a time.
         chunks.push(WhisperChunkSpanV2 {
             text: trimmed.to_owned(),
-            start_s: DurationSeconds(segment.start_timestamp() as f64 / 100.0),
-            end_s: DurationSeconds(segment.end_timestamp() as f64 / 100.0),
+            start_s: segment_seconds(segment.start_timestamp())?,
+            end_s: segment_seconds(segment.end_timestamp())?,
         });
     }
 

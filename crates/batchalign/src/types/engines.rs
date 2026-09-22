@@ -4,7 +4,7 @@
 //! No external plugin system, all engines are built-in.
 //! The [`EngineBackend`] trait provides a common interface.
 
-use batchalign_types::worker_v2::FaBackendV2;
+use batchalign_types::worker_v2::{FaBackendV2, TranslateBackendV2};
 use serde::{Deserialize, Serialize};
 
 /// Shared behavior for all engine backend selectors.
@@ -1422,6 +1422,31 @@ impl EngineBackend for TranslateEngineName {
 }
 
 impl TranslateEngineName {
+    /// The wire backend a V2 translate request names for this engine.
+    ///
+    /// The two are pinned as a bijection by
+    /// `translate_engine_and_worker_backend_are_a_bijection`.
+    pub const fn worker_backend(&self) -> TranslateBackendV2 {
+        match self {
+            Self::Google => TranslateBackendV2::Google,
+            Self::Seamless => TranslateBackendV2::Seamless,
+            Self::Nllb => TranslateBackendV2::Nllb,
+            Self::Tencent => TranslateBackendV2::Tencent,
+            Self::Aliyun => TranslateBackendV2::Aliyun,
+        }
+    }
+
+    /// The engine a V2 translate request selected.
+    pub const fn from_worker_backend(backend: TranslateBackendV2) -> Self {
+        match backend {
+            TranslateBackendV2::Google => Self::Google,
+            TranslateBackendV2::Seamless => Self::Seamless,
+            TranslateBackendV2::Nllb => Self::Nllb,
+            TranslateBackendV2::Tencent => Self::Tencent,
+            TranslateBackendV2::Aliyun => Self::Aliyun,
+        }
+    }
+
     /// The override name used in worker pool keys for dispatch.
     ///
     /// Identical to ``wire_name``: translate has no legacy alias
@@ -2573,6 +2598,30 @@ mod selectable_engine_tests {
     /// they are inverses. Both directions are checked, so neither a new engine
     /// pointed at an occupied backend nor a new backend routed to the wrong
     /// engine can pass.
+    #[test]
+    fn translate_engine_and_worker_backend_are_a_bijection() {
+        for engine in <TranslateEngineName as SelectableEngine>::ALL {
+            assert_eq!(
+                &TranslateEngineName::from_worker_backend(engine.worker_backend()),
+                engine,
+                "{engine:?} does not survive a round trip through its wire backend"
+            );
+        }
+        for backend in [
+            TranslateBackendV2::Google,
+            TranslateBackendV2::Seamless,
+            TranslateBackendV2::Nllb,
+            TranslateBackendV2::Tencent,
+            TranslateBackendV2::Aliyun,
+        ] {
+            assert_eq!(
+                TranslateEngineName::from_worker_backend(backend).worker_backend(),
+                backend,
+                "{backend:?} does not survive a round trip through its engine"
+            );
+        }
+    }
+
     #[test]
     fn fa_engine_and_worker_backend_are_a_bijection() {
         for &engine in FaEngineName::ALL {

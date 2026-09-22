@@ -54,7 +54,7 @@ Source verified by reading code on 2026-05-06.
 | 8 | Cantonese FA | `batchalign/inference/languages/cantonese/_cantonese_fa.py` `load_cantonese_fa` | Reuses row 7: it calls `load_wave2vec_fa` (torchaudio `MMS_FA`) and adds jyutping preprocessing; no separate download | torchaudio hub |
 | 9 | SeamlessM4T translation | `batchalign/worker/_model_loading/translation.py::_load_seamless_translate` | `AutoProcessor.from_pretrained` + `SeamlessM4TModel.from_pretrained` | HF |
 | 9b | NLLB-200 translation | `batchalign/worker/_model_loading/translation.py::_load_nllb_translate` | `AutoTokenizer.from_pretrained` + `AutoModelForSeq2SeqLM.from_pretrained` (`facebook/nllb-200-distilled-1.3B`, ~5.5 GB) | HF |
-| 10 | pyannote diarization | `batchalign/inference/speaker.py:350` | `Pipeline.from_pretrained("talkbank/dia-fork")` | HF |
+| 10 | pyannote diarization | `batchalign/inference/pyannote_local.py:163` `_load_pipeline` | `Pipeline.from_pretrained(config, token=token)` over the pinned `talkbank/dia-fork` artifacts | HF |
 | 10b | Pyannote speaker embedding | `batchalign/inference/speaker_embedding.py::load_speaker_embedding_model` | `PretrainedSpeakerEmbedding(<pinned local ONNX path>)` | HF |
 | 11 | NeMo speaker (fallback) | `batchalign/inference/speaker.py` (NeMo branch) | `EncDecSpeakerLabelModel.from_pretrained(...)` | NeMo cache |
 | 12 | BERT utterance (boundary model) | `batchalign/worker/_model_loading/utterance.py::load_utterance_model` resolves the pinned snapshot; `batchalign/models/utterance/infer.py::BertUtteranceModel` loads it | `resolve_pinned_snapshot`, then `AutoTokenizer.from_pretrained` + `BertForTokenClassification.from_pretrained` on the resolved LOCAL PATH | HF |

@@ -1,7 +1,7 @@
 # Adding Support for a New Language
 
 **Status:** Current
-**Last updated:** 2026-05-19 21:19 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 
 This page is the checklist to run through when someone says "let's add
 language X." Skipping any of these checks produces silent quality bugs
@@ -190,7 +190,7 @@ user-visible support, adjust integration before merging.
   switch away from Rev.AI
 - `book/src/batchalign/reference/whisper-hub-asr.md`: HuggingFace fine-tune
   routing
-- `crates/batchalign/CLAUDE.md`: batchalign crate map
+- `crates/batchalign/AGENTS.md`: batchalign crate map
 - [Number Expansion](../architecture/number-expansion.md), protocol
   for refreshing `crates/batchalign-transform/data/num2lang.json` and
   the hand-curated overlay (the historical

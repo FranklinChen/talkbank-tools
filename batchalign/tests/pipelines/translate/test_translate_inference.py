@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from batchalign.inference._domain_types import TranslationBackend
+from batchalign.inference.provider_retry import ProviderRefusal, ProviderResponse
 from batchalign.inference.translate import (
     LoadedTranslation,
     TranslateBatchItem,
@@ -53,7 +53,6 @@ class TestBatchInferTranslate:
                 items=[{"text": "hola"}, {"text": "adios"}],
             ),
             LoadedTranslation(
-                backend=TranslationBackend.SEAMLESS,
                 engine="test-engine",
                 translate=translate_fn,
             ),
@@ -93,7 +92,6 @@ class TestBatchInferTranslate:
                 items=[{"text": "   "}, {"text": "hello"}],
             ),
             LoadedTranslation(
-                backend=TranslationBackend.SEAMLESS,
                 engine="test-engine",
                 translate=translate_fn,
             ),
@@ -108,20 +106,13 @@ class TestBatchInferTranslate:
             "engine": "test-engine",
         }
 
-    def test_reports_invalid_and_runtime_error_items_and_google_sleeps(
-        self, monkeypatch
-    ) -> None:
+    def test_reports_invalid_and_runtime_error_items(self, monkeypatch) -> None:
         calls: list[tuple[str, str]] = []
-        sleep_calls: list[float] = []
         monotonic = _monotonic_values(0.0, 3.0)
 
         monkeypatch.setattr(
             "batchalign.inference.translate.time.monotonic",
             lambda: next(monotonic),
-        )
-        monkeypatch.setattr(
-            "batchalign.inference.translate.time.sleep",
-            lambda seconds: sleep_calls.append(seconds),
         )
 
         def translate_fn(text: str, src_lang: str) -> str:
@@ -142,14 +133,12 @@ class TestBatchInferTranslate:
                 ],
             ),
             LoadedTranslation(
-                backend=TranslationBackend.GOOGLE,
                 engine="test-engine",
                 translate=translate_fn,
             ),
         )
 
         assert calls == [("hello", "yue"), ("boom", "yue")]
-        assert sleep_calls == [1.5, 1.5]
         assert response.results[0].error == "Invalid batch item"
         assert response.results[0].elapsed_s == 3.0
         assert response.results[1].result == {
@@ -178,7 +167,6 @@ class TestBatchInferTranslate:
         response = batch_infer_translate(
             BatchInferRequest(task="translate", lang="eng", items=[]),
             LoadedTranslation(
-                backend=TranslationBackend.SEAMLESS,
                 engine="test-engine",
                 translate=translate_fn,
             ),
@@ -186,3 +174,52 @@ class TestBatchInferTranslate:
 
         assert touched == []
         assert response.results == []
+
+    def test_a_provider_status_is_reported_with_its_cooldown_and_never_slept(
+        self, monkeypatch
+    ) -> None:
+        """The worker reports what the provider answered; the Rust control
+        plane decides whether to wait it out. Nothing here sleeps, and the
+        items after a refusal are still attempted: stopping the file is the
+        control plane's call too."""
+        monotonic = _monotonic_values(0.0, 1.0)
+        monkeypatch.setattr(
+            "batchalign.inference.translate.time.monotonic",
+            lambda: next(monotonic),
+        )
+
+        def translate_fn(text: str, src_lang: str) -> str:
+            if text == "throttled":
+                raise ProviderRefusal(
+                    ProviderResponse(status=429, retry_after_s=7.0),
+                    Exception('Unexpected status code "429"'),
+                )
+            if text == "dropped":
+                raise ProviderRefusal(None, ConnectionResetError("peer reset"))
+            return text.upper()
+
+        response = batch_infer_translate(
+            BatchInferRequest(
+                task="translate",
+                lang="spa",
+                items=[{"text": "throttled"}, {"text": "dropped"}, {"text": "ok"}],
+            ),
+            LoadedTranslation(engine="test-engine", translate=translate_fn),
+        )
+
+        assert response.results[0].error is None
+        assert response.results[0].result == {
+            "kind": "provider_status",
+            "status": 429,
+            "retry_after_s": 7.0,
+            "error": 'Unexpected status code "429"',
+        }
+        assert response.results[1].result == {
+            "kind": "no_response",
+            "error": "peer reset",
+        }
+        assert response.results[2].result == {
+            "kind": "translated",
+            "raw_translation": "OK",
+            "engine": "test-engine",
+        }

@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from batchalign.device import DevicePolicy
+from batchalign.inference._domain_types import WhisperCpuPrecision
 from batchalign.worker._model_loading import asr as asr_loading
 from batchalign.worker._model_loading.asr import (
     PINNED_ASR_MODELS_KEY,
@@ -144,9 +145,11 @@ class TestResolveAsrEngine:
 def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:
     """Whisper bootstrap should not touch legacy config-discovery paths."""
 
-    def fake_load_whisper_asr(*, model, base, language, device_policy):
+    def fake_load_whisper_asr(*, model, base, language, device_policy, cpu_precision):
         assert language == "english"
         assert device_policy == DevicePolicy(force_cpu=True)
+        # No `whisper_cpu_dtype` extra on this job: the default precision.
+        assert cpu_precision is WhisperCpuPrecision.FLOAT32
         # The worker resolves the snapshot and hands the loader a local path,
         # so both coordinates are the resolved directory rather than an id.
         assert model == base == _FAKE_SNAPSHOT_PATH

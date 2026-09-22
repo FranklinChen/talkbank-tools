@@ -301,7 +301,7 @@ struct RescueObservation {
 ///
 /// Word counting uses `super::count_alignable_main_words` so the rescue's
 /// density threshold operates on the same word population FA will receive
-/// downstream. This is one of the four sites listed in `CLAUDE.md`'s
+/// downstream. This is one of the four sites listed in `AGENTS.md`'s
 /// "ReplacedWord Extraction/Injection Policy" table that must stay in sync;
 /// do not duplicate the counting logic here.
 fn collect_rescue_candidates(chat_file: &ChatFile) -> Vec<RescueObservation> {

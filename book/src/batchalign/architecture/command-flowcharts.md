@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:04 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -549,7 +549,7 @@ flowchart TD
     start([translate invoked]) --> parse[Parse all files → ASTs]
     parse --> collect[collect_payloads\nExtract utterance text + source/target language]
     collect --> cache[Cache lookup: BLAKE3 keys\ntext + src_lang + tgt_lang]
-    cache --> worker[execute_v2(task="translate") misses\nprepared_text batch → raw translations]
+    cache --> worker[execute_v2(task="translate") misses\none utterance per request, paced and retried by the provider policy → raw translation]
     worker --> inject[inject %xtra tiers with translated text]
     inject --> merge_check{--merge-abbrev?}
     merge_check -->|Yes| merge[merge_abbreviations]

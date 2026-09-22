@@ -1,7 +1,7 @@
 # Dispatch and Execution
 
 **Status:** Current
-**Last updated:** 2026-09-15 19:40 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 How a job moves from the CLI to a running command: the four CLI
 dispatch targets, the workflow families that organize commands, the
@@ -114,7 +114,8 @@ flowchart TD
 |---|---|---|
 | Generation | `transcribe`, `transcribe_s` | Builds `ChatFile` from ASR output via `build_chat()` |
 | Per-file processing | `align`, `morphotag` | Parse, mutate, serialize |
-| Cross-file batch | `utseg`, `translate`, `coref` | Pool utterances across files in one GPU batch |
+| Cross-file batch | `utseg`, `coref` | Pool utterances across files in one GPU batch |
+| Per-file, per-utterance | `translate` | One file per gateway call, one worker request per utterance, paced and retried by the engine's provider policy |
 | Reference projection | `compare` | Main transcript + gold companion → projected views from typed compare bundle |
 | Composite | `benchmark` (= `transcribe` + `compare`) | Chains existing workflows without reimplementing |
 | Analysis | `diarize`, `opensmile`, `avqi` | Produces turns, metrics, or other non-CHAT output |

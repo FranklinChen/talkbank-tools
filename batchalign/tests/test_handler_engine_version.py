@@ -17,7 +17,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from batchalign.inference._domain_types import TranslationBackend
 from batchalign.inference.translate import LoadedTranslation
 from batchalign.worker._handlers import _reported_engine
 from batchalign.worker._types import (
@@ -118,7 +117,6 @@ def test_fa_is_unreported_until_an_fa_engine_loads() -> None:
 def test_a_loaded_translation_refuses_an_unreportable_engine() -> None:
     with pytest.raises(InvalidReportedEngineName):
         LoadedTranslation(
-            backend=TranslationBackend.NLLB,
             engine="models|nllb",
             translate=lambda text, _lang: text,
         )

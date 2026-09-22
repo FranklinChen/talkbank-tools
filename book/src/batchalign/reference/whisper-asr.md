@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-09-15 12:12 EDT
+**Last updated:** 2026-09-22 17:22 EDT
 
 ## Overview
 
@@ -77,10 +77,34 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
 - Uses HuggingFace `transformers.pipeline("automatic-speech-recognition")`
 - Loads via `load_whisper_asr()` in `inference/asr.py` (returns `WhisperASRHandle`)
 - Uses language-specific model resolution (see below)
-- Supports `bfloat16` (CUDA) with `float16` fallback
+- Precision: `float16` on CUDA; `float32` on CPU by default. A job can load
+  the CPU model in half precision with
+  `--engine-overrides '{"asr":"whisper","whisper_cpu_dtype":"float16"}'`
+  (PyTorch 2.5 and later run half-precision CPU kernels; the saving is memory,
+  which matters on small Apple Silicon machines). The selection enters the
+  worker key, so a float16 worker never serves a float32 job, and an unknown
+  value is refused at worker start. It is an experiment knob until a WER
+  comparison on the same fixtures says it is quality-neutral; the default is
+  the precision every measured number in this book was taken at.
 - Chunk length 25s with 3s stride for long files
 - Device selection: CUDA > CPU (`MPS` is intentionally excluded; see
   `developer/apple-mps-workarounds.md`)
+- Chunk timestamps: a chunk with a missing bound is dropped and reported by
+  the Python producer (an absence is not a time). Overlap at a chunk seam, or
+  a chunk returned with its end before its start, travels as emitted, from
+  this engine and from `whisper_rs` alike, and is settled once where the
+  chunks are consumed: `MonotoneChunkSpans::project` in
+  `crates/batchalign/src/worker/chunk_spans.rs` projects the boundary
+  sequence `start_0, end_0, start_1, ...` onto the closest non-decreasing
+  one (least squares, pool-adjacent violators), moving only the boundaries
+  that conflict, and the lowering logs how many moved. An inverted chunk
+  pools its two bounds and comes out zero-width, which the timing admission
+  then demotes to untimed (`ZeroLengthSpan`), so the word is placed by its
+  neighbours rather than by a guess at which bound was right. The fit is
+  checked against an exact isotonic-regression oracle on every short
+  sequence. Each bound is a finite non-negative time by type
+  (`NonNegativeSeconds`, refused in deserialization otherwise), from both
+  producers.
 
 ### Native Whisper (`--asr-engine whisper_rs`)
 

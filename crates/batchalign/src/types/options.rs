@@ -813,6 +813,18 @@ impl CommandOptions {
         }
     }
 
+    /// The translate options, when this is a translate command.
+    ///
+    /// `None` for every other command rather than a defaulted engine: a
+    /// translate dispatcher handed another command's options must refuse,
+    /// not translate with whatever the default happens to be.
+    pub fn as_translate(&self) -> Option<&TranslateOptions> {
+        match self {
+            Self::Translate(options) => Some(options),
+            _ => None,
+        }
+    }
+
     /// Get the command name as a string (matches the serde tag value).
     pub fn command_name(&self) -> &'static str {
         match self {

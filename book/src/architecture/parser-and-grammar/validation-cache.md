@@ -1,7 +1,7 @@
 # Validation Cache
 
 **Status:** Current
-**Last updated:** 2026-05-19 16:54 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 
 The CHAT-core validation cache, used by `chatter validate`. Distinct from the
 [audio-task cache](../runtime/audio-task-cache.md) used by Batchalign
@@ -76,7 +76,7 @@ secondary index used by maintenance operations (orphan pruning, etc.).
 
 Per project policy, do not delete the cache directory without
 explicit request, see the cache-policy section of
-`talkbank-tools/CLAUDE.md`.
+`talkbank-tools/AGENTS.md`.
 
 ## See also
 

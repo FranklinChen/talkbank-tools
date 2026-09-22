@@ -51,7 +51,7 @@
       ]
     },
     "AsrElementV2": {
-      "description": "One raw ASR element inside a speaker monologue.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "description": "One raw ASR element inside a speaker monologue.\n\nEach bound, when present, is a finite non-negative time by type; their\norder is checked where the element is admitted.",
       "type": "object",
       "properties": {
         "confidence": {
@@ -67,7 +67,7 @@
           "description": "End timestamp in seconds when the provider exposes one.",
           "anyOf": [
             {
-              "$ref": "#/$defs/DurationSeconds"
+              "$ref": "#/$defs/NonNegativeSeconds"
             },
             {
               "type": "null"
@@ -83,7 +83,7 @@
           "description": "Start timestamp in seconds when the provider exposes one.",
           "anyOf": [
             {
-              "$ref": "#/$defs/DurationSeconds"
+              "$ref": "#/$defs/NonNegativeSeconds"
             },
             {
               "type": "null"
@@ -561,6 +561,13 @@
       "format": "uint64",
       "minimum": 0
     },
+    "HttpStatusCodeV2": {
+      "description": "An HTTP status code as a provider answered it: 100 to 599.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 599,
+      "minimum": 100
+    },
     "HubCommitV2": {
       "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
       "type": "string",
@@ -796,6 +803,12 @@
       "required": [
         "items"
       ]
+    },
+    "NonNegativeSeconds": {
+      "description": "A finite, non-negative number of seconds.",
+      "type": "number",
+      "format": "double",
+      "minimum": 0.0
     },
     "ObservedRevisionV2": {
       "description": "What the runtime actually loaded, as the worker observed it.",
@@ -1485,7 +1498,7 @@
       ]
     },
     "TranslationItemResultV2": {
-      "description": "One translation item result returned by Python.\n\nA tagged union: a translation always names the engine that produced it.",
+      "description": "One translation item result returned by Python.\n\nA tagged union: a translation always names the engine that produced it,\nand a failure says what kind it was. The worker reports and never retries:\nwhether a provider's answer is waited out is decided by the control plane\n(`batchalign::translate::provider`), where the wait is visible to the\njob's deadline and cancellation.",
       "oneOf": [
         {
           "description": "The engine translated the item.",
@@ -1524,7 +1537,59 @@
           ]
         },
         {
-          "description": "The item failed; the file it belongs to fails with this message.",
+          "description": "The provider answered with an HTTP status instead of a translation.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "The provider library's own message, for the operator.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "provider_status"
+            },
+            "retry_after_s": {
+              "description": "The cooldown the provider asked for (`Retry-After`), when it named\none in seconds.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonNegativeSeconds"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "description": "The status the provider answered.",
+              "$ref": "#/$defs/HttpStatusCodeV2"
+            }
+          },
+          "required": [
+            "kind",
+            "status",
+            "error"
+          ]
+        },
+        {
+          "description": "The request reached no provider answer: a transport failure before\nany reply.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "The transport error, rendered.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "no_response"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
+        },
+        {
+          "description": "The engine failed the item with no provider semantics; the verdict is\nfinal and the file it belongs to fails with this message.",
           "type": "object",
           "properties": {
             "error": {
@@ -1857,16 +1922,16 @@
       ]
     },
     "WhisperChunkSpanV2": {
-      "description": "One raw Whisper chunk span returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "description": "One raw Whisper chunk span as a producer emitted it.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat each bound is a finite non-negative duration, which its type proves.",
       "type": "object",
       "properties": {
         "end_s": {
           "description": "End timestamp in seconds.",
-          "$ref": "#/$defs/DurationSeconds"
+          "$ref": "#/$defs/NonNegativeSeconds"
         },
         "start_s": {
           "description": "Start timestamp in seconds.",
-          "$ref": "#/$defs/DurationSeconds"
+          "$ref": "#/$defs/NonNegativeSeconds"
         },
         "text": {
           "description": "Surface text for the chunk.",

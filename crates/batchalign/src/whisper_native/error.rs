@@ -97,6 +97,14 @@ pub enum WhisperNativeError {
         reason: String,
     },
 
+    /// whisper.cpp reported a segment timestamp that is not a time: negative
+    /// centiseconds. Never seen in practice; refused rather than carried.
+    #[error("segment timestamp is not a time: {centiseconds} cs")]
+    SegmentTimestampNegative {
+        /// The raw centisecond value whisper.cpp reported.
+        centiseconds: i64,
+    },
+
     /// The context cache reached a state that should be unreachable in
     /// practice (a concurrent `set` neither stored our value nor a matching
     /// one). Surfaced as a typed error rather than a panic because this crate

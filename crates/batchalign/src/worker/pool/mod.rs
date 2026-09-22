@@ -162,81 +162,78 @@ impl EngineSelection {
         overrides
     }
 
-    /// The selection a worker for `target` must carry.
+    /// The one derivation of a worker's engine identity.
     ///
-    /// A worker loads models for every task in its TARGET's bundle, while the
-    /// overrides describe only what its COMMAND selected. Those are different
-    /// sets: a transcribe command on the GPU profile preloads forced alignment
-    /// while naming only an ASR engine, so the worker reached the FA loader
-    /// with no engine named and had to guess.
+    /// Both spawn routes end here: the command route
+    /// ([`WorkerKey::from_command_options`], from the job's options) and the
+    /// V2 request route (`execute_v2_worker_key`, from the request). They used
+    /// to be two derivations that agreed only when the shared overrides were
+    /// empty: the command route started from the WHOLE `--engine-overrides`
+    /// map, the request route from what the request carried, so a translate
+    /// job given an ASR extra, or any morphotag job given any override, spawned
+    /// one worker at its capability probe and dispatched to a second one.
     ///
-    /// Only forced alignment is filled in, and the asymmetry is the point.
-    /// Rust owns the FA default: the Python side has no way to choose between
-    /// two models that report different SHAPES of timing, which is why its
-    /// guess there was deleted rather than corrected. ASR and translation are
-    /// the opposite. `resolve_asr_engine` picks per LANGUAGE (`yue` takes
-    /// FunAudio, because Whisper measured worst on it) and prefers Rev.AI only
-    /// when a key is actually present, and it reads any `asr` key as an
-    /// explicit operator instruction. Injecting a default here would therefore
-    /// silently overrule a better-informed choice: an align job, which never
-    /// asked for ASR at all, would pin the ASR model for the whole worker.
-    ///
-    /// Lazy-profile workers preload nothing but still retain the command's
-    /// selection in their identity. The selected recipe is loaded on demand;
-    /// a worker keyed for one engine cannot silently serve another.
-    pub(super) fn for_target(target: WorkerTarget, options: &CommandOptions) -> Self {
-        Self::from_overrides(Self::fill_for_preloaded_tasks(
-            target,
-            Self::overrides_for_command(options),
-        ))
+    /// The identity is a pure function of the task's own keys
+    /// ([`Self::task_keys`]), filled for the tasks an eager target preloads.
+    /// A lazy worker preloads nothing, so its identity is the task's keys
+    /// alone: an ASR probe must not acquire an unrelated FA selection.
+    pub(super) fn derive(
+        task: InferTask,
+        selected: EngineOverrides,
+        target: WorkerTarget,
+        mode: WorkerBootstrapMode,
+    ) -> Self {
+        let keys = Self::task_keys(task, selected);
+        let filled = match mode {
+            WorkerBootstrapMode::LazyProfile => keys,
+            WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => {
+                Self::fill_for_preloaded_tasks(target, keys)
+            }
+        };
+        Self::from_overrides(filled)
     }
 
-    /// The single audio-engine recipe a lazy command capability probe loads.
+    /// The keys a task's worker is identified by: the engines that task's
+    /// loader reads from its overrides, and nothing else.
     ///
-    /// Lazy workers do not preload their profile siblings, so an ASR probe
-    /// must not acquire an unrelated FA selection and vice versa. Non-audio
-    /// primary tasks retain their existing command-specific recipe;
-    /// their V2 requests do not yet carry a backend identity to project here.
-    fn for_lazy_command(command: ReleasedCommand, options: &CommandOptions) -> Self {
-        let selected = Self::overrides_for_command(options);
-        match crate::command_model::command_spec(command)
-            .capabilities
-            .primary_infer_task
-        {
-            InferTask::Asr => Self::from_overrides(EngineOverrides {
+    /// ASR reads `asr` and the extras (`qwen_model`, `funaudio_model`,
+    /// `whisper_cpu_dtype`, ...); FA reads `fa`; translate reads `translate`.
+    /// Every other task has one implementation and reads nothing, so nothing
+    /// enters its key. Listed rather than wildcarded so a new task decides.
+    fn task_keys(task: InferTask, selected: EngineOverrides) -> EngineOverrides {
+        match task {
+            InferTask::Asr => EngineOverrides {
                 asr: selected.asr,
                 extras: selected.extras,
                 ..EngineOverrides::default()
-            }),
-            InferTask::Fa => Self::from_overrides(EngineOverrides {
+            },
+            InferTask::Fa => EngineOverrides {
                 fa: selected.fa,
                 ..EngineOverrides::default()
-            }),
+            },
+            InferTask::Translate => EngineOverrides {
+                translate: selected.translate,
+                ..EngineOverrides::default()
+            },
             InferTask::Morphosyntax
             | InferTask::Utseg
-            | InferTask::Translate
             | InferTask::Coref
             | InferTask::Opensmile
             | InferTask::Avqi
-            | InferTask::Speaker => Self::for_target(
-                WorkerTarget::for_command_with_mode(command, WorkerBootstrapMode::LazyProfile),
-                options,
-            ),
+            | InferTask::Speaker => EngineOverrides::default(),
         }
     }
 
     /// Name an engine for every task the target's bootstrap will PRELOAD,
     /// beyond what the command or request itself named.
     ///
-    /// One owner for a guarantee two spawn routes rely on: the command route
-    /// (`for_target`) and the V2 execute route
-    /// (`from_execute_request_for_target`) both spawn eager profile workers,
-    /// and the Python bootstrap REFUSES a preloaded task with no named engine
+    /// The Python bootstrap REFUSES a preloaded task with no named engine
     /// rather than defaulting (`resolve_fa_engine`). Until 2026-08-21 only
     /// the command route filled this in, so an eager-mode V2 ASR request
     /// spawned a profile worker that preloaded FA with no `fa` override and
-    /// died at bootstrap ("no 'fa' engine in overrides").
-    pub(super) fn fill_for_preloaded_tasks(
+    /// died at bootstrap ("no 'fa' engine in overrides"); both routes now
+    /// share [`Self::derive`].
+    fn fill_for_preloaded_tasks(
         target: WorkerTarget,
         mut overrides: EngineOverrides,
     ) -> EngineOverrides {
@@ -413,12 +410,15 @@ impl WorkerKey {
         bootstrap_mode: WorkerBootstrapMode,
     ) -> Self {
         let target = WorkerTarget::for_command_with_mode(command, bootstrap_mode);
-        let engine_selection = match bootstrap_mode {
-            WorkerBootstrapMode::LazyProfile => EngineSelection::for_lazy_command(command, options),
-            WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => {
-                EngineSelection::for_target(target, options)
-            }
-        };
+        let task = crate::command_model::command_spec(command)
+            .capabilities
+            .primary_infer_task;
+        let engine_selection = EngineSelection::derive(
+            task,
+            EngineSelection::overrides_for_command(options),
+            target,
+            bootstrap_mode,
+        );
         Self {
             target,
             language,
@@ -1468,7 +1468,7 @@ mod default_pool_config_tests {
     use crate::worker::{InferTask, WorkerTarget};
 
     #[test]
-    fn command_options_selection_normalizes_non_worker_asr_and_keeps_extras() {
+    fn command_options_selection_drops_keys_the_task_does_not_read() {
         let mut options = AlignOptions::default();
         options.common.engine_overrides = EngineOverrides {
             asr: Some(AsrEngineName::RevAi),
@@ -1476,26 +1476,28 @@ mod default_pool_config_tests {
             ..EngineOverrides::default()
         };
 
-        // Through the production constructor: `for_target` is what builds
-        // every real key, and it is a superset of what the retired
-        // `from_command_options` did.
-        let selection = EngineSelection::for_target(
-            WorkerTarget::for_command_with_mode(
-                ReleasedCommand::Align,
-                WorkerBootstrapMode::Profile,
-            ),
+        // Through the production constructor, which is the one derivation
+        // every real key comes from.
+        let key = WorkerKey::from_command_options(
+            ReleasedCommand::Align,
+            WorkerLanguage::from(LanguageCode3::eng()),
             &CommandOptions::Align(options),
+            WorkerBootstrapMode::Profile,
         );
+        let selection = &key.engine_selection;
 
+        // An FA worker's identity is its FA engine: the ASR selection and the
+        // ASR extras belong to the ASR worker, whose request carries them.
+        // Until 2026-09-22 the extra survived here, so an align job given one
+        // spawned a worker at its probe that no FA request could ever match.
         assert_eq!(selection.overrides().asr, None);
-        assert_eq!(selection.overrides().extras["provider_region"], "us-east");
+        assert!(selection.overrides().extras.is_empty());
         // Derived: `fa` is whatever the default engine is, not a value this
-        // test chooses. What it asserts is that a non-worker ASR override is
-        // dropped while an unknown extra survives.
+        // test chooses.
         assert_eq!(
             selection.worker_config_json(),
             format!(
-                r#"{{"fa":"{}","provider_region":"us-east"}}"#,
+                r#"{{"fa":"{}"}}"#,
                 <crate::types::engines::FaEngineName as
                     crate::types::engines::SelectableEngine>::DEFAULT
                     .dispatch_override_name()

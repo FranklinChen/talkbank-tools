@@ -14,7 +14,7 @@
 //! `chat_ops::fa::coordinates` re-exports all three, so FA code keeps its
 //! existing spelling and there is still exactly one definition of each.
 //!
-//! **Why here and not `batchalign-types`, which `crates/batchalign/CLAUDE.md`
+//! **Why here and not `batchalign-types`, which `crates/batchalign/AGENTS.md`
 //! names as the home for domain newtypes.** The argument above does not settle
 //! it: `batchalign-types` would satisfy "somewhere both can see" just as well.
 //! The reason that does settle it is PRIVACY.

@@ -224,10 +224,11 @@ mod tests {
                 .collect()
         }
 
-        async fn translate_batch(
+        async fn translate_file(
             &self,
-            _files: &[TextBatchFileInput],
+            _file: &TextBatchFileInput,
             _lang: &LanguageCode3,
+            _engine: &crate::types::engines::TranslateEngineName,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             unreachable!()

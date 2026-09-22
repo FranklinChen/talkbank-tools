@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+import typing
 import urllib.error
 import urllib.request
 import uuid
@@ -25,6 +26,17 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from batchalign.inference.provider_retry import (
+    Final,
+    GiveUp,
+    ProviderResponse,
+    Retry,
+    RetryPolicy,
+    parse_retry_after,
+)
+
+_RETRY_POLICY = RetryPolicy.pyannote_ai()
 
 L = logging.getLogger("batchalign.worker")
 
@@ -266,26 +278,36 @@ class PyannoteAIClient:
         return parsed
 
     def _open(self, request: urllib.request.Request, *, operation: str) -> bytes:
-        for attempt in range(4):
+        """One request, retried on 429 by the shared provider policy."""
+        state = _RETRY_POLICY.start()
+        while True:
             try:
                 with self._urlopen(request, timeout=self._http_timeout_s) as response:
                     return bytes(response.read())
             except urllib.error.HTTPError as error:
-                if error.code == 429 and attempt < 3:
-                    retry_after = (error.headers or {}).get("Retry-After", "1")
-                    try:
-                        delay = max(float(retry_after), 1.0)
-                    except ValueError:
-                        delay = 1.0
-                    self._sleep(delay)
-                    continue
-                detail = _http_error_detail(error)
-                raise RuntimeError(
-                    f"pyannoteAI {operation} failed (HTTP {error.code}): {detail}"
-                ) from error
+                headers = error.headers or {}
+                observed = ProviderResponse(
+                    status=int(error.code),
+                    retry_after_s=parse_retry_after(headers.get("Retry-After")),
+                )
+                decision = _RETRY_POLICY.decide(observed, state)
+                match decision:
+                    case Retry(delay_s=delay_s, next_state=next_state):
+                        self._sleep(delay_s)
+                        state = next_state
+                    case GiveUp(why=Final()):
+                        detail = _http_error_detail(error)
+                        raise RuntimeError(
+                            f"pyannoteAI {operation} failed (HTTP {error.code}): {detail}"
+                        ) from error
+                    case GiveUp() as give_up:
+                        raise RuntimeError(
+                            f"pyannoteAI {operation} failed: {give_up}"
+                        ) from error
+                    case _:
+                        typing.assert_never(decision)
             except (urllib.error.URLError, TimeoutError) as error:
                 raise RuntimeError(f"pyannoteAI {operation} failed: {error}") from error
-        raise RuntimeError(f"pyannoteAI {operation} exhausted rate-limit retries")
 
 
 def infer_pyannote_ai(

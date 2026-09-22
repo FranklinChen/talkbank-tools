@@ -5,7 +5,7 @@
 //! `mod.rs` for browsability.
 
 use crate::api::WorkerLanguage;
-use crate::types::engines::{AsrEngineName, EngineOverrides, FaEngineName};
+use crate::types::engines::{AsrEngineName, EngineOverrides, FaEngineName, TranslateEngineName};
 use crate::types::worker_v2::{AsrBackendV2, ExecuteRequestV2, InferenceTaskV2, TaskRequestV2};
 use crate::worker::error::WorkerError;
 use crate::worker::{InferTask, WorkerBootstrapMode, WorkerTarget};
@@ -55,48 +55,20 @@ pub(super) fn execute_v2_worker_key(
     // first engine for later requests. It also allowed a concurrent request to
     // switch process-global model state underneath in-flight inference.
     //
-    // LazyProfile pre-scaling is disabled, so retaining this selection cannot
-    // recreate the old empty-key pre-scale mismatch. On constrained hosts the
-    // global worker permit and idle eviction still bound resident processes.
-    let engine_selection = if bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-        EngineSelection::from_execute_request(request)
-    } else {
-        // Eager mode: the worker bootstrap preloads the whole profile, so the
-        // selection must name an engine for every preloaded task, not only the
-        // one this request carries.
-        EngineSelection::from_execute_request_for_target(target, request)
-    };
+    // The same derivation the command route uses, from what this request
+    // names; the two keys agree by construction.
+    let engine_selection = EngineSelection::derive(
+        infer_task,
+        execute_request_overrides(request),
+        target,
+        bootstrap_mode,
+    );
 
     Ok(WorkerKey {
         target,
         language: lang,
         engine_selection,
     })
-}
-
-impl EngineSelection {
-    /// Derive worker configuration from a typed V2 request.
-    ///
-    /// This is the only V2 route into a pool engine identity. The typed
-    /// `EngineOverrides` retains every opaque ASR extra, including
-    /// `qwen_model`, until it is serialized for Python worker startup.
-    pub(super) fn from_execute_request(request: &ExecuteRequestV2) -> Self {
-        Self::from_overrides(execute_request_overrides(request))
-    }
-
-    /// Like [`Self::from_execute_request`], for spawning an EAGER worker
-    /// whose target may preload more tasks than the request names. The
-    /// target-driven fill has one owner (`fill_for_preloaded_tasks`), shared
-    /// with the command spawn route.
-    pub(super) fn from_execute_request_for_target(
-        target: WorkerTarget,
-        request: &ExecuteRequestV2,
-    ) -> Self {
-        Self::from_overrides(Self::fill_for_preloaded_tasks(
-            target,
-            execute_request_overrides(request),
-        ))
-    }
 }
 
 /// The engines a V2 request itself names, before any target-driven filling.
@@ -111,7 +83,19 @@ fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOverrides {
             fa: Some(FaEngineName::from_worker_backend(request.backend)),
             ..EngineOverrides::default()
         },
-        _ => EngineOverrides::default(),
+        TaskRequestV2::Translate(request) => EngineOverrides {
+            translate: Some(TranslateEngineName::from_worker_backend(request.engine)),
+            ..EngineOverrides::default()
+        },
+        // One implementation each: nothing to select, so nothing enters the
+        // key. Listed rather than wildcarded so a new task has to decide.
+        TaskRequestV2::Morphosyntax(_)
+        | TaskRequestV2::Utseg(_)
+        | TaskRequestV2::Coref(_)
+        | TaskRequestV2::Speaker(_)
+        | TaskRequestV2::SpeakerEmbedding(_)
+        | TaskRequestV2::Opensmile(_)
+        | TaskRequestV2::Avqi(_) => EngineOverrides::default(),
     }
 }
 
@@ -126,7 +110,14 @@ pub(super) fn ensure_task_params(
     let task = infer_task_for_execute_v2(request.task)?;
     let task_name = crate::worker::target::task_name(task).to_string();
 
-    let selection = EngineSelection::from_execute_request(request);
+    // A lazy worker's identity is the task's own keys, whatever its target
+    // would preload eagerly.
+    let selection = EngineSelection::derive(
+        task,
+        execute_request_overrides(request),
+        WorkerTarget::from_infer_task(task, WorkerBootstrapMode::LazyProfile),
+        WorkerBootstrapMode::LazyProfile,
+    );
     let overrides = (!selection.is_none()).then(|| selection.overrides().dispatch_overrides());
 
     Ok((task_name, overrides))
@@ -296,7 +287,14 @@ mod tests {
             }),
         );
 
-        let json = EngineSelection::from_execute_request(&request).worker_config_json();
+        let json = execute_v2_worker_key(
+            WorkerLanguage::from(LanguageCode3::eng()),
+            &request,
+            WorkerBootstrapMode::LazyProfile,
+        )
+        .unwrap()
+        .engine_selection
+        .worker_config_json();
         let parsed: std::collections::BTreeMap<String, String> =
             serde_json::from_str(&json).expect("engine_overrides JSON must round-trip");
 
@@ -334,7 +332,13 @@ mod tests {
             }),
         );
 
-        let selection = EngineSelection::from_execute_request(&request);
+        let key = execute_v2_worker_key(
+            WorkerLanguage::from(LanguageCode3::eng()),
+            &request,
+            WorkerBootstrapMode::LazyProfile,
+        )
+        .unwrap();
+        let selection = &key.engine_selection;
         assert_eq!(selection.overrides().asr, None);
         assert_eq!(selection.overrides().extras, extras);
         assert_eq!(
@@ -451,6 +455,153 @@ mod tests {
         assert_eq!(fa_key.target, asr_key.target);
         assert_eq!(fa_key.language, asr_key.language);
         assert_ne!(fa_key, asr_key);
+    }
+
+    /// Shared overrides that name every key a request could carry plus an
+    /// extra: whatever a job's command is, the keys its request does not
+    /// carry must not enter its spawn-time identity either.
+    fn crowded_common_options() -> crate::options::CommonOptions {
+        crate::options::CommonOptions {
+            engine_overrides: EngineOverrides {
+                asr: Some(AsrEngineName::Whisper),
+                fa: Some(FaEngineName::Whisper),
+                translate: Some(crate::types::engines::TranslateEngineName::Nllb),
+                extras: [("qwen_model".to_owned(), "Qwen/Qwen3-ASR-0.6B".to_owned())].into(),
+                ..EngineOverrides::default()
+            },
+            ..crate::options::CommonOptions::default()
+        }
+    }
+
+    /// The capability probe's key (from the job's options) and the dispatch
+    /// key (from the request) for one command, which must agree in every
+    /// bootstrap mode or the probed worker idles while dispatch spawns a
+    /// second one. Before 2026-09-22 they agreed only when the shared
+    /// overrides were empty: the probe started from the whole map.
+    fn assert_probe_and_dispatch_keys_agree(
+        command: crate::api::ReleasedCommand,
+        options: crate::options::CommandOptions,
+        request: ExecuteRequestV2,
+    ) {
+        let language = WorkerLanguage::from(LanguageCode3::eng());
+        for mode in [
+            WorkerBootstrapMode::LazyProfile,
+            WorkerBootstrapMode::Profile,
+            WorkerBootstrapMode::Task,
+        ] {
+            let probe = WorkerKey::from_command_options(command, language.clone(), &options, mode);
+            let dispatch = execute_v2_worker_key(language.clone(), &request, mode)
+                .expect("a typed request derives a worker key");
+            assert_eq!(probe, dispatch, "{command} in {mode:?}");
+        }
+    }
+
+    fn text_payload_id() -> WorkerArtifactIdV2 {
+        WorkerArtifactIdV2::from("payload-1")
+    }
+
+    #[test]
+    fn translate_probe_and_dispatch_keys_agree_under_crowded_overrides() {
+        assert_probe_and_dispatch_keys_agree(
+            crate::api::ReleasedCommand::Translate,
+            crate::options::CommandOptions::Translate(crate::options::TranslateOptions {
+                common: crowded_common_options(),
+                ..crate::options::TranslateOptions::default()
+            }),
+            request_with_payload(
+                InferenceTaskV2::Translate,
+                TaskRequestV2::Translate(crate::types::worker_v2::TranslateRequestV2 {
+                    source_lang: LanguageCode3::eng(),
+                    target_lang: LanguageCode3::eng(),
+                    // The shared map's `translate` beats the flag, so the
+                    // request names what the job resolved.
+                    engine: crate::types::worker_v2::TranslateBackendV2::Nllb,
+                    payload_ref_id: text_payload_id(),
+                    item_count: 1,
+                }),
+            ),
+        );
+    }
+
+    #[test]
+    fn morphotag_probe_and_dispatch_keys_agree_under_crowded_overrides() {
+        assert_probe_and_dispatch_keys_agree(
+            crate::api::ReleasedCommand::Morphotag,
+            crate::options::CommandOptions::Morphotag(crate::options::MorphotagOptions {
+                common: crowded_common_options(),
+                ..crate::options::MorphotagOptions::default()
+            }),
+            request_with_payload(
+                InferenceTaskV2::Morphosyntax,
+                TaskRequestV2::Morphosyntax(MorphosyntaxRequestV2 {
+                    lang: LanguageCode3::eng(),
+                    payload_ref_id: text_payload_id(),
+                    item_count: 1,
+                    retokenize: false,
+                }),
+            ),
+        );
+    }
+
+    #[test]
+    fn utseg_probe_and_dispatch_keys_agree_under_crowded_overrides() {
+        assert_probe_and_dispatch_keys_agree(
+            crate::api::ReleasedCommand::Utseg,
+            crate::options::CommandOptions::Utseg(crate::options::UtsegOptions {
+                common: crowded_common_options(),
+                merge_abbrev: false.into(),
+                utseg_fallback: false.into(),
+            }),
+            request_with_payload(
+                InferenceTaskV2::Utseg,
+                TaskRequestV2::Utseg(crate::types::worker_v2::UtsegRequestV2 {
+                    lang: LanguageCode3::eng(),
+                    payload_ref_id: text_payload_id(),
+                    item_count: 1,
+                    allow_stanza_fallback: false,
+                }),
+            ),
+        );
+    }
+
+    #[test]
+    fn coref_probe_and_dispatch_keys_agree_under_crowded_overrides() {
+        assert_probe_and_dispatch_keys_agree(
+            crate::api::ReleasedCommand::Coref,
+            crate::options::CommandOptions::Coref(crate::options::CorefOptions {
+                common: crowded_common_options(),
+                merge_abbrev: false.into(),
+            }),
+            request_with_payload(
+                InferenceTaskV2::Coref,
+                TaskRequestV2::Coref(crate::types::worker_v2::CorefRequestV2 {
+                    lang: LanguageCode3::eng(),
+                    payload_ref_id: text_payload_id(),
+                    item_count: 1,
+                }),
+            ),
+        );
+    }
+
+    #[test]
+    fn align_probe_and_dispatch_keys_agree_under_crowded_overrides() {
+        assert_probe_and_dispatch_keys_agree(
+            crate::api::ReleasedCommand::Align,
+            crate::options::CommandOptions::Align(crate::options::AlignOptions {
+                common: crowded_common_options(),
+                ..crate::options::AlignOptions::default()
+            }),
+            request_with_payload(
+                InferenceTaskV2::ForcedAlignment,
+                TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
+                    // The shared map's `fa` beats the flag.
+                    backend: FaBackendV2::Whisper,
+                    payload_ref_id: text_payload_id(),
+                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
+                    text_mode: FaTextModeV2::SpaceJoined,
+                }),
+            ),
+        );
     }
 
     /// The command-level capability probe and the actual V2 ASR dispatch are

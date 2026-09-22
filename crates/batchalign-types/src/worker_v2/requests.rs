@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationSeconds, LanguageCode3, NumSpeakers, WorkerLanguage};
+use crate::api::{LanguageCode3, NonNegativeSeconds, NumSpeakers, WorkerLanguage};
 use crate::worker::WorkerPid;
 
 string_id!(
@@ -895,6 +895,28 @@ pub struct UtsegRequestV2 {
     pub allow_stanza_fallback: bool,
 }
 
+/// Translation backend selected by the Rust control plane.
+///
+/// Mirrors the Python `TranslationBackend` wire values. A request names its
+/// engine for the same reason an ASR or FA request names its backend: the
+/// worker pool keys workers by engine, and a request that named none keyed
+/// onto a worker with no translate override, which loads the default engine
+/// whatever the job asked for.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslateBackendV2 {
+    /// Public Google Translate through `googletrans`.
+    Google,
+    /// Local Meta SeamlessM4T.
+    Seamless,
+    /// Local Meta NLLB-200.
+    Nllb,
+    /// Tencent Cloud TMT.
+    Tencent,
+    /// Alibaba Cloud Machine Translation.
+    Aliyun,
+}
+
 /// V2 translation request payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct TranslateRequestV2 {
@@ -902,6 +924,8 @@ pub struct TranslateRequestV2 {
     pub source_lang: LanguageCode3,
     /// Target language requested by Rust.
     pub target_lang: LanguageCode3,
+    /// The engine the job selected; part of the worker's identity.
+    pub engine: TranslateBackendV2,
     /// Reference to the prepared text batch payload.
     pub payload_ref_id: WorkerArtifactIdV2,
     /// Number of utterance items frozen into the prepared batch payload.
@@ -1156,17 +1180,21 @@ fn batched_text_timeout_seconds(item_count: u32) -> u64 {
     u64::from(item_count).saturating_mul(5).max(120)
 }
 
-/// One raw Whisper chunk span returned by Python.
+/// One raw Whisper chunk span as a producer emitted it.
 ///
-/// Timing fields validated upstream by Python Pydantic models (see module docs).
+/// Raw on purpose: a chunk may overlap its neighbour or arrive inverted, and
+/// neither producer (the Python worker, the in-process whisper.cpp backend)
+/// repairs that. The consumer does, once, through `MonotoneChunkSpans` in
+/// `batchalign::worker::chunk_spans`; the only invariant the wire carries is
+/// that each bound is a finite non-negative duration, which its type proves.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct WhisperChunkSpanV2 {
     /// Surface text for the chunk.
     pub text: String,
     /// Start timestamp in seconds.
-    pub start_s: DurationSeconds,
+    pub start_s: NonNegativeSeconds,
     /// End timestamp in seconds.
-    pub end_s: DurationSeconds,
+    pub end_s: NonNegativeSeconds,
 }
 
 #[cfg(test)]

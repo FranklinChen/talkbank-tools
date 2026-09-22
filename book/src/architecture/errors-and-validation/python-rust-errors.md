@@ -1,7 +1,7 @@
 # Errors at the Python ↔ Rust Boundary
 
 **Status:** Current
-**Last updated:** 2026-05-01 17:07 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 
 How errors crossing the PyO3 boundary between the Rust worker
 runtime (`batchalign_core`) and the Python ML hosting layer
@@ -259,7 +259,7 @@ from their own private patterns file.
   `DecisionRecord` types directly across the boundary.** These
   have richer structure than the Python side wants today; they're
   flattened to `ValidationErrorEntry` at the boundary.
-- **Rust-side panics.** The no-panic standard from `CLAUDE.md`
+- **Rust-side panics.** The no-panic standard from `AGENTS.md`
   applies; this contract assumes panics never cross the boundary.
 
 ## Related
@@ -270,4 +270,4 @@ from their own private patterns file.
   error flow.
 - [INTERFACE_MAP.md](https://github.com/FranklinChen/talkbank-tools/blob/main/INTERFACE_MAP.md)
  , Rust ↔ Python boundary inventory.
-- `crates/batchalign/CLAUDE.md`: server-side error-handling rules.
+- `crates/batchalign/AGENTS.md`: server-side error-handling rules.

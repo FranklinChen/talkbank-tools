@@ -579,7 +579,7 @@ pub enum EndOverlapPolicy {
 /// The one owner of `EndOverlapPolicy`'s default (2026-09-01 review, item 8).
 ///
 /// `EndOverlapPolicy` deliberately does NOT derive `Default`: a `Default` on
-/// this enum is exactly the affordance CLAUDE.md's practice 14 warns about,
+/// this enum is exactly the affordance AGENTS.md's practice 14 warns about,
 /// and it was two independent, silently-agreeing-by-luck literals before this
 /// constant existed (the CLI's `default_value_t` reading the derive, and
 /// `AlignBoundaryOptions`'s own derived `Default` reading it too), so a plain

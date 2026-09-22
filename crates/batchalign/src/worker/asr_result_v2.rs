@@ -4,12 +4,13 @@
 //! but the transcription pipeline still expects the established Rust
 //! `AsrResponse` domain. This module keeps that normalization in Rust.
 
-use crate::api::LanguageCode3;
+use crate::api::{DurationSeconds, LanguageCode3, NonNegativeSeconds};
 use crate::transcribe::{AsrResponse, AsrToken};
 use crate::types::worker_v2::{
     AsrBackendV2, AsrElementKindV2, AsrIdentityMismatchV2, AsrRequestedModelsV2, ExecuteResponseV2,
     SpeakerAttributionV2, TaskResultV2, WhisperChunkResultV2,
 };
+use crate::worker::chunk_spans::MonotoneChunkSpans;
 use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
 use batchalign_transform::asr_postprocess::{
     AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs, SpeakerIndex,
@@ -114,8 +115,8 @@ pub fn parse_asr_response_v2(
 
                             Some(AsrToken {
                                 text: text.to_string(),
-                                start_s: element.start_s,
-                                end_s: element.end_s,
+                                start_s: element.start_s.map(DurationSeconds::from),
+                                end_s: element.end_s.map(DurationSeconds::from),
                                 // `None` is this field's own spelling of "no
                                 // speaker label", which is exactly what an
                                 // undiarized engine reports. It used to receive
@@ -145,10 +146,10 @@ pub fn parse_asr_response_v2(
                                         Some(AsrElement {
                                             value: AsrRawText::new(text),
                                             ts: AsrTimestampSecs::from(
-                                                element.start_s.map(|ts| ts.0),
+                                                element.start_s.map(NonNegativeSeconds::get),
                                             ),
                                             end_ts: AsrTimestampSecs::from(
-                                                element.end_s.map(|ts| ts.0),
+                                                element.end_s.map(NonNegativeSeconds::get),
                                             ),
                                             kind: match element.kind {
                                                 AsrElementKindV2::Text => AsrElementKind::Text,
@@ -255,13 +256,21 @@ pub(crate) fn whisper_chunk_result_to_asr_response(
     result: &WhisperChunkResultV2,
     fallback_lang: Option<&LanguageCode3>,
 ) -> Result<AsrResponse, String> {
+    // Both producers' seams are settled here, once, whatever they sent.
+    let spans = MonotoneChunkSpans::project(&result.chunks);
+    if spans.adjusted_boundaries() > 0 {
+        warn!(
+            moved = spans.adjusted_boundaries(),
+            "Whisper chunk boundaries projected onto a non-decreasing sequence \
+             (overlap or inversion at chunk seams)"
+        );
+    }
     Ok(AsrResponse {
         lang: resolve_worker_lang(&result.lang, fallback_lang)?,
         // Shared by the Python worker path and the in-process whisper.cpp path,
         // so both engines report their weights the same way.
         model: Some(result.model.clone()),
-        tokens: result
-            .chunks
+        tokens: spans
             .iter()
             .filter_map(|chunk| {
                 let text = chunk.text.trim();
@@ -307,7 +316,7 @@ fn resolve_worker_lang(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{DurationSeconds, LanguageCode3};
+    use crate::api::LanguageCode3;
     use crate::types::worker_v2::{
         AsrElementKindV2, AsrElementV2, AsrModelIdentityV2, AsrMonologueV2, ExecuteResponseV2,
         HubCommitV2, LoadedModelV2, ModelIdV2, MonologueAsrResultV2, ObservedRevisionV2,
@@ -358,6 +367,11 @@ mod tests {
         }
     }
 
+    /// A wire bound, through the same proof the deserializer uses.
+    fn seconds(value: f64) -> NonNegativeSeconds {
+        NonNegativeSeconds::try_from(value).expect("test bound")
+    }
+
     #[test]
     fn parses_whisper_chunk_result_into_established_asr_domain() {
         let response = ExecuteResponseV2::success(
@@ -368,13 +382,13 @@ mod tests {
                 chunks: vec![
                     WhisperChunkSpanV2 {
                         text: "hello".into(),
-                        start_s: DurationSeconds(0.0),
-                        end_s: DurationSeconds(0.5),
+                        start_s: seconds(0.0),
+                        end_s: seconds(0.5),
                     },
                     WhisperChunkSpanV2 {
                         text: "world".into(),
-                        start_s: DurationSeconds(0.5),
-                        end_s: DurationSeconds(1.0),
+                        start_s: seconds(0.5),
+                        end_s: seconds(1.0),
                     },
                 ],
                 model: test_identity(),
@@ -409,8 +423,8 @@ mod tests {
                     elements: vec![
                         AsrElementV2 {
                             value: "nei5".into(),
-                            start_s: Some(DurationSeconds(0.1)),
-                            end_s: Some(DurationSeconds(0.4)),
+                            start_s: Some(seconds(0.1)),
+                            end_s: Some(seconds(0.4)),
                             kind: AsrElementKindV2::Text,
                             confidence: Some(0.9),
                         },
@@ -423,8 +437,8 @@ mod tests {
                         },
                         AsrElementV2 {
                             value: "hou2".into(),
-                            start_s: Some(DurationSeconds(0.5)),
-                            end_s: Some(DurationSeconds(0.8)),
+                            start_s: Some(seconds(0.5)),
+                            end_s: Some(seconds(0.8)),
                             kind: AsrElementKindV2::Text,
                             confidence: None,
                         },
@@ -465,8 +479,8 @@ mod tests {
                 text: "hello".into(),
                 chunks: vec![WhisperChunkSpanV2 {
                     text: "hello".into(),
-                    start_s: DurationSeconds(0.0),
-                    end_s: DurationSeconds(0.5),
+                    start_s: seconds(0.0),
+                    end_s: seconds(0.5),
                 }],
                 model: AsrModelIdentityV2::Whisper {
                     asr: LoadedModelV2 {

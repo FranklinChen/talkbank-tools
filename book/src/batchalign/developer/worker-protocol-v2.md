@@ -2,7 +2,7 @@
 
 **Status:** Current
 **Last verified:** 2026-08-31 07:13 EDT
-**Last updated:** 2026-09-16 04:34 EDT
+**Last updated:** 2026-09-22 17:22 EDT
 
 **Speaker attribution (2026-09-16).** `AsrMonologueV2.speaker` is a tagged
 `SpeakerAttribution` rather than a bare string, and `ProviderMediaInput`
@@ -613,7 +613,10 @@ Current implementation status:
 These tasks now share one batched text-V2 pattern:
 
 - Rust normalizes the whole cross-file miss set into one `PreparedTextRef`
-- the request payload carries `payload_ref_id` plus `item_count`
+- the request payload carries `payload_ref_id` plus `item_count`; a translate
+  request also names its `engine` (`TranslateBackendV2`), which the pool key
+  is derived from, and since 2026-09-22 carries one item per request so the
+  control plane can pace and retry per utterance
 - Python reads the artifact, runs the model batch, and returns one typed batched
   result whose morphosyntax, translate and coref items are tagged outcomes
   (`kind`), each carrying only what that outcome needs (table below)
@@ -629,7 +632,7 @@ These tasks now share one batched text-V2 pattern:
 | Task | Outcomes |
 |---|---|
 | morphosyntax | `analyzed` (`raw_sentences`, the `model` that produced them, and the `repairs` it made to their UD relations), `no_words` (no identity, nothing repaired), `failed` (`error`) |
-| translate | `translated` (`raw_translation` plus `engine`), `blank_input` (no identity), `failed` (`error`) |
+| translate | `translated` (`raw_translation` plus `engine`), `blank_input` (no identity), `provider_status` (`status`, optional `retry_after_s`, `error`: the provider answered a status; the control plane decides whether to wait it out), `no_response` (`error`: a transport failure before any reply), `failed` (`error`, final) |
 | coref | `resolved` (`annotations` plus `engine`), `no_sentences` (no identity), `failed` (`error`) |
 
 `model` (`MorphosyntaxModelIdentityV2`) names the Stanza version, the language

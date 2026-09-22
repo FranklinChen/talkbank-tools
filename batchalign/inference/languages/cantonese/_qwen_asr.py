@@ -133,7 +133,7 @@ def load_qwen_asr(
     )
 
     # Surface the model-load event to every UI channel per the
-    # time-transparency rule in talkbank-tools/CLAUDE.md §11. The
+    # time-transparency rule in talkbank-tools/AGENTS.md §11. The
     # ``from_pretrained`` call can take minutes (first-time HF Hub
     # download) and an operator watching the daemon log or dashboard
     # needs to see "loading Qwen3-ASR…" rather than silent dead air.

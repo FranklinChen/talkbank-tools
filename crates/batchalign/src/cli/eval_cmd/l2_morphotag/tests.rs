@@ -11,7 +11,7 @@
 //!
 //! Fixtures are minimal hand-written CHAT strings, just enough to
 //! exercise one behavior per test. No filesystem searches for "small
-//! files" (per the workspace CLAUDE.md rule 19).
+//! files" (per the workspace AGENTS.md rule 19).
 
 use std::path::{Path, PathBuf};
 

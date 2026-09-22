@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationMs, DurationSeconds, LanguageCode3, ReportedEngineName};
+use crate::api::{
+    DurationMs, DurationSeconds, LanguageCode3, NonNegativeSeconds, ReportedEngineName,
+};
 
 use super::asr_model::AsrModelIdentityV2;
 use super::requests::{
@@ -43,17 +45,18 @@ pub enum AsrElementKindV2 {
 
 /// One raw ASR element inside a speaker monologue.
 ///
-/// Timing fields validated upstream by Python Pydantic models (see module docs).
+/// Each bound, when present, is a finite non-negative time by type; their
+/// order is checked where the element is admitted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct AsrElementV2 {
     /// Surface token or punctuation value.
     pub value: String,
     /// Start timestamp in seconds when the provider exposes one.
     #[serde(default)]
-    pub start_s: Option<DurationSeconds>,
+    pub start_s: Option<NonNegativeSeconds>,
     /// End timestamp in seconds when the provider exposes one.
     #[serde(default)]
-    pub end_s: Option<DurationSeconds>,
+    pub end_s: Option<NonNegativeSeconds>,
     /// Stable element kind selected by the worker adapter.
     pub kind: AsrElementKindV2,
     /// Optional model/provider confidence score.
@@ -486,10 +489,49 @@ pub struct UtsegResultV2 {
     pub items: Vec<UtsegItemResultV2>,
 }
 
+validated_numeric!(
+    /// An HTTP status code as a provider answered it: three digits, 100 to 599.
+    ///
+    /// The private field and fallible deserializer keep an out-of-range
+    /// integer from crossing the worker boundary as a status.
+    pub HttpStatusCodeV2(u16 = "u16"), InvalidHttpStatusCode,
+    |v| (100..=599).contains(&v), "an HTTP status code is 100 to 599",
+    {
+        "type": "integer",
+        "format": "uint16",
+        "minimum": 100,
+        "maximum": 599,
+        "description": "An HTTP status code as a provider answered it: 100 to 599."
+    } [Eq]
+);
+
+impl HttpStatusCodeV2 {
+    /// A status known at compile time, for policy tables: an out-of-range
+    /// literal fails the build, so a table cannot name a status that the
+    /// wire would refuse.
+    pub const fn known(code: u16) -> Self {
+        assert!(
+            code >= 100 && code <= 599,
+            "an HTTP status code is 100 to 599"
+        );
+        Self(code)
+    }
+}
+
+impl std::fmt::Display for HttpStatusCodeV2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// One translation item result returned by Python.
 ///
-/// A tagged union: a translation always names the engine that produced it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+/// A tagged union: a translation always names the engine that produced it,
+/// and a failure says what kind it was. The worker reports and never retries:
+/// whether a provider's answer is waited out is decided by the control plane
+/// (`batchalign::translate::provider`), where the wait is visible to the
+/// job's deadline and cancellation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranslationItemResultV2 {
     /// The engine translated the item.
@@ -501,7 +543,25 @@ pub enum TranslationItemResultV2 {
     },
     /// The item's text was blank, so no engine ran.
     BlankInput,
-    /// The item failed; the file it belongs to fails with this message.
+    /// The provider answered with an HTTP status instead of a translation.
+    ProviderStatus {
+        /// The status the provider answered.
+        status: HttpStatusCodeV2,
+        /// The cooldown the provider asked for (`Retry-After`), when it named
+        /// one in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_s: Option<NonNegativeSeconds>,
+        /// The provider library's own message, for the operator.
+        error: String,
+    },
+    /// The request reached no provider answer: a transport failure before
+    /// any reply.
+    NoResponse {
+        /// The transport error, rendered.
+        error: String,
+    },
+    /// The engine failed the item with no provider semantics; the verdict is
+    /// final and the file it belongs to fails with this message.
     Failed {
         /// Operator-facing failure message.
         error: String,
@@ -509,7 +569,7 @@ pub enum TranslationItemResultV2 {
 }
 
 /// Batched translation response payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct TranslationResultV2 {
     /// Item results aligned to the prepared batch payload order.
     pub items: Vec<TranslationItemResultV2>,

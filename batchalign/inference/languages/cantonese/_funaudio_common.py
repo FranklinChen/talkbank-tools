@@ -103,7 +103,7 @@ class FunAudioRecognizer:
         nothing: a future call cannot mislead the user into thinking
         another download is happening.
 
-        Per CLAUDE.md §11 time-transparency rule; mirrors the eager
+        Per AGENTS.md §11 time-transparency rule; mirrors the eager
         ``warm()`` pattern in ``_qwen_common.QwenRecognizer`` but
         without the eager-call-at-bootstrap shape because FunASR's
         worker bootstrap is deliberately lazy. Late binding of

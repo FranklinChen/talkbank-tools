@@ -75,8 +75,9 @@ out would have made the Python boundary WORSE:
   and `FiniteNonNegativeFloat`, and this codebase does not accept a bare
   primitive at a stable boundary.
 - **Validators cannot be generated.** Several models enforce relationships a
-  schema cannot state, such as `end_s >= start_s` on `WhisperChunkSpanV2` and
-  the parallel-array lengths on `FaInferItem`.
+  schema cannot state, such as the parallel-array lengths on `FaInferItem`.
+  (`WhisperChunkSpanV2` deliberately carries none: its spans travel raw and
+  the Rust consumer settles their order in one place.)
 - **`extra="allow"`** on `UdWord`, which lets unknown Stanza fields through,
   has no schema expression either.
 

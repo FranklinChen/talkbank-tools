@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AsrElementV2",
-  "description": "One raw ASR element inside a speaker monologue.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+  "description": "One raw ASR element inside a speaker monologue.\n\nEach bound, when present, is a finite non-negative time by type; their\norder is checked where the element is admitted.",
   "type": "object",
   "properties": {
     "confidence": {
@@ -17,7 +17,7 @@
       "description": "End timestamp in seconds when the provider exposes one.",
       "anyOf": [
         {
-          "$ref": "#/$defs/DurationSeconds"
+          "$ref": "#/$defs/NonNegativeSeconds"
         },
         {
           "type": "null"
@@ -33,7 +33,7 @@
       "description": "Start timestamp in seconds when the provider exposes one.",
       "anyOf": [
         {
-          "$ref": "#/$defs/DurationSeconds"
+          "$ref": "#/$defs/NonNegativeSeconds"
         },
         {
           "type": "null"
@@ -66,10 +66,11 @@
         }
       ]
     },
-    "DurationSeconds": {
-      "description": "Duration measured in fractional seconds.",
+    "NonNegativeSeconds": {
+      "description": "A finite, non-negative number of seconds.",
       "type": "number",
-      "format": "double"
+      "format": "double",
+      "minimum": 0.0
     }
   }
 }

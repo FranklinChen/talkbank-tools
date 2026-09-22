@@ -42,7 +42,7 @@
       ]
     },
     "AsrElementV2": {
-      "description": "One raw ASR element inside a speaker monologue.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "description": "One raw ASR element inside a speaker monologue.\n\nEach bound, when present, is a finite non-negative time by type; their\norder is checked where the element is admitted.",
       "type": "object",
       "properties": {
         "confidence": {
@@ -58,7 +58,7 @@
           "description": "End timestamp in seconds when the provider exposes one.",
           "anyOf": [
             {
-              "$ref": "#/$defs/DurationSeconds"
+              "$ref": "#/$defs/NonNegativeSeconds"
             },
             {
               "type": "null"
@@ -74,7 +74,7 @@
           "description": "Start timestamp in seconds when the provider exposes one.",
           "anyOf": [
             {
-              "$ref": "#/$defs/DurationSeconds"
+              "$ref": "#/$defs/NonNegativeSeconds"
             },
             {
               "type": "null"
@@ -287,11 +287,6 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
-    "DurationSeconds": {
-      "description": "Duration measured in fractional seconds.",
-      "type": "number",
-      "format": "double"
-    },
     "HubCommitV2": {
       "description": "An exact hub commit: 40 lowercase hexadecimal characters.",
       "type": "string",
@@ -328,6 +323,12 @@
       "description": "A model identifier as BA3 names it: a hub repo id, a ModelScope repo id, a ggml file name, or a provider service name. Stamp-safe text, because provenance records it byte for byte.",
       "type": "string",
       "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "NonNegativeSeconds": {
+      "description": "A finite, non-negative number of seconds.",
+      "type": "number",
+      "format": "double",
+      "minimum": 0.0
     },
     "ObservedRevisionV2": {
       "description": "What the runtime actually loaded, as the worker observed it.",

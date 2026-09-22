@@ -7,7 +7,8 @@ No CHAT assembly, no number expansion, no retokenization.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias
+import typing
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import pycountry
@@ -21,6 +22,7 @@ from batchalign.inference._domain_types import (
     SampleRate,
     SpeakerId,
     TimestampSeconds,
+    WhisperCpuPrecision,
 )
 from batchalign.worker._types_v2 import ProviderDiarizationV2
 
@@ -168,6 +170,19 @@ def iso3_to_language_name(iso3: LanguageCode) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _cpu_torch_dtype(precision: WhisperCpuPrecision) -> Any:
+    """The torch dtype for a CPU precision; exhaustive so a new member decides."""
+    import torch
+
+    match precision:
+        case WhisperCpuPrecision.FLOAT32:
+            return torch.float32
+        case WhisperCpuPrecision.FLOAT16:
+            return torch.float16
+        case _:
+            typing.assert_never(precision)
+
+
 def load_whisper_asr(
     model: str = "openai/whisper-large-v3",
     base: str = "openai/whisper-large-v3",
@@ -175,8 +190,13 @@ def load_whisper_asr(
     target_sample_rate: SampleRate = 16000,
     *,
     device_policy=None,
+    cpu_precision: WhisperCpuPrecision = WhisperCpuPrecision.FLOAT32,
 ) -> WhisperASRHandle:
-    """Load a Whisper ASR pipeline. Returns a typed handle."""
+    """Load a Whisper ASR pipeline. Returns a typed handle.
+
+    ``cpu_precision`` applies only when the resolved device is a CPU; CUDA
+    always loads float16.
+    """
     import torch
     from transformers import (
         GenerationConfig,
@@ -218,7 +238,9 @@ def load_whisper_asr(
             [10, 5],
         ]
 
-    asr_dtype = torch.float16 if device.type == "cuda" else torch.float32
+    asr_dtype = (
+        torch.float16 if device.type == "cuda" else _cpu_torch_dtype(cpu_precision)
+    )
 
     pipe = pipeline(
         "automatic-speech-recognition",
@@ -300,7 +322,10 @@ def infer_whisper_prepared_audio(
     )
 
     chunks = raw.get("chunks", []) if isinstance(raw, dict) else []
-    clamped_chunks: list[WhisperChunkSpanV2] = []
+    # Overlap at a seam and an inverted chunk travel as emitted: the Rust
+    # consumer projects every producer's spans onto non-decreasing boundaries
+    # in one place (`worker::chunk_spans`), so nothing is guessed here.
+    with_span: list[WhisperChunkSpanV2] = []
     dropped_without_span = 0
     for chunk in chunks:
         # A missing bound is an ABSENCE, not a time. Substituting 0.0 here used
@@ -316,20 +341,11 @@ def infer_whisper_prepared_audio(
         if raw_start is None or raw_end is None:
             dropped_without_span += 1
             continue
-        start_s: float = float(raw_start)
-        end_s: float = float(raw_end)
-        if end_s < start_s:
-            logger.warning(
-                "Whisper chunk has inverted timestamps (start=%.1f > end=%.1f), swapping",
-                start_s,
-                end_s,
-            )
-            start_s, end_s = end_s, start_s
-        clamped_chunks.append(
+        with_span.append(
             WhisperChunkSpanV2(
                 text=str(chunk.get("text", "")),
-                start_s=start_s,
-                end_s=end_s,
+                start_s=float(raw_start),
+                end_s=float(raw_end),
             )
         )
     if dropped_without_span:
@@ -337,7 +353,7 @@ def infer_whisper_prepared_audio(
             "Dropped %d Whisper chunk(s) with no usable timestamp span "
             "(kept %d); these carry no placeable timing",
             dropped_without_span,
-            len(clamped_chunks),
+            len(with_span),
         )
     # The handle is the honest witness: it is the object the loader resolved a
     # snapshot into, so it knows which commit actually came off the hub. A
@@ -355,6 +371,6 @@ def infer_whisper_prepared_audio(
     return WhisperChunkResultPayloadV2(
         lang=lang,
         text=raw.get("text", "") if isinstance(raw, dict) else "",
-        chunks=clamped_chunks,
+        chunks=with_span,
         model=identity,
     )

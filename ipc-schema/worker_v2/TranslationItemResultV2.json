@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TranslationItemResultV2",
-  "description": "One translation item result returned by Python.\n\nA tagged union: a translation always names the engine that produced it.",
+  "description": "One translation item result returned by Python.\n\nA tagged union: a translation always names the engine that produced it,\nand a failure says what kind it was. The worker reports and never retries:\nwhether a provider's answer is waited out is decided by the control plane\n(`batchalign::translate::provider`), where the wait is visible to the\njob's deadline and cancellation.",
   "oneOf": [
     {
       "description": "The engine translated the item.",
@@ -40,7 +40,59 @@
       ]
     },
     {
-      "description": "The item failed; the file it belongs to fails with this message.",
+      "description": "The provider answered with an HTTP status instead of a translation.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "The provider library's own message, for the operator.",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "provider_status"
+        },
+        "retry_after_s": {
+          "description": "The cooldown the provider asked for (`Retry-After`), when it named\none in seconds.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "description": "The status the provider answered.",
+          "$ref": "#/$defs/HttpStatusCodeV2"
+        }
+      },
+      "required": [
+        "kind",
+        "status",
+        "error"
+      ]
+    },
+    {
+      "description": "The request reached no provider answer: a transport failure before\nany reply.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "The transport error, rendered.",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "no_response"
+        }
+      },
+      "required": [
+        "kind",
+        "error"
+      ]
+    },
+    {
+      "description": "The engine failed the item with no provider semantics; the verdict is\nfinal and the file it belongs to fails with this message.",
       "type": "object",
       "properties": {
         "error": {
@@ -59,6 +111,19 @@
     }
   ],
   "$defs": {
+    "HttpStatusCodeV2": {
+      "description": "An HTTP status code as a provider answered it: 100 to 599.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 599,
+      "minimum": 100
+    },
+    "NonNegativeSeconds": {
+      "description": "A finite, non-negative number of seconds.",
+      "type": "number",
+      "format": "double",
+      "minimum": 0.0
+    },
     "ReportedEngineName": {
       "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
       "type": "string",

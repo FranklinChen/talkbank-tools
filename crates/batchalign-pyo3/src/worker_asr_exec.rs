@@ -4,7 +4,7 @@
 //! - Python caller: `batchalign/worker/_asr_v2.py::execute_asr_request_v2()`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
-use batchalign_types::api::{DurationSeconds, LanguageCode3};
+use batchalign_types::api::{LanguageCode3, NonNegativeSeconds};
 use batchalign_types::worker_v2::{
     AsrBackendV2, AsrElementKindV2, AsrElementV2, AsrInputV2, AsrModelIdentityV2, AsrMonologueV2,
     AsrRequestV2, ExecuteRequestV2, MonologueAsrResultV2, ProviderDiarizationV2,
@@ -40,10 +40,12 @@ enum ProviderSpeakerInput {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ProviderAsrElementInput {
     value: String,
+    /// A finite non-negative time by type: a negative or non-finite bound is
+    /// refused where the host output is parsed.
     #[serde(default)]
-    ts: Option<f64>,
+    ts: Option<NonNegativeSeconds>,
     #[serde(default)]
-    end_ts: Option<f64>,
+    end_ts: Option<NonNegativeSeconds>,
     #[serde(default = "default_provider_element_type", rename = "type")]
     type_name: String,
     #[serde(default)]
@@ -66,15 +68,6 @@ struct ProviderAsrResponseInput {
 
 fn default_provider_element_type() -> String {
     "text".to_owned()
-}
-
-fn validate_non_negative(label: &str, value: f64) -> Result<(), ExecuteFailure> {
-    if value < 0.0 {
-        return Err(ExecuteFailure::Runtime(format!(
-            "invalid ASR host output: {label} must be >= 0"
-        )));
-    }
-    Ok(())
 }
 
 /// The identity this worker recorded when it loaded its ASR engine.
@@ -133,19 +126,12 @@ fn admit_identity(
 fn parse_whisper_result(
     response: &Bound<'_, PyAny>,
 ) -> Result<WhisperChunkResultV2, ExecuteFailure> {
-    let parsed: WhisperChunkResultV2 = parse_host_output(response, "ASR")?;
-
-    for chunk in &parsed.chunks {
-        validate_non_negative("Whisper chunk start_s", chunk.start_s.0)?;
-        validate_non_negative("Whisper chunk end_s", chunk.end_s.0)?;
-        if chunk.end_s < chunk.start_s {
-            return Err(ExecuteFailure::Runtime(
-                "invalid ASR host output: Whisper chunk end_s must be >= start_s".to_owned(),
-            ));
-        }
-    }
-
-    Ok(parsed)
+    // Each bound is a finite non-negative duration by type, refused in
+    // deserialization otherwise. Their ORDER is not checked here: seams
+    // overlap and chunks arrive inverted from every Whisper producer, and the
+    // consumer settles them once (`batchalign::worker::chunk_spans`), so a
+    // refusal here would be a second route that guesses.
+    parse_host_output(response, "ASR")
 }
 
 /// Admit one monologue's speaker against what the REQUEST asked for.
@@ -195,12 +181,8 @@ fn parse_provider_result(
     for (monologue_index, monologue) in parsed.monologues.into_iter().enumerate() {
         let mut elements = Vec::with_capacity(monologue.elements.len());
         for element in monologue.elements {
-            if let Some(start_s) = element.ts {
-                validate_non_negative("ASR element start_s", start_s)?;
-            }
-            if let Some(end_s) = element.end_ts {
-                validate_non_negative("ASR element end_s", end_s)?;
-            }
+            // Each bound is a finite non-negative time by type; only their
+            // order is left to check here.
             if let (Some(start_s), Some(end_s)) = (element.ts, element.end_ts)
                 && end_s < start_s
             {
@@ -217,8 +199,8 @@ fn parse_provider_result(
 
             elements.push(AsrElementV2 {
                 value: element.value,
-                start_s: element.ts.map(DurationSeconds),
-                end_s: element.end_ts.map(DurationSeconds),
+                start_s: element.ts,
+                end_s: element.end_ts,
                 kind,
                 confidence: element.confidence,
             });

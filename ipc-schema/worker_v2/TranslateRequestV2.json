@@ -4,6 +4,10 @@
   "description": "V2 translation request payload.",
   "type": "object",
   "properties": {
+    "engine": {
+      "description": "The engine the job selected; part of the worker's identity.",
+      "$ref": "#/$defs/TranslateBackendV2"
+    },
     "item_count": {
       "description": "Number of utterance items frozen into the prepared batch payload.",
       "type": "integer",
@@ -26,6 +30,7 @@
   "required": [
     "source_lang",
     "target_lang",
+    "engine",
     "payload_ref_id",
     "item_count"
   ],
@@ -33,6 +38,36 @@
     "LanguageCode3": {
       "description": "3-letter ISO 639-3 language code (e.g. `\"eng\"`, `\"spa\"`).\n\nConstruction validates that the value is exactly 3 ASCII alphabetic\ncharacters, lowercased. Sentinel values like `\"auto\"` are rejected, use\n[`LanguageSpec`] at boundaries where auto-detection is meaningful.",
       "type": "string"
+    },
+    "TranslateBackendV2": {
+      "description": "Translation backend selected by the Rust control plane.\n\nMirrors the Python `TranslationBackend` wire values. A request names its\nengine for the same reason an ASR or FA request names its backend: the\nworker pool keys workers by engine, and a request that named none keyed\nonto a worker with no translate override, which loads the default engine\nwhatever the job asked for.",
+      "oneOf": [
+        {
+          "description": "Public Google Translate through `googletrans`.",
+          "type": "string",
+          "const": "google"
+        },
+        {
+          "description": "Local Meta SeamlessM4T.",
+          "type": "string",
+          "const": "seamless"
+        },
+        {
+          "description": "Local Meta NLLB-200.",
+          "type": "string",
+          "const": "nllb"
+        },
+        {
+          "description": "Tencent Cloud TMT.",
+          "type": "string",
+          "const": "tencent"
+        },
+        {
+          "description": "Alibaba Cloud Machine Translation.",
+          "type": "string",
+          "const": "aliyun"
+        }
+      ]
     },
     "WorkerArtifactIdV2": {
       "description": "Stable identifier for one prepared worker artifact.",

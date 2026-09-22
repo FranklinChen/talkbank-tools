@@ -1,7 +1,7 @@
 # Stanza Limitations: Observed Defects with Version Pinning
 
 **Status:** Reference (living document, update when Stanza behavior changes)
-**Last updated:** 2026-09-10 13:54 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 **Current Stanza pin:** `stanza[transformers]>=1.14.0,<1.15` (see `pyproject.toml`)
 **Current English MWT package:** `gum`
 
@@ -528,7 +528,7 @@ has_mwt = should_request_mwt(alpha2, get_cached_capability_table())
 The capability table (``batchalign/worker/_stanza_capabilities.py``)
 is built once at worker startup from
 ``stanza.resources.common.load_resources_json()`` and reports per
-language whether each processor is available. CLAUDE.md mandates
+language whether each processor is available. AGENTS.md mandates
 this pattern: *"Per-language processor availability is determined
 by reading Stanza's resources.json at worker startup, NOT by
 hardcoded tables. Never hardcode processor assumptions."*

@@ -11,6 +11,7 @@ use crate::params::MorphosyntaxParams;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::post_validate::PostValidated;
 use crate::text_batch::{TextBatchFileInput, TextBatchFileResults};
+use crate::types::engines::TranslateEngineName;
 use crate::worker::pool::WorkerPool;
 
 /// Runtime morphotag options resolved from command options for execution.
@@ -92,12 +93,18 @@ pub(crate) trait WorkerGateway: Send + Sync {
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults;
 
-    /// Run translation over one cross-file batch of CHAT inputs. Each result
-    /// names the engine that translated it.
-    async fn translate_batch(
+    /// Translate one CHAT input. Each result names the engine that
+    /// translated it.
+    ///
+    /// One file, not a batch: translate stops a file at its first failed
+    /// utterance, a verdict that is only per-file when the file is sent
+    /// alone. `engine` is the job's selection: it keys the worker that serves
+    /// the requests and sets the pacing and retry policy they are sent under.
+    async fn translate_file(
         &self,
-        files: &[TextBatchFileInput],
+        file: &TextBatchFileInput,
         lang: &LanguageCode3,
+        engine: &TranslateEngineName,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults;
 
@@ -224,13 +231,14 @@ impl WorkerGateway for PooledWorkerGateway {
         .await
     }
 
-    async fn translate_batch(
+    async fn translate_file(
         &self,
-        files: &[TextBatchFileInput],
+        file: &TextBatchFileInput,
         lang: &LanguageCode3,
+        engine: &TranslateEngineName,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults {
-        crate::translate::process_translate_batch(files, lang, &self.pool, cancellation).await
+        crate::translate::process_translate_file(file, lang, engine, &self.pool, cancellation).await
     }
 
     async fn coref_batch(

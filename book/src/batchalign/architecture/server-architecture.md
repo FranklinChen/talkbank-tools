@@ -1,7 +1,7 @@
 # Server Dispatch Architecture
 
 **Status:** Current
-**Last updated:** 2026-08-31 07:13 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 This page describes the implemented `batchalign3` runtime:
 
@@ -331,7 +331,8 @@ For text-only commands, the server owns the full CHAT lifecycle, no CHAT text cr
 
 | Command | Dispatch Path | Worker Role |
 |---------|--------------|-------------|
-| morphotag, utseg, translate, coref | infer (cross-file) | Stateless model inference only |
+| morphotag, utseg, coref | infer (cross-file) | Stateless model inference only |
+| translate | infer (per-file, one request per utterance) | Stateless model inference only; the server paces requests and waits out transient provider answers |
 | align | infer (per-file, per-group) | Stateless audio/text alignment inference |
 | transcribe, transcribe_s | infer (per-file audio) | Raw ASR inference feeding a Rust-owned pipeline |
 | benchmark | infer (per-file audio + compare) | Raw ASR inference feeding Rust transcribe + compare |
@@ -609,7 +610,7 @@ runbook: the deploy procedure's migration-hash drift (self-healing) section.
 | `crates/batchalign/src/fa/` | forced alignment orchestrator |
 | `crates/batchalign/src/runner/dispatch/transcribe_pipeline.rs` | transcribe orchestrator (ASR→postprocess→CHAT assembly) |
 | `crates/batchalign/src/utseg.rs` | utseg orchestrator |
-| `crates/batchalign/src/translate.rs` | translation orchestrator |
+| `crates/batchalign/src/translate/` | translation orchestrator (`mod.rs`), per-utterance loop (`items.rs`), provider policy (`provider.rs`) |
 | `crates/batchalign/src/coref.rs` | coreference orchestrator |
 | `crates/batchalign/src/cache/` | Tiered utterance cache (moka hot + SQLite cold), BLAKE3 keys |
 | `crates/batchalign/src/worker/pool/` | worker spawn, checkout, health loop, idle timeout |

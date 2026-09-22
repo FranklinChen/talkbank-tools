@@ -101,7 +101,7 @@ def test_iso3_to_alpha2_resolves_pycountry_languages_outside_hardcoded_dict() ->
 # The 2026-04-15 overnight morphotag run lost an entire 500-file chunk to
 # this. The principled fix is to query the capability table at runtime
 # rather than maintaining a hand-edited mirror of Stanza's catalog.
-# CLAUDE.md: "Per-language processor availability is determined by reading
+# AGENTS.md: "Per-language processor availability is determined by reading
 # Stanza's resources.json at worker startup, NOT by hardcoded tables."
 # ---------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 # Number Expansion in ASR Post-Processing
 
 **Status:** Current
-**Last updated:** 2026-09-15 09:35 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 
 This page is the **single source of truth** for how batchalign3 turns
 ASR-emitted number tokens (`"3"`, `"$5"`, `"1950s"`, `"3rd"`,
@@ -312,7 +312,7 @@ the words attached to them are language-specific.
 Round 1 collapsed the dual-pass dispatch into a single Rust pass
 with codegenned cardinal tables. Round 2
 landed deterministic Rust ordinal/year/decade expansion for English
-and removed the Python `num2words` IPC entirely. The CLAUDE.md
+and removed the Python `num2words` IPC entirely. The AGENTS.md
 "Python is a pure ML model server" rule no longer has an exception
 for number expansion. Remaining issues:
 
@@ -535,9 +535,9 @@ maintainer sign-off):
 - [Malayalam Language Support](../reference/languages/malayalam.md)
  , concrete example of a language using the Rust `NUM2LANG` path
   after the fix.
-- `crates/batchalign/CLAUDE.md`: `asr_postprocess/` module
+- `crates/batchalign/AGENTS.md`: `asr_postprocess/` module
   map; references `num2text.rs` for number expansion specifically.
-- `crates/batchalign/CLAUDE.md`: Python boundary policy
+- `crates/batchalign/AGENTS.md`: Python boundary policy
   ("Locked de-Pythonization target"). After Round 2, number
   expansion no longer violates this rule.
 - `talkbank-tools/../chatter/crates/talkbank-model/src/validation/word/language/digits.rs`

@@ -40,7 +40,12 @@ import logging
 import typing
 from typing import NewType
 
-from batchalign.inference._domain_types import LanguageCode, TranslationBackend
+from batchalign.inference._domain_types import (
+    LanguageCode,
+    TranslationBackend,
+    parse_choice,
+)
+from batchalign.inference.provider_retry import LastResponse, ProviderRefusal
 from batchalign.inference.translate import LoadedTranslation
 from batchalign.worker._types import WorkerBootstrapRuntime, _state
 
@@ -112,39 +117,71 @@ def resolve_translate_engine(
     """
     if not engine_overrides or "translate" not in engine_overrides:
         return TranslationBackend.GOOGLE
-    choice = engine_overrides["translate"]
-    try:
-        return TranslationBackend(choice)
-    except ValueError as exc:
-        supported = ", ".join(b.value for b in TranslationBackend)
-        raise ValueError(
-            f"unknown translate engine {choice!r}; expected one of: {supported}"
-        ) from exc
+    return parse_choice(
+        TranslationBackend, engine_overrides["translate"], "translate engine"
+    )
+
+
+class _GoogleTranslateSession:
+    """One ``googletrans`` client and one event loop for the worker's lifetime.
+
+    ``raise_exception=True`` is not optional: without it the library answers
+    any non-200 response with the INPUT text as the translation, and a blocked
+    or rate-limited call would leave the source text in the output, stamped as
+    a translation.
+
+    The session reports and never retries. A refusal carries the response the
+    ``httpx`` hook recorded for THIS attempt (the hook is cleared before each
+    one), and the Rust control plane decides whether to wait it out. A client
+    per item cost a TLS handshake per utterance and was never closed; this one
+    is built once, when the engine loads.
+    """
+
+    def __init__(self) -> None:
+        import asyncio
+
+        import httpx
+        from googletrans import Translator
+
+        # Only the translate endpoint's answers count. The client also fetches
+        # a token page from another host once an hour; its 200 is not an
+        # answer to any utterance.
+        self._seen = LastResponse(endpoint="/translate_a/")
+        self._translator = Translator(raise_exception=True, timeout=httpx.Timeout(30.0))
+        self._translator.client.event_hooks["response"].append(self._seen.record)
+        self._loop = asyncio.new_event_loop()
+
+    async def _translate(self, text: str) -> str:
+        result = await self._translator.translate(text)
+        return str(getattr(result, "text", result))
+
+    def __call__(self, text: str, src_lang: LanguageCode) -> str:
+        """Run the async translator behind the worker's synchronous IPC seam.
+
+        What the failure means depends on what the endpoint answered:
+        nothing (a transport failure) or an error status is the PROVIDER's
+        refusal, reported for the control plane to wait out or not; a
+        success status with an exception behind it is the library failing to
+        use a reply it got, which is final and reported as an engine failure.
+        """
+        self._seen.clear()
+        try:
+            return self._loop.run_until_complete(self._translate(text))
+        except Exception as error:
+            response = self._seen.take()
+            if response is not None and response.status < 400:
+                raise RuntimeError(
+                    f"Google Translate answered HTTP {response.status} but the "
+                    f"library could not use the reply: {error}"
+                ) from error
+            raise ProviderRefusal(response, error) from error
 
 
 def _load_google_translate() -> None:
     """Install ``_state.translation`` for a googletrans-backed translator."""
-    from googletrans import Translator
-
-    async def _do_translate(translator: Translator, text: str) -> str:
-        result = await translator.translate(text)
-        return str(getattr(result, "text", result))
-
-    def translate_fn(text: str, src_lang: LanguageCode) -> str:
-        """Run the async translator behind the worker's synchronous IPC seam."""
-        import asyncio
-
-        translator = Translator()
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(_do_translate(translator, text))
-        finally:
-            loop.close()
-
     _state.translation = LoadedTranslation(
-        backend=TranslationBackend.GOOGLE,
         engine="googletrans-v1",
-        translate=translate_fn,
+        translate=_GoogleTranslateSession(),
     )
 
 
@@ -185,7 +222,6 @@ def _load_seamless_translate() -> None:
         return str(processor.decode(output[0].tolist()[0], skip_special_tokens=True))
 
     _state.translation = LoadedTranslation(
-        backend=TranslationBackend.SEAMLESS,
         engine="facebook/hf-seamless-m4t-medium",
         translate=seamless_fn,
     )
@@ -265,7 +301,6 @@ def _load_nllb_translate() -> None:
         return str(tokenizer.decode(translated[0], skip_special_tokens=True))
 
     _state.translation = LoadedTranslation(
-        backend=TranslationBackend.NLLB,
         engine=model_id,
         translate=nllb_fn,
     )
@@ -373,7 +408,6 @@ def _load_tencent_translate() -> None:
         return str(resp.TargetText)
 
     _state.translation = LoadedTranslation(
-        backend=TranslationBackend.TENCENT,
         engine="tencent-tmt",
         translate=tencent_fn,
     )
@@ -513,7 +547,6 @@ def _load_aliyun_translate() -> None:
         return translated
 
     _state.translation = LoadedTranslation(
-        backend=TranslationBackend.ALIYUN,
         engine="aliyun-mt",
         translate=aliyun_fn,
     )

@@ -1,7 +1,7 @@
 # Adding a New Command
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:04 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 This guide walks through adding a new batchalign3 command end-to-end.
 
@@ -187,7 +187,7 @@ pub(crate) async fn run_your_command_impl(
 }
 ```
 
-See `crates/batchalign/src/morphosyntax/` (directory module) or `crates/batchalign/src/translate.rs` (single-file module) for complete examples.
+See `crates/batchalign/src/morphosyntax/` or `crates/batchalign/src/translate/` (directory modules) for complete examples.
 
 ## Step 5: CLI args
 

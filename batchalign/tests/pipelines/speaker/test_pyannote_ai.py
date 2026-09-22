@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import email.message
 import json
+import urllib.error
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,3 +137,68 @@ def test_api_key_resolution_prefers_environment_then_compatible_config(
         == "from-environment"
     )
     assert resolve_pyannote_ai_api_key({}, config_path=config) == "from-config"
+
+
+class _ThrottlingOpener:
+    """Answers the first calls with the given HTTP errors, then succeeds."""
+
+    def __init__(self, errors: list[tuple[int, str | None]], then: bytes) -> None:
+        self.errors = list(errors)
+        self.then = then
+
+    def __call__(self, request, *, timeout: float):
+        if self.errors:
+            status, retry_after = self.errors.pop(0)
+            headers = email.message.Message()
+            if retry_after is not None:
+                headers["Retry-After"] = retry_after
+            raise urllib.error.HTTPError(
+                "https://api.example/x", status, "throttled", headers, None
+            )
+        return _Response(self.then)
+
+
+def _client_with(opener: _ThrottlingOpener, sleeps: list[float]) -> PyannoteAIClient:
+    return PyannoteAIClient(
+        "secret",
+        base_url="https://api.example",
+        urlopen=opener,
+        sleep=sleeps.append,
+        progress=lambda _stage: None,
+    )
+
+
+def test_a_rate_limit_is_retried_by_the_shared_policy_with_a_one_second_floor() -> None:
+    sleeps: list[float] = []
+    opener = _ThrottlingOpener(
+        [(429, "2"), (429, "0.2")], json.dumps({"ok": True}).encode()
+    )
+    client = _client_with(opener, sleeps)
+    assert client._request_json("GET", "/probe") == {"ok": True}
+    assert sleeps == [2.0, 1.0]
+
+
+def test_a_non_retryable_error_fails_at_once_with_its_detail() -> None:
+    sleeps: list[float] = []
+    opener = _ThrottlingOpener([(500, None)], b"{}")
+    client = _client_with(opener, sleeps)
+    try:
+        client._request_json("GET", "/probe")
+    except RuntimeError as error:
+        assert "HTTP 500" in str(error)
+    else:
+        raise AssertionError("a 500 must fail the request")
+    assert sleeps == []
+
+
+def test_the_fourth_rate_limit_gives_up_naming_the_exhaustion() -> None:
+    sleeps: list[float] = []
+    opener = _ThrottlingOpener([(429, None)] * 4, b"{}")
+    client = _client_with(opener, sleeps)
+    try:
+        client._request_json("GET", "/probe")
+    except RuntimeError as error:
+        assert "after 3 retries" in str(error)
+    else:
+        raise AssertionError("the fourth 429 must give up")
+    assert sleeps == [1.0, 1.0, 1.0]

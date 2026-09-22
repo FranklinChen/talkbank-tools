@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from batchalign.inference._domain_types import TranslationBackend
 from batchalign.inference.asr import (
     AsrElement,
     AsrMonologue,
@@ -1327,6 +1328,7 @@ def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
             payload=TranslateRequestV2(
                 source_lang="eng",
                 target_lang="spa",
+                engine=TranslationBackend.GOOGLE,
                 payload_ref_id="text-ref-translate-1",
                 item_count=1,
             ),
@@ -1379,6 +1381,7 @@ def test_invalid_translate_host_item_fails_only_that_item(tmp_path: Path) -> Non
             payload=TranslateRequestV2(
                 source_lang="eng",
                 target_lang="spa",
+                engine=TranslationBackend.GOOGLE,
                 payload_ref_id="text-ref-translate-invalid-1",
                 item_count=1,
             ),
@@ -1525,6 +1528,7 @@ def test_returns_typed_error_for_missing_text_v2_host(tmp_path: Path) -> None:
             payload=TranslateRequestV2(
                 source_lang="eng",
                 target_lang="spa",
+                engine=TranslationBackend.GOOGLE,
                 payload_ref_id="text-ref-unsupported-1",
                 item_count=1,
             ),

@@ -1,7 +1,7 @@
 # Batchalign Workers
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-09-22 17:47 EDT
 
 Per-app worker concerns specific to the Batchalign runtime: pool
 sizing, RAM-tier-aware memory budgets, model loading per worker,
@@ -435,7 +435,8 @@ forward-looking proposal, not a commitment.
 | `fa/mod.rs` | FA per-file processing |
 | `runner/dispatch/fa_pipeline.rs` | FA orchestrator with `JoinSet` concurrency |
 | `runner/dispatch/transcribe_pipeline.rs` | Transcribe per-file with optional morphotag |
-| `utseg.rs`, `translate.rs`, `coref.rs` | Other batched text commands |
+| `utseg.rs`, `coref.rs` | Other batched text commands |
+| `translate/` | Translate: one request per utterance, provider pacing and retries in `provider.rs` and `items.rs` |
 | `worker/pool/mod.rs` | Worker lifecycle and group management |
 | `worker/pool/eviction.rs` | Idle eviction (`try_evict_idle_from_other_group`, `select_eviction_target`) |
 | `worker/pool/checkout.rs` / `dispatch.rs` | Checkout state machine (saturation timeout, `worker_returned` notify) |

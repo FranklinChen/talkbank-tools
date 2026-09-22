@@ -14,6 +14,7 @@ from typing import Literal
 import numpy as np
 import pytest
 
+from batchalign.inference._domain_types import TranslationBackend
 from batchalign.inference.asr import (
     AsrElement,
     AsrMonologue,
@@ -408,6 +409,7 @@ def _make_text_request(tmp_path: Path, task_name: TextTaskName) -> ExecuteReques
         payload = TranslateRequestV2(
             source_lang="eng",
             target_lang="spa",
+            engine=TranslationBackend.GOOGLE,
             payload_ref_id=attachment_id,
             item_count=1,
         )
