@@ -475,14 +475,19 @@ mod tests {
         let services = PipelineServices::new(&pool, &cache);
         let sink = StoreRunnerEventSink::wrap(store.clone());
         let mut opts = crate::transcribe::TranscribeOptions {
-            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(crate::transcribe::TranscribeAsrPlan::from_request(
-                AsrBackend::Worker(crate::transcribe::AsrWorkerMode::LocalWhisperV2),
-                false,
-                1,
-                &std::collections::BTreeMap::new(),
-                &LanguageSpec::Resolved(LanguageCode3::eng()),
+            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
+                crate::transcribe::TranscribeAsrPlan::from_request(
+                    AsrBackend::Worker(crate::transcribe::AsrWorkerMode::LocalWhisperV2),
+                    false,
+                    1,
+                    &std::collections::BTreeMap::new(),
+                    &LanguageSpec::Resolved(LanguageCode3::eng()),
+                )
+                .unwrap(),
+                true,
+                crate::params::UtsegFallbackPolicy::Refuse,
             )
-            .unwrap(), true, crate::params::UtsegFallbackPolicy::Refuse).unwrap(),
+            .unwrap(),
             diarize: false,
             speaker_backend: None,
             with_morphosyntax: false,

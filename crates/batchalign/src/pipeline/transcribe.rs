@@ -63,9 +63,15 @@ impl Recognized {
         identity: crate::transcribe::types::AsrIdentity,
         plan: &crate::transcribe::types::AdmittedTranscribePlan<P>,
     ) -> Result<Self, ServerError> {
-        let segmentation = plan.resolve_segmentation(&language)
+        let segmentation = plan
+            .resolve_segmentation(&language)
             .map_err(|error| ServerError::Validation(error.to_string()))?;
-        Ok(Self { response, language, segmentation, identity })
+        Ok(Self {
+            response,
+            language,
+            segmentation,
+            identity,
+        })
     }
 }
 
@@ -758,8 +764,9 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     // pre-CHAT Stanza path, so an authorized Stanza fallback segments only
     // after CHAT is built, and this pass hands its chunks to punctuation
     // retokenization exactly as it always did for a language with no model.
-    let route = ctx.state.segmentation.as_ref().ok_or_else(||
-        ServerError::Validation("pre-CHAT segmentation requested from a disabled plan".into()))?;
+    let route = ctx.state.segmentation.as_ref().ok_or_else(|| {
+        ServerError::Validation("pre-CHAT segmentation requested from a disabled plan".into())
+    })?;
     if !route.uses_boundary_model() {
         let chunks = project_speakers(prepare_asr_chunks_with_snapshot(
             asr_output,
@@ -1224,8 +1231,9 @@ async fn stage_run_utseg<P: TranscribePlan>(
     ctx: &mut TranscribePipelineContext<'_, ChatReady, P>,
     post_chat_policy: crate::utseg::UtsegDecisionPolicy,
 ) -> Result<(), ServerError> {
-    let route = ctx.state.asr.segmentation.as_ref().ok_or_else(||
-        ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into()))?;
+    let route = ctx.state.asr.segmentation.as_ref().ok_or_else(|| {
+        ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into())
+    })?;
     let input = ctx.state.text.as_str();
     let filename = ctx
         .audio_path
@@ -1358,14 +1366,19 @@ mod tests {
         language: crate::api::LanguageSpec,
     ) -> TranscribeOptions {
         TranscribeOptions {
-            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(crate::transcribe::TranscribeAsrPlan::from_request(
-                AsrBackend::RustRevAi,
+            plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
+                crate::transcribe::TranscribeAsrPlan::from_request(
+                    AsrBackend::RustRevAi,
+                    false,
+                    2,
+                    &std::collections::BTreeMap::new(),
+                    &language,
+                )
+                .unwrap(),
                 false,
-                2,
-                &std::collections::BTreeMap::new(),
-                &language,
+                UtsegFallbackPolicy::Refuse,
             )
-            .unwrap(), false, UtsegFallbackPolicy::Refuse).unwrap(),
+            .unwrap(),
             diarize: true,
             speaker_backend,
             with_morphosyntax: false,
@@ -1612,8 +1625,11 @@ mod tests {
         let pair = crate::api::LanguageSpec::try_from("eng,spa").expect("a pair");
         let opts = TranscribeOptions {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
-                ReplayAsrPlan::for_legacy_replay(2, &pair).unwrap(), false, UtsegFallbackPolicy::Refuse,
-            ).unwrap(),
+                ReplayAsrPlan::for_legacy_replay(2, &pair).unwrap(),
+                false,
+                UtsegFallbackPolicy::Refuse,
+            )
+            .unwrap(),
             diarize: false,
             speaker_backend: None,
             with_morphosyntax: live.with_morphosyntax,
@@ -1724,8 +1740,11 @@ mod tests {
         );
         let opts = TranscribeOptions {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
-                ReplayAsrPlan::for_legacy_replay(2, &LanguageCode3::fra().into()).unwrap(), false, UtsegFallbackPolicy::Refuse,
-            ).unwrap(),
+                ReplayAsrPlan::for_legacy_replay(2, &LanguageCode3::fra().into()).unwrap(),
+                false,
+                UtsegFallbackPolicy::Refuse,
+            )
+            .unwrap(),
             diarize: opts.diarize,
             speaker_backend: opts.speaker_backend,
             with_morphosyntax: opts.with_morphosyntax,

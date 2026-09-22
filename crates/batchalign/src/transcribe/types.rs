@@ -713,7 +713,9 @@ enum SegmentationAdmission {
 pub(crate) enum SegmentationResolutionError {
     #[error(transparent)]
     Unavailable(#[from] crate::utseg_route::UtsegUnavailable),
-    #[error("recognized language '{actual}' differs from admitted segmentation language '{expected}'")]
+    #[error(
+        "recognized language '{actual}' differs from admitted segmentation language '{expected}'"
+    )]
     ChangedLanguage {
         expected: LanguageCode3,
         actual: LanguageCode3,
@@ -768,9 +770,9 @@ impl<P: TranscribePlan> AdmittedTranscribePlan<P> {
                     actual: language.primary().clone(),
                 })
             }
-            SegmentationAdmission::Detect(fallback) => {
-                Ok(Some(crate::utseg_route::UtsegRoute::resolve(language.primary(), *fallback)?))
-            }
+            SegmentationAdmission::Detect(fallback) => Ok(Some(
+                crate::utseg_route::UtsegRoute::resolve(language.primary(), *fallback)?,
+            )),
         }
     }
 }
@@ -822,36 +824,72 @@ mod transcribe_segmentation_tests {
     use crate::params::UtsegFallbackPolicy::{AllowStanza, Refuse};
 
     fn asr(language: LanguageSpec) -> TranscribeAsrPlan {
-        TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, false, 2, &Default::default(), &language)
-            .expect("ASR admission")
+        TranscribeAsrPlan::from_request(
+            AsrBackend::RustRevAi,
+            false,
+            2,
+            &Default::default(),
+            &language,
+        )
+        .expect("ASR admission")
     }
 
     #[test]
     fn transcribe_segmentation_requires_explicit_language_admission() {
-        assert!(AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), true, Refuse).is_err());
-        let plan = AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), true, AllowStanza)
-            .expect("authorized fallback");
-        let route = plan.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa()))
-            .unwrap().unwrap();
+        assert!(
+            AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), true, Refuse).is_err()
+        );
+        let plan =
+            AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), true, AllowStanza)
+                .expect("authorized fallback");
+        let route = plan
+            .resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa()))
+            .unwrap()
+            .unwrap();
         assert_eq!(route.language(), &LanguageCode3::spa());
         assert_eq!(route.fallback(), AllowStanza);
         assert!(!route.uses_boundary_model());
-        assert!(matches!(plan.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng())),
-            Err(SegmentationResolutionError::ChangedLanguage { .. })));
+        assert!(matches!(
+            plan.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng())),
+            Err(SegmentationResolutionError::ChangedLanguage { .. })
+        ));
     }
 
     #[test]
     fn transcribe_segmentation_distinguishes_disabled_and_detected_language() {
-        let disabled = AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), false, Refuse).unwrap();
+        let disabled =
+            AdmittedTranscribePlan::admit(asr(LanguageCode3::spa().into()), false, Refuse).unwrap();
         assert!(!disabled.with_utseg());
-        assert!(disabled.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())).unwrap().is_none());
-        let deferred = AdmittedTranscribePlan::admit(asr(LanguageSpec::Auto), true, Refuse).unwrap();
+        assert!(
+            disabled
+                .resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa()))
+                .unwrap()
+                .is_none()
+        );
+        let deferred =
+            AdmittedTranscribePlan::admit(asr(LanguageSpec::Auto), true, Refuse).unwrap();
         assert!(deferred.with_utseg());
-        assert!(deferred.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng())).unwrap().unwrap().uses_boundary_model());
-        assert!(matches!(deferred.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())),
-            Err(SegmentationResolutionError::Unavailable(_))));
-        let allowed = AdmittedTranscribePlan::admit(asr(LanguageSpec::Auto), true, AllowStanza).unwrap();
-        assert_eq!(allowed.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())).unwrap().unwrap().fallback(), AllowStanza);
+        assert!(
+            deferred
+                .resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng()))
+                .unwrap()
+                .unwrap()
+                .uses_boundary_model()
+        );
+        assert!(matches!(
+            deferred.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())),
+            Err(SegmentationResolutionError::Unavailable(_))
+        ));
+        let allowed =
+            AdmittedTranscribePlan::admit(asr(LanguageSpec::Auto), true, AllowStanza).unwrap();
+        assert_eq!(
+            allowed
+                .resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa()))
+                .unwrap()
+                .unwrap()
+                .fallback(),
+            AllowStanza
+        );
     }
 }
 

@@ -422,8 +422,7 @@ mod tests {
             "http://media-host.example.org:8001",
             ReleasedCommand::Transcribe,
         )
-        .err()
-        .expect("transcribe must be refused for a remote server");
+        .expect_err("transcribe must be refused for a remote server");
         assert!(
             error.to_string().contains("recordings"),
             "the refusal must say why: {error}"

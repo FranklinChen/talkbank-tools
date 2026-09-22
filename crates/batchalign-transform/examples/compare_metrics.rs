@@ -34,9 +34,18 @@ enum Error {
     #[error("parser initialization failed: {0}")]
     Parser(String),
     #[error("cannot read {role:?} transcript {}: {source}", path.display())]
-    Read { role: Role, path: PathBuf, source: std::io::Error },
+    Read {
+        role: Role,
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("{role:?} transcript {} failed {stage:?}: {codes}", path.display())]
-    Invalid { role: Role, path: PathBuf, stage: AdmissionStage, codes: String },
+    Invalid {
+        role: Role,
+        path: PathBuf,
+        stage: AdmissionStage,
+        codes: String,
+    },
     #[error(transparent)]
     Metrics(#[from] CompareSerializationError),
     #[error(transparent)]
@@ -53,26 +62,50 @@ struct ValidatedTranscript(ChatFile);
 impl ValidatedTranscript {
     fn read(parser: &TreeSitterParser, path: &Path, role: Role) -> Result<Self, Error> {
         let text = std::fs::read_to_string(path).map_err(|source| Error::Read {
-            role, path: path.to_owned(), source,
+            role,
+            path: path.to_owned(),
+            source,
         })?;
         Self::admit(parser, path, role, &text)
     }
 
-    fn admit(parser: &TreeSitterParser, path: &Path, role: Role, text: &str) -> Result<Self, Error> {
+    fn admit(
+        parser: &TreeSitterParser,
+        path: &Path,
+        role: Role,
+        text: &str,
+    ) -> Result<Self, Error> {
         let errors = ErrorCollector::new();
         let chat = parser.parse_chat_file_streaming(text, &errors);
         let diagnostics = errors.into_vec();
         if !diagnostics.is_empty() {
             return Err(Error::Invalid {
-                role, path: path.to_owned(), stage: AdmissionStage::Parsing,
-                codes: diagnostics.iter().map(|error| error.code.to_string()).collect::<Vec<_>>().join(", "),
+                role,
+                path: path.to_owned(),
+                stage: AdmissionStage::Parsing,
+                codes: diagnostics
+                    .iter()
+                    .map(|error| error.code.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             });
         }
         let errors = ErrorCollector::new();
-        chat.clone().validate_into(&errors, talkbank_model::model::TranscriptName::for_path(path))
+        chat.clone()
+            .validate_into(
+                &errors,
+                talkbank_model::model::TranscriptName::for_path(path),
+            )
             .map_err(|_| Error::Invalid {
-                role, path: path.to_owned(), stage: AdmissionStage::ModelValidation,
-                codes: errors.to_vec().iter().map(|error| error.code.to_string()).collect::<Vec<_>>().join(", "),
+                role,
+                path: path.to_owned(),
+                stage: AdmissionStage::ModelValidation,
+                codes: errors
+                    .to_vec()
+                    .iter()
+                    .map(|error| error.code.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             })?;
         Ok(Self(chat))
     }
@@ -89,17 +122,26 @@ struct AdmittedBenchmark(Vec<AdmittedPair>);
 
 impl AdmittedBenchmark {
     fn read(arguments: &[String]) -> Result<Self, Error> {
-        let (pairs, []) = arguments.as_chunks::<2>() else { return Err(Error::Arguments); };
-        if pairs.is_empty() { return Err(Error::Arguments); }
+        let (pairs, []) = arguments.as_chunks::<2>() else {
+            return Err(Error::Arguments);
+        };
+        if pairs.is_empty() {
+            return Err(Error::Arguments);
+        }
         let parser = TreeSitterParser::new().map_err(|error| Error::Parser(error.to_string()))?;
         let mut admitted = Vec::with_capacity(pairs.len());
         for [hypothesis, gold] in pairs {
-            let label = Path::new(hypothesis).file_stem()
+            let label = Path::new(hypothesis)
+                .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_else(|| hypothesis.clone());
             admitted.push(AdmittedPair {
                 label,
-                hypothesis: ValidatedTranscript::read(&parser, Path::new(hypothesis), Role::Hypothesis)?,
+                hypothesis: ValidatedTranscript::read(
+                    &parser,
+                    Path::new(hypothesis),
+                    Role::Hypothesis,
+                )?,
                 gold: ValidatedTranscript::read(&parser, Path::new(gold), Role::Gold)?,
             });
         }
@@ -113,14 +155,17 @@ impl AdmittedBenchmark {
             let mut output = csv::Writer::from_writer(&mut bytes);
             output.write_record(["pair", "metric", "value"])?;
             for pair in self.0 {
-                let metrics = compare(&pair.hypothesis.0, &pair.gold.0, GoldCoverage::Complete).metrics;
+                let metrics =
+                    compare(&pair.hypothesis.0, &pair.gold.0, GoldCoverage::Complete).metrics;
                 let table = CompareMetricsCsvTable::from_metrics(&metrics)?;
                 for row in &table.rows {
                     let key = row.metric.to_csv_field();
                     let value = row.value.to_csv_field();
                     if let CompareMetricValue::Count(count) = row.value {
                         let total = totals.entry(key.clone()).or_default();
-                        *total = total.checked_add(count).ok_or_else(|| Error::CountOverflow(key.clone()))?;
+                        *total = total
+                            .checked_add(count)
+                            .ok_or_else(|| Error::CountOverflow(key.clone()))?;
                     }
                     output.write_record([pair.label.as_str(), key.as_str(), value.as_str()])?;
                 }
@@ -150,7 +195,10 @@ fn run(arguments: &[String], output: impl Write) -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Error> {
-    run(&std::env::args().skip(1).collect::<Vec<_>>(), std::io::stdout().lock())
+    run(
+        &std::env::args().skip(1).collect::<Vec<_>>(),
+        std::io::stdout().lock(),
+    )
 }
 
 #[cfg(test)]
@@ -158,23 +206,36 @@ mod tests {
     use super::*;
 
     fn chat(words: &str) -> String {
-        format!("@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\t{words}\n@End\n")
+        format!(
+            "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\t{words}\n@End\n"
+        )
     }
 
     #[test]
     fn recovered_parse_is_not_admitted_as_gold() {
         let parser = TreeSitterParser::new().unwrap();
         let malformed = chat("hello [ .");
-        assert!(matches!(ValidatedTranscript::admit(&parser, Path::new("gold.cha"), Role::Gold, &malformed),
-            Err(Error::Invalid { role: Role::Gold, stage: AdmissionStage::Parsing, .. })));
+        assert!(matches!(
+            ValidatedTranscript::admit(&parser, Path::new("gold.cha"), Role::Gold, &malformed),
+            Err(Error::Invalid {
+                role: Role::Gold,
+                stage: AdmissionStage::Parsing,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn parsed_but_invalid_model_is_not_admitted() {
         let parser = TreeSitterParser::new().unwrap();
         let invalid = chat("hello .").replace("*CHI:", "*MOT:");
-        assert!(matches!(ValidatedTranscript::admit(&parser, Path::new("gold.cha"), Role::Gold, &invalid),
-            Err(Error::Invalid { stage: AdmissionStage::ModelValidation, .. })));
+        assert!(matches!(
+            ValidatedTranscript::admit(&parser, Path::new("gold.cha"), Role::Gold, &invalid),
+            Err(Error::Invalid {
+                stage: AdmissionStage::ModelValidation,
+                ..
+            })
+        ));
     }
 
     #[test]

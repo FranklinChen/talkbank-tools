@@ -242,7 +242,9 @@ impl TranscribeDispatchPlan {
         )?;
 
         let plan = crate::transcribe::types::AdmittedTranscribePlan::admit(
-            asr, with_utseg, allow_stanza_fallback_utseg.into(),
+            asr,
+            with_utseg,
+            allow_stanza_fallback_utseg.into(),
         )?;
 
         Ok(Self {
@@ -315,13 +317,17 @@ impl BenchmarkDispatchPlan {
                 // front, so reaching this arm means the job predates the
                 // check. The refusal is PROPAGATED: `.ok()?` used to turn it
                 // into `None`, which routing dropped silently.
-                plan: crate::transcribe::types::AdmittedTranscribePlan::admit(crate::transcribe::TranscribeAsrPlan::from_request(
-                    AsrBackend::try_from_engine(&asr_engine)?,
+                plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
+                    crate::transcribe::TranscribeAsrPlan::from_request(
+                        AsrBackend::try_from_engine(&asr_engine)?,
+                        false,
+                        job.dispatch.num_speakers.0 as usize,
+                        &engine_extras,
+                        &job.dispatch.lang,
+                    )?,
                     false,
-                    job.dispatch.num_speakers.0 as usize,
-                    &engine_extras,
-                    &job.dispatch.lang,
-                )?, false, crate::params::UtsegFallbackPolicy::Refuse)?,
+                    crate::params::UtsegFallbackPolicy::Refuse,
+                )?,
                 diarize: false,
                 speaker_backend: None,
                 with_morphosyntax: false,
@@ -535,7 +541,10 @@ mod tests {
         job.dispatch.num_speakers = NumSpeakers(2);
         let plan = TranscribeDispatchPlan::from_job(&job, &ServerConfig::default())
             .expect("dispatch plan");
-        assert_eq!(plan.base_options.plan.asr().backend(), AsrBackend::RustRevAi);
+        assert_eq!(
+            plan.base_options.plan.asr().backend(),
+            AsrBackend::RustRevAi
+        );
         assert_eq!(plan.base_options.expected_speakers(), None);
         // A persisted job bypasses HTTP validation, but cannot bypass plan admission.
         let mut invalid = job.clone();

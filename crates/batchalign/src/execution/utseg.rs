@@ -310,8 +310,11 @@ mod tests {
     }
 
     fn route() -> UtsegRoute {
-        UtsegRoute::resolve(&LanguageCode3::eng(), crate::params::UtsegFallbackPolicy::Refuse)
-            .expect("English boundary model")
+        UtsegRoute::resolve(
+            &LanguageCode3::eng(),
+            crate::params::UtsegFallbackPolicy::Refuse,
+        )
+        .expect("English boundary model")
     }
 
     /// Per-file dispatch: each file produces its own gateway call, never
@@ -355,8 +358,9 @@ mod tests {
             let mut job = utseg_snapshot(temp.path(), false);
             let language = LanguageCode3::try_new(code).unwrap();
             job.dispatch.lang = LanguageSpec::Resolved(language.clone());
-            let route = UtsegRoute::resolve(&language, crate::params::UtsegFallbackPolicy::AllowStanza)
-                .expect("model or authorized fallback");
+            let route =
+                UtsegRoute::resolve(&language, crate::params::UtsegFallbackPolicy::AllowStanza)
+                    .expect("model or authorized fallback");
             dispatch_utseg_job(
                 &job,
                 &host,
@@ -366,7 +370,10 @@ mod tests {
             )
             .await
             .expect("admitted route dispatched");
-            assert_eq!(gateway.state.lock().unwrap().routes, vec![(language, true); 2]);
+            assert_eq!(
+                gateway.state.lock().unwrap().routes,
+                vec![(language, true); 2]
+            );
         }
     }
 

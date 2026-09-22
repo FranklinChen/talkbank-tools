@@ -75,6 +75,11 @@ struct NamedStructInfo {
 /// A `RefactorTarget` entry is a recorded verdict, not a plan: the cap stops the
 /// struct growing further while the reason names the specific fix, so whoever
 /// picks it up does not have to re-derive it.
+///
+/// Dropped on 2026-09-22, both under the threshold now: `CatalogEntry` (nine
+/// fields once `source_kind` became a projection of `io_profile`) and
+/// `TranscribeOptions` (eight, once language, backend and speaker count moved
+/// into the sealed ASR plan).
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign-transform/src/retokenize/rebuild.rs",
@@ -84,15 +89,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         disposition: WideStructDisposition::RefactorTarget,
         reason: "existing AST-walk context carries mappings, source slices and mutable cursors \
                  independently; bind the mapping to its input collections before changing this path",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/recipe_runner/command_spec.rs",
-        struct_name: "CatalogEntry",
-        max_fields: 10,
-        max_bool_fields: 0,
-        disposition: WideStructDisposition::RealAggregate,
-        reason: "static command catalog declares each command's planner, capabilities, I/O, \
-                 dispatch and output recipe explicitly; these are catalog facts, not stage flags",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/runner/dispatch/kernel_plan.rs",
@@ -373,16 +369,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         reason: "one transcription execution owns its service handles, diagnostic sinks and \
                  optional evidence; required stage outputs live in the mandatory generic state, \
                  replaced by consuming transitions, while the plan type separates live and replay",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/transcribe/types.rs",
-        struct_name: "TranscribeOptions",
-        max_fields: 10,
-        max_bool_fields: 5,
-        disposition: WideStructDisposition::BoundaryShim,
-        reason: "transcription policy boundary with five independent stage/output switches; \
-                 language, backend and speaker-count admission belong to the sealed ASR plan, \
-                 whose type also pairs live inference and replay with their inputs",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/types/cancellation.rs",

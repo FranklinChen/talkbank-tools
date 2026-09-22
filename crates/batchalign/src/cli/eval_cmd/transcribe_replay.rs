@@ -114,9 +114,11 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
         let opts = TranscribeOptions {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
                 crate::transcribe::ReplayAsrPlan::for_legacy_replay(args.num_speakers, &lang)?,
-                utseg_execution.pre_chat_policy().is_some() || utseg_execution.post_chat_policy().is_some(),
+                utseg_execution.pre_chat_policy().is_some()
+                    || utseg_execution.post_chat_policy().is_some(),
                 args.utseg_fallback_stanza.into(),
-            ).map_err(|error| CliError::InvalidArgument(error.to_string()))?,
+            )
+            .map_err(|error| CliError::InvalidArgument(error.to_string()))?,
             diarize: args.diarize,
             speaker_backend: args.diarize.then_some(SpeakerBackendV2::PyannoteAi),
             with_morphosyntax: false,
