@@ -280,8 +280,8 @@ pub(crate) fn whisper_chunk_result_to_asr_response(
 
                 Some(AsrToken {
                     text: text.to_string(),
-                    start_s: Some(chunk.start_s),
-                    end_s: Some(chunk.end_s),
+                    start_s: chunk.start_s,
+                    end_s: chunk.end_s,
                     speaker: None,
                     confidence: None,
                 })
@@ -382,13 +382,13 @@ mod tests {
                 chunks: vec![
                     WhisperChunkSpanV2 {
                         text: "hello".into(),
-                        start_s: seconds(0.0),
-                        end_s: seconds(0.5),
+                        start_s: Some(seconds(0.0)),
+                        end_s: Some(seconds(0.5)),
                     },
                     WhisperChunkSpanV2 {
                         text: "world".into(),
-                        start_s: seconds(0.5),
-                        end_s: seconds(1.0),
+                        start_s: Some(seconds(0.5)),
+                        end_s: Some(seconds(1.0)),
                     },
                 ],
                 model: test_identity(),
@@ -479,8 +479,8 @@ mod tests {
                 text: "hello".into(),
                 chunks: vec![WhisperChunkSpanV2 {
                     text: "hello".into(),
-                    start_s: seconds(0.0),
-                    end_s: seconds(0.5),
+                    start_s: Some(seconds(0.0)),
+                    end_s: Some(seconds(0.5)),
                 }],
                 model: AsrModelIdentityV2::Whisper {
                     asr: LoadedModelV2 {

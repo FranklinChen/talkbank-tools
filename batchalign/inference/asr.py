@@ -224,19 +224,16 @@ def load_whisper_asr(
     config.no_repeat_ngram_size = 4
     config.use_cache = True
 
-    if language == "Cantonese":
-        config.no_timestamps_token_id = 50363
-        config.alignment_heads = [
-            [5, 3],
-            [5, 9],
-            [8, 0],
-            [8, 4],
-            [8, 8],
-            [9, 0],
-            [9, 7],
-            [9, 9],
-            [10, 5],
-        ]
+    # No per-language overrides of the generation config. BA2 carried a
+    # Cantonese block here that set `no_timestamps_token_id = 50363` and nine
+    # `alignment_heads` at layers 5 to 10: those are whisper-small's values
+    # (its vocabulary and its twelve layers), from the Cantonese fine-tune of
+    # small that BA2 once used. Applied to large-v3, 50363 is `<|nospeech|>`
+    # (`<|notimestamps|>` is 50364), so the timestamp logits processor
+    # suppressed the wrong token and the model predicted no timestamps at all:
+    # one chunk per file with `(None, None)`. The checkpoint's own generation
+    # config names the right token and heads for the model actually loaded.
+    # Measured 2026-09-22 on the Cantonese benchmark fixtures.
 
     asr_dtype = (
         torch.float16 if device.type == "cuda" else _cpu_torch_dtype(cpu_precision)
@@ -325,35 +322,34 @@ def infer_whisper_prepared_audio(
     # Overlap at a seam and an inverted chunk travel as emitted: the Rust
     # consumer projects every producer's spans onto non-decreasing boundaries
     # in one place (`worker::chunk_spans`), so nothing is guessed here.
-    with_span: list[WhisperChunkSpanV2] = []
-    dropped_without_span = 0
+    #
+    # A missing bound travels as ``None``: it is an absence of TIMING, not of
+    # words. Substituting 0.0 used to invent a time (a chunk missing only its
+    # start then claimed to run from the beginning of the audio); dropping the
+    # chunk, the rule between 536f29c8 and 2026-09-22, discarded the words
+    # with the timing and emptied whole transcripts when the model predicted
+    # no timestamps at all. The words are kept and go untimed, as a Tencent or
+    # Aliyun word with a missing offset does.
+    spans: list[WhisperChunkSpanV2] = []
+    without_full_timing = 0
     for chunk in chunks:
-        # A missing bound is an ABSENCE, not a time. Substituting 0.0 here used
-        # to satisfy `WhisperChunkSpanV2`'s non-optional fields by inventing a
-        # value: a chunk missing only its start then claimed to run from the
-        # beginning of the audio to its real end, and passed every downstream
-        # check because both numbers were real and correctly ordered. It also
-        # reached the Rust boundary as `Some(0.0)` rather than `None`, so the
-        # filter there could not see it either. Note 0.0 is a legal start, so
-        # `or 0.0` could not distinguish the two cases even in principle.
-        timestamp = chunk.get("timestamp") or [None, None]
+        timestamp = chunk.get("timestamp") or (None, None)
         raw_start, raw_end = timestamp[0], timestamp[1]
         if raw_start is None or raw_end is None:
-            dropped_without_span += 1
-            continue
-        with_span.append(
+            without_full_timing += 1
+        spans.append(
             WhisperChunkSpanV2(
                 text=str(chunk.get("text", "")),
-                start_s=float(raw_start),
-                end_s=float(raw_end),
+                start_s=None if raw_start is None else float(raw_start),
+                end_s=None if raw_end is None else float(raw_end),
             )
         )
-    if dropped_without_span:
+    if without_full_timing:
         logger.warning(
-            "Dropped %d Whisper chunk(s) with no usable timestamp span "
-            "(kept %d); these carry no placeable timing",
-            dropped_without_span,
-            len(with_span),
+            "%d of %d Whisper chunk(s) carry no complete timestamp span; their "
+            "words are kept untimed",
+            without_full_timing,
+            len(spans),
         )
     # The handle is the honest witness: it is the object the loader resolved a
     # snapshot into, so it knows which commit actually came off the hub. A
@@ -371,6 +367,6 @@ def infer_whisper_prepared_audio(
     return WhisperChunkResultPayloadV2(
         lang=lang,
         text=raw.get("text", "") if isinstance(raw, dict) else "",
-        chunks=with_span,
+        chunks=spans,
         model=identity,
     )

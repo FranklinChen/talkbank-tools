@@ -744,13 +744,14 @@ class WhisperChunkSpanV2(BaseModel):
     Raw on purpose: chunks may overlap at a seam or arrive inverted, and the
     Rust consumer settles every producer's spans in one place
     (`batchalign::worker::chunk_spans::MonotoneChunkSpans`). The only
-    invariant the wire carries is that each bound is a finite non-negative
-    duration.
+    invariant the wire carries is that a bound, when present, is a finite
+    non-negative duration. A bound is ``None`` when the model predicted no
+    timestamp for it; the words still travel, untimed.
     """
 
     text: str
-    start_s: FiniteNonNegativeFloat
-    end_s: FiniteNonNegativeFloat
+    start_s: FiniteNonNegativeFloat | None = None
+    end_s: FiniteNonNegativeFloat | None = None
 
 
 class WhisperChunkResultPayloadV2(BaseModel):

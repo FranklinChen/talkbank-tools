@@ -46,15 +46,20 @@ pub(crate) fn project_non_decreasing(values: &[f64]) -> Vec<f64> {
 }
 
 /// One chunk after projection: its text, borrowed from the producer's span,
-/// and its settled bounds.
+/// and whichever bounds it has.
+///
+/// A chunk with both bounds was projected with its timed neighbours; a chunk
+/// missing either bound keeps what it had and goes downstream untimed on
+/// that side, where the timing admission already handles a missing bound.
 #[derive(Debug)]
 pub(crate) struct MonotoneChunk<'a> {
     pub(crate) text: &'a str,
-    pub(crate) start_s: DurationSeconds,
-    pub(crate) end_s: DurationSeconds,
+    pub(crate) start_s: Option<DurationSeconds>,
+    pub(crate) end_s: Option<DurationSeconds>,
 }
 
-/// Chunk spans whose boundaries never decrease, built by [`Self::project`] only.
+/// Chunk spans whose timed boundaries never decrease, built by
+/// [`Self::project`] only.
 #[derive(Debug)]
 pub(crate) struct MonotoneChunkSpans<'a> {
     chunks: Vec<MonotoneChunk<'a>>,
@@ -62,11 +67,21 @@ pub(crate) struct MonotoneChunkSpans<'a> {
 }
 
 impl<'a> MonotoneChunkSpans<'a> {
-    /// Project raw producer spans onto the closest non-decreasing boundaries.
+    /// Project the fully timed producer spans onto the closest non-decreasing
+    /// boundaries, in order; chunks without both bounds pass through as they
+    /// are.
     pub(crate) fn project(raw: &'a [WhisperChunkSpanV2]) -> Self {
-        let boundaries: Vec<f64> = raw
+        let timed: Vec<(usize, f64, f64)> = raw
             .iter()
-            .flat_map(|chunk| [chunk.start_s.get(), chunk.end_s.get()])
+            .enumerate()
+            .filter_map(|(index, chunk)| match (chunk.start_s, chunk.end_s) {
+                (Some(start), Some(end)) => Some((index, start.get(), end.get())),
+                _ => None,
+            })
+            .collect();
+        let boundaries: Vec<f64> = timed
+            .iter()
+            .flat_map(|(_, start, end)| [*start, *end])
             .collect();
         let fitted = project_non_decreasing(&boundaries);
         let adjusted_boundaries = boundaries
@@ -75,14 +90,28 @@ impl<'a> MonotoneChunkSpans<'a> {
             .filter(|(before, after)| before != after)
             .count();
         let (pairs, _) = fitted.as_chunks::<2>();
-        let chunks = raw
+        let mut projected = timed
             .iter()
             .zip(pairs)
-            .map(|(chunk, [start_s, end_s])| MonotoneChunk {
-                text: &chunk.text,
-                start_s: DurationSeconds(*start_s),
-                end_s: DurationSeconds(*end_s),
-            })
+            .map(|((index, _, _), [start_s, end_s])| (*index, *start_s, *end_s))
+            .peekable();
+        let chunks = raw
+            .iter()
+            .enumerate()
+            .map(
+                |(index, chunk)| match projected.next_if(|(timed, _, _)| *timed == index) {
+                    Some((_, start_s, end_s)) => MonotoneChunk {
+                        text: &chunk.text,
+                        start_s: Some(DurationSeconds(start_s)),
+                        end_s: Some(DurationSeconds(end_s)),
+                    },
+                    None => MonotoneChunk {
+                        text: &chunk.text,
+                        start_s: chunk.start_s.map(DurationSeconds::from),
+                        end_s: chunk.end_s.map(DurationSeconds::from),
+                    },
+                },
+            )
             .collect();
         Self {
             chunks,
@@ -126,13 +155,60 @@ mod tests {
     fn span(text: &str, start_s: f64, end_s: f64) -> WhisperChunkSpanV2 {
         WhisperChunkSpanV2 {
             text: text.into(),
-            start_s: NonNegativeSeconds::try_from(start_s).expect("test bound"),
-            end_s: NonNegativeSeconds::try_from(end_s).expect("test bound"),
+            start_s: Some(NonNegativeSeconds::try_from(start_s).expect("test bound")),
+            end_s: Some(NonNegativeSeconds::try_from(end_s).expect("test bound")),
+        }
+    }
+
+    fn untimed(text: &str) -> WhisperChunkSpanV2 {
+        WhisperChunkSpanV2 {
+            text: text.into(),
+            start_s: None,
+            end_s: None,
         }
     }
 
     fn spans_of(projected: &MonotoneChunkSpans) -> Vec<(f64, f64)> {
-        projected.iter().map(|c| (c.start_s.0, c.end_s.0)).collect()
+        projected
+            .iter()
+            .map(|c| {
+                (
+                    c.start_s.expect("timed in this test").0,
+                    c.end_s.expect("timed in this test").0,
+                )
+            })
+            .collect()
+    }
+
+    /// A chunk without both bounds is neither projected nor dropped: its
+    /// words pass through untimed, and the timed chunks around it are
+    /// projected as if it were not there.
+    #[test]
+    fn an_untimed_chunk_passes_through_and_does_not_disturb_the_projection() {
+        let raw = [
+            span("one", 0.0, 1.2),
+            untimed("two"),
+            span("three", 1.0, 2.0),
+        ];
+        let projected = MonotoneChunkSpans::project(&raw);
+        let chunks: Vec<_> = projected.iter().collect();
+        assert_eq!(chunks[1].text, "two");
+        assert_eq!((chunks[1].start_s, chunks[1].end_s), (None, None));
+        assert!((chunks[0].end_s.unwrap().0 - 1.1).abs() < 1e-9);
+        assert!((chunks[2].start_s.unwrap().0 - 1.1).abs() < 1e-9);
+        assert_eq!(projected.adjusted_boundaries(), 2);
+    }
+
+    /// The case that emptied Cantonese transcripts: one chunk, no timestamps
+    /// at all. The words survive.
+    #[test]
+    fn a_whole_transcript_without_timestamps_is_kept_untimed() {
+        let raw = [untimed("有個小朋友在戶外踢球")];
+        let projected = MonotoneChunkSpans::project(&raw);
+        let chunks: Vec<_> = projected.iter().collect();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "有個小朋友在戶外踢球");
+        assert_eq!(projected.adjusted_boundaries(), 0);
     }
 
     #[test]

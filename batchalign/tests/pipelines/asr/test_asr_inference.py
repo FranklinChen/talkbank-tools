@@ -421,7 +421,7 @@ class TestWhisperLoader:
         assert bind_calls == [pipe.model]
         assert pipe.model.eval_called is True
 
-    def test_load_whisper_asr_ignores_mps_and_applies_cantonese_overrides(
+    def test_load_whisper_asr_ignores_mps_and_keeps_the_checkpoint_generation_config(
         self,
         monkeypatch,
     ) -> None:
@@ -448,22 +448,16 @@ class TestWhisperLoader:
             device_policy=DevicePolicy(),
         )
 
-        assert handle.config.no_timestamps_token_id == 50363
-        assert handle.config.alignment_heads == [
-            [5, 3],
-            [5, 9],
-            [8, 0],
-            [8, 4],
-            [8, 8],
-            [9, 0],
-            [9, 7],
-            [9, 9],
-            [10, 5],
-        ]
+        # No per-language override of the checkpoint's generation config. The
+        # Cantonese block this test used to pin (no_timestamps_token_id 50363,
+        # nine alignment heads at layers 5 to 10) was whisper-small's, and on
+        # large-v3 it named <|nospeech|>: the model then predicted no
+        # timestamps and every Cantonese transcript arrived as one untimed
+        # chunk (measured 2026-09-22).
+        assert handle.config.no_timestamps_token_id is None
+        assert handle.config.alignment_heads is None
         # MPS excluded since 2026-04-05 (AGXG14X kernel deadlock), even with
-        # MPS available, the loader selects CPU. Cantonese config overrides
-        # (alignment_heads, no_timestamps_token_id) are language-dependent, not
-        # device-dependent, and must still be applied.
+        # MPS available, the loader selects CPU.
         assert pipeline_calls[0][1]["device"] == torch.device("cpu")
         assert pipeline_calls[0][1]["torch_dtype"] == torch.float32
 

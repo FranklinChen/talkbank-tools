@@ -130,8 +130,8 @@ pub(super) fn transcribe_impl(
         // carried into the pipeline as a time.
         chunks.push(WhisperChunkSpanV2 {
             text: trimmed.to_owned(),
-            start_s: segment_seconds(segment.start_timestamp())?,
-            end_s: segment_seconds(segment.end_timestamp())?,
+            start_s: Some(segment_seconds(segment.start_timestamp())?),
+            end_s: Some(segment_seconds(segment.end_timestamp())?),
         });
     }
 

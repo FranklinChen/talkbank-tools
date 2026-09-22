@@ -1806,16 +1806,32 @@
       ]
     },
     "WhisperChunkSpanV2": {
-      "description": "One raw Whisper chunk span as a producer emitted it.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat each bound is a finite non-negative duration, which its type proves.",
+      "description": "One raw Whisper chunk as a producer emitted it: its words, and whichever\nbounds the model reported.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat a bound, when present, is a finite non-negative duration, which its\ntype proves.\n\nA bound is absent when the model predicted no timestamp for it: the\nHuggingFace pipeline reports `(start, None)` for a chunk cut off\nmid-word, and `(None, None)` for a whole transcript when timestamps were\nsuppressed. A missing bound is an absence of TIMING, never of words, and\nthe words travel untimed exactly as a Tencent or Aliyun word with a\nmissing offset does. Between 536f29c8 and this change such a chunk was\ndropped, which emptied every Cantonese Whisper transcript.",
       "type": "object",
       "properties": {
         "end_s": {
-          "description": "End timestamp in seconds.",
-          "$ref": "#/$defs/NonNegativeSeconds"
+          "description": "End timestamp in seconds, when the model reported one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "start_s": {
-          "description": "Start timestamp in seconds.",
-          "$ref": "#/$defs/NonNegativeSeconds"
+          "description": "Start timestamp in seconds, when the model reported one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonNegativeSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text": {
           "description": "Surface text for the chunk.",
@@ -1823,9 +1839,7 @@
         }
       },
       "required": [
-        "text",
-        "start_s",
-        "end_s"
+        "text"
       ]
     },
     "WhisperTokenTimingResultV2": {

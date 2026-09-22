@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:22 EDT
+**Last updated:** 2026-09-22 19:22 EDT
 
 ## Overview
 
@@ -89,8 +89,12 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
 - Chunk length 25s with 3s stride for long files
 - Device selection: CUDA > CPU (`MPS` is intentionally excluded; see
   `developer/apple-mps-workarounds.md`)
-- Chunk timestamps: a chunk with a missing bound is dropped and reported by
-  the Python producer (an absence is not a time). Overlap at a chunk seam, or
+- Chunk timestamps: a chunk with a missing bound keeps its words and goes
+  downstream untimed on that side (the producer reports how many; an absence
+  is not a time, and it is not an absence of words either). The HuggingFace
+  pipeline returns `(start, None)` for a chunk cut off mid-word and
+  `(None, None)` for a whole transcript when the model predicted no
+  timestamps. Overlap at a chunk seam, or
   a chunk returned with its end before its start, travels as emitted, from
   this engine and from `whisper_rs` alike, and is settled once where the
   chunks are consumed: `MonotoneChunkSpans::project` in
@@ -102,9 +106,16 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
   then demotes to untimed (`ZeroLengthSpan`), so the word is placed by its
   neighbours rather than by a guess at which bound was right. The fit is
   checked against an exact isotonic-regression oracle on every short
-  sequence. Each bound is a finite non-negative time by type
-  (`NonNegativeSeconds`, refused in deserialization otherwise), from both
-  producers.
+  sequence, over the chunks that have both bounds. Each bound, when present,
+  is a finite non-negative time by type (`NonNegativeSeconds`, refused in
+  deserialization otherwise), from both producers.
+- No per-language overrides of the generation config. Until 2026-09-22 a
+  Cantonese block set `no_timestamps_token_id = 50363` and nine
+  `alignment_heads` at layers 5 to 10: whisper-small's values, inherited from
+  BA2's Cantonese fine-tune of small. On large-v3, 50363 is `<|nospeech|>`
+  (`<|notimestamps|>` is 50364), so the model predicted no timestamps for
+  Cantonese at all and every Cantonese Whisper transcript arrived as one
+  untimed chunk. The checkpoint's own generation config is used as is.
 
 ### Native Whisper (`--asr-engine whisper_rs`)
 

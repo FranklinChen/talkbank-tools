@@ -1180,21 +1180,33 @@ fn batched_text_timeout_seconds(item_count: u32) -> u64 {
     u64::from(item_count).saturating_mul(5).max(120)
 }
 
-/// One raw Whisper chunk span as a producer emitted it.
+/// One raw Whisper chunk as a producer emitted it: its words, and whichever
+/// bounds the model reported.
 ///
 /// Raw on purpose: a chunk may overlap its neighbour or arrive inverted, and
 /// neither producer (the Python worker, the in-process whisper.cpp backend)
 /// repairs that. The consumer does, once, through `MonotoneChunkSpans` in
 /// `batchalign::worker::chunk_spans`; the only invariant the wire carries is
-/// that each bound is a finite non-negative duration, which its type proves.
+/// that a bound, when present, is a finite non-negative duration, which its
+/// type proves.
+///
+/// A bound is absent when the model predicted no timestamp for it: the
+/// HuggingFace pipeline reports `(start, None)` for a chunk cut off
+/// mid-word, and `(None, None)` for a whole transcript when timestamps were
+/// suppressed. A missing bound is an absence of TIMING, never of words, and
+/// the words travel untimed exactly as a Tencent or Aliyun word with a
+/// missing offset does. Between 536f29c8 and this change such a chunk was
+/// dropped, which emptied every Cantonese Whisper transcript.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct WhisperChunkSpanV2 {
     /// Surface text for the chunk.
     pub text: String,
-    /// Start timestamp in seconds.
-    pub start_s: NonNegativeSeconds,
-    /// End timestamp in seconds.
-    pub end_s: NonNegativeSeconds,
+    /// Start timestamp in seconds, when the model reported one.
+    #[serde(default)]
+    pub start_s: Option<NonNegativeSeconds>,
+    /// End timestamp in seconds, when the model reported one.
+    #[serde(default)]
+    pub end_s: Option<NonNegativeSeconds>,
 }
 
 #[cfg(test)]
