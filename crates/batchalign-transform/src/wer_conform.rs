@@ -153,39 +153,39 @@ impl WerNormalization {
         let w = trimmed.to_lowercase();
 
         if let Some((a, b)) = COMPOUND_MAP.get(&w) {
-            result.push(a.clone());
-            result.push(b.clone());
+            push_token(result, a.clone());
+            push_token(result, b.clone());
         } else if ABBREV.contains(trimmed) {
             // Python checks abbreviations in original case
             for ch in trimmed.chars() {
-                result.push(ch.to_string());
+                push_token(result, ch.to_string());
             }
         } else if w.contains("'s") {
-            result.push(w.split('\'').next().unwrap_or("").to_string());
-            result.push("is".to_string());
+            push_token(result, w.split('\'').next().unwrap_or("").to_string());
+            push_token(result, "is".to_string());
         } else if w.contains("'ve") {
-            result.push(w.split('\'').next().unwrap_or("").to_string());
-            result.push("have".to_string());
+            push_token(result, w.split('\'').next().unwrap_or("").to_string());
+            push_token(result, "have".to_string());
         } else if w.contains("'d") {
-            result.push(w.split('\'').next().unwrap_or("").to_string());
-            result.push("had".to_string());
+            push_token(result, w.split('\'').next().unwrap_or("").to_string());
+            push_token(result, "had".to_string());
         } else if w.contains("'m") {
-            result.push(w.split('\'').next().unwrap_or("").to_string());
-            result.push("am".to_string());
+            push_token(result, w.split('\'').next().unwrap_or("").to_string());
+            push_token(result, "am".to_string());
         } else if FILLERS.contains(w.as_str()) {
-            result.push("um".to_string());
+            push_token(result, "um".to_string());
         } else if w.contains('-') {
             for part in w.split('-') {
-                result.push(part.trim().to_string());
+                push_token(result, part.trim().to_string());
             }
         } else if w == "ok" {
-            result.push("okay".to_string());
+            push_token(result, "okay".to_string());
         } else if w == "gimme" {
             result.extend(["give", "me"].map(String::from));
         } else if w == "hafta" || w == "havta" {
             result.extend(["have", "to"].map(String::from));
         } else if self == Self::English && NAMES.contains(&w) {
-            result.push("name".to_string());
+            push_token(result, "name".to_string());
         } else if w == "dunno" {
             result.extend(["don't", "know"].map(String::from));
         } else if w == "wanna" {
@@ -213,26 +213,40 @@ impl WerNormalization {
         } else if w == "farmhouse" {
             result.extend(["farm", "house"].map(String::from));
         } else if w == "mm" || w == "hmm" {
-            result.push("hm".to_string());
+            push_token(result, "hm".to_string());
         } else if w == "em" {
-            result.push("them".to_string());
+            push_token(result, "them".to_string());
         } else if w == "eh" {
-            result.push("uh".to_string());
+            push_token(result, "uh".to_string());
         } else if w == "til" {
-            result.push("until".to_string());
+            push_token(result, "until".to_string());
         } else if w == "ed" {
-            result.push("education".to_string());
+            push_token(result, "education".to_string());
         } else if matches!(w.as_str(), "mba" | "tli" | "bbc" | "ai" | "aa" | "ii") {
             for ch in w.chars() {
-                result.push(ch.to_string());
+                push_token(result, ch.to_string());
             }
         } else if w.contains('_') {
             for part in w.split('_') {
-                result.push(part.to_string());
+                push_token(result, part.to_string());
             }
         } else {
-            result.push(w);
+            push_token(result, w);
         }
+    }
+}
+
+/// Append `token` unless it is empty.
+///
+/// Every branch of `conform_word_into` appends through here. A split can
+/// leave nothing on one side of a hyphen, an apostrophe or an underscore
+/// (`-`, `'s`, `a_`), and a whitespace-only word lowercases to nothing.
+/// BA2's `_conform()` passed those empties on as tokens; here a word conforms
+/// to zero tokens rather than to an empty one, which the compare serializer
+/// refuses (`EmptyXsrepToken`) and which no alignment could ever match.
+fn push_token(result: &mut Vec<String>, token: String) {
+    if !token.is_empty() {
+        result.push(token);
     }
 }
 
@@ -242,6 +256,31 @@ mod tests {
 
     fn s(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn separator_only_words_conform_to_nothing() {
+        for word in ["-", "--", "_", " ", ""] {
+            assert!(
+                WerNormalization::English
+                    .conform_words(&s(&[word]))
+                    .is_empty(),
+                "{word:?} must conform to no token"
+            );
+        }
+        // A bare contraction keeps its expansion and loses only the empty stem.
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["'s"])),
+            s(&["is"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["a-", "-b"])),
+            s(&["a", "b"])
+        );
+        assert_eq!(
+            WerNormalization::English.conform_words(&s(&["x_"])),
+            s(&["x"])
+        );
     }
 
     #[test]
@@ -452,6 +491,22 @@ mod tests {
         ]
     }
 
+    /// Words whose separators leave nothing on one side, or nothing at all:
+    /// the shapes that used to conform to empty tokens.
+    fn separator_word_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("-".to_string()),
+            Just("--".to_string()),
+            Just("a-".to_string()),
+            Just("-a".to_string()),
+            Just("'s".to_string()),
+            Just("_".to_string()),
+            Just("a_".to_string()),
+            Just(" ".to_string()),
+            "[a-z-_']{1,6}".prop_map(|s| s),
+        ]
+    }
+
     fn word_vec(max_len: usize) -> impl Strategy<Value = Vec<String>> {
         prop::collection::vec(word_strategy(), 0..=max_len)
     }
@@ -502,6 +557,18 @@ mod tests {
         fn empty_input_empty_output(_dummy in 0..1u8) {
             let result = WerNormalization::English.conform_words(&[]);
             prop_assert!(result.is_empty());
+        }
+
+        /// A separator-only word conforms to nothing, never to an empty
+        /// token: the compare serializer refuses an empty token and no
+        /// alignment could match one. Found 2026-09-22 when a Whisper
+        /// Cantonese transcript reached compare with such a word.
+        #[test]
+        fn separators_never_yield_an_empty_token(words in prop::collection::vec(separator_word_strategy(), 0..=10)) {
+            let result = WerNormalization::English.conform_words(&words);
+            for (i, token) in result.iter().enumerate() {
+                prop_assert!(!token.is_empty(), "Empty token at index {} from input {:?}", i, words);
+            }
         }
 
         /// Each input word produces at least one output word.
