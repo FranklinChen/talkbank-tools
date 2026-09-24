@@ -5,7 +5,7 @@
 //! Four call sites used to spell out the same ffmpeg invocation by hand:
 //!
 //! ```text
-//! -y -nostdin -v error -xerror [-ss START -to END] -i SOURCE [-f f32le] -acodec pcm_{s16le,f32le} \
+//! -y -nostdin -v error [-ss START -to END] -i SOURCE [-f f32le] -acodec pcm_{s16le,f32le} \
 //!    -ar 16000 -ac 1 DESTINATION
 //! ```
 //!
@@ -52,8 +52,98 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use super::probe::{MediaProbe, ProbeError};
 use super::tools::{MediaTool, MediaToolError};
+use super::window::DecodedFrames;
 pub use super::window::{EmptyWindow, MediaWindow};
+use crate::api::DurationMs;
+
+/// How far the decoded audio may fall short of the source's declared length
+/// when ffmpeg reported decoding errors, and still be admitted.
+///
+/// A damaged packet that ffmpeg CONCEALS keeps the timeline: the decode is as
+/// long as the source. One it DROPS shortens the decode, and every later
+/// sample, so every later word timing, moves earlier by the loss. The
+/// tolerance absorbs codec priming and padding (tens of milliseconds for AAC)
+/// and nothing that could be a lost packet run; a real loss is refused.
+/// Measured on the recordings that motivated this (2026-09-24): seven MP4s
+/// with AAC "channel element is not allocated" errors, every one decoding to
+/// its container length to the millisecond.
+pub const DAMAGE_SHORTFALL_TOLERANCE_MS: u64 = 100;
+
+/// Whether a transcode decoded cleanly, or reported damage it concealed.
+///
+/// Carried on [`ProducedMedia`] so a caller that records provenance can say
+/// which it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodeIntegrity {
+    /// ffmpeg reported nothing.
+    Clean,
+    /// ffmpeg reported decoding errors, and the decode lost no audio.
+    ConcealedDamage(ConcealedDamage),
+}
+
+/// A decode that reported errors yet runs as long as its source declares,
+/// within [`DAMAGE_SHORTFALL_TOLERANCE_MS`]: the damage was concealed, not
+/// dropped.
+///
+/// The fields are private and the only constructor is [`Self::admit`], which
+/// applies the tolerance, so a value is the proof that the admission rule ran;
+/// no caller can assemble one whose lengths disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConcealedDamage {
+    diagnostics: String,
+    expected: DurationMs,
+    decoded: DurationMs,
+}
+
+/// What a damaged decode lost: the refusal [`ConcealedDamage::admit`] returns,
+/// handing ffmpeg's diagnostics back for the error that reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LostAudio {
+    diagnostics: String,
+    expected: DurationMs,
+    decoded: DurationMs,
+}
+
+impl ConcealedDamage {
+    /// The one statement of the admission rule. A decode LONGER than the
+    /// source declares is not a loss (containers under-declare); only a
+    /// shortfall beyond the tolerance is.
+    fn admit(
+        diagnostics: String,
+        expected: DurationMs,
+        decoded: DurationMs,
+    ) -> Result<Self, LostAudio> {
+        match expected.0.saturating_sub(decoded.0) <= DAMAGE_SHORTFALL_TOLERANCE_MS {
+            true => Ok(Self {
+                diagnostics,
+                expected,
+                decoded,
+            }),
+            false => Err(LostAudio {
+                diagnostics,
+                expected,
+                decoded,
+            }),
+        }
+    }
+
+    /// ffmpeg's diagnostics, verbatim.
+    pub fn diagnostics(&self) -> &str {
+        &self.diagnostics
+    }
+
+    /// The source's declared length for the requested span.
+    pub const fn expected(&self) -> DurationMs {
+        self.expected
+    }
+
+    /// What was decoded.
+    pub const fn decoded(&self) -> DurationMs {
+        self.decoded
+    }
+}
 
 /// The sample rate every ML model in this crate consumes.
 ///
@@ -129,6 +219,8 @@ pub struct ProducedMedia {
     /// the width the worker protocol's own channel count uses; a fact that
     /// travels should not change type on the way.
     channels: u16,
+    /// Whether the decode was clean or concealed reported damage.
+    integrity: DecodeIntegrity,
 }
 
 impl ProducedMedia {
@@ -145,6 +237,11 @@ impl ProducedMedia {
     /// Channel count requested by the checked conversion.
     pub const fn channels(&self) -> u16 {
         self.channels
+    }
+
+    /// Whether the decode was clean or concealed reported damage.
+    pub const fn integrity(&self) -> &DecodeIntegrity {
+        &self.integrity
     }
 }
 
@@ -185,6 +282,35 @@ pub enum TranscodeError {
         input: String,
         /// What the operating system said.
         source: std::io::Error,
+    },
+    /// ffmpeg reported decoding errors AND the decode lost audio: the output
+    /// is shorter than the source declares by more than
+    /// [`DAMAGE_SHORTFALL_TOLERANCE_MS`], so every later timing would shift.
+    #[error(
+        "ffmpeg reported decoding errors on {input} and the decode lost audio: \
+         {decoded_ms} ms decoded of {expected_ms} ms expected (tolerance \
+         {DAMAGE_SHORTFALL_TOLERANCE_MS} ms): {stderr}"
+    )]
+    DamagedAudioLost {
+        /// The media it was asked to read.
+        input: String,
+        /// The source's declared length for the requested span, in ms.
+        expected_ms: u64,
+        /// What was decoded, in ms.
+        decoded_ms: u64,
+        /// What ffmpeg said.
+        stderr: String,
+    },
+    /// ffmpeg reported decoding errors and the lengths needed to admit the
+    /// decode could not be measured, so it is refused rather than trusted.
+    #[error(
+        "ffmpeg reported decoding errors on {input} and the decode could not be measured: {source}"
+    )]
+    DamageUnmeasured {
+        /// The media it was asked to read.
+        input: String,
+        /// Why the length could not be read.
+        source: ProbeError,
     },
     /// The transcode succeeded but its output could not be inspected.
     #[error("could not inspect output transcoded from {input}: {source}")]
@@ -235,32 +361,107 @@ impl Transcode {
                     },
                 })?;
 
-        // ffmpeg may otherwise return zero after dropping damaged packets.
-        // `-v error` makes any stderr diagnostic incompatible with admission;
-        // `-xerror` also stops decoding at the first error.
-        if !output.status.success() || !output.stderr.is_empty() {
-            // The one statement of this cleanup. Four call sites each had their
-            // own, and a fifth would have had to remember.
-            let _ = std::fs::remove_file(destination);
+        if !output.status.success() {
+            discard_partial(destination);
             return Err(TranscodeError::Failed {
                 input,
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
 
-        let byte_len = std::fs::metadata(destination)
-            .map_err(|source| TranscodeError::Inspect { input, source })?
-            .len();
+        let byte_len = match std::fs::metadata(destination) {
+            Ok(metadata) => metadata.len(),
+            Err(source) => return Err(TranscodeError::Inspect { input, source }),
+        };
+
+        // `-v error` makes any decoder diagnostic visible on stderr. A clean
+        // decode says nothing; one that said something is admitted only when
+        // it lost no audio, and then with a warning.
+        let integrity = match output.stderr.is_empty() {
+            true => DecodeIntegrity::Clean,
+            false => {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                match self.admit_damaged(destination, byte_len, &input, stderr) {
+                    Ok(concealed) => DecodeIntegrity::ConcealedDamage(concealed),
+                    Err(error) => {
+                        discard_partial(destination);
+                        return Err(error);
+                    }
+                }
+            }
+        };
+
         Ok(ProducedMedia {
             byte_len,
             sample_rate_hz: MODEL_SAMPLE_RATE_HZ,
             channels: MODEL_CHANNELS,
+            integrity,
         })
+    }
+
+    /// Admit a decode that reported errors, or refuse it: measure the
+    /// source's declared length for the requested span against what was
+    /// decoded, and let [`ConcealedDamage::admit`] rule. Asked only after
+    /// ffmpeg reported errors, so a clean decode pays for no probe.
+    fn admit_damaged(
+        &self,
+        destination: &Path,
+        byte_len: u64,
+        input: &str,
+        stderr: String,
+    ) -> Result<ConcealedDamage, TranscodeError> {
+        let unmeasured = |source| TranscodeError::DamageUnmeasured {
+            input: input.to_owned(),
+            source,
+        };
+        let source = MediaProbe::new(&self.source)
+            .duration_blocking()
+            .map_err(unmeasured)?;
+        let expected = DurationMs(match self.window {
+            // A window reaching past the source's end can only decode what the
+            // source holds, so the expectation is clipped to it.
+            Some(window) => source
+                .0
+                .min(window.end().get())
+                .saturating_sub(window.start().get()),
+            None => source.0,
+        });
+        let decoded = match self.encoding {
+            // Raw float PCM: the length follows from the frame count.
+            PcmEncoding::F32LeRaw => DurationMs(match DecodedFrames::measure_f32le(byte_len) {
+                DecodedFrames::Frames(frames) => {
+                    frames.get() * 1000 / u64::from(MODEL_SAMPLE_RATE_HZ)
+                }
+                DecodedFrames::None(_) => 0,
+            }),
+            // A WAV's header size varies, so its length is read, not computed.
+            PcmEncoding::S16LeWav => MediaProbe::new(destination)
+                .duration_blocking()
+                .map_err(unmeasured)?,
+        };
+        match ConcealedDamage::admit(stderr, expected, decoded) {
+            Ok(concealed) => {
+                tracing::warn!(
+                    input,
+                    expected_ms = expected.0,
+                    decoded_ms = decoded.0,
+                    diagnostics = %concealed.diagnostics().trim(),
+                    "decoded with errors that lost no audio; admitted"
+                );
+                Ok(concealed)
+            }
+            Err(lost) => Err(TranscodeError::DamagedAudioLost {
+                input: input.to_owned(),
+                expected_ms: lost.expected.0,
+                decoded_ms: lost.decoded.0,
+                stderr: lost.diagnostics,
+            }),
+        }
     }
 
     /// The full argv, which exists in exactly this one place.
     fn args(&self, destination: &Path) -> Vec<OsString> {
-        let mut args: Vec<OsString> = ["-y", "-nostdin", "-v", "error", "-xerror"]
+        let mut args: Vec<OsString> = ["-y", "-nostdin", "-v", "error"]
             .into_iter()
             .map(OsString::from)
             .collect();
@@ -286,15 +487,22 @@ impl Transcode {
     }
 }
 
+/// Remove a partial output after a refusal: the one statement of this cleanup
+/// for every refusal path in [`Transcode::produce`].
+fn discard_partial(destination: &Path) {
+    let _ = std::fs::remove_file(destination);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::time::FileMs;
 
-    /// A truncated PCM sample is a real decoder error that ffmpeg ordinarily
-    /// tolerates with exit zero and almost all of the audio still emitted.
+    /// A truncated PCM sample is a real decoder error that ffmpeg tolerates
+    /// with exit zero and all but one sample still emitted: the damage lost
+    /// no audio, so the decode is admitted, its diagnostics kept.
     #[test]
-    fn decoder_errors_refuse_partial_audio_and_remove_output() {
+    fn decoder_errors_that_lose_no_audio_are_admitted_with_their_diagnostics() {
         assert!(MediaTool::Ffmpeg.banner().is_some(), "test requires ffmpeg");
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("truncated.wav");
@@ -326,11 +534,55 @@ mod tests {
         assert!(!permissive.stdout.is_empty());
         assert!(!permissive.stderr.is_empty());
 
-        let error = Transcode::whole(&source, PcmEncoding::S16LeWav)
+        let produced = Transcode::whole(&source, PcmEncoding::S16LeWav)
             .produce(&destination)
-            .expect_err("a successful process exit cannot admit decoder errors");
-        assert!(matches!(error, TranscodeError::Failed { .. }));
-        assert!(!destination.exists(), "partial output must be removed");
+            .expect("damage that lost no audio is admitted");
+        match produced.integrity() {
+            DecodeIntegrity::ConcealedDamage(concealed) => {
+                assert!(
+                    !concealed.diagnostics().is_empty(),
+                    "ffmpeg's report is kept"
+                );
+                assert!(
+                    concealed.expected().0.saturating_sub(concealed.decoded().0)
+                        <= DAMAGE_SHORTFALL_TOLERANCE_MS
+                );
+            }
+            DecodeIntegrity::Clean => panic!("the decoder reported an error; it was not clean"),
+        }
+        assert!(destination.exists());
+    }
+
+    /// The admission rule itself: a shortfall up to the tolerance is concealed
+    /// damage, one past it is lost audio, and a decode longer than the
+    /// container declares is never a loss.
+    #[test]
+    fn damage_is_admitted_only_when_no_audio_was_lost() {
+        let admit = |expected: u64, decoded: u64| {
+            ConcealedDamage::admit(
+                "damaged packet".into(),
+                DurationMs(expected),
+                DurationMs(decoded),
+            )
+            .is_ok()
+        };
+        assert!(admit(785_110, 785_110));
+        assert!(admit(785_110, 785_110 - DAMAGE_SHORTFALL_TOLERANCE_MS));
+        assert!(!admit(785_110, 785_110 - DAMAGE_SHORTFALL_TOLERANCE_MS - 1));
+        assert!(
+            admit(1_000, 1_050),
+            "a decode longer than declared is not a loss"
+        );
+        let lost = ConcealedDamage::admit(
+            "damaged packet".into(),
+            DurationMs(2_000),
+            DurationMs(1_000),
+        )
+        .expect_err("a second of audio was lost");
+        assert_eq!(
+            lost.diagnostics, "damaged packet",
+            "the refusal keeps ffmpeg's report"
+        );
     }
 
     fn ms(value: u64) -> FileMs {
@@ -354,7 +606,7 @@ mod tests {
     /// has: it is what reaches `execvp`, and no type can describe what ffmpeg
     /// will accept.
     #[test]
-    fn a_whole_file_wav_transcode_requires_strict_decoding() {
+    fn a_whole_file_wav_transcode_reports_decoder_errors_without_stopping() {
         let args = Transcode::whole("/in.mp4", PcmEncoding::S16LeWav).args(Path::new("/out.wav"));
         let rendered: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
         assert_eq!(
@@ -364,7 +616,6 @@ mod tests {
                 "-nostdin",
                 "-v",
                 "error",
-                "-xerror",
                 "-i",
                 "/in.mp4",
                 "-acodec",
@@ -393,7 +644,6 @@ mod tests {
                 "-nostdin",
                 "-v",
                 "error",
-                "-xerror",
                 "-ss",
                 "1.500",
                 "-to",

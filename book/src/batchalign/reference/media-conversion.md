@@ -128,9 +128,9 @@ Implements content-fingerprinted WAV conversion with file-locking and atomic wri
    is important for parallel FA processing where multiple groups reference
    the same audio.
 6. **Re-check**: another task may have completed conversion while we waited.
-7. **Convert**: `ffmpeg -y -nostdin -v error -xerror -i source -acodec pcm_s16le -ar 16000 -ac 1 tmp.wav`.
+7. **Convert**: `ffmpeg -y -nostdin -v error -i source -acodec pcm_s16le -ar 16000 -ac 1 tmp.wav`.
    The locked slot becomes a produced slot only after its own temporary path
-   passes strict conversion.
+   passes conversion admission (see Error Handling).
 8. **Atomic rename**: publish the produced slot while retaining its lock;
    release the lock only after the rename succeeds.
 
@@ -140,8 +140,7 @@ Implements content-fingerprinted WAV conversion with file-locking and atomic wri
 |------|---------|
 | `-y` | Overwrite output without asking |
 | `-nostdin` | Prevent an unattended conversion from consuming terminal input |
-| `-v error` | Emit error diagnostics, which prevent output admission |
-| `-xerror` | Stop decoding at the first error |
+| `-v error` | Emit error diagnostics, which trigger the damage check |
 | `-i source` | Input file (mp4, m4a, etc.) |
 | `-acodec pcm_s16le` | 16-bit signed PCM (what soundfile reads natively) |
 | `-ar 16000` | 16 kHz sample rate (FA/ASR model input rate) |
@@ -175,12 +174,25 @@ resolution and **before** the audio path is passed to Python workers:
 
 ### Error Handling
 
-Whole-file and segment conversions use strict ffmpeg decoding (`-xerror`),
-with error-level diagnostics. A zero exit status accompanied by decoding
-errors is also rejected. Partial output is removed before returning the
-conversion error; it cannot be published as a successful new conversion.
-The strict conversion recipe uses a new cache namespace, preserving old
-entries without accepting them as strict-recipe hits. This does not certify
+Whole-file and segment conversions report decoding errors at error level
+and decode through them. A decode that reported nothing is clean. A decode
+that reported errors is admitted only when it lost no audio: the source's
+declared length for the requested span (probed with `ffprobe`, clipped to
+the source's end for a window) and the decoded length must agree within
+`DAMAGE_SHORTFALL_TOLERANCE_MS` (100 ms). Such a decode is admitted as
+`DecodeIntegrity::ConcealedDamage`, carrying ffmpeg's diagnostics and both
+lengths, and logged as a warning. A shortfall beyond the tolerance
+(`DamagedAudioLost`) means ffmpeg dropped audio, which would shift every
+later timing, so it is refused; so is a damaged decode whose lengths cannot
+be measured (`DamageUnmeasured`). A refused conversion's partial output is
+removed; it cannot be published.
+
+Until 2026-09-24 conversions ran with `-xerror` and refused any diagnostic,
+which refused recordings whose damaged AAC packets are concealed without
+losing a sample. A clean decode's bytes are identical with or without
+`-xerror`, so the `strict-v3` cache namespace is unchanged and its entries
+stay valid. A concealed-damage conversion is warned about when it is made;
+a later cache hit of it does not repeat the warning. This does not certify
 preexisting cache bytes or media formats passed through without conversion.
 
 If conversion fails, the file is marked with a clear error:

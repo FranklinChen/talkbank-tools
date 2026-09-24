@@ -70,27 +70,47 @@ impl MediaProbe {
 
     /// How long the audio runs.
     pub async fn duration(&self) -> Result<DurationMs, ProbeError> {
+        let output = MediaTool::Ffprobe.run_async(self.duration_args()).await;
+        self.read_duration(output)
+    }
+
+    /// How long the audio runs, for a caller already on a blocking thread
+    /// (a transcode checking what a damaged decode produced). The same
+    /// question and the same reading of the answer as [`Self::duration`];
+    /// only the spawn differs.
+    pub fn duration_blocking(&self) -> Result<DurationMs, ProbeError> {
+        let output = MediaTool::Ffprobe.run(self.duration_args());
+        self.read_duration(output)
+    }
+
+    /// The one statement of the duration question.
+    fn duration_args(&self) -> [&std::ffi::OsStr; 7] {
+        [
+            "-v".as_ref(),
+            "quiet".as_ref(),
+            "-show_entries".as_ref(),
+            "format=duration".as_ref(),
+            "-of".as_ref(),
+            "default=noprint_wrappers=1:nokey=1".as_ref(),
+            self.source.as_os_str(),
+        ]
+    }
+
+    /// The one reading of ffprobe's answer, for both spawns.
+    fn read_duration(
+        &self,
+        output: Result<std::process::Output, MediaToolError>,
+    ) -> Result<DurationMs, ProbeError> {
         let input = self.source.display().to_string();
-        let output = MediaTool::Ffprobe
-            .run_async([
-                "-v".as_ref(),
-                "quiet".as_ref(),
-                "-show_entries".as_ref(),
-                "format=duration".as_ref(),
-                "-of".as_ref(),
-                "default=noprint_wrappers=1:nokey=1".as_ref(),
-                self.source.as_os_str(),
-            ])
-            .await
-            .map_err(|error| match error {
-                MediaToolError::NotInstalled(_) => ProbeError::FfprobeMissing {
-                    input: input.clone(),
-                },
-                MediaToolError::Spawn { source, .. } => ProbeError::Spawn {
-                    input: input.clone(),
-                    source,
-                },
-            })?;
+        let output = output.map_err(|error| match error {
+            MediaToolError::NotInstalled(_) => ProbeError::FfprobeMissing {
+                input: input.clone(),
+            },
+            MediaToolError::Spawn { source, .. } => ProbeError::Spawn {
+                input: input.clone(),
+                source,
+            },
+        })?;
 
         if !output.status.success() {
             return Err(ProbeError::Refused { input });
