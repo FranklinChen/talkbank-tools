@@ -222,10 +222,11 @@ vocabulary coverage 98-100% across MOST, LeeWongLeung, CHCC, EACMC, HKU
 ## Number Expansion
 
 Cantonese uses **traditional** Chinese number characters: `5` → `五`,
-`42` → `四十二`, `10000` → `一萬` (not `一万`). Implemented via
-`num2chinese(n, ChineseScript::Traditional)` in Rust. Runs as Stage 4 of
-ASR post-processing, after the text-normalization stage (2d), so the numerals
-it writes are already in their final form.
+`42` → `四十二`, `10000` → `一萬` (not `一万`). Expansion is chatter's:
+`talkbank_transform::num_words::expand_number` selects traditional-script
+CJK numerals for `yue`. Runs as Stage 4 of ASR post-processing, after the
+text-normalization stage (2d), so the numerals it writes are already in
+their final form.
 
 See [Number Expansion](../number-expansion.md) for the full language
 table.

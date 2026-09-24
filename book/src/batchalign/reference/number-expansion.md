@@ -41,16 +41,18 @@ expanded text.
 
 ## Coverage
 
-The number-expansion table at
-`crates/batchalign-transform/data/num2lang.json` covers the long tail
-of European, Indic, East Asian, and Semitic languages, the active
-list is the JSON file itself; treat it as the canonical source. Most
-entries are codegenned from the Python `num2words` library at build
-time; a handful are hand-curated where `num2words` is missing the
-language or has known defects (Malayalam `mal`, Greek `ell`, Basque
-`eus`, Croatian `hrv`).
+The number-expansion table lives in chatter, at
+`crates/talkbank-transform/data/num2lang.json` in the chatter
+repository, and covers the long tail of European, Indic, East Asian,
+and Semitic languages; the active list is the JSON file itself, treat
+it as the canonical source. Most entries were originally codegenned
+from the Python `num2words` library; a handful are hand-curated where
+`num2words` is missing the language or has known defects (Malayalam
+`mal`, Greek `ell`, Basque `eus`, Croatian `hrv`). Batchalign adopts
+table changes by bumping the pinned chatter release; see
+[Architecture → Number Expansion](../architecture/number-expansion.md).
 
-CJK languages route through the dedicated `num2chinese` converter
+CJK numerals are also chatter's, built into the same generator
 (Mandarin → simplified, Cantonese / Japanese → traditional).
 
 Languages whose CHAT validator already accepts inline digits need no

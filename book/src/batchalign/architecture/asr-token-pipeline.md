@@ -44,7 +44,7 @@ flowchart TD
     EnTitlePeriod["strip_english_title_periods_on_elements()\n⚠ English transcribe rule\n(must precede Stage 3 split)"]
     Pre["prepare_words_pre_expansion()\nStages 1-3b, including\nCantonese normalization (2d)"]
     AW_pre["Vec&lt;AsrWord&gt;\n(digits still raw,\n% tokens already split)"]
-    Expand["expand_number()\nper-word Rust pass\n(NUM2LANG / num2chinese /\ncurrency / ordinal_year_eng)"]
+    Expand["expand_number()\nper-word Rust pass\n(chatter num_words: tables/CJK/\ncurrency/ordinals; Batchalign: por ordinals)"]
     Split["split_words_with_whitespace()\npost-expansion re-split"]
     AW["AsrWord\n&bull; text: AsrNormalizedText\n&bull; start_ms/end_ms: Option i64\n&bull; kind: WordKind"]
     Fin["finalize_words_to_chunks()\nStages 5-5b"]
@@ -287,7 +287,7 @@ count.
 | 2d | **Cantonese normalization** (lang=yue only) | `prepare_words_pre_expansion()` | The monologue's words are normalized as ONE run through `AlignedNormalization` (simplified → traditional plus the 31-entry domain table), and each word gets back exactly its own characters. It runs before stage 3 because that stage interpolates timestamps across a token's characters and must see final text, and because normalizing afterwards would normalize one character at a time and lose every multi-character replacement. A conversion that changed the character count refuses the file (`NormalizationChangedLength`, carrying both counts) rather than re-cutting words away from their timings. |
 | 3 | Multi-word splitting | `prepare_words_pre_expansion()` | Space-containing tokens split, timestamps interpolated, hyphens joined |
 | 3b | **Percent-suffix split** | `split_percent_suffix_words()` | `"80%"` → `"80"` + per-language percent word ("percent" for eng, 11 languages covered) with proportional timing. `%` is the CHAT dep-tier sigil and structurally illegal on the main tier in any language. Dormant for single-language en/es (see below); fires for languages where Rev.AI applies ITN. For code-switched text (`AsrTextLanguage::CodeSwitched`) the digit group is kept and `%` dropped, because no language is known to write the percent word in. |
-| 4 | **Number expansion** | `expand_number()` per word | Single Rust pass: cardinals via per-language `NUM2LANG` (47 langs); CJK via `num2chinese`; English ordinals/decades via `ordinal_year_eng`; currency via `try_expand_currency`; percent via per-lang table; dash-ranges split and recurse; digit-leading hyphen compounds (`"17-year-old"` → `"seventeen-year-old"` in digit-rejecting languages) via `try_expand_digit_leading_hyphen`. **Skipped for code-switched text**: nothing says which language a numeral was spoken in, so digits stay digits and are reported for review rather than written out as words the speaker may not have said. |
+| 4 | **Number expansion** | `expand_number()` per word | Single Rust pass: Batchalign's Portuguese indicator-ordinal check (`ordinal_por`) runs first; everything else routes to chatter's `talkbank_transform::num_words::expand_number`, which owns per-language cardinal tables, CJK numerals, English ordinals/decades, currency and digit-leading hyphen compounds (`"17-year-old"` → `"seventeen-year-old"` in digit-rejecting languages), plus dash-ranges (split and recurse). The per-language percent word stays Batchalign's (`language_percent_word`). **Skipped for code-switched text**: nothing says which language a numeral was spoken in, so digits stay digits and are reported for review rather than written out as words the speaker may not have said. |
 | 4.5 | **Post-expansion re-split** | `split_words_with_whitespace()` | Expansion can produce multi-word text (`"100"` → `"one hundred"`, `"$80"` → `"eighty dollars"`). A `ChatWordText` holds one main-tier token, so whitespace-bearing entries are split into separate `AsrWord`s with proportionally distributed timing. |
 
 ### Rev.AI and the stage-3b/4/4.5 defense-in-depth
@@ -589,7 +589,7 @@ These types are documented in
 | Pipeline orchestrator | `crates/batchalign-transform/src/asr_postprocess/mod.rs` |
 | Compound merging | `crates/batchalign-transform/src/asr_postprocess/compounds.rs` |
 | Disfluency and retrace | `crates/batchalign-transform/src/asr_postprocess/cleanup.rs` |
-| Number expansion | `crates/batchalign-transform/src/asr_postprocess/num2text.rs` |
+| Number expansion | `crates/batchalign-transform/src/asr_postprocess/num2text.rs` (Portuguese ordinals; delegates the rest to chatter's `talkbank_transform::num_words`) |
 | Cantonese normalization | `crates/batchalign-transform/src/asr_postprocess/cantonese.rs` |
 | FunASR unit admission | `crates/batchalign-pyo3/src/cantonese_asr_bridge/funasr_projection.rs` |
 | CHAT assembly | `crates/batchalign-transform/src/build_chat/` (directory) |

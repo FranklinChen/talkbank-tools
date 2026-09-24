@@ -99,7 +99,7 @@ ASR preprocessing is the most complex because raw ASR output needs extensive nor
 | 2. Timed word extraction | `mod.rs` | Convert seconds → milliseconds, extract ASR tokens, strip MOR_PUNCT, lowercase |
 | 2d. Cantonese normalization | `cantonese.rs` | Simplified → traditional + domain replacements (31 entries, Aho-Corasick), applied once to the whole monologue through `AlignedNormalization`, which proves the character count did not change |
 | 3. Multi-word splitting | `mod.rs` | Split space-separated tokens with timestamp interpolation |
-| 4. **Number expansion** | `num2text.rs` + `ordinal_year_eng.rs` | Single Rust per-word pass: cardinals via per-language `NUM2LANG` (47 langs), CJK via `num2chinese`, currency via `try_expand_currency`, English ordinals/years/decades via `ordinal_year_eng`. No Python `num2words` IPC. See [Number Expansion](../reference/number-expansion.md). |
+| 4. **Number expansion** | `num2text.rs` (Batchalign) + chatter's `talkbank_transform::num_words` | Single Rust per-word pass: Batchalign's Portuguese ordinal check runs first; chatter's generator owns per-language cardinal tables (47 langs), CJK numerals, currency, and English ordinals/years/decades. No Python `num2words` IPC. See [Number Expansion](../reference/number-expansion.md). |
 | 5. Long turn splitting | `mod.rs` | Break turns > 300 words into separate utterances |
 | 5b. Pause-based splitting | `mod.rs` | Long pauses in unpunctuated runs create utterance boundaries |
 | 6. Retokenization | `mod.rs` | Split into utterances by punctuation boundaries |

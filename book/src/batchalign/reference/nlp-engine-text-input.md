@@ -76,8 +76,10 @@ through a multi-stage Rust pipeline before becoming CHAT:
 2. Cantonese normalization (simplified to traditional + domain replacements,
    `lang=yue` only), once per monologue, before any splitting
 3. Multi-word splitting (space-separated tokens get timestamp interpolation)
-4. Number expansion via `crates/batchalign-transform/data/num2lang.json`
-   (46 languages today) plus `num2chinese.rs` for CJK
+4. Number expansion via chatter's `talkbank_transform::num_words`
+   (cardinal tables plus CJK numerals); Batchalign's `num2text.rs`
+   adds only Portuguese indicator ordinals in front of it. See
+   [Number Expansion](../architecture/number-expansion.md).
 5. Long turn splitting (>300 words)
 6. Retokenization (split into utterances by punctuation)
 7. Disfluency replacement (`um` -> `&-um`, `'cause` -> `(be)cause`)

@@ -418,8 +418,9 @@ InferenceTask =
 ```
 
 > **Removed 2026-04-26: `ExpandNumbers`.** Number expansion was migrated
-> entirely into Rust (`asr_postprocess::expand_number` +
-> `ordinal_year_eng`); the IPC types `ExpandNumbersRequestV2`,
+> entirely into Rust (`asr_postprocess::expand_number`, then
+> Batchalign's own `ordinal_year_eng` composer, since superseded by
+> chatter's generator); the IPC types `ExpandNumbersRequestV2`,
 > `ExpandNumbersResultV2`, `NumberExpansionModeV2`, and the
 > `InferenceTaskV2::ExpandNumbers` enum variant no longer exist.
 > See [Number Expansion](../architecture/number-expansion.md).

@@ -106,10 +106,13 @@ contractions (preposition + article combinations like בַּ → ב + ה).
 
 ## Number Expansion
 
-Hebrew does not have a dedicated number expansion table in `num2lang.json`.
-Digit strings in Hebrew ASR output pass through unexpanded. This is a known
-gap, Hebrew numbers in CHAT output will appear as digits rather than
-Hebrew word forms (אחת, שתיים, שלוש, etc.).
+Hebrew has no cardinal table in chatter's `num2lang.json`
+(`crates/talkbank-transform/data/num2lang.json` in the chatter
+repository). Digit strings in Hebrew ASR output pass through
+unexpanded. This is a known gap, Hebrew numbers in CHAT output will
+appear as digits rather than Hebrew word forms (אחת, שתיים, שלוש,
+etc.). See [Number Expansion](../architecture/number-expansion.md)
+for the full per-language coverage matrix.
 
 ## No Other Language-Specific Workarounds
 

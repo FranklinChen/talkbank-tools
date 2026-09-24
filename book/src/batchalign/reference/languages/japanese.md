@@ -13,7 +13,7 @@ what doesn't, and what's planned.
 |---------------|---------------------------|
 | ASR | Whisper (default), no Japanese-specific alternatives |
 | Text normalization | None, Japanese characters passed through as-is |
-| Number expansion | Chinese number system (`num2chinese` with simplified script) |
+| Number expansion | Chinese number system (chatter's traditional-script CJK numerals) |
 | Retokenize | Stanza `combined` package merges/splits CJK tokens |
 | Morphosyntax | Stanza `ja` with forced `combined` package for all processors |
 | MWT | Excluded, Japanese has no contractions |

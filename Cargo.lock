@@ -464,7 +464,7 @@ dependencies = [
  "talkbank-parser",
  "talkbank-parser-tests",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -504,7 +504,7 @@ dependencies = [
 name = "batchalign-fa-core"
 version = "0.1.0"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -517,7 +517,7 @@ dependencies = [
  "pyo3",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing-subscriber",
 ]
 
@@ -541,7 +541,7 @@ dependencies = [
  "talkbank-parser",
  "talkbank-transform",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
  "whatlang",
@@ -556,7 +556,7 @@ dependencies = [
  "serde_json",
  "static_assertions",
  "sysinfo 0.39.6",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "utoipa",
 ]
 
@@ -908,7 +908,7 @@ dependencies = [
  "rand_distr",
  "rayon",
  "safetensors",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokenizers 0.22.2",
  "yoke",
  "zerocopy",
@@ -928,7 +928,7 @@ dependencies = [
  "rayon",
  "safetensors",
  "serde",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -970,7 +970,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1805,7 +1805,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2337,7 +2337,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3250,7 +3250,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-retry",
  "tokio-util",
@@ -3272,7 +3272,7 @@ dependencies = [
  "more-asserts",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tokio_with_wasm",
@@ -3913,7 +3913,7 @@ dependencies = [
  "jni-sys 0.4.1",
  "log",
  "simd_cesu8",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "walkdir",
  "windows-link 0.2.1",
 ]
@@ -4004,9 +4004,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.55.1"
+version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b68339c3d874e48151d74ffe256d93a58cffa240983cb0967d3cbaea083a44fe"
+checksum = "71160ed5f6dbe36a2d6be79f4ca03ee09a99d2866f340faed49458913449aefa"
 dependencies = [
  "ahash",
  "bytecount",
@@ -4032,18 +4032,18 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.55.1"
+version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6307b5b51216ec9b941b52244c74043fa0b1d6b657b56199f57cb1416d3641c5"
+checksum = "48d2120d8466ffcdc1b3be4b88ff0e9191bf5b6b09b1b1af1eef9aff8f465ea3"
 dependencies = [
  "regex-syntax 0.8.11",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.55.1"
+version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0230ac05e09c6111e96c147b75c390579f5cbd45654b980c68ac60fe17b3f129"
+checksum = "3fbfa40a42415369d940b3848f3ce08099f1f1ac04d73e8580f4d652617c4f44"
 dependencies = [
  "ahash",
  "bytecount",
@@ -4063,7 +4063,7 @@ checksum = "bde5057d6143cc94e861d90f591b9303d6716c6b9602309150bd068853c10899"
 dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4539,7 +4539,7 @@ dependencies = [
  "once_cell",
  "png 0.18.1",
  "serde",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
 
@@ -5162,7 +5162,7 @@ dependencies = [
  "futures-sink",
  "js-sys",
  "pin-project-lite",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -5192,7 +5192,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prost",
  "reqwest",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5219,7 +5219,7 @@ dependencies = [
  "percent-encoding",
  "portable-atomic",
  "rand 0.9.5",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
 ]
@@ -6010,7 +6010,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "web-time",
@@ -6033,7 +6033,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "web-time",
@@ -6205,7 +6205,7 @@ dependencies = [
  "palette",
  "serde",
  "strum",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.2",
@@ -6378,7 +6378,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6403,9 +6403,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.55.1"
+version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a196a5b4a8a12f46b6353174df865a05d41a6055aff212ec30877492788618b6"
+checksum = "b06f6798be4fed305e74df8b1fb90cf59c6b8cc17aa3febeb1830c0c6b627b3e"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -6541,7 +6541,7 @@ dependencies = [
  "async-trait",
  "http",
  "reqwest",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tower-service",
 ]
 
@@ -7527,7 +7527,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallvec",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -7568,7 +7568,7 @@ dependencies = [
  "sqlx-postgres",
  "sqlx-sqlite",
  "syn 2.0.119",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "url",
 ]
@@ -7595,7 +7595,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "sqlx-core",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -7629,7 +7629,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "stringprep",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
  "whoami",
 ]
@@ -7653,7 +7653,7 @@ dependencies = [
  "percent-encoding",
  "serde",
  "sqlx-core",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
  "url",
 ]
@@ -8005,7 +8005,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "walkdir",
  "yaml-rust",
 ]
@@ -8095,13 +8095,13 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "talkbank-build"
-version = "0.25.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+version = "0.26.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 
 [[package]]
 name = "talkbank-derive"
-version = "0.25.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+version = "0.26.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8110,8 +8110,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-model"
-version = "0.25.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+version = "0.26.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "dashmap",
  "indexmap 2.14.2",
@@ -8127,21 +8127,22 @@ dependencies = [
  "talkbank-build",
  "talkbank-derive",
  "text-size",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
 name = "talkbank-parser"
-version = "0.25.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+version = "0.26.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "indexmap 2.14.2",
  "smallvec",
  "smol_str",
  "talkbank-build",
  "talkbank-model",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
  "tree-sitter",
  "tree-sitter-talkbank",
@@ -8149,8 +8150,8 @@ dependencies = [
 
 [[package]]
 name = "talkbank-parser-re2c"
-version = "0.25.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+version = "0.26.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "chumsky",
  "indexmap 2.14.2",
@@ -8161,27 +8162,29 @@ dependencies = [
  "syn 3.0.6",
  "talkbank-build",
  "talkbank-model",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
 [[package]]
 name = "talkbank-parser-tests"
-version = "0.25.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+version = "0.26.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "clap",
  "comrak",
  "insta",
+ "proc-macro2",
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "shellexpand",
  "syn 3.0.6",
  "talkbank-model",
  "talkbank-parser",
  "talkbank-spec-vocabulary",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "tree-sitter",
  "tree-sitter-talkbank",
@@ -8191,19 +8194,19 @@ dependencies = [
 [[package]]
 name = "talkbank-spec-vocabulary"
 version = "0.0.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "serde",
  "talkbank-model",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "walkdir",
 ]
 
 [[package]]
 name = "talkbank-transform"
-version = "0.25.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+version = "0.26.0"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "chrono",
  "jsonschema",
@@ -8216,9 +8219,10 @@ dependencies = [
  "talkbank-model",
  "talkbank-parser",
  "talkbank-parser-re2c",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -8325,7 +8329,7 @@ dependencies = [
  "tauri-runtime",
  "tauri-runtime-wry",
  "tauri-utils",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tray-icon",
  "url",
@@ -8376,7 +8380,7 @@ dependencies = [
  "sha2 0.10.9",
  "syn 2.0.119",
  "tauri-utils",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "time",
  "url",
  "uuid",
@@ -8427,7 +8431,7 @@ dependencies = [
  "tauri",
  "tauri-plugin",
  "tauri-plugin-fs",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "url",
 ]
 
@@ -8450,7 +8454,7 @@ dependencies = [
  "tauri",
  "tauri-plugin",
  "tauri-utils",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "url",
 ]
@@ -8472,7 +8476,7 @@ dependencies = [
  "shared_child",
  "tauri",
  "tauri-plugin",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
@@ -8494,7 +8498,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tauri-utils",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "url",
  "webkit2gtk",
  "webview2-com",
@@ -8557,7 +8561,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "swift-rs",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "url",
  "urlpattern",
@@ -8729,11 +8733,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.20",
+ "thiserror-impl 2.0.21",
 ]
 
 [[package]]
@@ -8749,9 +8753,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8843,7 +8847,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spm_precompiled",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "unicode-normalization-alignments",
  "unicode-segmentation",
  "unicode_categories",
@@ -8876,7 +8880,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spm_precompiled",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "unicode-normalization-alignments",
  "unicode-segmentation",
  "unicode_categories",
@@ -9251,7 +9255,7 @@ checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
  "symlink",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "time",
  "tracing-subscriber",
 ]
@@ -9363,7 +9367,7 @@ dependencies = [
  "once_cell",
  "png 0.18.1",
  "serde",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
 
@@ -9389,7 +9393,7 @@ checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 [[package]]
 name = "tree-sitter-talkbank"
 version = "0.1.0"
-source = "git+https://github.com/TalkBank/chatter?tag=v0.25.0#bb4bef82d43412536f48341e2c33c6c685ee3017"
+source = "git+https://github.com/TalkBank/chatter?tag=v0.26.0#d18b54ad37c356f35f562315f48af16bbbe30dce"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -9414,7 +9418,7 @@ dependencies = [
  "log",
  "rand 0.9.5",
  "sha1 0.10.7",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -10028,7 +10032,7 @@ version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "windows 0.61.3",
  "windows-core 0.61.2",
 ]
@@ -10735,7 +10739,7 @@ dependencies = [
  "sha2 0.10.9",
  "soup3",
  "tao-macros",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "url",
  "webkit2gtk",
  "webkit2gtk-sys",
@@ -10797,7 +10801,7 @@ dependencies = [
  "serde_repr",
  "statrs",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-retry",
  "tokio_with_wasm",
@@ -10833,7 +10837,7 @@ dependencies = [
  "safe-transmute",
  "serde",
  "static_assertions",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
@@ -10861,7 +10865,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tokio_with_wasm",
@@ -10902,7 +10906,7 @@ dependencies = [
  "serde_json",
  "shellexpand",
  "sysinfo 0.38.4",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tokio_with_wasm",

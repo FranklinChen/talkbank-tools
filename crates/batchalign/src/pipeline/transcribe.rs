@@ -927,9 +927,10 @@ fn prepare_asr_chunks_with_snapshot(
             for (_speaker, words) in &mut monologue_words {
                 for word in words.iter_mut() {
                     let text = word.text.as_str();
-                    // Fast path: tokens with no ASCII digit can never expand
-                    // (every expander: NUM2LANG, num2chinese, currency,
-                    // ordinal/decade: requires a digit somewhere in the input).
+                    // Fast path: tokens with no ASCII digit can never expand.
+                    // Every expander (chatter's cardinal tables, CJK numerals,
+                    // currency and ordinal/decade forms, and Batchalign's
+                    // Portuguese ordinals) requires a digit in the input.
                     if !text.bytes().any(|b| b.is_ascii_digit()) {
                         continue;
                     }

@@ -63,22 +63,23 @@ See [Language Code Resolution](language-code-resolution.md) and
 
 ### Stage 2: Number Expansion
 
-Digit strings in ASR output are converted to language-appropriate word forms.
+Digit strings in ASR output are converted to language-appropriate word
+forms by chatter's `talkbank_transform::num_words::expand_number`.
 
 | Language group | Method | Example |
 |----------------|--------|---------|
-| Mandarin (zho, cmn) | `num2chinese` (simplified) | 10000 → 一万 |
-| Cantonese (yue), Japanese (jpn) | `num2chinese` (traditional) | 10000 → 一萬 |
-| Table languages | NUM2LANG JSON lookup | 5 → "five" (eng), "cinco" (spa), "cinq" (fra) |
+| Mandarin (zho, cmn) | Chatter CJK numerals (simplified) | 10000 → 一万 |
+| Cantonese (yue), Japanese (jpn) | Chatter CJK numerals (traditional) | 10000 → 一萬 |
+| Table languages | Chatter `num2lang.json` lookup | 5 → "five" (eng), "cinco" (spa), "cinq" (fra) |
 | All others | Pass-through (no expansion) | 42 → "42" |
 
-The table-driven languages are enumerated in
-`crates/batchalign-transform/data/num2lang.json` (46 entries today;
-re-derive via `python3 -c "import json; print(sorted(json.load(open('crates/batchalign-transform/data/num2lang.json'))))"`
-rather than maintaining a parallel list here).
+The table-driven languages are enumerated in chatter's `num2lang.json`
+(`crates/talkbank-transform/data/num2lang.json` in the chatter
+repository); that file is the canonical source, not a list maintained
+here.
 
-See [Number Expansion](number-expansion.md) for details on the Chinese
-character conversion algorithm and the table-based approach.
+See [Number Expansion](number-expansion.md) for details on the CJK
+numeral conversion and the table-based approach.
 
 ### Stage 3: Cantonese Text Normalization (yue only)
 
@@ -146,7 +147,7 @@ Cross-language infrastructure:
 |---------|------|-----------|
 | MWT dispatch | Capability-driven via `should_request_mwt()` against the cached Stanza catalog | §X1 + [Stanza Limitations Defect 5](stanza-limitations.md) |
 | ISO 639-3 → 639-1 mapping | `iso3_to_alpha2()` + `_ISO3_OVERRIDES` (Stanza-specific overrides) for codes like yue/cmn/zho → `zh-hans`, nor → `nb` | [Language Code Resolution](language-code-resolution.md) |
-| Number expansion | Table-driven via `num2lang.json` + `num2chinese.rs` for CJK | [Number Expansion](number-expansion.md) |
+| Number expansion | Table-driven via chatter's `num2lang.json` + built-in CJK numerals | [Number Expansion](number-expansion.md) |
 
 ### Stage 7: Forced Alignment
 
@@ -201,7 +202,7 @@ transformation is not idempotent: `聯繫` normalized twice becomes `聯係`.
 - [Cantonese Processing](languages/cantonese.md), normalization, char tokenization, FA
 - [Hebrew Morphosyntax](hebrew-morphosyntax.md), HebBinyan, HebExistential
 - [Japanese Morphosyntax](japanese-morphosyntax.md), verb forms, combined package
-- [Number Expansion](number-expansion.md), num2chinese, NUM2LANG tables
+- [Number Expansion](number-expansion.md), chatter's cardinal tables and CJK numerals
 - [Utterance Segmentation](utterance-segmentation.md), per-language models
 - [Non-English Workarounds](../developer/non-english-workarounds.md), workaround and convention catalog
 - [Whisper ASR](whisper-asr.md), engine selection, model IDs

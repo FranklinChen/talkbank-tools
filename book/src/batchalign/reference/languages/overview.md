@@ -70,16 +70,17 @@ These use `tokenize_pretokenized=True` (no MWT processor):
 
 ## Number Expansion Coverage
 
-47 languages have dedicated number-expansion tables in `num2lang.json`,
-plus dedicated converters for CJK and English-specific modes. Full
-matrix at [Number Expansion](../number-expansion.md).
+47 languages have dedicated number-expansion tables in chatter's
+`num2lang.json`, plus CJK and English-specific modes built into
+chatter's generator. Full matrix at
+[Number Expansion](../number-expansion.md).
 
 | Family | Coverage |
 |--------|----------|
-| 43 codegenned via `num2words` | English, Spanish, French, German, Italian, Portuguese, Dutch, Scandinavian languages, Russian, Polish, Czech, Turkish, Thai, Telugu, Bengali, Kannada, Indonesian, … |
+| 43 codegenned via `num2words` (historical origin, now chatter-owned) | English, Spanish, French, German, Italian, Portuguese, Dutch, Scandinavian languages, Russian, Polish, Czech, Turkish, Thai, Telugu, Bengali, Kannada, Indonesian, … |
 | 4 hand-curated | Malayalam, Greek, Basque, Croatian |
-| Chinese (Simplified) | `num2chinese` (一万), Mandarin |
-| Chinese (Traditional) | `num2chinese` (一萬), Cantonese, Japanese |
+| Chinese (Simplified) | chatter CJK numerals (一万), Mandarin |
+| Chinese (Traditional) | chatter CJK numerals (一萬), Cantonese, Japanese |
 | English-only | Ordinals (`13th` → "thirteenth"), decades (`1950s` → "nineteen fifties"), years |
 | Validator-permits-digits | Welsh, Vietnamese, Min Nan, Hakka, no expansion needed |
 

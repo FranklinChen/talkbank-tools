@@ -82,8 +82,10 @@ UD feature processing.
 
 ### No Hebrew number expansion
 Hebrew digits pass through unexpanded. CHAT output will show `5` instead of
-`חמש`. This is a known gap, a Hebrew number table for `num2lang.json` has
-not been created.
+`חמש`. This is a known gap: chatter has not created a Hebrew entry in its
+`num2lang.json` cardinal table. See
+[Number Expansion](../../architecture/number-expansion.md) for the full
+per-language coverage matrix.
 
 ### RTL text layout
 The CHAT format is line-oriented and primarily designed for LTR text. Hebrew

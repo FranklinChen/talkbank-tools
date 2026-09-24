@@ -30,12 +30,10 @@ mod compounds;
 mod english_caps;
 mod expand;
 pub mod lang_detect;
-mod num2chinese;
 mod num2text;
 #[cfg(test)]
 mod num2text_baseline;
 mod ordinal_por;
-mod ordinal_year_eng;
 mod prepare;
 mod retrace;
 mod snapshot;
@@ -54,7 +52,7 @@ pub use chunking::{
 };
 pub use compounds::merge_compounds;
 pub use expand::split_words_with_whitespace;
-pub use num2text::{NumberExpansionMode, detect_expansion, expand_number};
+pub use num2text::expand_number;
 pub use snapshot::AsrPipelineSnapshot;
 pub use timing::{AdmittedInterval, IntervalBound, IntervalRefusal, UntimedCause, WordTiming};
 pub use utterance::{

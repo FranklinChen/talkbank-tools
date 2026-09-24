@@ -20,7 +20,7 @@ worker startup for the authoritative current list.
 |---------------|---------------------------|
 | ASR | HuggingFace Whisper fine-tune via `--asr-engine whisper_hub` |
 | Text normalization | None, Malayalam script passed through as-is |
-| Number expansion | **Rust-side `NUM2LANG` table.** Digits like `"3"` reach CHAT as `"മൂന്ന്"` and pass E220. See [Number Expansion](../../architecture/number-expansion.md) for the dispatch path; Malayalam is registered in the per-language coverage matrix on that page. |
+| Number expansion | **Chatter's `num2lang.json` cardinal table.** Digits like `"3"` reach CHAT as `"മൂന്ന്"` and pass E220. See [Number Expansion](../../architecture/number-expansion.md) for the dispatch path; Malayalam is registered in the per-language coverage matrix on that page. |
 | Retokenize | Not applied, retokenize maps a Stanza-tokenized word list back to ASR tokens; without a Stanza pipeline there is nothing to map. |
 | Morphosyntax | **Not available**: Stanza ships no Malayalam pipeline |
 | Utseg | **Not available**: same reason |
@@ -101,23 +101,22 @@ which permits digits only for `zho`, `cym`, `vie`, `tha`, `nan`,
 `yue`, `min`, `hak`), and the Python `num2words` library has no
 Malayalam backend.
 
-**Fix:** added a Malayalam entry to `NUM2LANG` in
-`crates/batchalign-transform/data/num2lang.json` covering 0-20,
-decades 30-90, plus 100/1000 anchor words. The per-word Rust pass
-in `crates/batchalign/src/pipeline/transcribe.rs:527::prepare_asr_chunks`
+**Fix:** added a Malayalam entry to the `num2lang.json` cardinal table
+covering 0-20, decades 30-90, plus 100/1000 anchor words. That table
+now lives in chatter, at `crates/talkbank-transform/data/num2lang.json`
+in the chatter repository; Batchalign adopts it via the pinned chatter
+release. The per-word pass in
+`crates/batchalign/src/pipeline/transcribe.rs::prepare_asr_chunks`
 calls `expand_number(text, "mal")` on every word, converting digits
-to their Malayalam-script word forms. The Python IPC path no longer
-exists, Malayalam expansion is end-to-end Rust. Tests at
-`crates/batchalign-transform/src/asr_postprocess/num2text.rs:540`
-(`malayalam_single_digits_expand_to_script`,
-`malayalam_digits_collected_for_expansion`,
-`malayalam_anchor_decades_and_hundreds`) lock in the expected
-expansions.
+to their Malayalam-script word forms via chatter's generator. The
+Python IPC path no longer exists, Malayalam expansion is end-to-end
+Rust. Tests locking in the expected expansions now live in chatter,
+alongside the table.
 
-Higher-magnitude numbers (4-digit and beyond) are decomposed by
-`decompose_with_table` greedily against the anchor entries; if the
-table can't fully decompose, the original digit string is returned
-(matching every other language without an exhaustive table).
+Higher-magnitude numbers (4-digit and beyond) are decomposed greedily
+against the anchor entries by chatter's generator; if the table can't
+fully decompose, the original digit string is returned (matching every
+other language without an exhaustive table).
 
 ## Operational notes
 

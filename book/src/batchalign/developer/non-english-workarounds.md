@@ -319,13 +319,13 @@ For each workaround, the recommended verification test is:
 
 | | |
 |---|---|
-| **File** | `crates/batchalign-transform/src/asr_postprocess/num2text.rs`, `crates/batchalign-transform/src/asr_postprocess/num2chinese.rs` |
-| **Size** | Language-specific lookup tables (the authoritative list lives at `crates/batchalign-transform/data/num2lang.json`) plus a Chinese-script converter |
+| **File** | `crates/batchalign-transform/src/asr_postprocess/num2text.rs` (Batchalign: Portuguese ordinals, per-language percent word); chatter's `talkbank_transform::num_words` (everything else) |
+| **Size** | Language-specific lookup tables (the authoritative list lives at `crates/talkbank-transform/data/num2lang.json` in the chatter repository) plus a CJK-script converter, both chatter's |
 | **What** | Converts digit strings to word forms (5→"five", 5→"五") during ASR post-processing. |
 | **Why** | ASR output digit strings need language-appropriate word forms for CHAT transcription. |
 | **Origin** | `batchalign2/pipelines/asr/utils.py` |
 | **Still needed?** | **Yes, permanent.** Language-specific numeral systems. |
-| **Tests** | Parameterized tests for English, Spanish, Chinese |
+| **Tests** | Chatter's per-language tests; Batchalign's seam tests in `num2text.rs` and its frozen cross-language baseline (`crates/batchalign-transform/data/number_expansion_baseline.json`) |
 
 ---
 

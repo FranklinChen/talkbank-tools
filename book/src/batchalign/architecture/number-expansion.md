@@ -1,7 +1,7 @@
 # Number Expansion in ASR Post-Processing
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:57 EDT
+**Last updated:** 2026-09-24 19:15 EDT
 
 This page is the **single source of truth** for how batchalign3 turns
 ASR-emitted number tokens (`"3"`, `"$5"`, `"1950s"`, `"3rd"`,
@@ -51,49 +51,42 @@ gated by `always_enabled`: it runs for **every** language on
 **every** transcribe / transcribe_s job. It is not gated on Stanza
 availability.
 
-### Dispatch
+### Dispatch and ownership
 
-Round 2 of the rework landed: **the Python `num2words` IPC is gone.**
-Number expansion is now a single per-word Rust pass with no boundary
-crossings:
+Number expansion is a single per-word Rust pass with no boundary
+crossings (the Python `num2words` IPC is gone). The generic generator
+is **chatter's**, not Batchalign's:
+`talkbank_transform::num_words::expand_number` (from the pinned chatter
+release) owns the per-language cardinal tables, English short-scale
+composition, CJK numerals, English suffix ordinals and decades,
+currency, dash ranges and digit-leading hyphen compounds. Batchalign's
+`asr_postprocess::expand_number` (`num2text.rs`) adds only what chatter
+does not provide, Portuguese indicator ordinals, in front of it:
 
 ```mermaid
 flowchart TD
-    Word(["AsrWord<br/>(text, start, end)"]) --> ExpandNum["expand_number(text, lang)<br/>(num2text.rs)"]
+    Word(["AsrWord<br/>(text, start, end)"]) --> ExpandNum["asr_postprocess::expand_number(text, lang)<br/>(batchalign-transform num2text.rs)"]
     ExpandNum --> Por{"lang == por and whole token<br/>is an indicator ordinal?"}
     Por -->|"rank 1..=1000"| PorRust["ordinal_por: gendered ordinal words"]
     Por -->|"rank out of range"| PorPass["return unchanged<br/>(E220 catches at validate)"]
-    Por -->|"no"| Eng{"lang == eng?"}
-    Eng -->|"yes"| OrdEng{"ends in 'st'/'nd'/'rd'/'th'?"}
-    OrdEng -->|"yes"| OrdinalRust["ordinal_year_eng::expand_ordinal_eng"]
-    OrdEng -->|"no"| DecEng{"ends in 's' with digit stem?"}
-    DecEng -->|"yes"| DecadeRust["ordinal_year_eng::expand_decade_eng"]
-    DecEng -->|"no"| DigitLead
-    Eng -->|"no"| DigitLead{"digit-leading hyphen<br/>(e.g. 3-star)?"}
-    DigitLead -->|"yes"| HyphenRust["try_expand_digit_leading_hyphen"]
-    DigitLead -->|"no"| Currency{"currency prefix/suffix?"}
-    Currency -->|"yes"| CurrencyRust["try_expand_currency"]
-    Currency -->|"no"| Percent{"percent suffix?"}
-    Percent -->|"yes"| PercentRust["try_expand_percent"]
-    Percent -->|"no"| Dash{"contains dash/em-dash?"}
-    Dash -->|"yes"| DashRust["dash-split + recurse"]
-    Dash -->|"no"| CJK{"CJK lang?<br/>(zho/cmn/jpn/yue)"}
-    CJK -->|"yes"| Num2Chinese["num2chinese(script)"]
-    CJK -->|"no"| Table{"NUM2LANG[lang]<br/>has entry?"}
-    Table -->|"yes"| TableLookup["NUM2LANG decompose<br/>(43 codegenned langs<br/>+ 4 hand-curated)"]
-    Table -->|"no"| Passthrough["return unchanged<br/>(E220 catches at validate)"]
+    Por -->|"no"| Chatter["talkbank_transform::num_words::expand_number<br/>(chatter)"]
+    Chatter --> Forms["English ordinals/decades, digit-leading hyphen,<br/>currency, dash ranges, CJK numerals,<br/>per-language cardinal tables"]
+    Forms --> Out(["expanded text, or the token unchanged<br/>(E220 catches at validate)"])
 ```
 
-After per-word expansion, `split_words_with_whitespace` widens
-multi-token expansions (`"100"` → `"one hundred"`) into separate
-`AsrWord`s so each fits in a single `ChatWordText`.
+Because the generator is a dependency, a chatter pin bump can change
+ASR output with no Batchalign edit. The [frozen baseline](#frozen-baseline)
+is what makes such a change visible: adopting chatter 0.26.0 corrected
+English scale composition (`2024` had been `two one thousand
+twenty-four`) and the Chinese zero between skipped four-digit groups
+(`100000001` had been `一亿零零一`), both of which Batchalign carried in
+its former copy of the generator until that copy was deleted.
 
-For Malayalam (the motivating case for the rework), the path is
-`expand_number("3", "mal")` → `NUM2LANG["mal"]["3"]` → `"മൂന്ന്"`.
-For English ordinals (`"13th"`) and decades (`"1950s"`), the
-`ordinal_year_eng` module produces `"thirteenth"` and `"nineteen
-fifties"` via deterministic composition rules cross-validated against
-`num2words` at build time (fixture `data/eng_ordinal_year_fixtures.json`).
+After per-word expansion, `split_words_with_whitespace` widens
+multi-token expansions (`"100"` becomes `"one hundred"`) into separate
+`AsrWord`s so each fits in a single `ChatWordText`. The percent split
+(`80%` to `80` plus the language's percent word) happens earlier, in
+the tokenizer, using Batchalign's `language_percent_word`.
 
 ### Portuguese indicator ordinals
 
@@ -139,51 +132,35 @@ expander if a real corpus surfaces the need.
 ### Routing lives in `expand_number`
 
 There is no separate per-language routing table. `expand_number` is the
-router: the checks in the diagram above run in order and the first that
-applies decides the output. (A `NumberExpander` registry module was once
+router: Batchalign's Portuguese check runs first, then chatter's
+generator applies its own checks in order. (A `NumberExpander` registry module was once
 added as a proposed single source of routing truth, but nothing ever
 consulted it, so it was deleted as dead code.) What each language actually
 does today is pinned by the [frozen baseline](#frozen-baseline), not by a
 declaration.
 
 Languages whose CHAT validator permits digits are not special-cased:
-`cym`, `vie` and `tha` have `NUM2LANG` tables and are expanded like any
-table language, while `nan`, `min` and `hak` have no table and keep their
-digits, which their validator accepts.
+`cym`, `vie` and `tha` have chatter cardinal tables and are expanded like
+any table language, while `nan`, `min` and `hak` have no table and keep
+their digits. Since chatter 0.26.0, E220 refuses a bare numeral word even
+in those languages, so such a token is emitted verbatim and reported as
+language-invalid (`AsrTranscript::language_invalid`).
 
-### Codegen
+### Tables
 
-The pre-Layer-1 `data/num2lang.json` was hand-curated and contained
-several typos (`"ninety-sx"` for English 96, `"diecineuve"` for
-Spanish 19, `"จ็ด"` for Thai 7, etc.). The current
-`crates/batchalign-transform/data/num2lang.json` was generated by
-invoking Python `num2words` for every ISO 639-3 → num2words mapping
-and writing the result to that path. 43 languages × 0-99 + decades +
-100/1000 anchors = ~4,700 entries.
-
-Four languages stay hand-curated (the regeneration workflow must not
-overwrite them):
-
-- `mal` (Malayalam), num2words has no `ml` backend
-- `ell` (Greek), num2words has no `el` backend; hand-curated entries
-  preserved verbatim from pre-codegen file (known typos flagged for
-  follow-up native-speaker review)
-- `eus` (Basque), num2words has no `eu` backend
-- `hrv` (Croatian), num2words falls back to Serbian, lower quality
-  than the existing hand-curated table
-
-The codegen tool itself is not currently committed to the repo. When
-the table needs regeneration, the workflow is: map each ISO 639-3
-code to its `num2words` language code, drive `num2words` externally,
-and write the result back to
-`crates/batchalign-transform/data/num2lang.json`, taking care to
-preserve the four hand-curated entries.
+The per-language cardinal tables (`num2lang.json`, originally generated
+from Python `num2words`, with hand-curated `mal`, `ell`, `eus` and `hrv`)
+live in chatter, at `crates/talkbank-transform/data/num2lang.json` in the
+chatter repository. Table corrections and new languages are chatter
+changes; Batchalign adopts them by bumping the pin and reviewing the
+baseline diff.
 
 ### Frozen baseline
 
 `crates/batchalign-transform/data/number_expansion_baseline.json`
-records 50 languages (every `NUM2LANG` table language, the CJK numeral
-languages and one unknown code) crossed with 63 representative tokens
+records 50 languages (every table language chatter had when the fixture
+was built, the CJK numeral languages and the passthrough control `xxx`)
+crossed with 63 representative tokens
 (cardinals, large and overflowing numbers, English ordinals and decades,
 currency, percent, dash ranges, digit-leading hyphen compounds,
 Portuguese indicator ordinals, and lookalikes). Each row holds both the
@@ -191,7 +168,10 @@ Portuguese indicator ordinals, and lookalikes). Each row holds both the
 for the token as one timed element, so tokenizer changes are pinned too.
 
 `num2text_baseline.rs::number_expansion_matches_frozen_baseline` fails
-if any row changes, or if a table language is added without rows. The
+if any row changes, or if a fixture language other than `xxx` stops
+expanding a single digit. Chatter does not publish its table language
+set, so a language it adds is not detected; add it to the fixture's
+`languages` list when adopting that chatter release. The
 fixture owns its `languages` and `inputs` lists. To accept a deliberate
 change, edit those lists if needed, run
 
@@ -207,15 +187,12 @@ its reason, in the commit message.
 | File | Purpose |
 |------|---------|
 | `crates/batchalign/src/pipeline/transcribe.rs` | `stage_asr_postprocess`, `prepare_asr_chunks` (per-word Rust expansion + whitespace split + finalize) |
-| `crates/batchalign-transform/src/asr_postprocess/num2text.rs` | `expand_number(word, lang)`: top-level Rust entry; `detect_expansion`; currency/percent/dash helpers; `NUM2LANG` static map |
-| `crates/batchalign-transform/src/asr_postprocess/ordinal_year_eng.rs` | `expand_ordinal_eng`, `expand_year_eng`, `expand_decade_eng` (English-only deterministic composition; cross-validated against `num2words` via `data/eng_ordinal_year_fixtures.json`) |
-| `crates/batchalign-transform/src/asr_postprocess/num2chinese.rs` | `num2chinese(n, script)` for CJK |
+| `crates/batchalign-transform/src/asr_postprocess/num2text.rs` | `expand_number(word, lang)`: Batchalign's entry; Portuguese ordinals first, then chatter's generator; `language_percent_word` |
+| chatter `talkbank_transform::num_words` | The generic generator: cardinal tables, English composition, ordinals/decades, CJK numerals, currency, dash ranges, digit-leading hyphens |
 | `crates/batchalign-transform/src/asr_postprocess/ordinal_por.rs` | Portuguese indicator ordinals: typed recognition (`PortugueseOrdinalSyntax`, `PortugueseOrdinal`), gendered rendering, tokenizer protection |
 | `crates/batchalign-transform/src/asr_postprocess/prepare.rs` | Tokenizer (`split_chunk_word`); protects indicator ordinals before separator splitting |
 | `crates/batchalign-transform/src/asr_postprocess/num2text_baseline.rs` | Frozen-baseline check and its opt-in regeneration test |
-| `crates/batchalign-transform/data/num2lang.json` | Per-language Rust tables (43 codegenned + 4 hand-curated) |
 | `crates/batchalign-transform/data/number_expansion_baseline.json` | Frozen `(language, token)` outputs of `expand_number` and the prepare pipeline |
-| `crates/batchalign-transform/data/eng_ordinal_year_fixtures.json` | Cross-validation fixtures for `ordinal_year_eng` |
 
 ### Per-language coverage matrix
 
@@ -224,88 +201,34 @@ given token routes to. Update in lock-step with code changes.
 
 | Lang | Wire token | Expander | Source |
 |------|------------|----------|--------|
-| `eng` | `"3"` | Rust NUM2LANG | `data/num2lang.json:eng` |
-| `eng` | `"3rd"` | Rust `expand_ordinal_eng` | `ordinal_year_eng.rs` |
-| `eng` | `"1950s"` | Rust `expand_decade_eng` | `ordinal_year_eng.rs` |
-| `eng` | `"1950"` (year context) | Rust NUM2LANG cardinal, year-form expansion only fires for the decade-suffixed shape; bare 4-digit numbers route as cardinals | `num2text.rs` |
+| `eng` | `"3"`, `"2024"` | chatter English short-scale composition (`two thousand twenty-four`) | chatter `num_words` |
+| `eng` | `"3rd"` | chatter English ordinal | chatter `num_words` |
+| `eng` | `"1950s"` | chatter English decade | chatter `num_words` |
+| `eng` | `"1950"` (year context) | chatter cardinal; year-form expansion only fires for the decade-suffixed shape | chatter `num_words` |
 | `por` | `"54ª"`, `"1.º"`, `"54.ºs"` (rank 1..=1000) | Rust `ordinal_por` (gendered ordinal words) | `ordinal_por.rs` |
 | `por` | `"0ª"`, `"1001.º"` (out of range) | Passthrough as one token, E220 fires | `ordinal_por.rs` |
-| any | `"$5"` | Rust `try_expand_currency` | `num2text.rs` |
-| any | `"80%"` | Rust currency-style + `PERCENT_WORD_BY_LANG` | `num2text.rs` |
-| 43 codegenned langs (eng/fra/deu/spa/por/ita/nld/…) | `"3"` | Rust NUM2LANG | `data/num2lang.json` |
-| `mal`, `ell`, `eus`, `hrv` | `"3"` | Rust NUM2LANG (hand-curated overlay) | `scripts/codegen_num2lang.py::HAND_CURATED` |
-| `zho` / `cmn` | `"3"` | Rust `num2chinese(simplified)` | `num2text.rs` |
-| `yue` / `jpn` | `"3"` | Rust `num2chinese(traditional)` | `num2text.rs` |
-| Digit-permitting languages without a table (`nan`, `min`, `hak`) | `"3"` | Passthrough (the validator accepts digits) | `num2text.rs` |
+| any | `"$5"` | chatter currency (English currency word) | chatter `num_words` |
+| any | `"80%"` | tokenizer percent split + `language_percent_word`, then the digits expand | `prepare.rs`, `num2text.rs` |
+| other table languages (fra/deu/spa/por/ita/nld/...) | `"3"` | chatter cardinal table | chatter `num2lang.json` |
+| `mal`, `ell`, `eus`, `hrv` | `"3"` | chatter cardinal table (hand-curated entries) | chatter `num2lang.json` |
+| `zho` / `cmn` | `"3"` | chatter Chinese numerals (simplified) | chatter `num_words` |
+| `yue` / `jpn` | `"3"` | chatter Chinese numerals (traditional) | chatter `num_words` |
+| Digit-permitting languages without a table (`nan`, `min`, `hak`) | `"3"` | Passthrough; E220 reports the bare numeral (chatter 0.26.0) | chatter `num_words` |
 | Non-eng `"3rd"` / `"1950s"`, indicator ordinals outside `por` | passthrough | None, accepted limitation, no observed production traffic | (gap) |
 | `hin`, `tam`, `mar`, `guj`, `pan`, `ori`, most African langs | `"3"` | **Nothing**: digit reaches CHAT, E220 fires | (gap) |
 
-To add a `num2words`-supported language: add the ISO 639-3 → 2-char
-mapping to `ISO3_TO_NUM2WORDS` in `scripts/codegen_num2lang.py` and
-re-run the script. To add a hand-curated language: add to
-`HAND_CURATED` in the same script (the codegen never overwrites those).
-
-### Detection algorithm (`detect_expansion`)
-
-`detect_expansion` classifies a token's expansion mode (`Cardinal` /
-`Ordinal` / `Decade` / `Year`) for callers that need the decision
-without doing the expansion. After Round 2 the dispatcher does not
-use it directly, `expand_number` runs the full per-word pipeline
-unconditionally, but it is kept as a public helper for testing and
-future per-mode dispatch.
-
-```mermaid
-flowchart TD
-    Start(["word, lang"]) --> Empty{"word.is_empty()?"}
-    Empty -->|"yes"| ReturnNone1["return None"]
-    Empty -->|"no"| CJKCheck{"lang in<br/>{zho, cmn, jpn, yue}?"}
-    CJKCheck -->|"yes"| ReturnNone2["return None<br/>(handled by num2chinese in Rust)"]
-    CJKCheck -->|"no"| CurrencyCheck{"starts with currency<br/>prefix or ends with<br/>currency suffix?"}
-    CurrencyCheck -->|"yes"| ReturnNone3["return None<br/>(handled by try_expand_currency in Rust)"]
-    CurrencyCheck -->|"no"| AllDigits{"word.chars().all(is_ascii_digit)?"}
-    AllDigits -->|"yes"| ReturnCardinal["return Some(n, Cardinal)"]
-    AllDigits -->|"no"| DecadeCheck{"word ends 's' AND<br/>stem all digits?"}
-    DecadeCheck -->|"yes"| ReturnDecade["return Some(n, Decade)"]
-    DecadeCheck -->|"no"| OrdinalCheck{"word ends 'st'/'nd'/'rd'/'th'<br/>AND stem all digits?"}
-    OrdinalCheck -->|"yes"| ReturnOrdinal["return Some(n, Ordinal)"]
-    OrdinalCheck -->|"no"| DashCheck{"word contains<br/>dash or em-dash?"}
-    DashCheck -->|"yes"| ReturnNone4["return None<br/>(handled in expand_number<br/>via dash-split path)"]
-    DashCheck -->|"no"| ReturnNone5["return None"]
-```
-
-A `Some` result means the token will be sent to Python. `None` means
-either the Rust safety pass handles it (CJK, currency, dash) or it
-isn't a number at all (passes through unchanged).
-
-### Decompose strategy for higher numbers
-
-`decompose_with_table` at `num2text.rs:274` greedily subtracts the
-largest table entry that fits. So `"234"` for German becomes
-`"zweihundert" + "vierunddreißig"` if the table has `200` and `34`,
-or `"zweihundert" + "dreißig" + "vier"` if it has `200`, `30`, `4`.
-Recurses for hundreds-and-up multipliers (`1234` → `decompose(1)` +
-`"thousand"` + `decompose(234)`).
-
-If the table can't fully decompose (e.g., a 5-digit number when the
-table only goes to 1000), `expand_number` returns the original
-digit string unchanged. This is a **silent fallthrough**: the
-validator E220 will catch it later, but at the call site there's no
-typed signal that expansion failed.
+To add a language's cardinal table: add it to chatter's
+`num2lang.json`, release chatter, then bump the pin here and add the
+language to the baseline fixture.
 
 ### Currency and percent
 
-- `CURRENCY_PREFIXES` and `CURRENCY_SUFFIXES` (`num2text.rs:53,63`)
-  recognize `$ € £ ¥ ₹ ₩ ₽` and append the **English** word for the
-  currency regardless of target language. Rationale (per inline
-  comment): morphosyntax can re-tag in-language later; CHAT just
-  needs a non-digit word here.
-- `PERCENT_WORD_BY_LANG` (`num2text.rs:77`) lists per-language
-  percent words for the languages we actively transcribe. Anything
-  not listed falls back to `"percent"`.
-
-These two tables are independent of the main `NUM2LANG` table, they
-exist because currency/percent symbols are language-orthogonal but
-the words attached to them are language-specific.
+- Currency symbols (`$ € £ ¥ ₹ ₩ ₽`) are chatter's: the digits expand in
+  the target language and the **English** currency word is appended
+  regardless of language, since CHAT only needs a non-digit word here.
+- `PERCENT_WORD_BY_LANG` (`num2text.rs`) is Batchalign's: per-language
+  percent words for the languages we actively transcribe. Anything not
+  listed falls back to `"percent"`.
 
 ## Known limitations (post-Round-2)
 
@@ -317,27 +240,26 @@ and removed the Python `num2words` IPC entirely. The AGENTS.md
 for number expansion. Remaining issues:
 
 1. **Most non-English ordinals/decades pass through.** English
-   suffix ordinals and decades (`ordinal_year_eng`) and Portuguese
+   suffix ordinals and decades (chatter) and Portuguese
    indicator ordinals (`ordinal_por`) are covered. Spanish `"3º"`,
    German `"3."`, French `"1950s"` (rare) leave the digit in place;
    add a per-language ordinal/decade module if a real corpus
    surfaces the need.
 2. **Scattered token detection.** Currency, percent, ordinals,
    decades, dash-ranges, digit-leading hyphens are each detected by
-   their own ad-hoc function. No unified parse phase. Adding a new
+   their own ad-hoc function (now in chatter). No unified parse phase. Adding a new
    token shape (e.g., phone numbers `555-1234`, time `3:30`) means
    touching every dispatch site. Layer 2 of the rework addresses this.
 3. **Indic + African coverage gaps.** Hindi, Tamil, Marathi,
    Gujarati, Punjabi, Oriya, and most African languages have no
    expander, so the digit reaches CHAT,
-   triggering E220. Add to `HAND_CURATED` in
-   `scripts/codegen_num2lang.py` as the languages come online.
+   triggering E220. Add their tables to chatter as the languages come
+   online.
 4. **Hand-curated quality not native-reviewed.** Greek (`ell`),
    Basque (`eus`), and Croatian (`hrv`) tables were preserved
    verbatim from the pre-codegen file and contain known typos
    (e.g., Greek `"96": "ενενήντα-sx"` with English-suffix bleed).
-   Native-speaker review needed; flagged in the script's HAND_CURATED
-   block.
+   Native-speaker review needed, in chatter's table.
 5. **No fail-loud signal at submission.** A language with no
    expander only surfaces at validation time as E220. A
    submission-time check could reject the request with a
@@ -357,6 +279,10 @@ what Layer 2's typed parser would provide. Layers 2 and 3 are still
 proposed.
 
 ### Layer 2: Typed `NumberToken` parser
+
+The generic token forms below are now chatter's, so this layer belongs
+in chatter's `num_words`; Batchalign would keep only its
+Portuguese-ordinal and percent-word extensions.
 
 Replace the scattered detect/try/try cascade with a single parse
 function returning a typed enum:
@@ -493,30 +419,20 @@ not already on the matrix):
 1. Determine which expander applies (per the
    [Adding Language Support](../developer/adding-language-support.md)
    checklist's number-expansion section).
-2. Either:
-   - add the ISO 639-3 → 2-char mapping to `ISO3_TO_NUM2WORDS` in
-     `scripts/codegen_num2lang.py` and re-run the script, OR
-   - add a `HAND_CURATED` entry in the same script (one-shot codegen
-     never overwrites the overlay).
-3. Add the row to this page's coverage matrix.
-4. Add a test in `num2text.rs::tests`.
+2. If it needs a cardinal table, add the table in chatter and adopt
+   that chatter release here.
+3. Add the row to this page's coverage matrix and the language to the
+   baseline fixture's `languages` list, then regenerate the baseline.
 5. If neither path covers the language, document it explicitly:
    add a row with "Nothing, digit reaches CHAT, E220 fires" so
    the gap is visible to future contributors.
 
-**When updating `num2words` (Python lib version bump):**
+**When bumping the chatter pin:**
 
-The library is no longer a runtime dependency, but
-`scripts/codegen_num2lang.py` invokes it to regenerate
-`num2lang.json` and `eng_ordinal_year_fixtures.json`. After bumping:
-
-1. Re-run `uv run python scripts/codegen_num2lang.py --output crates/batchalign/data/num2lang.json`.
-2. Re-run the English ordinal/year fixture generator (see comments in
-   `scripts/codegen_num2lang.py`).
-3. Diff the generated files; any value change in a covered language
-   is a behaviour change worth a callout in the commit.
-4. Run `cargo test -p batchalign --lib`; the
-   `ordinal_year_eng` cross-validation tests catch divergence.
+1. Run `number_expansion_matches_frozen_baseline`. Any changed row is a
+   behaviour change in ASR output.
+2. Regenerate the baseline and name every changed row (old and new),
+   with the chatter change that caused it, in the commit message.
 
 **When changing the CHAT digit-allowlist** (rare, requires CHAT-spec
 maintainer sign-off):
@@ -533,8 +449,7 @@ maintainer sign-off):
  , checklist for new-language work; has a "Number expansion" section
   that points here.
 - [Malayalam Language Support](../reference/languages/malayalam.md)
- , concrete example of a language using the Rust `NUM2LANG` path
-  after the fix.
+ , concrete example of a language using a cardinal table after the fix.
 - `crates/batchalign/AGENTS.md`: `asr_postprocess/` module
   map; references `num2text.rs` for number expansion specifically.
 - `crates/batchalign/AGENTS.md`: Python boundary policy

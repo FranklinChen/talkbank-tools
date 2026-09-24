@@ -12,7 +12,7 @@ expansion system with Cantonese, but has distinct word segmentation behavior.
 |---------------|---------------------------|
 | ASR | Rev.AI by default; `paraformer` (FunASR) is the common Mandarin choice, and every other engine works too. See [ASR engines](#asr-engines). |
 | Text normalization | None (Cantonese normalization is `yue`-only) |
-| Number expansion | Chinese number system (`num2chinese` with simplified script for both `cmn` and `zho`) |
+| Number expansion | Chinese number system (chatter's simplified-script CJK numerals for both `cmn` and `zho`) |
 | Utterance segmentation | `talkbank/CHATUtterance-zh_CN` for `cmn` / `zho` in standalone `utseg` and transcribe pre-CHAT segmentation |
 | Word segmentation | Stanza neural tokenizer via `--retokenize` |
 | Morphosyntax | Stanza Chinese (`zh`) model; `@s` Mandarin words in mixed-language files use the same Chinese morphosyntax path |
@@ -142,10 +142,12 @@ path for already-built CHAT text.
 
 ## Number Expansion
 
-Mandarin uses the Chinese number expansion system. Per
-`crates/batchalign-transform/src/asr_postprocess/num2text.rs:243-247`,
-both `cmn` and `zho` dispatch to `ChineseScript::Simplified`; only
-`yue` and `jpn` use `ChineseScript::Traditional`:
+Mandarin uses the Chinese number expansion system, owned by chatter's
+`talkbank_transform::num_words::expand_number`: both `cmn` and `zho`
+dispatch to simplified-script CJK numerals; only `yue` and `jpn` use
+traditional script. See
+[Number Expansion](../../architecture/number-expansion.md) for the
+dispatch path.
 
 | Code | Script | Example |
 |------|--------|---------|
@@ -202,5 +204,5 @@ runs for `yue`. Mandarin text passes through without character normalization.
 |------|------|
 | `batchalign/worker/_stanza_loading.py` | `load_stanza_retokenize_model()` for lazy `zh` retok pipeline (`:251`) |
 | `batchalign/inference/morphosyntax.py` | Mandarin retokenize path in `batch_infer_morphosyntax()` |
-| `crates/batchalign-transform/src/asr_postprocess/num2chinese.rs` | Chinese number expansion |
+| chatter `talkbank_transform::num_words` | Chinese number expansion (simplified/traditional CJK numerals) |
 | `crates/batchalign-transform/src/retokenize.rs` + `crates/batchalign-transform/src/retokenize/` | AST rewrite (language-agnostic) |

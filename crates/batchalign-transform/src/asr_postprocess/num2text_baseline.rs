@@ -5,9 +5,11 @@
 //! Number expansion is a pure function from `(token, language)` to text, but
 //! it is spread across several detectors (English ordinals and decades,
 //! currency, dash ranges, digit-leading hyphen compounds, CJK numerals, the
-//! per-language `NUM2LANG` tables and their decomposition) and it interacts
-//! with the tokenizer that runs before it. A change aimed at one language or
-//! one token shape can silently alter another. The committed fixture
+//! per-language cardinal tables, Portuguese indicator ordinals) and it
+//! interacts with the tokenizer that runs before it. Most of those detectors
+//! live in chatter (`talkbank_transform::num_words`), so a chatter pin bump
+//! can change this output without any Batchalign edit. A change aimed at one
+//! language or one token shape can silently alter another. The committed fixture
 //! `data/number_expansion_baseline.json` records, for every language in the
 //! fixture's `languages` list crossed with every token in its `inputs` list:
 //!
@@ -18,9 +20,13 @@
 //!   handling and expansion together).
 //!
 //! [`number_expansion_matches_frozen_baseline`] asserts that the current code
-//! reproduces every row exactly, and that the language list still covers
-//! every `NUM2LANG` table language plus the CJK numeral languages, so a new
-//! table language cannot slip in without a baseline.
+//! reproduces every row exactly, and that every fixture language except the
+//! passthrough control (`xxx`, which records what an unsupported language
+//! gets) still has an expander (a single digit expands), so a language
+//! chatter drops is reported here rather than reaching transcripts as bare
+//! digits. Chatter does not publish its table language set, so a language it
+//! ADDS is not detected; add it to the fixture's `languages` list when
+//! adopting that chatter release.
 //!
 //! # Regenerating deliberately
 //!
@@ -40,7 +46,6 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::num2text::{EM_DASH, EN_DASH, NUM2LANG};
 use super::{
     AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
     SpeakerIndex, expand_number, prepare_asr_chunks,
@@ -56,10 +61,15 @@ const FIXTURE_TEXT: &str = include_str!("../../data/number_expansion_baseline.js
 /// test at once cannot rewrite the baseline by accident.
 const REGENERATE_ENV: &str = "BATCHALIGN_REGENERATE_NUMBER_BASELINE";
 
-/// Languages expanded by `num2chinese` that have no `NUM2LANG` table.
-/// (`jpn` also routes through `num2chinese` but already has a table entry,
-/// so the table key set covers it.)
-const CJK_WITHOUT_TABLE: [&str; 3] = ["cmn", "yue", "zho"];
+/// Em-dash and en-dash, written into the fixture as JSON `\u` escapes so the
+/// committed file never carries the raw characters (house rule: a raw dash is
+/// never written, even as functional data).
+const EM_DASH: char = '\u{2014}';
+const EN_DASH: char = '\u{2013}';
+
+/// The fixture's control language: it has no expander, and its rows record
+/// that unsupported languages keep their digits rather than a guessed word.
+const PASSTHROUGH_CONTROL: &str = "xxx";
 
 /// The whole fixture: the two input axes and one row per cell of their cross
 /// product, in `languages` then `inputs` order.
@@ -166,17 +176,27 @@ fn number_expansion_matches_frozen_baseline() {
     assert_unique("languages", &baseline.languages);
     assert_unique("inputs", &baseline.inputs);
 
-    let declared: BTreeSet<&str> = baseline.languages.iter().map(String::as_str).collect();
-    let uncovered: Vec<&str> = NUM2LANG
-        .keys()
+    assert!(
+        baseline
+            .languages
+            .iter()
+            .any(|lang| lang == PASSTHROUGH_CONTROL),
+        "baseline must keep the passthrough control language {PASSTHROUGH_CONTROL:?}"
+    );
+    assert_eq!(
+        expand_number("7", PASSTHROUGH_CONTROL),
+        "7",
+        "the passthrough control language must have no expander"
+    );
+    let unexpanded: Vec<&str> = baseline
+        .languages
+        .iter()
         .map(String::as_str)
-        .chain(CJK_WITHOUT_TABLE)
-        .filter(|lang| !declared.contains(lang))
+        .filter(|lang| *lang != PASSTHROUGH_CONTROL && expand_number("7", lang) == "7")
         .collect();
     assert!(
-        uncovered.is_empty(),
-        "languages with an expander but no baseline rows: {uncovered:?}; add them to \
-         {FIXTURE_RELATIVE_PATH} and regenerate"
+        unexpanded.is_empty(),
+        "baseline languages with no number expander: {unexpanded:?}"
     );
 
     let expected_rows = baseline.languages.len() * baseline.inputs.len();

@@ -25,7 +25,7 @@ need a "not available for X" line.
 |------------|--------------|---------|
 | **ISO 639-3 code** | `pycountry`, `talkbank-types::LanguageCode3` | Everything downstream |
 | **Stanza pipeline?** | `python -c "import stanza; print('XXX' in stanza.resources.common.load_resources_json())"` AND check the entry has a `packages` key (not just charlm stubs) | morphotag, utseg, retokenize gating |
-| **`num2words` backend?** (build-time only) | `python -c "import num2words; print('XX' in num2words.CONVERTER_CLASSES)"` (use ISO 639-1 2-char code). The Rust `NUM2LANG` table at `crates/batchalign-transform/data/num2lang.json` is the codegenned output of an offline `num2words` sweep; runtime uses Rust only. (No in-tree codegen script today: see [Number Expansion](../architecture/number-expansion.md) for the regeneration protocol.) | Number expansion (E220 risk) |
+| **`num2words` backend?** (historical origin only) | `python -c "import num2words; print('XX' in num2words.CONVERTER_CLASSES)"` (use ISO 639-1 2-char code) as a sanity check. The cardinal table now lives in chatter, at `crates/talkbank-transform/data/num2lang.json` in the chatter repository; adding a language there is a chatter change, adopted here by bumping the pin. See [Number Expansion](../architecture/number-expansion.md) for the protocol. | Number expansion (E220 risk) |
 | **Rev.AI quality?** | Submit a sample to Rev.AI; check for hallucinations, script confusion, repetition. Document result in `book/src/batchalign/reference/revai-language-quality-strategy.md` | Default ASR engine choice |
 | **Stock Whisper quality?** | Same: run a representative sample, evaluate | Fallback ASR engine choice |
 | **HuggingFace fine-tune available?** | Search HF Hub for `whisper-*-{lang}` checkpoints | `whisper_hub` engine routing in `crates/batchalign/src/model_manifest.rs::WHISPER_HUB_DEFAULTS` |
@@ -76,27 +76,29 @@ pipeline is Rust-only (no Python IPC) and is NOT Stanza-gated.
 
 What determines whether digits get spelled out:
 
-- **CJK (`zho`/`cmn`/`jpn`/`yue`)**: handled in Rust by `num2chinese`
-  in `crates/batchalign-transform/src/asr_postprocess/num2chinese.rs`.
-- **English ordinals/years/decades**: handled by
-  `crates/batchalign-transform/src/asr_postprocess/ordinal_year_eng.rs`
-  via deterministic composition rules.
-- **All other cases**: per-language `NUM2LANG` table at
-  `crates/batchalign-transform/data/num2lang.json`. The table is the
-  offline-codegenned output of a `num2words` sweep; runtime is
-  Rust-only.
+- **CJK (`zho`/`cmn`/`jpn`/`yue`)**, **English ordinals/years/decades**,
+  and **the per-language cardinal table**: all owned by chatter's
+  `talkbank_transform::num_words::expand_number` (the pinned chatter
+  release; tables at `crates/talkbank-transform/data/num2lang.json` in
+  the chatter repository).
+- **Portuguese indicator ordinals**: Batchalign's own
+  `crates/batchalign-transform/src/asr_postprocess/ordinal_por.rs`,
+  which runs first and falls through to chatter for everything else.
+- **The per-language percent word**: also Batchalign's, in
+  `num2text.rs`.
 
-**Regenerating the table.** The historical codegen script
-(`scripts/codegen_num2lang.py`) is no longer in the tree; the
-table is committed as a generated artifact. The maintenance protocol
-lives in [Number Expansion](../architecture/number-expansion.md),
-follow that page when adding or refreshing a language entry. When
-`num2words.CONVERTER_CLASSES` does not cover a language (e.g.
-Malayalam, Hindi, Tamil, most non-Telugu/Kannada/Bengali Indic
-languages), either:
+**Adding a table entry.** Add it to chatter's `num2lang.json`, release
+chatter, then bump the pin here and add the language to
+`crates/batchalign-transform/data/number_expansion_baseline.json`. The
+maintenance protocol lives in
+[Number Expansion](../architecture/number-expansion.md); follow that
+page when adding or refreshing a language entry. When chatter has no
+table for a language (e.g. Hindi, Tamil, most non-Telugu/Kannada/Bengali
+Indic languages), either:
 
-1. Add a hand-curated overlay (digits 0-9 and the common compounds
-   you need) following the procedure in the number-expansion page.
+1. Ask chatter to add a hand-curated overlay (digits 0-9 and the
+   common compounds needed), following the procedure in the
+   number-expansion page.
 2. Add the language to the digit-allowed list via
    `language_allows_numbers` in
    `../chatter/crates/talkbank-model/src/validation/context.rs:34` (consulted by
@@ -192,8 +194,7 @@ user-visible support, adjust integration before merging.
   routing
 - `crates/batchalign/AGENTS.md`: batchalign crate map
 - [Number Expansion](../architecture/number-expansion.md), protocol
-  for refreshing `crates/batchalign-transform/data/num2lang.json` and
-  the hand-curated overlay (the historical
-  `scripts/codegen_num2lang.py` script is no longer in-tree)
+  for adopting a chatter `num2lang.json` update and updating the
+  frozen baseline
 - `../chatter/crates/talkbank-model/src/validation/word/language/`
  , language-aware validators, including E220 digits

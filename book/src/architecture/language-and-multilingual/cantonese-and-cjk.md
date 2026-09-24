@@ -317,8 +317,7 @@ crates/batchalign-transform/src/asr_postprocess/
 ├── prepare.rs: stage 2d, one Cantonese run per monologue
 ├── cantonese.rs: AlignedNormalization (the one owner), cantonese_char_tokens()
 ├── compounds.rs: Compound word merging
-├── num2text.rs: Number expansion
-└── num2chinese.rs: Chinese/Japanese number converter
+└── num2text.rs: Number expansion (Portuguese ordinals; delegates CJK/cardinal numerals to chatter's `talkbank_transform::num_words`)
 
 crates/talkbank-transform/src/retokenize/: Language-agnostic AST rewrite
 crates/batchalign/src/chat_ops/cache_key.rs: cache_key() with retokenize differentiation

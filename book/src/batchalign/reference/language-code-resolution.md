@@ -470,9 +470,15 @@ To add language-specific behavior for a new language:
    whisper_hub`. That is the table a planned job resolves from, so an entry
    added only to `batchalign/models/resolve.py` leaves the job refused with
    `WhisperHubHasNoDefaultModel`.
-4. **Number expansion**: Add an entry to
-   `crates/batchalign-transform/data/num2lang.json`, or handle the
-   language in `crates/batchalign-transform/src/asr_postprocess/num2text.rs`.
+4. **Number expansion**: add a cardinal table entry to chatter's
+   `num2lang.json` (`crates/talkbank-transform/data/num2lang.json` in
+   the chatter repository), release chatter, then bump the pin here
+   and add the language to
+   `crates/batchalign-transform/data/number_expansion_baseline.json`.
+   Language-specific behavior chatter does not cover (Portuguese
+   indicator ordinals, the per-language percent word) is handled in
+   `crates/batchalign-transform/src/asr_postprocess/num2text.rs`. See
+   [Number Expansion](../architecture/number-expansion.md).
 5. **Utterance segmentation**: Optionally train a BERT boundary
    model and add it, with the exact hub commit to pin it to, to
    `crates/batchalign/src/model_manifest.rs::UTSEG_BOUNDARY_MODELS`. That one

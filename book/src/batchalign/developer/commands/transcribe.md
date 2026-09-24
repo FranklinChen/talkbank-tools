@@ -119,11 +119,13 @@ All ASR post-processing runs in Rust (`crates/batchalign-transform/src/asr_postp
    - Distributes timing proportionally by text length
 
 4. **Number expansion**: convert digit strings to word form
-   - Cardinals: 47 languages via `NUM2LANG` static table (data/num2lang.json)
-   - CJK: specialized `num2chinese` path
-   - Ordinals/decades: English-specific `ordinal_year_eng` composer
-   - Currency, percent, dash-ranges: dedicated Rust handlers
-   - **Runtime:** Pure Rust table lookup (Python `num2words` involved at **build time only** for codegen; removed from runtime 2026-04-26)
+   - Cardinals, CJK numerals, English ordinals/decades, currency and
+     dash-ranges: chatter's `talkbank_transform::num_words::expand_number`
+     (tables at `num2lang.json` in the chatter repository)
+   - Portuguese indicator ordinals and the per-language percent word:
+     Batchalign's `num2text.rs`
+   - **Runtime:** Pure Rust, no Python IPC. See
+     [Number Expansion](../../architecture/number-expansion.md).
 
 5. **Long-turn splitting**: chunk monologues >300 words
    - Prevents unbounded utterance lengths in downstream processing

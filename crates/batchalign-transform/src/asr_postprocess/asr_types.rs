@@ -33,8 +33,10 @@
 //! 2. Parses cleanly via `TreeSitterParser::parse_word_fragment`, and
 //! 3. (For the `try_from_lang*` variants) satisfies every language-aware
 //!    word-level rule `talkbank_model::Validate for Word` applies under
-//!    the declared language, including E220 (numeric digits not
-//!    allowed) for languages outside the digit-permitting set.
+//!    the declared language, including E220: digits are refused in
+//!    languages outside the digit-permitting set, and a bare numeral
+//!    word is refused in every language (chatter 0.26.0), because a
+//!    number must be written out as it was pronounced.
 //!
 //!
 //! [`AsrRawText`] and [`AsrNormalizedText`] continue to follow the
@@ -277,8 +279,9 @@ impl ChatWordText {
     ///
     /// Runs [`try_from_with_parser`]'s structural check first, then
     /// applies `Word::validate` under a single-language
-    /// `ValidationContext`: catching E220 (digits disallowed) for
-    /// languages outside the digit-permitting set, plus any other
+    /// `ValidationContext`: catching E220 (digits disallowed for
+    /// languages outside the digit-permitting set, and a bare numeral
+    /// word disallowed in every language), plus any other
     /// word-level rule the model validator applies. Code-switching
     /// semantics live at the full-file layer; this boundary is
     /// deliberately single-language.
@@ -551,17 +554,9 @@ mod tests {
 
     /// Thin adapter for the language-aware invariant tests.
     ///
-    /// For Step 2 this runs the structural half only (delegating to
-    /// `ChatWordText::try_from`) and accepts everything language-wise.
-    /// That is correct for structural invariants that hold in every
-    /// language (e.g. `%` never permitted on the main tier), and the
-    /// cross-language structural test exercises exactly that property.
-    ///
-    /// The E220 digit-policy half lands in Step 3; until then,
-    /// digit-permitting languages (yue, zho, cmn, nan, hak, min, cym,
-    /// vie, tha) and digit-rejecting ones (eng and most others) both
-    /// round-trip through the same structural check, which means
-    /// `rejects_digits_for_eng` stays RED, by design.
+    /// Runs the full language-aware constructor
+    /// (`ChatWordText::try_from_lang`): the structural check, then the
+    /// model's word-level rules (including E220) under `lang` alone.
     fn try_chat_word_for_lang(s: &str, lang: &str) -> Result<ChatWordText, String> {
         let code = talkbank_model::model::LanguageCode::new(lang)
             .map_err(|e| format!("invalid test language code {lang:?}: {e}"))?;
@@ -623,18 +618,26 @@ mod tests {
     }
 
     #[test]
-    fn red_fund_a_chat_word_text_accepts_digits_for_yue() {
+    fn red_fund_a_chat_word_text_yue_permits_embedded_digits_not_bare_numerals() {
         // Digit-permitting languages (yue/zho/cmn/nan/hak/min/cym/vie/
-        // tha) pass the digit rule. The structural invariant (no `%`
-        // on main tier) still holds cross-language, see the next test.
+        // tha) admit digits embedded in a word (tone or homonym digits).
+        // The structural invariant (no `%` on main tier) still holds
+        // cross-language, see the next test.
         assert!(
             try_chat_word_for_lang("17-year-old", "yue").is_ok(),
             "digit-bearing word is legal in yue; ChatWordText \
              construction must succeed"
         );
+        // Since chatter 0.26.0, E220 refuses a bare numeral word in every
+        // language, digit-permitting ones included: a number must be
+        // written out as it was pronounced. Asserting the code, not only
+        // the refusal, keeps this from passing on an unrelated failure.
+        let yue = talkbank_model::model::LanguageCode::new("yue").expect("valid language code");
+        let errors = ChatWordText::try_from_lang("80", &yue)
+            .expect_err("a bare numeral is not a legal yue CHAT word");
         assert!(
-            try_chat_word_for_lang("80", "yue").is_ok(),
-            "bare numeric is legal in yue"
+            errors.iter().any(|e| e.code.as_str() == "E220"),
+            "bare numeral refusal must be E220, got {errors:?}"
         );
     }
 

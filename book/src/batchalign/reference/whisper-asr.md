@@ -302,10 +302,11 @@ in `crates/batchalign-transform/src/asr_postprocess/`:
    `"icecream"` using a known compound list (`crates/batchalign-transform/data/compounds.json`;
    3,660 raw entries → 3,584 unique pairs after dedup, asserted at
    `crates/batchalign-transform/src/asr_postprocess/compounds.rs:84`)
-2. **Number-to-words** -- converts digits to words using language-specific
-   lookup tables (`crates/batchalign-transform/data/num2lang.json`; 46 languages today)
-   plus Chinese/Japanese via
-   `crates/batchalign-transform/src/asr_postprocess/num2chinese.rs`
+2. **Number-to-words** -- converts digits to words via chatter's
+   `talkbank_transform::num_words::expand_number`, which owns the
+   per-language cardinal tables (`num2lang.json`, in the chatter
+   repository) and the CJK numeral converter; see
+   [Number Expansion](number-expansion.md)
 3. **Retokenization** into utterances:
    - With utterance engine (English, Chinese, Cantonese): uses a BERT model
      to predict utterance boundaries

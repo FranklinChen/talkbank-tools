@@ -191,6 +191,13 @@ static NUM2LANG: LazyLock<BTreeMap<String, BTreeMap<String, String>>> = ...;
 Adding a language is adding a table entry.  This is more flexible than a
 trait (data-driven, no code change) and has zero dispatch overhead.
 
+> **Note (2026-09):** this table now lives in chatter, at
+> `crates/talkbank-transform/src/num_words/` and
+> `crates/talkbank-transform/data/num2lang.json` in the chatter
+> repository; Batchalign adopts it via the pinned chatter release. The
+> table-driven-lookup reasoning above still applies. See
+> [Number Expansion](../architecture/number-expansion.md).
+
 **When to reconsider:** If we reach 6+ languages with distinct
 post-processing logic (not just table entries), the conditionals would
 become unwieldy and a trait registry would be cleaner.  We currently have
