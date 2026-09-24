@@ -796,6 +796,7 @@ decision strategies have different severity and review priority:
 | `start_stripped` | Utterance start precedes previous accepted start, full timing removed | **Yes** | Review utterance; may indicate transcript/audio reordering |
 | `kept_bullet_left_unresolved` | Under `--main-bullets keep`, two kept bullets overlap, or one starts before an earlier one; neither changed | **Yes** for a same-speaker overlap or a backward start; **No** for a cross-speaker overlap | Review the input's own bullets; the run did not touch them |
 | `yielded_to_kept_bullet` | Under `--main-bullets keep`, a derived bullet overlapping a kept one moved its start to the kept end | **Yes** only if a word was cut | Informational unless words were cut |
+| `words_untimed_for_kept_absence` | Under `--main-bullets exact`, an utterance the input left without a bullet had words the aligner timed; their timings were removed so it stays without one | No | Informational: the reason lists where each word had been placed |
 
 The three `end_clamped_*` strategies are classified from what is MEASURED
 (word timings), never from the bullet's own extent, since the bullet at this
@@ -1027,7 +1028,22 @@ The phases, and what each does with a kept bullet:
 
 An `Empty` kept bullet (start equals end) is written exactly as given with every
 word untimed, and always recorded. The provenance stamp records
-`main_bullets=keep|derive`.
+`main_bullets=keep|exact|derive`.
+
+**Kept absence (`--main-bullets exact`, `MainBulletPolicy::KeepExact`).** The
+one difference from `KeepGiven` is what `bind` makes of an input utterance
+without a bullet: `GivenSlot::KeptAbsent` instead of `GivenSlot::Unbulleted`.
+Before `impose`, `given_mutability` answers `GivenMutability::ReadOnly` for
+both kinds of kept slot, so the bullet update after post-processing is not run
+for a kept absence either. `impose` then removes any bullet a pre-pass wrote,
+and untimes every word on both tiers with `clamp_words_within` over an empty
+bound (which no word fits), recording `words_untimed_for_kept_absence` when
+the aligner had timed any. The words stay in the FA group: removing them would
+change what the aligner hears around the neighbours. After `impose`,
+`ImposedBullets::mutability` takes the LIVE bullet (repair and monotonicity
+only ask about bulleted utterances), so a kept absence there has gained a
+bullet and is `KeptBulletError::GainedBullet`; `verify_held` checks the same
+at the end and counts the absences held (`KeptBulletsHeld::kept_absent`).
 
 #### Word end times for an onset-only engine
 

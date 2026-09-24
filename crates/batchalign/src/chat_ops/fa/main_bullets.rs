@@ -20,6 +20,10 @@
 //! input bullet --classify--> GivenMainBullet::{Extent, Empty, Backward}
 //!     Backward: bind refuses the file (BackwardGivenBullet)
 //!     Extent | Empty: KeptBullet, read-only for the run
+//! input without a bullet: Given::Unbulleted, read through the document's ONE
+//! AbsencePolicy (a binding cannot mix the two):
+//!     keep  (AbsencePolicy::Derive): derives one from its words as by default
+//!     exact (AbsencePolicy::Keep):   stays without one; its words lose timing
 //! MainBulletPolicy + input --MainBulletAuthority::bind--> MainBulletAuthority
 //! FaProjectionPolicy + MainBulletAuthority --FaProjection::new--> FaProjection
 //! MainBulletAuthority --impose(chat)--> Imposition
@@ -33,8 +37,14 @@
 //! Repair and monotonicity cannot run without an [`ImposedBullets`], and their
 //! guards compare the LIVE bullet with the [`KeptBullet`] they carry, so a kept
 //! bullet that drifted is an error at the first phase to see it rather than a
-//! silent wrong answer. The run ends with [`MainBulletAuthority::verify_held`],
-//! whose [`KeptBulletsHeld`] proof `FaFinalized` carries.
+//! silent wrong answer. Those phases only ever ask about an utterance that HAS
+//! a live bullet, so a kept absence is never one of their read-only nodes: an
+//! absence that gained a bullet is [`KeptBulletError::GainedBullet`] instead.
+//! The phases before `impose` ask [`MainBulletAuthority::given_mutability`],
+//! whose [`GivenMutability::ReadOnly`] covers both, so the injection writes no
+//! bullet onto a kept absence in the first place. The run ends with
+//! [`MainBulletAuthority::verify_held`], whose [`KeptBulletsHeld`] proof
+//! `FaFinalized` carries.
 
 use std::fmt::Write as _;
 
@@ -75,9 +85,15 @@ impl GivenMainBullet {
 ///
 /// Built only by [`MainBulletAuthority::bind`], so a value is always a bullet
 /// read off the input. `Backward` has no variant here, which is what makes a
-/// kept backward bullet unrepresentable rather than merely checked for.
+/// kept backward bullet unrepresentable rather than merely checked for. The
+/// variants live in the private [`Kept`], so the sibling phases that receive a
+/// `KeptBullet` can read it but cannot build one from raw milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum KeptBullet {
+pub(super) struct KeptBullet(Kept);
+
+/// The two shapes of a [`KeptBullet`]; private to this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kept {
     /// A positive extent.
     Extent { start_ms: u64, end_ms: u64 },
     /// A zero-length bullet, kept as written.
@@ -87,17 +103,17 @@ pub(super) enum KeptBullet {
 impl KeptBullet {
     /// Start, in milliseconds.
     pub(super) fn start_ms(self) -> u64 {
-        match self {
-            Self::Extent { start_ms, .. } => start_ms,
-            Self::Empty { at_ms } => at_ms,
+        match self.0 {
+            Kept::Extent { start_ms, .. } => start_ms,
+            Kept::Empty { at_ms } => at_ms,
         }
     }
 
     /// End, in milliseconds.
     pub(super) fn end_ms(self) -> u64 {
-        match self {
-            Self::Extent { end_ms, .. } => end_ms,
-            Self::Empty { at_ms } => at_ms,
+        match self.0 {
+            Kept::Extent { end_ms, .. } => end_ms,
+            Kept::Empty { at_ms } => at_ms,
         }
     }
 
@@ -123,11 +139,35 @@ impl KeptBullet {
     }
 }
 
-/// One input utterance's slot.
+/// What the input carried for one utterance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Given {
+    /// No bullet. What that means is the document's [`AbsencePolicy`].
+    Unbulleted,
+    /// This bullet, which the run keeps.
+    Kept(KeptBullet),
+}
+
+/// What the run does with an utterance the input left without a bullet. One
+/// value per document, held beside the slots rather than in each, so a
+/// binding cannot mix the two meanings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbsencePolicy {
+    /// `keep`: the utterance derives a bullet from its words, as by default.
+    Derive,
+    /// `exact`: the utterance stays without a bullet and its words are untimed.
+    Keep,
+}
+
+/// What the run does with one utterance's bullet: [`Given`] read through the
+/// document's [`AbsencePolicy`]. Computed by [`GivenMainBullets::slot`], never
+/// stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GivenSlot {
-    /// The input gave this utterance no bullet: it derives one as by default.
+    /// No bullet was given and the run derives one.
     Unbulleted,
+    /// No bullet was given and the run keeps that absence.
+    KeptAbsent,
     /// The input gave this bullet and the run keeps it.
     Kept(KeptBullet),
 }
@@ -135,7 +175,8 @@ enum GivenSlot {
 /// The main bullets one input document carried, by utterance ordinal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GivenMainBullets {
-    by_utterance: Vec<GivenSlot>,
+    by_utterance: Vec<Given>,
+    absence: AbsencePolicy,
 }
 
 impl GivenMainBullets {
@@ -143,12 +184,17 @@ impl GivenMainBullets {
     /// typed error: the working document has an utterance the input did not,
     /// and no given bullet can be attributed to it.
     fn slot(&self, utterance_idx: UtteranceIdx) -> Result<GivenSlot, KeptBulletError> {
-        self.by_utterance.get(utterance_idx.raw()).copied().ok_or(
+        let given = self.by_utterance.get(utterance_idx.raw()).copied().ok_or(
             KeptBulletError::UtteranceOutsideInput {
                 utterance_idx: utterance_idx.raw(),
                 input_utterances: self.by_utterance.len(),
             },
-        )
+        )?;
+        Ok(match (given, self.absence) {
+            (Given::Kept(kept), _) => GivenSlot::Kept(kept),
+            (Given::Unbulleted, AbsencePolicy::Derive) => GivenSlot::Unbulleted,
+            (Given::Unbulleted, AbsencePolicy::Keep) => GivenSlot::KeptAbsent,
+        })
     }
 }
 
@@ -157,11 +203,24 @@ impl GivenMainBullets {
 pub enum MainBulletAuthority {
     /// No bullet is read-only: every bullet is a projection of its words.
     DeriveFromWords,
-    /// The bullets the input carried are read-only.
-    KeepGiven(GivenMainBullets),
+    /// The bullets the input carried are read-only (`keep`), and under
+    /// `exact` so is the absence of one.
+    Keep(GivenMainBullets),
 }
 
-/// What a phase may do to one utterance's main bullet.
+/// What a phase running BEFORE [`MainBulletAuthority::impose`] may do to one
+/// utterance's main bullet. `ReadOnly` covers a kept bullet and a kept
+/// absence alike: either way the phase must not write one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GivenMutability {
+    /// The input's bullet, or its absence, is kept.
+    ReadOnly,
+    /// This bullet is the projection's to derive, widen or strip.
+    Revisable,
+}
+
+/// What a phase after [`MainBulletAuthority::impose`] may do to one
+/// utterance's LIVE main bullet.
 ///
 /// Matched exhaustively by every phase that writes a bullet, so a phase added
 /// later has to say what it does with a read-only bullet before it compiles.
@@ -229,9 +288,30 @@ pub enum KeptBulletError {
         /// The live bullet, as `start_end`, or `no bullet`.
         live: String,
     },
+    /// An utterance the input left without a bullet, under `exact`, has one.
+    #[error(
+        "--main-bullets exact: utterance {utterance_idx} was given no bullet but now has \
+         {start_ms}_{end_ms}"
+    )]
+    GainedBullet {
+        /// The utterance that gained a bullet.
+        utterance_idx: usize,
+        /// The live start.
+        start_ms: u64,
+        /// The live end.
+        end_ms: u64,
+    },
 }
 
 impl KeptBulletError {
+    fn gained(utterance_idx: UtteranceIdx, live: &Bullet) -> Self {
+        Self::GainedBullet {
+            utterance_idx: utterance_idx.raw(),
+            start_ms: live.timing.start_ms,
+            end_ms: live.timing.end_ms,
+        }
+    }
+
     fn drifted(utterance_idx: UtteranceIdx, kept: KeptBullet, live: Option<&Bullet>) -> Self {
         Self::Drifted {
             utterance_idx: utterance_idx.raw(),
@@ -249,42 +329,46 @@ impl MainBulletAuthority {
     /// Bind the policy to the input document AS PARSED, before any pre-pass.
     ///
     /// The one place [`MainBulletPolicy`] is read for the projection. The
-    /// default reads nothing and cannot fail; `keep` classifies every input
-    /// bullet and refuses a backward one.
+    /// default reads nothing and cannot fail; `keep` and `exact` classify
+    /// every input bullet and refuse a backward one, and differ only in what
+    /// an utterance WITHOUT a bullet becomes.
     pub fn bind(policy: MainBulletPolicy, input: &ChatFile) -> Result<Self, BackwardGivenBullet> {
-        match policy {
-            MainBulletPolicy::DeriveFromWords => Ok(Self::DeriveFromWords),
-            MainBulletPolicy::KeepGiven => {
-                let by_utterance = utterances_indexed(input)
-                    .map(|(line_idx, utterance_idx, utterance)| {
-                        match utterance
-                            .main
-                            .content
-                            .bullet
-                            .as_ref()
-                            .map(GivenMainBullet::classify)
-                        {
-                            None => Ok(GivenSlot::Unbulleted),
-                            Some(GivenMainBullet::Extent { start_ms, end_ms }) => {
-                                Ok(GivenSlot::Kept(KeptBullet::Extent { start_ms, end_ms }))
-                            }
-                            Some(GivenMainBullet::Empty { at_ms }) => {
-                                Ok(GivenSlot::Kept(KeptBullet::Empty { at_ms }))
-                            }
-                            Some(GivenMainBullet::Backward { start_ms, end_ms }) => {
-                                Err(BackwardGivenBullet {
-                                    utterance_ordinal: utterance_idx.raw(),
-                                    line_idx,
-                                    start_ms,
-                                    end_ms,
-                                })
-                            }
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Self::KeepGiven(GivenMainBullets { by_utterance }))
-            }
-        }
+        let absence = match policy {
+            MainBulletPolicy::DeriveFromWords => return Ok(Self::DeriveFromWords),
+            MainBulletPolicy::KeepGiven => AbsencePolicy::Derive,
+            MainBulletPolicy::KeepExact => AbsencePolicy::Keep,
+        };
+        let by_utterance = utterances_indexed(input)
+            .map(|(line_idx, utterance_idx, utterance)| {
+                match utterance
+                    .main
+                    .content
+                    .bullet
+                    .as_ref()
+                    .map(GivenMainBullet::classify)
+                {
+                    None => Ok(Given::Unbulleted),
+                    Some(GivenMainBullet::Extent { start_ms, end_ms }) => {
+                        Ok(Given::Kept(KeptBullet(Kept::Extent { start_ms, end_ms })))
+                    }
+                    Some(GivenMainBullet::Empty { at_ms }) => {
+                        Ok(Given::Kept(KeptBullet(Kept::Empty { at_ms })))
+                    }
+                    Some(GivenMainBullet::Backward { start_ms, end_ms }) => {
+                        Err(BackwardGivenBullet {
+                            utterance_ordinal: utterance_idx.raw(),
+                            line_idx,
+                            start_ms,
+                            end_ms,
+                        })
+                    }
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::Keep(GivenMainBullets {
+            by_utterance,
+            absence,
+        }))
     }
 
     /// What a phase running BEFORE [`Self::impose`] may do to a bullet. No
@@ -292,13 +376,19 @@ impl MainBulletAuthority {
     pub(super) fn given_mutability(
         &self,
         utterance_idx: UtteranceIdx,
-    ) -> Result<BulletMutability, KeptBulletError> {
+    ) -> Result<GivenMutability, KeptBulletError> {
+        match self.slot(utterance_idx)? {
+            None | Some(GivenSlot::Unbulleted) => Ok(GivenMutability::Revisable),
+            Some(GivenSlot::Kept(_) | GivenSlot::KeptAbsent) => Ok(GivenMutability::ReadOnly),
+        }
+    }
+
+    /// The input's slot for one utterance, or `None` when no bullet is kept
+    /// at all (the default policy).
+    fn slot(&self, utterance_idx: UtteranceIdx) -> Result<Option<GivenSlot>, KeptBulletError> {
         match self {
-            Self::DeriveFromWords => Ok(BulletMutability::Revisable),
-            Self::KeepGiven(given) => match given.slot(utterance_idx)? {
-                GivenSlot::Unbulleted => Ok(BulletMutability::Revisable),
-                GivenSlot::Kept(kept) => Ok(BulletMutability::ReadOnly(kept)),
-            },
+            Self::DeriveFromWords => Ok(None),
+            Self::Keep(given) => given.slot(utterance_idx).map(Some),
         }
     }
 
@@ -323,10 +413,31 @@ impl MainBulletAuthority {
     ) -> Result<Imposition<'_>, KeptBulletError> {
         let mut cuts = Vec::new();
         let mut records = Vec::new();
-        if let Self::KeepGiven(given) = self {
+        if let Self::Keep(given) = self {
             for (line_idx, utterance_idx, utterance) in utterances_indexed_mut(chat_file) {
                 let kept = match given.slot(utterance_idx)? {
                     GivenSlot::Unbulleted => continue,
+                    GivenSlot::KeptAbsent => {
+                        // No bullet, and no word timing a later reader could
+                        // derive one from. An empty bound fits no word, so
+                        // `clamp_words_within` untimes every word on both
+                        // tiers, recording where the aligner had put each.
+                        utterance.main.content.bullet = None;
+                        let untimed = clamp_words_within(utterance, TimeSpan::new(0, 0));
+                        if untimed.cut_main_tier() {
+                            cuts.push(utterance_idx);
+                        }
+                        if let Some(reason) = absence_reason(&untimed) {
+                            records.push(DecisionRecord::new_and_trace(
+                                line_idx,
+                                utterance.main.speaker.as_str().to_string(),
+                                DecisionStrategy::Fa(FaStrategy::WordsUntimedForKeptAbsence),
+                                reason,
+                                false,
+                            ));
+                        }
+                        continue;
+                    }
                     GivenSlot::Kept(kept) => kept,
                 };
                 utterance.main.content.bullet = Some(kept.to_bullet());
@@ -360,14 +471,19 @@ impl MainBulletAuthority {
     ) -> Result<KeptBulletsHeld, KeptBulletError> {
         let given = match self {
             Self::DeriveFromWords => return Ok(KeptBulletsHeld(HeldBullets::NoneKept)),
-            Self::KeepGiven(given) => given,
+            Self::Keep(given) => given,
         };
         let mut working_utterances = 0usize;
         let mut kept_count = 0usize;
+        let mut kept_absent = 0usize;
         for (_, utterance_idx, utterance) in utterances_indexed(chat_file) {
             working_utterances += 1;
             match given.slot(utterance_idx)? {
                 GivenSlot::Unbulleted => {}
+                GivenSlot::KeptAbsent => match utterance.main.content.bullet.as_ref() {
+                    None => kept_absent += 1,
+                    Some(live) => return Err(KeptBulletError::gained(utterance_idx, live)),
+                },
                 GivenSlot::Kept(kept) => {
                     let live = utterance.main.content.bullet.as_ref();
                     match kept.is_live(live) {
@@ -378,7 +494,10 @@ impl MainBulletAuthority {
             }
         }
         match working_utterances == given.by_utterance.len() {
-            true => Ok(KeptBulletsHeld(HeldBullets::AllHeld { kept: kept_count })),
+            true => Ok(KeptBulletsHeld(HeldBullets::AllHeld {
+                kept: kept_count,
+                kept_absent,
+            })),
             false => Err(KeptBulletError::UtteranceMissing {
                 input_utterances: given.by_utterance.len(),
                 working_utterances,
@@ -391,8 +510,8 @@ impl MainBulletAuthority {
 /// saying (a positive-extent bullet whose words already fitted).
 fn imposition_reason(kept: KeptBullet, clamped: &ClampedWordCounts) -> Option<(String, bool)> {
     let mut reason = String::new();
-    let needs_review = match kept {
-        KeptBullet::Extent { start_ms, end_ms } => {
+    let needs_review = match kept.0 {
+        Kept::Extent { start_ms, end_ms } => {
             if clamped.trimmed() == 0 && clamped.dropped.is_empty() {
                 return None;
             }
@@ -401,17 +520,41 @@ fn imposition_reason(kept: KeptBullet, clamped: &ClampedWordCounts) -> Option<(S
         }
         // An empty bullet is always worth a record: the input asserted an
         // utterance that took no time, and every word of it is now untimed.
-        KeptBullet::Empty { at_ms } => {
+        Kept::Empty { at_ms } => {
             let _ = write!(reason, "kept_empty_main_bullet={at_ms}_{at_ms}");
             true
         }
     };
     let _ = write!(
         reason,
-        " words_trimmed={} words_dropped={} dropped=[",
+        " words_trimmed={} words_dropped={} ",
         clamped.trimmed(),
         clamped.dropped.len()
     );
+    write_dropped(&mut reason, clamped);
+    let _ = write!(reason, " cause=word_outside_kept_bullet");
+    Some((reason, needs_review))
+}
+
+/// The decision reason for one kept absence whose words the aligner had
+/// timed, or `None` when none was timed.
+fn absence_reason(untimed: &ClampedWordCounts) -> Option<String> {
+    if untimed.dropped.is_empty() {
+        return None;
+    }
+    let mut reason = format!(
+        "kept_absent_main_bullet words_untimed={} ",
+        untimed.dropped.len()
+    );
+    write_dropped(&mut reason, untimed);
+    let _ = write!(reason, " cause=utterance_given_no_bullet");
+    Some(reason)
+}
+
+/// `dropped=[tier:word:start_end,...]`, the one spelling both reasons use for
+/// where each word had been placed before its timing was removed.
+fn write_dropped(reason: &mut String, clamped: &ClampedWordCounts) {
+    reason.push_str("dropped=[");
     for (i, dropped) in clamped.dropped.iter().enumerate() {
         let tier = match dropped.tier {
             WordTier::MainTier => "main",
@@ -424,8 +567,7 @@ fn imposition_reason(kept: KeptBullet, clamped: &ClampedWordCounts) -> Option<(S
             dropped.word_index, dropped.measured.start_ms, dropped.measured.end_ms
         );
     }
-    let _ = write!(reason, "] cause=word_outside_kept_bullet");
-    Some((reason, needs_review))
+    reason.push(']');
 }
 
 /// What [`MainBulletAuthority::impose`] did, consumed by `then_finalize`.
@@ -469,16 +611,20 @@ impl ImposedBullets<'_> {
     /// What a phase may do to this utterance's bullet, checked against the
     /// LIVE bullet: a kept bullet that is no longer the given one is an error
     /// here, at the first phase to see it.
+    ///
+    /// Only an utterance with a live bullet is asked about, so a kept absence
+    /// here has gained one, which is [`KeptBulletError::GainedBullet`].
     pub(super) fn mutability(
         &self,
         utterance_idx: UtteranceIdx,
-        live: Option<&Bullet>,
+        live: &Bullet,
     ) -> Result<BulletMutability, KeptBulletError> {
-        match self.authority.given_mutability(utterance_idx)? {
-            BulletMutability::Revisable => Ok(BulletMutability::Revisable),
-            BulletMutability::ReadOnly(kept) => match kept.is_live(live) {
+        match self.authority.slot(utterance_idx)? {
+            None | Some(GivenSlot::Unbulleted) => Ok(BulletMutability::Revisable),
+            Some(GivenSlot::KeptAbsent) => Err(KeptBulletError::gained(utterance_idx, live)),
+            Some(GivenSlot::Kept(kept)) => match kept.is_live(Some(live)) {
                 true => Ok(BulletMutability::ReadOnly(kept)),
-                false => Err(KeptBulletError::drifted(utterance_idx, kept, live)),
+                false => Err(KeptBulletError::drifted(utterance_idx, kept, Some(live))),
             },
         }
     }
@@ -506,8 +652,9 @@ pub struct KeptBulletsHeld(HeldBullets);
 enum HeldBullets {
     /// The run kept no bullets (the default policy).
     NoneKept,
-    /// Every given bullet, this many, is exactly the one written.
-    AllHeld { kept: usize },
+    /// Every given bullet, this many, is exactly the one written, and every
+    /// kept absence, this many, is still without one.
+    AllHeld { kept: usize, kept_absent: usize },
 }
 
 impl KeptBulletsHeld {
@@ -515,7 +662,16 @@ impl KeptBulletsHeld {
     pub fn kept(self) -> usize {
         match self.0 {
             HeldBullets::NoneKept => 0,
-            HeldBullets::AllHeld { kept } => kept,
+            HeldBullets::AllHeld { kept, .. } => kept,
+        }
+    }
+
+    /// How many kept absences were verified still without a bullet (0 unless
+    /// `exact`).
+    pub fn kept_absent(self) -> usize {
+        match self.0 {
+            HeldBullets::NoneKept => 0,
+            HeldBullets::AllHeld { kept_absent, .. } => kept_absent,
         }
     }
 }

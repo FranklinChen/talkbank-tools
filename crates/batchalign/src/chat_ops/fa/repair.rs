@@ -586,7 +586,7 @@ fn collect_bullet_entries(
             speaker: utt.main.speaker.to_string(),
             start_ms: bullet.timing.start_ms,
             end_ms: bullet.timing.end_ms,
-            mutability: imposed.mutability(utterance_idx, Some(bullet))?,
+            mutability: imposed.mutability(utterance_idx, bullet)?,
         });
     }
     Ok(entries)

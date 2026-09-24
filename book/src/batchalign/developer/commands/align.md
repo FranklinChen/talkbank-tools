@@ -107,7 +107,7 @@ changing the FA model no longer discards UTR ASR results, and changing a
 recovery model no longer silently reuses rows produced by the previous one.
 
 The `[fc-ba3 align | ...]` stamp records `fa=` (the reported FA engine),
-`main_bullets=` (`derive` or `keep`, always written) and, when a
+`main_bullets=` (`derive`, `keep` or `exact`, always written) and, when a
 timing-recovery pass actually ran (the pre-pass or the retry fallback),
 `utr=` with the recovery engine's name (`rev`, `whisper`, `tencent`). A file
 whose utterances were all timed, so that no pass ran, records no `utr=`. The

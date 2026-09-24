@@ -104,6 +104,13 @@ pub enum FaStrategy {
     /// its edge is trimmed to it, and a word wholly outside it (or left with no
     /// extent) loses its timing.
     WordsClampedToKeptBullet,
+    /// The input gave this utterance no bullet and the run was told to keep
+    /// that absence (`align --main-bullets exact`): the aligner's word
+    /// timings for it are removed, so no bullet can be derived from them.
+    ///
+    /// Distinct from [`Self::WordsClampedToKeptBullet`], where the words are
+    /// fitted into a bullet the input gave; here there is no bullet to fit.
+    WordsUntimedForKeptAbsence,
     /// How this utterance's word timings were produced.
     ///
     /// Not a decision in the sense the others are: nothing was changed. It
@@ -138,6 +145,7 @@ impl FaStrategy {
             Self::WordsTimingDropped => "words_timing_dropped",
             Self::NarrowBulletRescued => "narrow_bullet_rescued",
             Self::WordsClampedToKeptBullet => "words_clamped_to_kept_bullet",
+            Self::WordsUntimedForKeptAbsence => "words_untimed_for_kept_absence",
             Self::KeptBulletWindowWidened => "kept_bullet_window_widened",
         }
     }

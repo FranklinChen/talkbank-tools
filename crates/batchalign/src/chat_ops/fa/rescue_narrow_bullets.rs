@@ -33,7 +33,7 @@
 use talkbank_model::model::{BulletSource, ChatFile, Line};
 
 use super::coordinates::Ms;
-use super::main_bullets::{BulletMutability, KeptBulletError, MainBulletAuthority};
+use super::main_bullets::{GivenMutability, KeptBulletError, MainBulletAuthority};
 use super::speech_rate::SpeechRate;
 
 #[cfg(test)]
@@ -271,10 +271,10 @@ pub fn rescue_narrow_bullets(
             tag = trigger.as_decision_tag(),
         );
         let strategy = match obs.mutability {
-            BulletMutability::Revisable => {
+            GivenMutability::Revisable => {
                 batchalign_transform::decisions::FaStrategy::NarrowBulletRescued
             }
-            BulletMutability::ReadOnly(_) => {
+            GivenMutability::ReadOnly => {
                 reason.push_str(" scope=grouping_only");
                 batchalign_transform::decisions::FaStrategy::KeptBulletWindowWidened
             }
@@ -313,7 +313,7 @@ struct RescueObservation {
     next_start_ms: Option<u64>,
     /// Whether the transcript keeps this bullet as given, which decides what
     /// the rescue record may claim.
-    mutability: BulletMutability,
+    mutability: GivenMutability,
 }
 
 /// Walk the file once and collect rescue candidates with their next-utterance

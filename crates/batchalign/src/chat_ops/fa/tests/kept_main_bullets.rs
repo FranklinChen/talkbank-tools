@@ -1,6 +1,7 @@
-//! `--main-bullets keep`, binding and word fitting: a bullet the input
-//! carried is written back exactly, word timings are fitted inside it on both
-//! tiers, and an utterance the input left unbulleted still derives a bullet.
+//! `--main-bullets keep` and `exact`, binding and word fitting: a bullet the
+//! input carried is written back exactly, word timings are fitted inside it on
+//! both tiers, and an utterance the input left unbulleted still derives a
+//! bullet under `keep` but stays without one under `exact`.
 //! Every keep run goes through [`run_under_both_policies`] or calls
 //! [`assert_given_bullets_held`] itself, so EVERY given bullet is checked,
 //! not a chosen few. Ordering phases (monotonicity, repair) are in
@@ -208,6 +209,101 @@ fn unbulleted_utterance_still_derives_its_bullet_under_keep() {
     assert_eq!(
         get_utterance_bullet(&kept.chat, 1),
         get_utterance_bullet(&derived.chat, 1)
+    );
+}
+
+/// Under `exact`, the same unbulleted utterance stays without a bullet: its
+/// words are aligned with the rest but lose their timings, on both tiers, and
+/// the run records where the aligner had put them. The given bullet holds.
+#[test]
+fn unbulleted_utterance_stays_without_a_bullet_under_exact() {
+    let input =
+        two_speaker_transcript("*CHI:\thello . \u{15}1000_2000\u{15}\n*MOT:\tgood morning .\n");
+    let given = parse_chat(&input);
+    let mut chat = parse_chat(&input);
+    let exact = bound_projection(
+        &chat,
+        EndOverlapPolicy::ClampAllAdjacent,
+        MainBulletPolicy::KeepExact,
+    );
+    let (records, _) = align_one_group(
+        &mut chat,
+        exact,
+        vec![
+            fa_word(0, 0, "hello"),
+            fa_word(1, 0, "good"),
+            fa_word(1, 1, "morning"),
+        ],
+        &[0, 1],
+        &[(900, 1900), (5000, 5400), (5400, 6100)],
+        true,
+        BulletRepairPolicy::Disabled,
+    );
+
+    assert_given_bullets_held(&given, &chat);
+    assert_eq!(get_utterance_bullet(&chat, 1), None);
+    assert!(
+        wor_timings(&chat, 1).iter().all(Option::is_none),
+        "no %wor timing a bullet could be derived from: {:?}",
+        wor_timings(&chat, 1)
+    );
+    let untimed = records_with(
+        &records,
+        DecisionStrategy::Fa(FaStrategy::WordsUntimedForKeptAbsence),
+    );
+    assert_eq!(untimed.len(), 1);
+    assert!(
+        untimed[0]
+            .reason
+            .starts_with("kept_absent_main_bullet words_untimed="),
+        "{}",
+        untimed[0].reason
+    );
+    assert!(!untimed[0].needs_review);
+}
+
+/// The runtime check under `exact`: a kept absence that gained a bullet
+/// fails it, and a held one is counted.
+#[test]
+fn held_check_fails_when_a_kept_absence_gains_a_bullet() {
+    let mut chat = parse_chat(&two_speaker_transcript(
+        "*CHI:\thello . \u{15}1000_2000\u{15}\n*MOT:\tthere .\n",
+    ));
+    let authority =
+        MainBulletAuthority::bind(MainBulletPolicy::KeepExact, &chat).expect("forward bullets");
+    let held = authority.verify_held(&chat).expect("nothing changed");
+    assert_eq!((held.kept(), held.kept_absent()), (1, 1));
+
+    get_test_utterance(&mut chat, 1).main.content.bullet = Some(Bullet::new(2500, 3000));
+    assert!(matches!(
+        authority.verify_held(&chat),
+        Err(KeptBulletError::GainedBullet {
+            utterance_idx: 1,
+            start_ms: 2500,
+            end_ms: 3000,
+        })
+    ));
+}
+
+/// `exact` admits no timing recovery; the other policies pass the request
+/// through unchanged.
+#[test]
+fn exact_refuses_utterance_timing_recovery() {
+    assert_eq!(
+        MainBulletPolicy::KeepExact.admit_utr(Some("rev")),
+        Err(crate::chat_ops::fa::ExactRefusesUtr)
+    );
+    assert_eq!(
+        MainBulletPolicy::KeepExact.admit_utr(None::<&str>),
+        Ok(None)
+    );
+    assert_eq!(
+        MainBulletPolicy::KeepGiven.admit_utr(Some("rev")),
+        Ok(Some("rev"))
+    );
+    assert_eq!(
+        MainBulletPolicy::DeriveFromWords.admit_utr(Some("rev")),
+        Ok(Some("rev"))
     );
 }
 

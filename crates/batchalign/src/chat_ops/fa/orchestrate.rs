@@ -18,8 +18,8 @@ use talkbank_model::model::{BracketedItems, TierContentItems};
 use super::WordEndPolicy;
 use super::injection::inject_timings_for_utterance;
 use super::main_bullets::{
-    BulletMutability, FaProjection, ImposedBullets, KeptBullet, KeptBulletError, KeptBulletsHeld,
-    MainBulletAuthority,
+    BulletMutability, FaProjection, GivenMutability, ImposedBullets, KeptBullet, KeptBulletError,
+    KeptBulletsHeld, MainBulletAuthority,
 };
 use super::origin::Origin;
 use super::postprocess::postprocess_utterance_timings_with_boundary_policy;
@@ -793,9 +793,11 @@ pub fn apply_fa_results_with_projection_policy(
 
             match mutability {
                 // Read-only: `MainBulletAuthority::impose` restores the given
-                // bullet and cuts the words to fit it at finalization.
-                BulletMutability::ReadOnly(_) => {}
-                BulletMutability::Revisable => update_utterance_bullet_with_boundary_policy(
+                // bullet and cuts the words to fit it at finalization, or,
+                // for a kept absence, leaves it without one and untimes its
+                // words.
+                GivenMutability::ReadOnly => {}
+                GivenMutability::Revisable => update_utterance_bullet_with_boundary_policy(
                     utt,
                     policy.existing_wor_boundaries(),
                 ),
@@ -1627,7 +1629,7 @@ fn enforce_start_order(
             speaker: utterance.main.speaker.as_str().to_string(),
             start_ms: bullet.timing.start_ms,
             end_ms: bullet.timing.end_ms,
-            mutability: imposed.mutability(utterance_idx, Some(bullet))?,
+            mutability: imposed.mutability(utterance_idx, bullet)?,
         });
     }
 
@@ -1922,9 +1924,7 @@ fn resolve_end_overlap_pair(
         return Ok(());
     };
     let next_start = next_bullet.timing.start_ms;
-    let next_mutability = kept
-        .imposed
-        .mutability(next_utterance_idx, Some(next_bullet))?;
+    let next_mutability = kept.imposed.mutability(next_utterance_idx, next_bullet)?;
 
     // Read what is true of the previous utterance's bullet before touching
     // anything: whether an overlap exists at all is decided read-only, and
@@ -1939,9 +1939,7 @@ fn resolve_end_overlap_pair(
     if prev_bullet.timing.end_ms <= next_start {
         return Ok(());
     }
-    let prev_mutability = kept
-        .imposed
-        .mutability(prev_utterance_idx, Some(prev_bullet))?;
+    let prev_mutability = kept.imposed.mutability(prev_utterance_idx, prev_bullet)?;
     let facts = OverlapFacts {
         edge: OverlapEdge {
             line_idx: prev_idx,

@@ -596,6 +596,23 @@ async fn process_one_fa_file(
         )
         .await;
 
+    // `--main-bullets exact` keeps untimed utterances untimed; timing recovery
+    // exists to time them. The UTR engine the rest of this file uses is the
+    // one the policy admits, so a contradictory job cannot reach the pre-pass.
+    let utr_engine = match fa_params.main_bullets.admit_utr(utr_engine) {
+        Ok(admitted) => admitted,
+        Err(refused) => {
+            lifecycle
+                .fail(
+                    &refused.to_string(),
+                    FailureCategory::Validation,
+                    unix_now(),
+                )
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+
     // Read the CHAT file
     let read_path: PathBuf =
         if job.filesystem.paths_mode && file_index < job.filesystem.source_paths.len() {

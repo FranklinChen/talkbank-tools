@@ -582,6 +582,14 @@ pub enum MainBulletPolicy {
     #[serde(rename = "keep")]
     #[value(name = "keep")]
     KeepGiven,
+    /// As `keep`, and an utterance the input left WITHOUT a bullet stays
+    /// without one: its words are aligned with the rest (they are spoken
+    /// somewhere) but their timings are removed, so no bullet is derived.
+    /// For a reviewed transcript whose untimed lines are a deliberate
+    /// status, not a gap to fill.
+    #[serde(rename = "exact")]
+    #[value(name = "exact")]
+    KeepExact,
 }
 
 /// The one owner of [`MainBulletPolicy`]'s default: the established
@@ -593,12 +601,36 @@ pub fn default_main_bullet_policy_serde() -> MainBulletPolicy {
     DEFAULT_MAIN_BULLET_POLICY
 }
 
+/// `--main-bullets exact` on a job that also asks for utterance timing
+/// recovery: `exact` keeps an utterance the input left without a bullet
+/// without one, and recovery exists to give it one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "--main-bullets exact keeps every utterance the input left without a bullet \
+     without one, and utterance timing recovery (UTR) exists to give it one; \
+     run align with --no-utr"
+)]
+pub struct ExactRefusesUtr;
+
 impl MainBulletPolicy {
-    /// The provenance-stamp and wire spelling (`derive` or `keep`).
+    /// The utterance-timing-recovery engine this policy admits, consuming the
+    /// requested one: `exact` admits none, so the pre-pass (which runs after
+    /// the bind and would write bullets onto kept absences, distorting FA
+    /// grouping before `impose` could remove them) is unreachable under it.
+    pub fn admit_utr<E>(self, requested: Option<E>) -> Result<Option<E>, ExactRefusesUtr> {
+        match (self, requested) {
+            (Self::KeepExact, Some(_)) => Err(ExactRefusesUtr),
+            (Self::KeepExact, None) => Ok(None),
+            (Self::DeriveFromWords | Self::KeepGiven, requested) => Ok(requested),
+        }
+    }
+
+    /// The provenance-stamp and wire spelling (`derive`, `keep` or `exact`).
     pub fn stamp_name(self) -> &'static str {
         match self {
             Self::DeriveFromWords => "derive",
             Self::KeepGiven => "keep",
+            Self::KeepExact => "exact",
         }
     }
 }

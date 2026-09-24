@@ -172,7 +172,7 @@ name.
 |-----|---------|
 | `fa` | Forced alignment engine the worker reported |
 | `lang` | Language code |
-| `main_bullets` | `derive` (utterance bullets recomputed from aligned words, the default) or `keep` (the input's bullets kept exactly; see `align --main-bullets`). Always written |
+| `main_bullets` | `derive` (utterance bullets recomputed from aligned words, the default), `keep` (the input's bullets kept exactly) or `exact` (as `keep`, and utterances without a bullet kept without one); see `align --main-bullets`. Always written |
 | `utr` | Timing recovery engine (`rev`, `whisper`, `tencent`), present only if a recovery pass ran |
 | `wor` | Present if %wor tier was written |
 | `incremental` | Present if `--before` incremental mode was used |

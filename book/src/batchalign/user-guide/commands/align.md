@@ -386,6 +386,20 @@ For such a transcript, run `batchalign3 align --main-bullets keep`. Then:
 - the output's `@Comment` provenance stamp records `main_bullets=keep` (or
   `main_bullets=derive` by default).
 
+`--main-bullets exact` does all of that and also keeps the ABSENCE of a bullet:
+an utterance the input left without one stays without one. Its words are still
+aligned with the rest of their group (they were spoken somewhere, and leaving
+them out would shift their neighbours' alignment), but their timings are then
+removed on both tiers, so no bullet can be derived from them later. Each such
+utterance whose words the aligner had timed is recorded as
+`words_untimed_for_kept_absence`, with where the words had been placed. Use it
+for a reviewed transcript whose untimed lines are a deliberate status ("not
+yet located", or located but in conflict with a neighbour) rather than a gap
+to fill. The stamp records `main_bullets=exact`. Because utterance timing
+recovery exists to give untimed utterances bullets, `exact` requires
+`--no-utr`; with a recovery engine configured, each file is refused with a
+message saying so.
+
 All of these records appear in the structured evidence written with
 `--debug-dir`.
 
@@ -428,7 +442,7 @@ the same cached alignment evidence.
 | `--pauses` | off | Preserve each engine-reported word end instead of healing small plausible gaps. For Whisper, it also selects the historical character-spaced text mode. |
 | `--existing-wor-boundaries {preserve,rebuild-from-evidence}` | `preserve` | v0.4.0 option controlling how a rerun projects fresh FA evidence when the input already has `%wor`. `preserve` keeps compatibility; the experimental rebuild mode keeps fresh word extents and reconstructs the main bullet from their hull. It is a local projection only and does not change raw-evidence cache identity. |
 | `--end-overlap-policy {clamp-all-adjacent,preserve-cross-speaker}` | `preserve-cross-speaker` | Controls the same-speaker/cross-speaker resolution described above. The default leaves cross-speaker overlap alone; `clamp-all-adjacent` resolves it the same way as a same-speaker pair. It does not change raw-evidence cache identity. |
-| `--main-bullets {derive,keep}` | `derive` | Whether utterance bullets already on the input may change. `derive` recomputes each bullet from its aligned words (it may be widened, cut or stripped). `keep` leaves every bullet the input carried exactly as given and fits the `%wor` word timings inside it; see [Keeping the input's utterance bullets](#keeping-the-inputs-utterance-bullets). A local projection only: it does not change raw-evidence cache identity or what is sent for inference. |
+| `--main-bullets {derive,keep,exact}` | `derive` | Whether utterance bullets already on the input may change. `derive` recomputes each bullet from its aligned words (it may be widened, cut or stripped). `keep` leaves every bullet the input carried exactly as given and fits the `%wor` word timings inside it; `exact` also leaves every utterance without a bullet without one; see [Keeping the input's utterance bullets](#keeping-the-inputs-utterance-bullets). A local projection only: it does not change raw-evidence cache identity or what is sent for inference. |
 | `--merge-abbrev` | off | Merge abbreviations in the output CHAT |
 | `--before PATH` |: | Previous version of the file for incremental alignment (skip unchanged utterances) |
 
