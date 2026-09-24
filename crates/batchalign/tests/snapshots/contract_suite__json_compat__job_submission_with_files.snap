@@ -35,6 +35,7 @@ expression: sub
     "pauses": true,
     "existing_wor_boundaries": "preserve",
     "end_overlap_policy": "preserve_cross_speaker",
+    "main_bullets": "derive",
     "wor": true,
     "merge_abbrev": false,
     "bullet_repair": false,

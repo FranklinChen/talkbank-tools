@@ -173,6 +173,7 @@ enum StampField {
     Fa,
     Incremental,
     Lang,
+    MainBullets,
     Retokenize,
     UdRepairs,
     Utr,
@@ -189,6 +190,7 @@ impl StampField {
             Self::Fa => "fa",
             Self::Incremental => "incremental",
             Self::Lang => "lang",
+            Self::MainBullets => "main_bullets",
             Self::Retokenize => "retokenize",
             Self::UdRepairs => "ud_repairs",
             Self::Utr => "utr",
@@ -1015,18 +1017,27 @@ impl UtrContribution {
 }
 
 /// Build a provenance comment for align: `fa=` is the FA engine the selected
-/// worker reported (also the FA cache namespace), and `utr=` names the timing
-/// recovery engine when a recovery pass ran.
+/// worker reported (also the FA cache namespace), `utr=` names the timing
+/// recovery engine when a recovery pass ran, and `main_bullets=` records
+/// whether the input's utterance bullets were kept (`keep`) or derived from
+/// the aligned words (`derive`). The last is always written, the default
+/// included: a reader must not have to know which value is the default to
+/// tell whether an output's bullets are the input's.
 pub(crate) fn align_provenance(
     lang: &LanguageCode3,
     fa: &FaCacheNamespace,
     utr: &UtrContribution,
     wor: bool,
     incremental: bool,
+    main_bullets: crate::chat_ops::fa::MainBulletPolicy,
 ) -> ProvenanceComment {
     let comment = ProvenanceComment::new(ReleasedCommand::Align)
         .field(StampField::Fa, StampFieldValue::from(fa.name()))
-        .field(StampField::Lang, StampFieldValue::from(lang));
+        .field(StampField::Lang, StampFieldValue::from(lang))
+        .field(
+            StampField::MainBullets,
+            StampFieldValue(StampSafeText::from_static(main_bullets.stamp_name())),
+        );
     let comment = match utr {
         UtrContribution::NotRun => comment,
         UtrContribution::Ran(engine) => {
@@ -2461,28 +2472,56 @@ mod tests {
     #[test]
     fn align_provenance_records_utr_only_when_recovery_ran() {
         let fa = FaCacheNamespace::for_test("wave2vec-fa-v1");
+        let derive = crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords;
         let ran = align_provenance(
             &LanguageCode3::eng(),
             &fa,
             &UtrContribution::Ran(UtrEngine::Whisper),
             false,
             false,
+            derive,
         )
         .format();
         assert!(
-            ran.starts_with("[fc-ba3 align | fa=wave2vec-fa-v1 ; lang=eng ; utr=whisper | "),
+            ran.starts_with(
+                "[fc-ba3 align | fa=wave2vec-fa-v1 ; lang=eng ; main_bullets=derive ; utr=whisper | "
+            ),
             "{ran}"
         );
 
         let mut contribution = UtrContribution::NotRun;
         contribution.record_pass(&UtrEngine::RevAi, &UtrResult::not_run_no_untimed(3));
         assert_eq!(contribution, UtrContribution::NotRun);
-        let not_run =
-            align_provenance(&LanguageCode3::eng(), &fa, &contribution, false, false).format();
+        let not_run = align_provenance(
+            &LanguageCode3::eng(),
+            &fa,
+            &contribution,
+            false,
+            false,
+            derive,
+        )
+        .format();
         assert!(
-            not_run.starts_with("[fc-ba3 align | fa=wave2vec-fa-v1 ; lang=eng | "),
+            not_run.starts_with(
+                "[fc-ba3 align | fa=wave2vec-fa-v1 ; lang=eng ; main_bullets=derive | "
+            ),
             "{not_run}"
         );
+    }
+
+    #[test]
+    fn align_provenance_records_the_main_bullet_policy() {
+        let fa = FaCacheNamespace::for_test("wave2vec-fa-v1");
+        let kept = align_provenance(
+            &LanguageCode3::eng(),
+            &fa,
+            &UtrContribution::NotRun,
+            false,
+            false,
+            crate::chat_ops::fa::MainBulletPolicy::KeepGiven,
+        )
+        .format();
+        assert!(kept.contains("main_bullets=keep"), "{kept}");
     }
 
     // ---- is_provenance_only_difference tests ----

@@ -291,8 +291,9 @@ impl std::ops::Deref for PendingTiming {
 pub(super) enum WordClampOutcome {
     /// The word kept a positive extent after clamping.
     Trimmed(WordTiming),
-    /// The word's start was already at or past the bound: no positive
-    /// extent survives the cut. `measured` is the span as it sat in the
+    /// No positive extent survives the cut: the word lay wholly outside the
+    /// bound (for a one-sided end clamp, its start was at or past it), or the
+    /// bound itself is empty. `measured` is the span as it sat in the
     /// transcript immediately before this clamp ran.
     DroppedPastBound {
         /// The extent that was lost.

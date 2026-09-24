@@ -1,7 +1,7 @@
 # Processing Provenance
 
 **Status:** Current
-**Last updated:** 2026-09-16 10:19 EDT
+**Last updated:** 2026-09-24 00:10 EDT
 
 ## What is provenance?
 
@@ -57,7 +57,7 @@ accumulate:
 @Participants:	CHI Target_Child
 @ID:	eng|test|CHI|2;0.||||Target_Child|||
 @Comment:	[fc-ba3 morphotag | engine=stanza-1.11.1:eng:standard ; lang=eng | 2026-09-15T18:30:00-04:00]
-@Comment:	[fc-ba3 align | fa=whisper-fa-large-v2 ; lang=eng | 2026-09-15T19:15:00-04:00]
+@Comment:	[fc-ba3 align | fa=whisper-fa-large-v2 ; lang=eng ; main_bullets=derive | 2026-09-15T19:15:00-04:00]
 *CHI:	the dog is running . 0_4500
 %mor:	det|the-Def-Art noun|dog aux|be-Fin-Ind-Pres-S3 verb|run-Part-Pres-S .
 %gra:	1|2|DET 2|4|NSUBJ 3|4|AUX 4|0|ROOT 5|4|PUNCT
@@ -165,13 +165,14 @@ name.
 ### align
 
 ```text
-[fc-ba3 align | fa=whisper-fa-large-v2 ; lang=eng ; utr=rev | ...]
+[fc-ba3 align | fa=whisper-fa-large-v2 ; lang=eng ; main_bullets=derive ; utr=rev | ...]
 ```
 
 | Key | Meaning |
 |-----|---------|
 | `fa` | Forced alignment engine the worker reported |
 | `lang` | Language code |
+| `main_bullets` | `derive` (utterance bullets recomputed from aligned words, the default) or `keep` (the input's bullets kept exactly; see `align --main-bullets`). Always written |
 | `utr` | Timing recovery engine (`rev`, `whisper`, `tencent`), present only if a recovery pass ran |
 | `wor` | Present if %wor tier was written |
 | `incremental` | Present if `--before` incremental mode was used |

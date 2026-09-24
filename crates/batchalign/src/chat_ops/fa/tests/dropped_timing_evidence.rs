@@ -29,15 +29,16 @@ use crate::types::traces::FaTimelineTrace;
 /// artifact a REAL run writes carries the drops.
 fn timeline_trace_for(input: &str) -> FaTimelineTrace {
     let mut chat = parse_chat(input);
-    let finalized = finalize_without_injection(
-        &mut chat,
+    let projection = FaProjection::new(
         FaProjectionPolicy::new(
             WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
             ExistingWorBoundaryPolicy::Preserve,
             EndOverlapPolicy::ClampAllAdjacent,
         ),
-        BulletRepairPolicy::Disabled,
+        MainBulletAuthority::DeriveFromWords,
     );
+    let finalized = finalize_without_injection(&mut chat, projection, BulletRepairPolicy::Disabled)
+        .expect("finalization under the default policy holds");
     let written = retain_decision_evidence(
         &mut chat,
         FaDecisions {

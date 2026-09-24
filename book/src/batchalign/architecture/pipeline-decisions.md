@@ -1,7 +1,7 @@
 # NLP Pipeline Decision Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-16 08:18 EDT
+**Last updated:** 2026-09-24 00:10 EDT
 
 This chapter documents how batchalign3's four NLP pipelines (morphotag,
 utseg, coref, forced alignment) represent per-utterance decisions, how
@@ -277,6 +277,10 @@ flowchart TD
     Mono -->|"coverage-only clamp"| FD5a["DecisionRecord<br/>Monotonicity::EndClampedCoverageOnly"]
     Mono -->|"hull-boundary clamp"| FD5b["DecisionRecord<br/>Monotonicity::EndClampedBoundaryFromWords"]
     Mono -->|"word-conflict clamp"| FD5c["DecisionRecord<br/>Monotonicity::EndClampedInterleavedWords"]
+    Mono -->|"two kept bullets conflict<br/>(--main-bullets keep)"| FD5d["DecisionRecord<br/>Monotonicity::KeptBulletLeftUnresolved"]
+    Mono -->|"derived bullet gave way to a kept one"| FD5e["DecisionRecord<br/>Monotonicity::YieldedToKeptBullet"]
+    Rep -->|"words cut to a kept bullet<br/>(--main-bullets keep)"| FD8["DecisionRecord<br/>Fa::WordsClampedToKeptBullet"]
+    Rep -->|"kept bullet's grouping window widened"| FD9["DecisionRecord<br/>Fa::KeptBulletWindowWidened"]
     Rep -->|"narrow bullet"| FD6["DecisionRecord<br/>Fa::NarrowBulletRescued"]
     Rep -->|"words timing dropped"| FD7["DecisionRecord<br/>Fa::WordsTimingDropped"]
 ```
@@ -323,6 +327,8 @@ classDiagram
         TimingStripped
         WordsTimingDropped
         NarrowBulletRescued
+        KeptBulletWindowWidened
+        WordsClampedToKeptBullet
     }
     class UtrStrategy {
         <<enumeration>>
@@ -335,6 +341,8 @@ classDiagram
         EndClampedBoundaryFromWords
         EndClampedInterleavedWords
         TimingStripped
+        KeptBulletLeftUnresolved
+        YieldedToKeptBullet
     }
     class MorphosyntaxStrategy {
         <<enumeration>>

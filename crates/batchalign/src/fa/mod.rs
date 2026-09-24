@@ -615,6 +615,10 @@ pub(crate) struct FaInputDocument<'a> {
     /// the one route that applies NOTHING, where the input's own bytes are the
     /// correct output.
     text: &'a str,
+    /// The run's main-bullet policy, bound to the input's bullets at the same
+    /// parse, before the UTR pre-pass could write any (see
+    /// `chat_ops::fa::main_bullets`).
+    main_bullets: crate::chat_ops::fa::MainBulletAuthority,
 }
 
 impl<'a> FaInputDocument<'a> {
@@ -627,13 +631,24 @@ impl<'a> FaInputDocument<'a> {
         chat_file: crate::chat_ops::ChatFile,
         parse_errors: Vec<crate::chat_ops::ParseError>,
         text: &'a str,
+        main_bullets: crate::chat_ops::fa::MainBulletAuthority,
     ) -> Self {
         Self {
             chat_file,
             parse_errors,
             text,
+            main_bullets,
         }
     }
+}
+
+/// Lower a kept-bullet failure to the error that fails this file.
+///
+/// Every variant is an internal invariant failure (a kept bullet did not
+/// hold, or could not be attributed), so the file fails rather than being
+/// written with a moved bullet.
+pub(super) fn kept_bullets_failed(error: crate::chat_ops::fa::KeptBulletError) -> ServerError {
+    ServerError::Validation(error.to_string())
 }
 
 /// Run forced alignment on a pre-parsed `ChatFile`.
@@ -667,6 +682,7 @@ pub(crate) async fn run_fa_from_ast(
         mut chat_file,
         parse_errors,
         text: chat_text,
+        main_bullets,
     } = document;
     // 1a′. Suppress %wor for Conversation Analysis transcripts.
     // CA transcripts (@Options: CA) use prosodic notation (⌈⌉⌊⌋, arrows,
@@ -714,6 +730,11 @@ pub(crate) async fn run_fa_from_ast(
     // proof it returns is what the output gate later reads its bar from.
     let admission = FaAdmission::admit(&chat_file, &parse_errors)?;
 
+    // 1d'. Pair the projection policy with the main bullets bound at the
+    // parse. Every finalization route below takes this one value.
+    let projection =
+        crate::chat_ops::fa::FaProjection::new(fa_params.projection_policy(), main_bullets);
+
     // 1e. Cheap rerun path: if the file already has complete, reusable `%wor`
     // timing, rebuild main-tier bullets and optionally regenerate `%wor`
     // without sending audio back through FA.
@@ -733,15 +754,12 @@ pub(crate) async fn run_fa_from_ast(
         // data, and the E362 violation persists indefinitely.
         //
         // Step 1: strip backward main-tier bullets.
-        let finalized = projection_without_injection_with_touched(
-            fa_params.projection_policy(),
-            write_wor,
-            touched,
-        )
-        .then_finalize(
-            &mut chat_file,
-            BulletRepairPolicy::from(fa_params.bullet_repair),
-        );
+        let finalized = projection_without_injection_with_touched(projection, write_wor, touched)
+            .then_finalize(
+                &mut chat_file,
+                BulletRepairPolicy::from(fa_params.bullet_repair),
+            )
+            .map_err(kept_bullets_failed)?;
         if fa_params.bullet_repair {
             tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied");
         }
@@ -808,7 +826,8 @@ pub(crate) async fn run_fa_from_ast(
     // Covered by the private regression fixture set under
     // `test-fixtures/align/regressions/` (gitignored; see
     // `book/src/batchalign/developer/regression-fixtures.md`).
-    let rescue_decisions = rescue_narrow_bullets(&mut chat_file);
+    let rescue_decisions = rescue_narrow_bullets(&mut chat_file, projection.main_bullets())
+        .map_err(kept_bullets_failed)?;
 
     // 2b. Expand utterance bullets to cover edge fillers in inter-utterance gaps.
     // UTR-assigned bullets may be too narrow to include trailing/leading fillers
@@ -837,12 +856,12 @@ pub(crate) async fn run_fa_from_ast(
         let finalized = if partially_reused_touched.is_empty() {
             finalize_without_injection(
                 &mut chat_file,
-                fa_params.projection_policy(),
+                projection,
                 BulletRepairPolicy::from(fa_params.bullet_repair),
             )
         } else {
             projection_without_injection_with_touched(
-                fa_params.projection_policy(),
+                projection,
                 write_wor,
                 partially_reused_touched,
             )
@@ -850,7 +869,8 @@ pub(crate) async fn run_fa_from_ast(
                 &mut chat_file,
                 BulletRepairPolicy::from(fa_params.bullet_repair),
             )
-        };
+        }
+        .map_err(kept_bullets_failed)?;
         if fa_params.bullet_repair {
             tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied");
         }
@@ -1155,9 +1175,10 @@ pub(crate) async fn run_fa_from_ast(
         &mut chat_file,
         &groups,
         &final_timings,
-        fa_params.projection_policy(),
+        projection,
         write_wor,
     )
+    .map_err(kept_bullets_failed)?
     // Utterances 1f refreshed from reusable `%wor` before grouping: their
     // `%wor` (if requested) is written by the SAME phase this run's own
     // fresh injections are, after monotonicity resolves.
@@ -1169,10 +1190,12 @@ pub(crate) async fn run_fa_from_ast(
     //    version strips every start-time regression and clamps end times to
     //    the next utterance's start. Timing removal is now retained as a typed
     //    decision in both the optional CHAT projection and durable evidence.
-    let finalized = fa_applied.then_finalize(
-        &mut chat_file,
-        BulletRepairPolicy::from(fa_params.bullet_repair),
-    );
+    let finalized = fa_applied
+        .then_finalize(
+            &mut chat_file,
+            BulletRepairPolicy::from(fa_params.bullet_repair),
+        )
+        .map_err(kept_bullets_failed)?;
     if fa_params.bullet_repair {
         tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied");
     }

@@ -103,6 +103,7 @@ pub(crate) async fn process_fa_incremental(
         mut chat_file,
         parse_errors,
         text: after_text,
+        main_bullets,
     } = after;
 
     if is_dummy(&chat_file) || is_no_align(&chat_file) {
@@ -122,6 +123,13 @@ pub(crate) async fn process_fa_incremental(
     // Same owner as the full path: the level is stated on `FaAdmission`, and
     // the proof it returns is what every `Ok` return below is gated against.
     let admission = FaAdmission::admit(&chat_file, &parse_errors)?;
+
+    // The same pairing the full path makes. The "after" document is this
+    // run's input, so under `--main-bullets keep` its bullets, bound at the
+    // parse, are the ones that stay, whatever copying the "before" file's
+    // `%wor` in and refreshing it below does to the working model.
+    let projection =
+        crate::chat_ops::fa::FaProjection::new(fa_params.projection_policy(), main_bullets);
 
     let reusable_after_indices =
         reuse_stable_wor_timing_from_before(&before_file, &mut chat_file, &deltas);
@@ -148,14 +156,15 @@ pub(crate) async fn process_fa_incremental(
         // monotonicity resolves, never by the refresh step itself
         // (2026-09-01 review, item 2).
         let finalized = crate::chat_ops::fa::projection_without_injection_with_touched(
-            fa_params.projection_policy(),
+            projection,
             fa_params.wor_tier.should_write(),
             reusable_after_touched,
         )
         .then_finalize(
             &mut chat_file,
             BulletRepairPolicy::from(fa_params.bullet_repair),
-        );
+        )
+        .map_err(super::kept_bullets_failed)?;
         if fa_params.bullet_repair {
             tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied (incremental)");
         }
@@ -452,9 +461,10 @@ pub(crate) async fn process_fa_incremental(
         &mut chat_file,
         &groups,
         &final_timings,
-        fa_params.projection_policy(),
+        projection,
         fa_params.wor_tier.should_write(),
     )
+    .map_err(super::kept_bullets_failed)?
     // Utterances reused from the "before" file's `%wor` (2026-09-01 review,
     // item 2): their `%wor` (if requested) is written by this SAME phase,
     // after monotonicity resolves, not by the refresh step above.
@@ -462,7 +472,8 @@ pub(crate) async fn process_fa_incremental(
     .then_finalize(
         &mut chat_file,
         BulletRepairPolicy::from(fa_params.bullet_repair),
-    );
+    )
+    .map_err(super::kept_bullets_failed)?;
     if fa_params.bullet_repair {
         tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied (incremental)");
     }
@@ -650,6 +661,72 @@ mod tests {
         )
     }
 
+    /// The incremental path copies the "before" file's `%wor` into the edited
+    /// file and refreshes the bullet from it. Under `--main-bullets keep` the
+    /// EDITED file's bullets are the given ones: a person narrowed the first
+    /// bullet, and the refreshed `%wor` hull must not undo that.
+    #[test]
+    fn incremental_reuse_keeps_the_edited_files_given_bullets() {
+        use crate::chat_ops::fa::{
+            BulletRepairPolicy, EndOverlapPolicy, ExistingWorBoundaryPolicy, FaProjection,
+            FaProjectionPolicy, MainBulletAuthority, MainBulletPolicy,
+            projection_without_injection_with_touched, retain_decision_evidence,
+        };
+        let before = parse_chat(&chat_with_wor(
+            "hello world . \u{15}100_1000\u{15}",
+            "goodbye . \u{15}1500_2000\u{15}",
+        ));
+        let edited = chat_with_wor(
+            "hello world . \u{15}300_900\u{15}",
+            "goodbye . \u{15}1500_2000\u{15}",
+        );
+        let given = parse_chat(&edited);
+        let mut after = parse_chat(&edited);
+        let projection = FaProjection::new(
+            FaProjectionPolicy::new(
+                WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
+                ExistingWorBoundaryPolicy::Preserve,
+                EndOverlapPolicy::PreserveCrossSpeaker,
+            ),
+            MainBulletAuthority::bind(MainBulletPolicy::KeepGiven, &after)
+                .expect("forward bullets"),
+        );
+
+        let deltas = diff_chat(&before, &after);
+        let reused = reuse_stable_wor_timing_from_before(&before, &mut after, &deltas);
+        assert!(reused.contains(&0), "a timing-only edit is reused");
+        let finalized = projection_without_injection_with_touched(
+            projection,
+            true,
+            reused.iter().map(|&idx| UtteranceIdx::new(idx)).collect(),
+        )
+        .then_finalize(&mut after, BulletRepairPolicy::Disabled)
+        .expect("every kept bullet holds");
+        let _ = retain_decision_evidence(
+            &mut after,
+            crate::chat_ops::fa::FaDecisions::without_injection(Vec::new(), Vec::new(), finalized),
+        )
+        .into_evidence();
+
+        crate::chat_ops::fa::tests::assert_given_bullets_held(&given, &after);
+        let wor = get_utterance(&after, 0)
+            .and_then(|utt| utt.wor_tier().cloned())
+            .expect("%wor rewritten");
+        let timings: Vec<Option<(u64, u64)>> = wor
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                talkbank_model::model::dependent_tier::WorItem::Word(word) => Some(
+                    word.inline_bullet
+                        .as_ref()
+                        .map(|b| (b.timing.start_ms, b.timing.end_ms)),
+                ),
+                talkbank_model::model::dependent_tier::WorItem::Separator { .. } => None,
+            })
+            .collect();
+        assert_eq!(timings, vec![Some((300, 500)), Some((600, 900))]);
+    }
+
     #[test]
     fn reuse_stable_wor_timing_from_before_only_marks_unchanged_utterances() {
         let before = parse_chat(&chat_with_wor("hello world .", "goodbye ."));
@@ -807,7 +884,9 @@ mod tests {
         );
         // Through the same route production takes, rather than replicating the
         // sequence by hand.
-        let _ = applied.then_finalize(&mut chat, crate::chat_ops::fa::BulletRepairPolicy::Disabled);
+        let _finalized = applied
+            .then_finalize(&mut chat, crate::chat_ops::fa::BulletRepairPolicy::Disabled)
+            .expect("finalization under the default policy holds");
 
         let utt0 = get_utterance(&chat, 0).expect("utterance 0 must exist");
         let utt1 = get_utterance(&chat, 1).expect("utterance 1 must exist");

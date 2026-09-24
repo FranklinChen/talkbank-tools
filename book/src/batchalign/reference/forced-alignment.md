@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-09-07 19:52 EDT
+**Last updated:** 2026-09-24 00:10 EDT
 
 ## Overview
 
@@ -794,6 +794,8 @@ decision strategies have different severity and review priority:
 | `end_clamped_boundary_from_words` | Both bullets' inherited boundary replaced by their measured word hulls; the words never conflicted | **No** | Informational; automatic |
 | `end_clamped_interleaved_words` | The words themselves interleave, or the next utterance has none: a genuine conflict | **Yes** | Adjudicate; the bullet and every affected word were clamped together |
 | `start_stripped` | Utterance start precedes previous accepted start, full timing removed | **Yes** | Review utterance; may indicate transcript/audio reordering |
+| `kept_bullet_left_unresolved` | Under `--main-bullets keep`, two kept bullets overlap, or one starts before an earlier one; neither changed | **Yes** for a same-speaker overlap or a backward start; **No** for a cross-speaker overlap | Review the input's own bullets; the run did not touch them |
+| `yielded_to_kept_bullet` | Under `--main-bullets keep`, a derived bullet overlapping a kept one moved its start to the kept end | **Yes** only if a word was cut | Informational unless words were cut |
 
 The three `end_clamped_*` strategies are classified from what is MEASURED
 (word timings), never from the bullet's own extent, since the bullet at this
@@ -968,6 +970,64 @@ in memory during the align pipeline.
 UTR bullet for bounding word end times. If `update_utterance_bullet` ran first,
 it would recompute from raw onset-only timings (Whisper FA gives only start
 times), producing a bullet too tight for proper end-time chaining.
+
+#### Kept main bullets (`--main-bullets keep`)
+
+Everything above describes the default, `MainBulletPolicy::DeriveFromWords`,
+where the utterance bullet is a projection of its words. Under
+`MainBulletPolicy::KeepGiven` a bullet the input carried is read-only for the
+whole projection. It is projection policy only: it never enters a cache key and
+never changes grouping or inference, so the pre-grouping passes (narrow-bullet
+rescue, edge-filler expansion, the partial `%wor` refresh) still widen bullets
+in the working document to give the aligner its windows.
+
+**Capture at the parse.** The given bullets cannot be read off the working
+document later: by then those passes, and the UTR pre-pass (whose two-pass
+recovery writes ordinary `Authoritative` bullets onto utterances the input left
+unbulleted), have changed it, and `BulletSource` cannot tell the difference. So
+`MainBulletAuthority::bind` runs at the single parse in the align dispatch,
+before UTR, and the result travels with the model in `FaInputDocument`. Each
+input bullet is classified as a `GivenMainBullet`: `Extent` and `Empty` are
+kept (`KeptBullet`); `Backward` refuses the file with `BackwardGivenBullet`.
+`FaProjection::new` pairs the authority with the `FaProjectionPolicy` (which
+does not itself carry the main-bullet choice).
+
+```mermaid
+flowchart TD
+    parse["align dispatch: single parse"] --> bind["MainBulletAuthority::bind\n(classify each input bullet;\nBackward refuses the file)"]
+    bind --> utr["UTR pre-pass, rescue, filler expansion\n(may widen bullets for grouping)"]
+    utr --> apply["apply_fa_results_with_projection_policy\nkept: skip the bullet update"]
+    apply --> impose["then_finalize: impose\nrestore kept bullets, clamp words on\nmain tier and %wor -> ImposedBullets"]
+    impose --> repair["bullet repair (optional)\nrequires ImposedBullets"]
+    repair --> mono["monotonicity\nrequires ImposedBullets"]
+    mono --> wor["%wor written (main-tier cuts folded in)"]
+    wor --> held["verify_held -> KeptBulletsHeld\nor KeptBulletError (fails the file)"]
+```
+
+The ordering is carried by types, not comments. Repair and monotonicity each
+require the `ImposedBullets` proof that only `MainBulletAuthority::impose`
+returns, and their guards compare the LIVE bullet with the `KeptBullet` they
+carry, so a drifted kept bullet is an error at the first phase to see it.
+`FaFinalized` carries the `KeptBulletsHeld` proof from `verify_held`, which runs
+after the `%wor` write on every route (full, incremental, `%wor` fast path,
+partial reuse, with or without repair, `--nowor`, CA).
+
+The phases, and what each does with a kept bullet:
+
+| Phase | Default | Kept bullet |
+|---|---|---|
+| Narrow-bullet rescue | Widen, record `narrow_bullet_rescued` | Widen the grouping window only, record `kept_bullet_window_widened` with `scope=grouping_only` |
+| Bullet update after post-processing | Union with (or rebuild from) the word hull | Not run |
+| `impose` at the head of finalization | Nothing | Restore the given bullet; `clamp_words_within` cuts each word on the main tier and on `%wor` to it (a straddling word to the edge; a word wholly outside or left with no extent loses its timing), recorded as `words_clamped_to_kept_bullet`. Main-tier cuts are folded into the `%wor` plan; under a suppressed `%wor` write the existing tier has already been clamped in place |
+| Bullet repair | Gap fill, boundary averaging, LIS removal | Never a gap-fill target, never averaged; a fixed LIS anchor, with the LIS solved on the revisable entries between consecutive anchors |
+| Monotonicity pass 1 (start order) | Strip every start below the greatest accepted start | Kept starts are a fixed skeleton: a revisable bullet below the accepted start or above the next kept start is stripped (the latter recorded as `yielded_to_kept_start`); a kept start below an earlier kept start is recorded as `kept_bullet_left_unresolved` |
+| Monotonicity pass 2, revisable earlier, kept later | May move the later start (`BoundaryFromWords`) | `BoundaryFromWords` becomes `InterleavedWords`, cutting only the earlier side; a zero-width strip of the earlier side cites `yielded_to_kept_start` |
+| Monotonicity pass 2, kept earlier, revisable later | Cut or strip the earlier bullet | `KeptEndYield`: the later start moves forward to the kept end (cutting leading words that reach back before it), or the later timing is stripped if nothing would remain; effect `YieldedToKeptBullet` |
+| Monotonicity pass 2, both kept | Cut or strip the earlier bullet | Left in place, recorded once per pair as `kept_bullet_left_unresolved` |
+
+An `Empty` kept bullet (start equals end) is written exactly as given with every
+word untimed, and always recorded. The provenance stamp records
+`main_bullets=keep|derive`.
 
 #### Word end times for an onset-only engine
 

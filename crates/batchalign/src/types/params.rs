@@ -374,6 +374,11 @@ pub struct FaParams {
     pub existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy,
     /// How adjacent utterance end overlap is projected.
     pub end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy,
+    /// Whether a main bullet the input carried may be changed by projection.
+    /// Bound to the input's bullets at the parse
+    /// (`chat_ops::fa::MainBulletAuthority::bind`), not part of
+    /// [`Self::projection_policy`].
+    pub main_bullets: crate::chat_ops::fa::MainBulletPolicy,
     /// Which FA engine to use: the engine itself, never a strategy derived
     /// from it. See [`FaEngineName`] for why that distinction matters.
     pub engine: FaEngineName,

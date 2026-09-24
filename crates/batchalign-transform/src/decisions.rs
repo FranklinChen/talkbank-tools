@@ -91,6 +91,19 @@ pub enum FaStrategy {
     WordsTimingDropped,
     /// A too-narrow utterance bullet was expanded to fit its word count.
     NarrowBulletRescued,
+    /// Under `align --main-bullets keep`, narrow-bullet rescue widened the
+    /// grouping window of a kept bullet so the aligner could find its words.
+    /// The window is used for grouping only: the transcript keeps the given
+    /// bullet, which is why this is not [`Self::NarrowBulletRescued`].
+    KeptBulletWindowWidened,
+    /// Word timings were cut to fit an utterance bullet the input carried and
+    /// the run was told to keep (`align --main-bullets keep`).
+    ///
+    /// Distinct from [`Self::WordsTimingDropped`] because the bullet here is a
+    /// fixed authority, not a projection this run derived: a word straddling
+    /// its edge is trimmed to it, and a word wholly outside it (or left with no
+    /// extent) loses its timing.
+    WordsClampedToKeptBullet,
     /// How this utterance's word timings were produced.
     ///
     /// Not a decision in the sense the others are: nothing was changed. It
@@ -124,6 +137,8 @@ impl FaStrategy {
             Self::WindowRefused => "window_refused",
             Self::WordsTimingDropped => "words_timing_dropped",
             Self::NarrowBulletRescued => "narrow_bullet_rescued",
+            Self::WordsClampedToKeptBullet => "words_clamped_to_kept_bullet",
+            Self::KeptBulletWindowWidened => "kept_bullet_window_widened",
         }
     }
 }
@@ -170,6 +185,15 @@ pub enum MonotonicityStrategy {
     EndClampedInterleavedWords,
     /// Bullet timing stripped because monotonicity could not be restored.
     TimingStripped,
+    /// Two utterance bullets the input carried conflict (one overlaps or
+    /// starts before the other) and the run was told to keep given bullets
+    /// (`align --main-bullets keep`), so both were left exactly as given and
+    /// the conflict is recorded here instead of resolved.
+    KeptBulletLeftUnresolved,
+    /// Under `align --main-bullets keep`, a derived bullet overlapping a kept
+    /// one gave way to it: its start moved forward to the kept end, and any
+    /// leading word reaching back before that was cut.
+    YieldedToKeptBullet,
 }
 
 impl MonotonicityStrategy {
@@ -180,6 +204,8 @@ impl MonotonicityStrategy {
             Self::EndClampedBoundaryFromWords => "end_clamped_boundary_from_words",
             Self::EndClampedInterleavedWords => "end_clamped_interleaved_words",
             Self::TimingStripped => "timing_stripped",
+            Self::KeptBulletLeftUnresolved => "kept_bullet_left_unresolved",
+            Self::YieldedToKeptBullet => "yielded_to_kept_bullet",
         }
     }
 }

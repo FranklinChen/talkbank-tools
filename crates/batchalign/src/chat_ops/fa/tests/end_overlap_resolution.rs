@@ -11,32 +11,6 @@ use super::*;
 use crate::chat_ops::fa::orchestrate::{EndOverlapResolution, classify_end_overlap};
 use talkbank_model::model::dependent_tier::WorItem;
 
-/// The (start_ms, end_ms) of the `n`th `%wor` word in `utterance`'s `%wor`
-/// tier, or `None` when that slot has no timing (or the tier/index doesn't
-/// exist).
-fn wor_word_timing(
-    chat: &talkbank_model::model::ChatFile,
-    utt_idx: usize,
-    word_idx: usize,
-) -> Option<(u64, u64)> {
-    let utt = get_utterance(chat, utt_idx);
-    let wor = utt.wor_tier()?;
-    let mut seen = 0usize;
-    for item in &wor.items {
-        let WorItem::Word(word) = item else {
-            continue;
-        };
-        if seen == word_idx {
-            return word
-                .inline_bullet
-                .as_ref()
-                .map(|b| (b.timing.start_ms, b.timing.end_ms));
-        }
-        seen += 1;
-    }
-    None
-}
-
 /// Case 1: the previous utterance's word hull already ends before the next
 /// utterance's start. Only the bullet's coverage overshot; the bullet end
 /// moves to the hull, and the word is untouched.

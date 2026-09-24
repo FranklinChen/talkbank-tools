@@ -92,6 +92,7 @@ pub(crate) fn extract_fa_dispatch_params(
             gap_healing,
             existing_wor_boundaries: align.boundaries.existing_wor_boundaries,
             end_overlap_policy: align.boundaries.end_overlap_policy,
+            main_bullets: align.boundaries.main_bullets,
             engine: align.effective_fa_engine(),
             cache_policy,
             wor_tier: align.wor,
@@ -389,6 +390,22 @@ mod tests {
         assert_eq!(
             params.fa_params.existing_wor_boundaries,
             crate::chat_ops::fa::ExistingWorBoundaryPolicy::RebuildFromEvidence
+        );
+    }
+
+    #[test]
+    fn fa_dispatch_reads_main_bullet_policy() {
+        let opts = CommandOptions::Align(AlignOptions {
+            boundaries: crate::options::AlignBoundaryOptions {
+                main_bullets: crate::chat_ops::fa::MainBulletPolicy::KeepGiven,
+                ..Default::default()
+            },
+            ..AlignOptions::default()
+        });
+        let params = extract_fa_dispatch_params(&opts, CachePolicy::UseCache).unwrap();
+        assert_eq!(
+            params.fa_params.main_bullets,
+            crate::chat_ops::fa::MainBulletPolicy::KeepGiven
         );
     }
 

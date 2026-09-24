@@ -12,6 +12,7 @@ mod expand_for_fillers;
 mod extraction;
 mod grouping;
 mod injection;
+mod main_bullets;
 mod orchestrate;
 pub mod origin;
 pub mod outcome;
@@ -23,7 +24,7 @@ pub mod timing;
 pub mod utr;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use self::origin::Origin;
 use crate::types::engines::FaTimingResolution;
@@ -44,29 +45,34 @@ pub use self::grouping::{
     estimate_untimed_boundaries, group_utterances,
 };
 pub use self::injection::inject_timings_for_utterance;
+pub use self::main_bullets::{
+    BackwardGivenBullet, FaProjection, KeptBulletError, KeptBulletsHeld, MainBulletAuthority,
+};
 pub(crate) use self::orchestrate::WrittenFaDecisions;
 pub use self::orchestrate::{
-    DroppedWordTiming, FaApplied, FaDecisions, FaFinalized, MonotonicityEffect, MonotonicityResult,
-    OverlapEdge, WordTier, apply_fa_results, apply_fa_results_with_projection_policy,
-    enforce_monotonicity, enforce_monotonicity_with_policy, finalize_without_injection,
-    has_reusable_wor_timing_for_utterance, projection_without_injection_with_touched,
-    refresh_existing_alignment_for_utterance, refresh_reusable_alignment,
-    refresh_reusable_utterances, retain_decision_evidence, strip_e704_same_speaker_overlaps,
+    DroppedWordTiming, FaApplied, FaDecisions, FaFinalized, KeptBulletYield, MonotonicityEffect,
+    MonotonicityResult, OverlapEdge, WordTier, apply_fa_results_with_projection_policy,
+    finalize_without_injection, has_reusable_wor_timing_for_utterance,
+    projection_without_injection_with_touched, refresh_existing_alignment_for_utterance,
+    refresh_reusable_alignment, refresh_reusable_utterances, retain_decision_evidence,
     strip_timing_from_content, strip_wor_from_monotonicity_stripped_utterances,
 };
-// `#[cfg(test)]` (2026-09-01 review, item 12): both names are test-fixture
-// convenience only, with no production caller; see their own doc comments
-// in `orchestrate.rs`.
+// `#[cfg(test)]` (2026-09-01 review, item 12): test-fixture conveniences with
+// no production caller; see their own doc comments in `orchestrate.rs`. The
+// derive-only entry points (`apply_fa_results`, `enforce_monotonicity*`)
+// joined them with `--main-bullets`: production always goes through an
+// `FaProjection`, so a derive-only shortcut is a route around the keep policy.
 #[cfg(test)]
 pub use self::orchestrate::{
+    apply_fa_results, enforce_monotonicity, enforce_monotonicity_with_policy,
     refresh_existing_alignment, refresh_existing_alignment_with_boundary_policy,
 };
 pub use self::postprocess::{
     postprocess_utterance_timings, postprocess_utterance_timings_with_boundary_policy,
 };
-pub use self::repair::{
-    BulletRepairPolicy, RepairDecision, RepairResult, RepairStats, repair_bullets,
-};
+#[cfg(test)]
+pub use self::repair::repair_bullets;
+pub use self::repair::{BulletRepairPolicy, RepairDecision, RepairResult, RepairStats};
 pub use self::rescue_narrow_bullets::rescue_narrow_bullets;
 // `ReviewLevel` remains on the wire surface for stored-job compatibility. It
 // does not reach CHAT serialization; `retain_decision_evidence` always strips
@@ -532,6 +538,71 @@ pub enum ExistingWorBoundaryPolicy {
     RebuildFromEvidence,
 }
 
+/// Whether a projection may change a main-tier utterance bullet the input
+/// already carried.
+///
+/// Like [`ExistingWorBoundaryPolicy`], this is projection policy only: it never
+/// enters a cache key and never changes which groups are sent for inference or
+/// how their windows are built. It decides only what the admitted word evidence
+/// is allowed to do to the transcript afterwards.
+///
+/// The default reproduces the established behavior exactly. `KeepGiven` exists
+/// for transcripts whose utterance bullets are themselves the authority (hand
+/// checked, or adjudicated while merging two transcripts), where letting word
+/// evidence widen a bullet, and then letting the overlap and monotonicity
+/// phases cut or strip the widened bullet, destroys the one boundary a person
+/// already decided.
+///
+/// Under `KeepGiven`, a main bullet present on the input is read-only for the
+/// whole projection. Word timings are clamped into it: a word straddling an
+/// edge is cut to the edge, and a word wholly outside it (or left with no
+/// extent) loses its timing and appears untimed in `%wor`. An utterance the
+/// input left unbulleted still derives its bullet from its words, exactly as
+/// under `DeriveFromWords`. A phase that could only restore validity by
+/// changing a kept bullet leaves it alone and records the conflict as
+/// [`batchalign_transform::decisions::MonotonicityStrategy::KeptBulletLeftUnresolved`].
+/// The mechanism is in `main_bullets.rs`.
+///
+/// The CLI and wire names are the short words `derive` and `keep`; the variant
+/// names say what each one means. The variant doc comments below are also the
+/// `--help` text for each value, so they are written for a user.
+///
+/// No `Default` derive: the default is [`DEFAULT_MAIN_BULLET_POLICY`], read by
+/// the CLI, the stored-job deserializer and `AlignBoundaryOptions`, the same
+/// one-owner pattern as [`DEFAULT_END_OVERLAP_POLICY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+pub enum MainBulletPolicy {
+    /// Recompute each utterance bullet from its aligned words; an existing
+    /// bullet may be widened, cut or stripped (the established behavior).
+    #[serde(rename = "derive")]
+    #[value(name = "derive")]
+    DeriveFromWords,
+    /// Leave every utterance bullet on the input exactly as given and fit the
+    /// word timings inside it; a word outside its bullet is left untimed.
+    #[serde(rename = "keep")]
+    #[value(name = "keep")]
+    KeepGiven,
+}
+
+/// The one owner of [`MainBulletPolicy`]'s default: the established
+/// behavior, so a job that never mentions the option runs as it always did.
+pub const DEFAULT_MAIN_BULLET_POLICY: MainBulletPolicy = MainBulletPolicy::DeriveFromWords;
+
+/// `serde(default = "...")` needs a function; this reads the one constant.
+pub fn default_main_bullet_policy_serde() -> MainBulletPolicy {
+    DEFAULT_MAIN_BULLET_POLICY
+}
+
+impl MainBulletPolicy {
+    /// The provenance-stamp and wire spelling (`derive` or `keep`).
+    pub fn stamp_name(self) -> &'static str {
+        match self {
+            Self::DeriveFromWords => "derive",
+            Self::KeepGiven => "keep",
+        }
+    }
+}
+
 /// How monotonicity projection treats an earlier utterance end that crosses
 /// the following utterance's start.
 ///
@@ -641,6 +712,11 @@ pub struct FaProjectionPolicy {
 
 impl FaProjectionPolicy {
     /// Construct a complete projection policy.
+    ///
+    /// The main-bullet choice is not a field here: it is bound to the input's
+    /// own bullets at the parse ([`MainBulletAuthority::bind`]) and joins this
+    /// policy in [`FaProjection`], so nothing can carry the choice without the
+    /// bullets it refers to.
     pub fn new(
         word_ends: WordEndPolicy,
         existing_wor_boundaries: ExistingWorBoundaryPolicy,
@@ -1155,6 +1231,42 @@ pub(super) fn utterance_line_idx(
         }
     }
     None
+}
+
+/// Every utterance with its LINE index and its utterance ordinal, in file order.
+///
+/// The one walk that pairs the two index spaces, so a caller never counts
+/// utterances by hand beside an `enumerate()` over lines.
+pub(super) fn utterances_indexed(
+    chat_file: &ChatFile,
+) -> impl Iterator<Item = (usize, UtteranceIdx, &Utterance)> {
+    chat_file
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line_idx, line)| match line {
+            Line::Utterance(utterance) => Some((line_idx, &**utterance)),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(ordinal, (line_idx, utterance))| (line_idx, UtteranceIdx::new(ordinal), utterance))
+}
+
+/// [`utterances_indexed`], mutably.
+pub(super) fn utterances_indexed_mut(
+    chat_file: &mut ChatFile,
+) -> impl Iterator<Item = (usize, UtteranceIdx, &mut Utterance)> {
+    chat_file
+        .lines
+        .as_mut_slice()
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(line_idx, line)| match line {
+            Line::Utterance(utterance) => Some((line_idx, &mut **utterance)),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(ordinal, (line_idx, utterance))| (line_idx, UtteranceIdx::new(ordinal), utterance))
 }
 
 /// Get a mutable reference to the nth utterance in the file.

@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-09-22 14:10 EDT
+**Last updated:** 2026-09-24 00:10 EDT
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -352,6 +352,52 @@ is more conservative about turning real pauses/fillers into dominant words.
 
 ---
 
+### Keeping the input's utterance bullets
+
+By default an utterance bullet is a projection of its words: an existing
+bullet is widened to cover any aligned word that falls outside it, and the
+widened bullet can then collide with its neighbour and be cut or stripped by
+the overlap and monotonicity phases. That is right when the bullets are
+estimates. It is wrong when the bullets are the authority, for example a
+transcript whose bullets were checked by hand, or one produced by merging two
+transcripts where each boundary was adjudicated.
+
+For such a transcript, run `batchalign3 align --main-bullets keep`. Then:
+
+- every utterance bullet present on the input is written back exactly as given;
+  no phase widens, cuts or strips it. The run checks this at the end and fails
+  the file rather than write a moved bullet;
+- word timings are fitted inside their utterance's bullet, on both the main
+  tier and `%wor`: a word crossing an edge is cut to that edge, and a word
+  wholly outside the bullet (or left with no duration) is written untimed. With
+  `--nowor`, or for a CA transcript, an existing `%wor` tier is fitted in place;
+- an utterance the input left without a bullet gets one from its words, exactly
+  as it would by default. Where that derived bullet overlaps a kept neighbour,
+  the derived one gives way: its start moves to the kept bullet's end (cutting
+  any word that reached back before it), or, if nothing would be left, its
+  timing is removed and recorded as `yielded_to_kept_bullet` or
+  `yielded_to_kept_start`;
+- only a conflict between two kept bullets (they overlap, or one starts before
+  an earlier one) is left in place, recorded as `kept_bullet_left_unresolved`;
+  words cut to fit a kept bullet are recorded as `words_clamped_to_kept_bullet`;
+- a bullet whose start equals its end is kept as written, with its words
+  untimed and a record; a bullet whose end comes before its start cannot be
+  kept, and the file is refused;
+- the output's `@Comment` provenance stamp records `main_bullets=keep` (or
+  `main_bullets=derive` by default).
+
+All of these records appear in the structured evidence written with
+`--debug-dir`.
+
+`--bullet-repair` never moves or strips a kept bullet either: kept bullets are
+fixed anchors, and repair still works on the bullets the run derived around
+them. Narrow-bullet rescue still widens a kept bullet's window so the aligner
+can find its words, recorded as `kept_bullet_window_widened` with
+`scope=grouping_only`, since the transcript keeps the given bullet. The flag
+affects only how evidence is projected into the transcript, never which audio
+is aligned, so switching between `derive` and `keep` on the same input reuses
+the same cached alignment evidence.
+
 ## Options
 
 ### Path options (shared with all processing commands)
@@ -382,6 +428,7 @@ is more conservative about turning real pauses/fillers into dominant words.
 | `--pauses` | off | Preserve each engine-reported word end instead of healing small plausible gaps. For Whisper, it also selects the historical character-spaced text mode. |
 | `--existing-wor-boundaries {preserve,rebuild-from-evidence}` | `preserve` | v0.4.0 option controlling how a rerun projects fresh FA evidence when the input already has `%wor`. `preserve` keeps compatibility; the experimental rebuild mode keeps fresh word extents and reconstructs the main bullet from their hull. It is a local projection only and does not change raw-evidence cache identity. |
 | `--end-overlap-policy {clamp-all-adjacent,preserve-cross-speaker}` | `preserve-cross-speaker` | Controls the same-speaker/cross-speaker resolution described above. The default leaves cross-speaker overlap alone; `clamp-all-adjacent` resolves it the same way as a same-speaker pair. It does not change raw-evidence cache identity. |
+| `--main-bullets {derive,keep}` | `derive` | Whether utterance bullets already on the input may change. `derive` recomputes each bullet from its aligned words (it may be widened, cut or stripped). `keep` leaves every bullet the input carried exactly as given and fits the `%wor` word timings inside it; see [Keeping the input's utterance bullets](#keeping-the-inputs-utterance-bullets). A local projection only: it does not change raw-evidence cache identity or what is sent for inference. |
 | `--merge-abbrev` | off | Merge abbreviations in the output CHAT |
 | `--before PATH` |: | Previous version of the file for incremental alignment (skip unchanged utterances) |
 

@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use talkbank_model::model::{ChatFile, Line, Utterance};
 
 use super::EndOverlapPolicy;
+use super::main_bullets::{BulletMutability, ImposedBullets, KeptBulletError};
 use super::orchestrate::{
     ClampedWordCounts, DroppedWordTiming, E704_TOLERANCE_MS, EndOverlapResolution,
     clamp_words_past_bound, classify_end_overlap, earliest_word_timing_start,
@@ -158,6 +159,9 @@ struct BulletEntry {
     start_ms: u64,
     /// Current bullet end_ms.
     end_ms: u64,
+    /// What repair may do to this bullet (`ReadOnly` under
+    /// `--main-bullets keep` for a bullet the input gave).
+    mutability: BulletMutability,
 }
 
 /// Apply all three repair strategies to a parsed CHAT file.
@@ -174,20 +178,51 @@ struct BulletEntry {
 /// ordinary conversational overlap and is left alone under the default
 /// `PreserveCrossSpeaker`, averaged only under `ClampAllAdjacent`
 /// (2026-09-01 review, item 7).
+///
+/// `#[cfg(test)]`: derive-only, with no production caller. Production repairs
+/// only inside `FaApplied::then_finalize`, through [`repair_bullets_under`],
+/// which requires the kept-bullet proof.
+#[cfg(test)]
 pub fn repair_bullets(
     chat_file: &mut ChatFile,
     dry_run: bool,
     end_overlap_policy: EndOverlapPolicy,
 ) -> RepairResult {
+    repair_bullets_under(
+        chat_file,
+        dry_run,
+        end_overlap_policy,
+        ImposedBullets::deriving(),
+    )
+    .expect("the default policy refers to no given bullet")
+}
+
+/// Repair after the given bullets were imposed.
+///
+/// Every strategy here rewrites a bullet (gap filling moves a start, boundary
+/// averaging moves an end and a start, LIS removal strips a bullet), so under
+/// `--main-bullets keep` none of them may touch a kept one, and each entry
+/// carries its [`BulletMutability`] from [`collect_bullet_entries`] (checked
+/// against the live bullet there). A gap fill never targets a kept bullet; a
+/// pair with a kept side is not averaged (monotonicity resolves it next,
+/// moving only the revisable side); and kept entries are fixed anchors of
+/// their speaker's LIS, which is solved on the revisable entries between
+/// consecutive anchors (see [`find_lis_removals`]).
+pub(super) fn repair_bullets_under(
+    chat_file: &mut ChatFile,
+    dry_run: bool,
+    end_overlap_policy: EndOverlapPolicy,
+    imposed: ImposedBullets<'_>,
+) -> Result<RepairResult, KeptBulletError> {
     let mut stats = RepairStats::default();
     let mut decisions = Vec::new();
 
     // Collect bullet entries in document order.
-    let entries = collect_bullet_entries(chat_file);
+    let entries = collect_bullet_entries(chat_file, imposed)?;
     stats.total_bulleted = entries.len();
 
     if entries.is_empty() {
-        return RepairResult { stats, decisions };
+        return Ok(RepairResult { stats, decisions });
     }
 
     // Same-speaker gap filling.
@@ -246,7 +281,7 @@ pub fn repair_bullets(
     // are clamped together through `clamp_words_past_bound`, the one route
     // by which either pass may cut a word.
     let (boundary_averaged, boundary_decisions) =
-        resolve_boundary_averages(working, end_overlap_policy);
+        resolve_boundary_averages(working, end_overlap_policy, imposed)?;
     stats.boundary_averaged = boundary_averaged;
     decisions.extend(boundary_decisions);
 
@@ -254,7 +289,7 @@ pub fn repair_bullets(
     // `working`'s CURRENT state (post gap-fill, post boundary-averaging),
     // not the original snapshot: a boundary average can itself have moved a
     // start, and LIS must decide against what is actually there.
-    let entries_after_averaging = collect_bullet_entries(working);
+    let entries_after_averaging = collect_bullet_entries(working, imposed)?;
     let lis_removals = find_lis_removals(&entries_after_averaging);
     stats.timing_stripped = lis_removals.len();
     for &line_idx in &lis_removals {
@@ -282,7 +317,7 @@ pub fn repair_bullets(
     }
 
     if dry_run {
-        return RepairResult { stats, decisions };
+        return Ok(RepairResult { stats, decisions });
     }
 
     // Gap fills and boundary averages are already applied to `working`,
@@ -293,7 +328,7 @@ pub fn repair_bullets(
         }
     }
 
-    RepairResult { stats, decisions }
+    Ok(RepairResult { stats, decisions })
 }
 
 /// Boundary averaging's live, interleaved sweep (2026-09-01 review, item 11):
@@ -326,43 +361,33 @@ pub fn repair_bullets(
 fn resolve_boundary_averages(
     chat_file: &mut ChatFile,
     end_overlap_policy: EndOverlapPolicy,
-) -> (usize, Vec<RepairDecision>) {
+    imposed: ImposedBullets<'_>,
+) -> Result<(usize, Vec<RepairDecision>), KeptBulletError> {
     let mut decisions = Vec::new();
     let mut resolved = 0usize;
 
-    resolved += resolve_boundary_averages_same_speaker_stream(chat_file, &mut decisions);
+    resolved += resolve_boundary_averages_same_speaker_stream(chat_file, &mut decisions, imposed)?;
 
-    // IDENTITY ONLY (line index, speaker), never a timing value, and
-    // captured AFTER the per-speaker sweep so it reflects anything that
+    // IDENTITY ONLY (line index, speaker, mutability), never a timing value,
+    // and captured AFTER the per-speaker sweep so it reflects anything that
     // sweep already moved. Every timing this sweep needs is read live, at
     // the point it is used.
-    let identity: Vec<(usize, String)> = collect_bullet_entries(chat_file)
-        .into_iter()
-        .map(|entry| (entry.line_idx, entry.speaker))
-        .collect();
+    let identity = collect_bullet_entries(chat_file, imposed)?;
 
     for window_idx in 0..identity.len().saturating_sub(1) {
-        let (earlier_line_idx, earlier_speaker) = &identity[window_idx];
-        let (later_line_idx, later_speaker) = &identity[window_idx + 1];
-        let (earlier_line_idx, later_line_idx) = (*earlier_line_idx, *later_line_idx);
+        let (earlier, later) = (&identity[window_idx], &identity[window_idx + 1]);
 
-        if !end_overlap_policy.should_clamp(earlier_speaker, later_speaker) {
+        if !end_overlap_policy.should_clamp(&earlier.speaker, &later.speaker) {
             continue;
         }
 
-        if let Some(decision) = resolve_boundary_average_pair(
-            chat_file,
-            earlier_line_idx,
-            earlier_speaker,
-            later_line_idx,
-            later_speaker,
-        ) {
+        if let Some(decision) = resolve_boundary_average_pair(chat_file, earlier, later) {
             decisions.push(decision);
             resolved += 1;
         }
     }
 
-    (resolved, decisions)
+    Ok((resolved, decisions))
 }
 
 /// The per-speaker-stream sweep (2026-09-01 review, item 15): each
@@ -379,18 +404,19 @@ fn resolve_boundary_averages(
 fn resolve_boundary_averages_same_speaker_stream(
     chat_file: &mut ChatFile,
     decisions: &mut Vec<RepairDecision>,
-) -> usize {
+    imposed: ImposedBullets<'_>,
+) -> Result<usize, KeptBulletError> {
     let mut speaker_order: Vec<String> = Vec::new();
-    let mut streams: std::collections::HashMap<String, Vec<usize>> =
+    let mut streams: std::collections::HashMap<String, Vec<BulletEntry>> =
         std::collections::HashMap::new();
-    for entry in collect_bullet_entries(chat_file) {
+    for entry in collect_bullet_entries(chat_file, imposed)? {
         if !streams.contains_key(&entry.speaker) {
             speaker_order.push(entry.speaker.clone());
         }
         streams
-            .entry(entry.speaker)
+            .entry(entry.speaker.clone())
             .or_default()
-            .push(entry.line_idx);
+            .push(entry);
     }
 
     let mut resolved = 0usize;
@@ -398,37 +424,40 @@ fn resolve_boundary_averages_same_speaker_stream(
         // SAFETY: `speaker` came from `speaker_order`, built from the same
         // insertion the `streams` entry itself was.
         #[allow(clippy::unwrap_used)]
-        let stream = streams.get(speaker).unwrap().clone();
+        let stream = streams.get(speaker).unwrap();
         for window_idx in 0..stream.len().saturating_sub(1) {
-            let earlier_line_idx = stream[window_idx];
-            let later_line_idx = stream[window_idx + 1];
             if let Some(decision) = resolve_boundary_average_pair(
                 chat_file,
-                earlier_line_idx,
-                speaker,
-                later_line_idx,
-                speaker,
+                &stream[window_idx],
+                &stream[window_idx + 1],
             ) {
                 decisions.push(decision);
                 resolved += 1;
             }
         }
     }
-    resolved
+    Ok(resolved)
 }
 
 /// Resolve one eligible small-overlap PAIR, live, against `chat_file`.
 /// Shared (2026-09-01 review, item 15) by both sweeps above; only how the
 /// pair and its successor are FOUND differs between them. Returns `None`
 /// when there is no overlap, the overlap exceeds
-/// [`BOUNDARY_AVERAGING_THRESHOLD_MS`], or either utterance has no bullet.
+/// [`BOUNDARY_AVERAGING_THRESHOLD_MS`], either utterance has no bullet, or
+/// either utterance's bullet is kept as given (every resolution here moves the
+/// earlier end, and most move the later start too; monotonicity then resolves
+/// the pair by moving only its revisable side, or records it).
 fn resolve_boundary_average_pair(
     chat_file: &mut ChatFile,
-    earlier_line_idx: usize,
-    earlier_speaker: &str,
-    later_line_idx: usize,
-    later_speaker: &str,
+    earlier: &BulletEntry,
+    later: &BulletEntry,
 ) -> Option<RepairDecision> {
+    match (earlier.mutability, later.mutability) {
+        (BulletMutability::Revisable, BulletMutability::Revisable) => {}
+        (BulletMutability::ReadOnly(_), _) | (_, BulletMutability::ReadOnly(_)) => return None,
+    }
+    let (earlier_line_idx, earlier_speaker) = (earlier.line_idx, earlier.speaker.as_str());
+    let (later_line_idx, later_speaker) = (later.line_idx, later.speaker.as_str());
     let earlier_bullet = get_utterance_mut(chat_file, earlier_line_idx)
         .and_then(|utt| utt.main.content.bullet.clone())?;
     let later_bullet = get_utterance_mut(chat_file, later_line_idx)
@@ -514,7 +543,7 @@ fn resolve_boundary_average_pair(
             "boundary_averaged overlap={overlap}ms resolution=interleaved_words clamped_to={earlier_new_end_ms} machine={}_{} adjacent={earlier_speaker}:{earlier_line_idx} words_trimmed={} words_dropped={}",
             later_bullet.timing.start_ms,
             later_bullet.timing.end_ms,
-            words_clamped.trimmed,
+            words_clamped.trimmed(),
             words_clamped.dropped.len(),
         ),
         EndOverlapResolution::CoverageOnly { .. }
@@ -541,14 +570,14 @@ fn resolve_boundary_average_pair(
     })
 }
 
-/// Collect bullet entries from all main-tier utterances in document order.
-fn collect_bullet_entries(chat_file: &ChatFile) -> Vec<BulletEntry> {
+/// Collect bullet entries from all main-tier utterances in document order,
+/// each with what repair may do to it (checked against the live bullet).
+fn collect_bullet_entries(
+    chat_file: &ChatFile,
+    imposed: ImposedBullets<'_>,
+) -> Result<Vec<BulletEntry>, KeptBulletError> {
     let mut entries = Vec::new();
-
-    for (line_idx, line) in chat_file.lines.iter().enumerate() {
-        let Line::Utterance(utt) = line else {
-            continue;
-        };
+    for (line_idx, utterance_idx, utt) in super::utterances_indexed(chat_file) {
         let Some(ref bullet) = utt.main.content.bullet else {
             continue;
         };
@@ -557,10 +586,10 @@ fn collect_bullet_entries(chat_file: &ChatFile) -> Vec<BulletEntry> {
             speaker: utt.main.speaker.to_string(),
             start_ms: bullet.timing.start_ms,
             end_ms: bullet.timing.end_ms,
+            mutability: imposed.mutability(utterance_idx, Some(bullet))?,
         });
     }
-
-    entries
+    Ok(entries)
 }
 
 /// Find same-speaker gaps eligible for filling.
@@ -580,12 +609,20 @@ fn find_gap_fills(entries: &[BulletEntry]) -> Vec<(usize, u64)> {
     let mut speaker_last_end: HashMap<&str, u64> = HashMap::new();
 
     for entry in entries {
-        if let Some(&prev_end) = speaker_last_end.get(entry.speaker.as_str())
-            && entry.start_ms > prev_end
-        {
-            let gap = entry.start_ms - prev_end;
-            if gap <= GAP_FILL_MAX_MS {
-                fills.push((entry.line_idx, prev_end));
+        // A kept bullet is never the target: gap filling moves the target's
+        // start. It still ends its speaker's run, so the next revisable entry
+        // is measured from it.
+        match entry.mutability {
+            BulletMutability::ReadOnly(_) => {}
+            BulletMutability::Revisable => {
+                if let Some(&prev_end) = speaker_last_end.get(entry.speaker.as_str())
+                    && entry.start_ms > prev_end
+                {
+                    let gap = entry.start_ms - prev_end;
+                    if gap <= GAP_FILL_MAX_MS {
+                        fills.push((entry.line_idx, prev_end));
+                    }
+                }
             }
         }
         speaker_last_end.insert(&entry.speaker, entry.end_ms);
@@ -599,6 +636,14 @@ fn find_gap_fills(entries: &[BulletEntry]) -> Vec<(usize, u64)> {
 /// For each speaker, computes the Longest Increasing Subsequence of start
 /// times. Utterances NOT in their speaker's LIS have same-speaker
 /// non-monotonic timing. Their timing is stripped rather than mangled.
+///
+/// Kept bullets (`--main-bullets keep`) are forced into the LIS as fixed
+/// anchors: they split the speaker's entries into segments, and each
+/// segment's revisable entries must start within the two anchors around it
+/// (at or after the one before, at or before the one after). An entry outside
+/// that window is removed; the LIS is solved on the rest. With no kept entry
+/// there is one unbounded segment, which is exactly the plain LIS. Two kept
+/// anchors out of order cannot be repaired here; monotonicity records them.
 ///
 /// Cross-speaker non-monotonicity is intentionally left alone, it
 /// represents normal conversational overlap, not a data error.
@@ -617,30 +662,71 @@ fn find_lis_removals(entries: &[BulletEntry]) -> Vec<usize> {
     let mut removals = Vec::new();
 
     for indices in speaker_entries.values() {
-        if indices.len() <= 1 {
-            continue;
-        }
-
-        // Extract start times for this speaker's utterances (in document order).
-        let starts: Vec<u64> = indices.iter().map(|&i| entries[i].start_ms).collect();
-        let lis = longest_increasing_subsequence(&starts);
-
-        // Build set of positions (within this speaker's list) that are in the LIS.
-        let mut in_lis = vec![false; indices.len()];
-        for &pos in &lis {
-            in_lis[pos] = true;
-        }
-
-        // Entries NOT in this speaker's LIS are stripped. They are the
-        // minimal set whose removal makes the speaker's timeline monotonic.
-        for (pos, &entry_idx) in indices.iter().enumerate() {
-            if !in_lis[pos] {
-                removals.push(entries[entry_idx].line_idx);
+        let mut segment: Vec<usize> = Vec::new();
+        let mut lower_anchor_ms: Option<u64> = None;
+        for &entry_idx in indices {
+            match entries[entry_idx].mutability {
+                BulletMutability::Revisable => segment.push(entry_idx),
+                BulletMutability::ReadOnly(_) => {
+                    let upper_anchor_ms = Some(entries[entry_idx].start_ms);
+                    remove_outside_lis(
+                        entries,
+                        &segment,
+                        lower_anchor_ms,
+                        upper_anchor_ms,
+                        &mut removals,
+                    );
+                    segment.clear();
+                    lower_anchor_ms = upper_anchor_ms;
+                }
             }
         }
+        remove_outside_lis(entries, &segment, lower_anchor_ms, None, &mut removals);
     }
 
     removals
+}
+
+/// One segment of revisable entries between two kept anchors (either may be
+/// absent): remove the entries whose start falls outside the anchors, then
+/// the ones outside the LIS of what is left, in document order.
+fn remove_outside_lis(
+    entries: &[BulletEntry],
+    segment: &[usize],
+    lower_anchor_ms: Option<u64>,
+    upper_anchor_ms: Option<u64>,
+    removals: &mut Vec<usize>,
+) {
+    let within = |start_ms: u64| {
+        lower_anchor_ms.is_none_or(|lower| start_ms >= lower)
+            && upper_anchor_ms.is_none_or(|upper| start_ms <= upper)
+    };
+    let mut inside: Vec<usize> = Vec::new();
+    for &entry_idx in segment {
+        match within(entries[entry_idx].start_ms) {
+            true => inside.push(entry_idx),
+            false => removals.push(entries[entry_idx].line_idx),
+        }
+    }
+    if inside.len() <= 1 {
+        return;
+    }
+
+    // Extract start times (in document order) and keep the LIS.
+    let starts: Vec<u64> = inside.iter().map(|&i| entries[i].start_ms).collect();
+    let lis = longest_increasing_subsequence(&starts);
+    let mut in_lis = vec![false; inside.len()];
+    for &pos in &lis {
+        in_lis[pos] = true;
+    }
+
+    // Entries NOT in the LIS are stripped. They are the minimal set whose
+    // removal makes the segment monotonic.
+    for (pos, &entry_idx) in inside.iter().enumerate() {
+        if !in_lis[pos] {
+            removals.push(entries[entry_idx].line_idx);
+        }
+    }
 }
 
 /// Compute the Longest Increasing Subsequence (non-strictly increasing).
@@ -713,6 +799,12 @@ impl From<&RepairDecision> for batchalign_transform::decisions::DecisionRecord {
 mod tests {
     use super::*;
 
+    /// Entries as repair sees them under the default policy.
+    fn derived_entries(chat_file: &ChatFile) -> Vec<BulletEntry> {
+        collect_bullet_entries(chat_file, ImposedBullets::deriving())
+            .expect("the default policy refers to no given bullet")
+    }
+
     /// Integration test: parse a real trimmed CHAT file with E704 (same-speaker
     /// overlap) and E701 (cross-speaker non-monotonicity), run bullet repair,
     /// verify that boundary averaging and LIS removal produce correct results.
@@ -778,7 +870,7 @@ mod tests {
 
         // After repair: same-speaker bullets should be monotonically increasing.
         // Cross-speaker non-monotonicity is expected (normal conversational overlap).
-        let entries_after = collect_bullet_entries(&chat_file);
+        let entries_after = derived_entries(&chat_file);
         let mut speaker_last_start: HashMap<&str, u64> = HashMap::new();
         for entry in &entries_after {
             if let Some(&prev) = speaker_last_start.get(entry.speaker.as_str()) {
@@ -843,8 +935,8 @@ mod tests {
 
         assert_eq!(result.stats.boundary_averaged, 0);
         assert!(result.decisions.is_empty());
-        assert_eq!(collect_bullet_entries(&chat)[0].end_ms, 3000);
-        assert_eq!(collect_bullet_entries(&chat)[1].start_ms, 2700);
+        assert_eq!(derived_entries(&chat)[0].end_ms, 3000);
+        assert_eq!(derived_entries(&chat)[1].start_ms, 2700);
     }
 
     /// 2026-09-01 review, item 7: a same-speaker overlap whose measured word
@@ -865,7 +957,7 @@ mod tests {
 
         assert_eq!(result.stats.boundary_averaged, 1);
         assert!(!result.decisions[0].needs_review, "no word conflict");
-        let entries = collect_bullet_entries(&chat);
+        let entries = derived_entries(&chat);
         // 2026-09-01 review, item 10: assigned from the measured hulls
         // DIRECTLY, no midpoint, since both hulls are known.
         assert_eq!(
@@ -911,7 +1003,7 @@ mod tests {
         let result = repair_bullets(&mut chat, false, EndOverlapPolicy::ClampAllAdjacent);
 
         assert_eq!(result.stats.boundary_averaged, 1);
-        let entries = collect_bullet_entries(&chat);
+        let entries = derived_entries(&chat);
         assert_eq!(
             entries[0].end_ms, 2950,
             "the earlier utterance's own hull end"
@@ -953,7 +1045,7 @@ mod tests {
             result.stats.boundary_averaged, 2,
             "both adjacent pairs overlap and are within threshold"
         );
-        let entries = collect_bullet_entries(&chat);
+        let entries = derived_entries(&chat);
         assert_eq!(entries.len(), 3);
         for entry in &entries {
             assert!(
@@ -995,7 +1087,7 @@ mod tests {
         let result = repair_bullets(&mut chat, false, EndOverlapPolicy::PreserveCrossSpeaker);
 
         assert_eq!(result.stats.boundary_averaged, 1);
-        let entries = collect_bullet_entries(&chat);
+        let entries = derived_entries(&chat);
         assert_eq!(
             (entries[1].start_ms, entries[1].end_ms),
             (1500, 1600),
@@ -1035,7 +1127,7 @@ mod tests {
             result.decisions[0].needs_review,
             "a real conflict, not hull-respecting"
         );
-        let entries = collect_bullet_entries(&chat);
+        let entries = derived_entries(&chat);
         assert_eq!(
             entries[1].start_ms, 2000,
             "CHI's later utterance must not be moved to 2150 (past PAR's 2100)"
@@ -1067,7 +1159,7 @@ mod tests {
 
         assert_eq!(result.stats.boundary_averaged, 1);
         assert!(result.decisions[0].needs_review, "a genuine word conflict");
-        let entries = collect_bullet_entries(&chat);
+        let entries = derived_entries(&chat);
         assert_eq!(
             entries[0].end_ms, 2700,
             "clamped to the later utterance's own original start"

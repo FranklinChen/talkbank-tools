@@ -202,6 +202,12 @@ pub struct AlignBoundaryOptions {
     /// How adjacent utterance end overlap is projected after alignment.
     #[serde(default = "crate::chat_ops::fa::default_end_overlap_policy_serde")]
     pub end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy,
+
+    /// Whether projection may change a main bullet the input carried. A job
+    /// stored before this field existed reads as the default, `derive`, which
+    /// is exactly what such a job ran.
+    #[serde(default = "crate::chat_ops::fa::default_main_bullet_policy_serde")]
+    pub main_bullets: crate::chat_ops::fa::MainBulletPolicy,
 }
 
 /// `EndOverlapPolicy` deliberately carries no `Default` impl (see
@@ -213,6 +219,7 @@ impl Default for AlignBoundaryOptions {
         Self {
             existing_wor_boundaries: Default::default(),
             end_overlap_policy: crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY,
+            main_bullets: crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
         }
     }
 }
@@ -895,6 +902,7 @@ mod tests {
             boundaries: AlignBoundaryOptions {
                 existing_wor_boundaries: Default::default(),
                 end_overlap_policy: crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY,
+                main_bullets: crate::chat_ops::fa::MainBulletPolicy::KeepGiven,
             },
             wor: true.into(),
             merge_abbrev: false.into(),
@@ -903,8 +911,23 @@ mod tests {
             media_dir: None,
         });
         let json = serde_json::to_string(&opts).unwrap();
+        // The wire name is the CLI's short word, so a stored job reads the
+        // way the command line that submitted it did.
+        assert!(json.contains("\"main_bullets\":\"keep\""), "json: {json}");
         let back: CommandOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(opts, back);
+    }
+
+    #[test]
+    fn align_job_stored_without_main_bullets_reads_as_derive() {
+        let json = r#"{"command":"align","existing_wor_boundaries":"preserve"}"#;
+        let CommandOptions::Align(align) = serde_json::from_str(json).unwrap() else {
+            panic!("expected Align");
+        };
+        assert_eq!(
+            align.boundaries.main_bullets,
+            crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY
+        );
     }
 
     #[test]

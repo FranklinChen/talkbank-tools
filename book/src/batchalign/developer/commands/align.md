@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-15 12:12 EDT
+**Last updated:** 2026-09-24 00:10 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -106,8 +106,9 @@ both live under the UTR engine's own namespace (`UtrAsrCacheNamespace`,
 changing the FA model no longer discards UTR ASR results, and changing a
 recovery model no longer silently reuses rows produced by the previous one.
 
-The `[fc-ba3 align | ...]` stamp records `fa=` (the reported FA engine) and,
-when a timing-recovery pass actually ran (the pre-pass or the retry fallback),
+The `[fc-ba3 align | ...]` stamp records `fa=` (the reported FA engine),
+`main_bullets=` (`derive` or `keep`, always written) and, when a
+timing-recovery pass actually ran (the pre-pass or the retry fallback),
 `utr=` with the recovery engine's name (`rev`, `whisper`, `tencent`). A file
 whose utterances were all timed, so that no pass ran, records no `utr=`. The
 record is a `UtrContribution` on `AlignAudioTask`, updated from each pass's
@@ -125,12 +126,19 @@ policy without changing the other. `--require-media-cache` resolves both to
 inference.
 
 `FaParams::projection_policy()` combines the engine-derived `WordEndPolicy`
-with typed `ExistingWorBoundaryPolicy` and `EndOverlapPolicy` values. Full,
-incremental, all-`%wor`, and empty-group paths consume that single
-`FaProjectionPolicy`, preventing execution shape from changing the local
-interpretation of the same evidence. Both local policies are deliberately
-absent from `cache_key()`: changing either must replay the same evidence, not
-create a new inference identity.
+with typed `ExistingWorBoundaryPolicy` and `EndOverlapPolicy` values. Full, incremental, all-`%wor`, and empty-group paths
+consume that single `FaProjectionPolicy`, preventing execution shape from
+changing the local interpretation of the same evidence. The local policies are
+deliberately absent from `cache_key()`: changing any of them must replay the
+same evidence, not create a new inference identity.
+
+`MainBulletPolicy` is not part of that value: the dispatch binds it to the
+input's own bullets at the single parse (`MainBulletAuthority::bind`, before
+the UTR pre-pass can write bullets of its own), carries the result in
+`FaInputDocument`, and each path pairs it with the projection policy in one
+`FaProjection` that every projection entry point takes. See the
+forced-alignment reference, "Kept main bullets", for what each phase does with
+a kept bullet and the proofs that order them.
 
 The final phase is also typed. Fresh injection produces `FaApplied`; a
 no-injection path can only enter through `finalize_without_injection`. Both

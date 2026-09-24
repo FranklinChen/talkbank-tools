@@ -195,7 +195,8 @@ fn test_apply_fa_results() {
         WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
         true,
     )
-    .then_finalize(&mut chat, BulletRepairPolicy::Disabled);
+    .then_finalize(&mut chat, BulletRepairPolicy::Disabled)
+    .expect("finalization under the default policy holds");
 
     let output = chat.to_chat_string();
     assert!(output.contains("%wor:"), "Output should contain %wor tier");
@@ -387,14 +388,20 @@ fn cross_speaker_overlap_policy_preserves_only_cross_speaker_end_overlap() {
 fn fa_applied_carries_end_overlap_policy_into_finalization() {
     let input = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child, MOT Mother\n@ID:\teng|x|CHI|||||Child|||\n@ID:\teng|x|MOT|||||Mother|||\n*CHI:\tone . \u{15}1000_5000\u{15}\n*MOT:\ttwo . \u{15}4000_8000\u{15}\n@End\n";
     let mut chat = parse_chat(input);
-    let policy = FaProjectionPolicy::new(
-        WordEndPolicy::measured(WordGapHealing::Heal),
-        ExistingWorBoundaryPolicy::Preserve,
-        EndOverlapPolicy::PreserveCrossSpeaker,
+    let projection = FaProjection::new(
+        FaProjectionPolicy::new(
+            WordEndPolicy::measured(WordGapHealing::Heal),
+            ExistingWorBoundaryPolicy::Preserve,
+            EndOverlapPolicy::PreserveCrossSpeaker,
+        ),
+        MainBulletAuthority::DeriveFromWords,
     );
 
-    let _finalized = apply_fa_results_with_projection_policy(&mut chat, &[], &[], policy, false)
-        .then_finalize(&mut chat, BulletRepairPolicy::Disabled);
+    let _finalized =
+        apply_fa_results_with_projection_policy(&mut chat, &[], &[], projection, false)
+            .expect("the default policy refers to no given bullet")
+            .then_finalize(&mut chat, BulletRepairPolicy::Disabled)
+            .expect("finalization under the default policy holds");
 
     assert_eq!(
         get_test_utterance(&mut chat, 0)
@@ -413,13 +420,18 @@ fn fa_applied_carries_end_overlap_policy_into_finalization() {
 fn no_injection_projection_carries_end_overlap_policy_into_ordering() {
     let input = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child, MOT Mother\n@ID:\teng|x|CHI|||||Child|||\n@ID:\teng|x|MOT|||||Mother|||\n*CHI:\tone . \u{15}1000_5000\u{15}\n*MOT:\ttwo . \u{15}4000_8000\u{15}\n@End\n";
     let mut chat = parse_chat(input);
-    let policy = FaProjectionPolicy::new(
-        WordEndPolicy::measured(WordGapHealing::Heal),
-        ExistingWorBoundaryPolicy::Preserve,
-        EndOverlapPolicy::PreserveCrossSpeaker,
+    let projection = FaProjection::new(
+        FaProjectionPolicy::new(
+            WordEndPolicy::measured(WordGapHealing::Heal),
+            ExistingWorBoundaryPolicy::Preserve,
+            EndOverlapPolicy::PreserveCrossSpeaker,
+        ),
+        MainBulletAuthority::DeriveFromWords,
     );
 
-    let _finalized = finalize_without_injection(&mut chat, policy, BulletRepairPolicy::Disabled);
+    let _finalized =
+        finalize_without_injection(&mut chat, projection, BulletRepairPolicy::Disabled)
+            .expect("finalization under the default policy holds");
 
     assert_eq!(
         get_test_utterance(&mut chat, 0)
@@ -438,14 +450,19 @@ fn no_injection_projection_carries_end_overlap_policy_into_ordering() {
 fn fa_finalization_runs_optional_repair_before_monotonicity() {
     let input = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child, MOT Mother\n@ID:\teng|x|CHI|||||Child|||\n@ID:\teng|x|MOT|||||Mother|||\n*CHI:\tone . \u{15}1000_5000\u{15}\n*MOT:\ttwo . \u{15}4800_8000\u{15}\n@End\n";
     let mut chat = parse_chat(input);
-    let policy = FaProjectionPolicy::new(
-        WordEndPolicy::measured(WordGapHealing::Heal),
-        ExistingWorBoundaryPolicy::Preserve,
-        EndOverlapPolicy::ClampAllAdjacent,
+    let projection = FaProjection::new(
+        FaProjectionPolicy::new(
+            WordEndPolicy::measured(WordGapHealing::Heal),
+            ExistingWorBoundaryPolicy::Preserve,
+            EndOverlapPolicy::ClampAllAdjacent,
+        ),
+        MainBulletAuthority::DeriveFromWords,
     );
 
-    let finalized = apply_fa_results_with_projection_policy(&mut chat, &[], &[], policy, false)
-        .then_finalize(&mut chat, BulletRepairPolicy::Enabled);
+    let finalized = apply_fa_results_with_projection_policy(&mut chat, &[], &[], projection, false)
+        .expect("the default policy refers to no given bullet")
+        .then_finalize(&mut chat, BulletRepairPolicy::Enabled)
+        .expect("finalization under the default policy holds");
 
     assert_eq!(finalized.repair_stats().boundary_averaged, 1);
     assert_eq!(

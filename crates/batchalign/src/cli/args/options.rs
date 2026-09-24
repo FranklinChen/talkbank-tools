@@ -242,6 +242,7 @@ pub fn build_typed_options(
                 boundaries: crate::options::AlignBoundaryOptions {
                     existing_wor_boundaries: a.boundaries.existing_wor_boundaries,
                     end_overlap_policy: a.boundaries.end_overlap_policy,
+                    main_bullets: a.boundaries.main_bullets,
                 },
                 wor: resolve_wor_tier_policy(a.wor, a.nowor),
                 merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),

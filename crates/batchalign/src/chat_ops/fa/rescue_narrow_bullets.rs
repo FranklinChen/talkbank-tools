@@ -33,6 +33,7 @@
 use talkbank_model::model::{BulletSource, ChatFile, Line};
 
 use super::coordinates::Ms;
+use super::main_bullets::{BulletMutability, KeptBulletError, MainBulletAuthority};
 use super::speech_rate::SpeechRate;
 
 #[cfg(test)]
@@ -203,13 +204,22 @@ fn rescued_end_ms(
 ///    cannot bleed into the next utterance's speech.
 /// 4. When there is no next utterance (last utterance in the file), the
 ///    rescue does nothing; there is no upper bound to safely extend to.
-pub fn rescue_narrow_bullets(chat_file: &mut ChatFile) -> Vec<DecisionRecord> {
+///
+/// Under `--main-bullets keep`, a kept bullet is widened too (grouping and
+/// inference must not depend on the policy), but the transcript keeps the
+/// given bullet, so the decision is recorded as
+/// `FaStrategy::KeptBulletWindowWidened` with `scope=grouping_only`: the
+/// evidence never claims a widening the output does not have.
+pub fn rescue_narrow_bullets(
+    chat_file: &mut ChatFile,
+    main_bullets: &MainBulletAuthority,
+) -> Result<Vec<DecisionRecord>, KeptBulletError> {
     let mut decisions = Vec::new();
 
     // First pass: collect (line_idx, current_bullet, word_count, next_start) tuples.
     // Done in a separate pass so the second pass can mutate bullets without
     // double-borrowing the lines vec.
-    let observations = collect_rescue_candidates(chat_file);
+    let observations = collect_rescue_candidates(chat_file, main_bullets)?;
 
     for obs in observations {
         // Classify the bullet density and pick a trigger.
@@ -250,22 +260,30 @@ pub fn rescue_narrow_bullets(chat_file: &mut ChatFile) -> Vec<DecisionRecord> {
         bullet.timing.end_ms = new_end;
         bullet.source = BulletSource::Utr;
 
+        let mut reason = format!(
+            "word_count={wc} original_end={oe} expanded_end={ne} \
+             next_start={ns} trigger={tag} \
+             cause=transcribe_bullet_too_narrow_for_word_count",
+            wc = obs.word_count,
+            oe = original_end,
+            ne = new_end,
+            ns = next_start,
+            tag = trigger.as_decision_tag(),
+        );
+        let strategy = match obs.mutability {
+            BulletMutability::Revisable => {
+                batchalign_transform::decisions::FaStrategy::NarrowBulletRescued
+            }
+            BulletMutability::ReadOnly(_) => {
+                reason.push_str(" scope=grouping_only");
+                batchalign_transform::decisions::FaStrategy::KeptBulletWindowWidened
+            }
+        };
         decisions.push(DecisionRecord::new_and_trace(
             obs.line_idx,
             utt.main.speaker.as_str().to_string(),
-            batchalign_transform::decisions::DecisionStrategy::Fa(
-                batchalign_transform::decisions::FaStrategy::NarrowBulletRescued,
-            ),
-            format!(
-                "word_count={wc} original_end={oe} expanded_end={ne} \
-                 next_start={ns} trigger={tag} \
-                 cause=transcribe_bullet_too_narrow_for_word_count",
-                wc = obs.word_count,
-                oe = original_end,
-                ne = new_end,
-                ns = next_start,
-                tag = trigger.as_decision_tag(),
-            ),
+            batchalign_transform::decisions::DecisionStrategy::Fa(strategy),
+            reason,
             // The rescue is a routine pre-pass correction, not a sign that
             // something is broken in the user's input. Retain it in evidence
             // but do not request human review: the FA result is still correct
@@ -274,7 +292,7 @@ pub fn rescue_narrow_bullets(chat_file: &mut ChatFile) -> Vec<DecisionRecord> {
         ));
     }
 
-    decisions
+    Ok(decisions)
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +311,9 @@ struct RescueObservation {
     word_count: usize,
     /// Start time of the next timed utterance, if any.
     next_start_ms: Option<u64>,
+    /// Whether the transcript keeps this bullet as given, which decides what
+    /// the rescue record may claim.
+    mutability: BulletMutability,
 }
 
 /// Walk the file once and collect rescue candidates with their next-utterance
@@ -304,13 +325,13 @@ struct RescueObservation {
 /// downstream. This is one of the four sites listed in `AGENTS.md`'s
 /// "ReplacedWord Extraction/Injection Policy" table that must stay in sync;
 /// do not duplicate the counting logic here.
-fn collect_rescue_candidates(chat_file: &ChatFile) -> Vec<RescueObservation> {
+fn collect_rescue_candidates(
+    chat_file: &ChatFile,
+    main_bullets: &MainBulletAuthority,
+) -> Result<Vec<RescueObservation>, KeptBulletError> {
     // First pass: build candidates with `next_start_ms` unset.
     let mut observations: Vec<RescueObservation> = Vec::new();
-    for (line_idx, line) in chat_file.lines.iter().enumerate() {
-        let Line::Utterance(utt) = line else {
-            continue;
-        };
+    for (line_idx, utterance_idx, utt) in super::utterances_indexed(chat_file) {
         let Some(bullet) = utt.main.content.bullet.as_ref() else {
             continue;
         };
@@ -324,6 +345,7 @@ fn collect_rescue_candidates(chat_file: &ChatFile) -> Vec<RescueObservation> {
             bullet_end_ms: bullet.timing.end_ms,
             word_count,
             next_start_ms: None,
+            mutability: main_bullets.given_mutability(utterance_idx)?,
         });
     }
     // Second pass: fill each candidate's `next_start_ms` from the next
@@ -333,7 +355,7 @@ fn collect_rescue_candidates(chat_file: &ChatFile) -> Vec<RescueObservation> {
     for i in 0..observations.len().saturating_sub(1) {
         observations[i].next_start_ms = Some(observations[i + 1].bullet_start_ms);
     }
-    observations
+    Ok(observations)
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +416,8 @@ mod tests {
         let mut file = parse_chat(&synthetic_narrow_bullet_chat());
         assert_eq!(nth_utterance_bullet(&file, 1), (3500, 3880));
 
-        let decisions = rescue_narrow_bullets(&mut file);
+        let decisions = rescue_narrow_bullets(&mut file, &MainBulletAuthority::DeriveFromWords)
+            .expect("the default policy refers to no given bullet");
 
         assert_eq!(nth_utterance_bullet(&file, 1), (3500, 19800));
 
@@ -426,7 +449,8 @@ mod tests {
         let mut file = parse_chat(chat);
         assert_eq!(nth_utterance_bullet(&file, 0), (1000, 4500));
 
-        let decisions = rescue_narrow_bullets(&mut file);
+        let decisions = rescue_narrow_bullets(&mut file, &MainBulletAuthority::DeriveFromWords)
+            .expect("the default policy refers to no given bullet");
 
         // 20 words * 350 ms = 7000 ms target → end = 1000 + 7000 = 8000.
         // Below the upper bound 19800, so the target wins.
@@ -459,7 +483,8 @@ mod tests {
         let mut file = parse_chat(chat);
         let before = nth_utterance_bullet(&file, 0);
 
-        let _ = rescue_narrow_bullets(&mut file);
+        let _ = rescue_narrow_bullets(&mut file, &MainBulletAuthority::DeriveFromWords)
+            .expect("the default policy refers to no given bullet");
 
         assert_eq!(nth_utterance_bullet(&file, 0), before);
     }
@@ -472,7 +497,8 @@ mod tests {
         let before_first = nth_utterance_bullet(&file, 0);
         let before_third = nth_utterance_bullet(&file, 2);
 
-        let _ = rescue_narrow_bullets(&mut file);
+        let _ = rescue_narrow_bullets(&mut file, &MainBulletAuthority::DeriveFromWords)
+            .expect("the default policy refers to no given bullet");
 
         assert_eq!(nth_utterance_bullet(&file, 0), before_first);
         assert_eq!(nth_utterance_bullet(&file, 2), before_third);
@@ -494,7 +520,8 @@ mod tests {
         let mut file = parse_chat(chat);
         let before = nth_utterance_bullet(&file, 0);
 
-        let decisions = rescue_narrow_bullets(&mut file);
+        let decisions = rescue_narrow_bullets(&mut file, &MainBulletAuthority::DeriveFromWords)
+            .expect("the default policy refers to no given bullet");
 
         assert_eq!(nth_utterance_bullet(&file, 0), before);
         assert!(decisions.is_empty());
@@ -516,7 +543,8 @@ mod tests {
         let mut file = parse_chat(chat);
         let before = nth_utterance_bullet(&file, 1);
 
-        let decisions = rescue_narrow_bullets(&mut file);
+        let decisions = rescue_narrow_bullets(&mut file, &MainBulletAuthority::DeriveFromWords)
+            .expect("the default policy refers to no given bullet");
 
         assert_eq!(nth_utterance_bullet(&file, 1), before);
         assert!(decisions.is_empty());

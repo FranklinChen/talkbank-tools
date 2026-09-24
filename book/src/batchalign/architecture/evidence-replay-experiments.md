@@ -1,7 +1,7 @@
 # Evidence, Replay, and Experiment Topology
 
 **Status:** Current
-**Last updated:** 2026-09-15 21:24 EDT
+**Last updated:** 2026-09-23 23:31 EDT
 
 This chapter is the visual map for BA3's evidence architecture. Version 0.3.0
 has raw-evidence caching and FA evidence schema 2. Version 0.4.0 additionally
@@ -33,7 +33,9 @@ compatibility default clamps all adjacent end overlap. The experimental
 differ; same-speaker clamps and start-regression stripping remain unchanged.
 Both policies travel inside one `FaProjectionPolicy`, so full, incremental,
 all-reusable, and empty-group paths cannot silently apply different
-combinations. A second phase type, `FaFinalized`, requires optional bullet
+combinations. `--main-bullets {derive,keep}` is a third dimension in the same
+value: `keep` leaves every utterance bullet the input carried unchanged and fits
+word timings inside it, again without touching the cache key. A second phase type, `FaFinalized`, requires optional bullet
 repair to run before that policy's monotonicity projection on every path.
 
 A cache-only ten-file development experiment held every other typed option

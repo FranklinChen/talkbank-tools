@@ -381,6 +381,52 @@ pub enum FaTimingDecisionTrace {
         /// `words_dropped: usize` that could say how many but not which).
         words_dropped: Vec<DroppedWordTimingTrace>,
     },
+    /// Under `--main-bullets keep`, a derived bullet gave way to a kept
+    /// neighbour's fixed boundary (its end, or its start); the kept bullet did
+    /// not change.
+    YieldedToKeptBullet {
+        /// Yielding line index, including headers.
+        line_idx: usize,
+        /// Stable ordinal of the yielding utterance.
+        utterance_idx: usize,
+        /// Speaker on the yielding utterance.
+        speaker: String,
+        /// Line of the kept utterance.
+        kept_line_idx: usize,
+        /// Stable ordinal of the kept utterance.
+        kept_utterance_idx: usize,
+        /// Speaker on the kept utterance.
+        kept_speaker: String,
+        /// The kept boundary yielded to.
+        kept_boundary_ms: u64,
+        /// What happened to the yielding utterance.
+        outcome: KeptBulletYieldTrace,
+    },
+}
+
+/// Wire form of `chat_ops::fa::KeptBulletYield`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeptBulletYieldTrace {
+    /// The start moved forward to the kept end; leading words were cut.
+    StartMoved {
+        /// Start before the move.
+        from_ms: u64,
+        /// Start after the move.
+        to_ms: u64,
+        /// Leading words cut to a shorter positive extent.
+        words_trimmed: usize,
+        /// Leading words that lost their timing.
+        words_dropped: Vec<DroppedWordTimingTrace>,
+    },
+    /// No valid bullet could remain: timing stripped.
+    Stripped {
+        /// Start of the stripped bullet.
+        start_ms: u64,
+        /// End of the stripped bullet.
+        end_ms: u64,
+    },
 }
 
 /// Wire form of `chat_ops::fa::orchestrate::DroppedWordTiming`: a word whose
@@ -465,7 +511,35 @@ impl FaTimingDecisionTrace {
             Self::StartRegressionStripped { .. }
             | Self::ZeroDurationClampStripped { .. }
             | Self::EndClampedCoverageOnly { .. }
-            | Self::EndClampedBoundaryFromWords { .. } => Vec::new(),
+            | Self::EndClampedBoundaryFromWords { .. }
+            | Self::YieldedToKeptBullet {
+                outcome: KeptBulletYieldTrace::Stripped { .. },
+                ..
+            } => Vec::new(),
+            Self::YieldedToKeptBullet {
+                line_idx,
+                utterance_idx,
+                speaker,
+                outcome:
+                    KeptBulletYieldTrace::StartMoved {
+                        to_ms,
+                        words_dropped,
+                        ..
+                    },
+                ..
+            } => words_dropped
+                .iter()
+                .map(|dropped| DroppedWordTimingRecord {
+                    line_idx: *line_idx,
+                    utterance_idx: *utterance_idx,
+                    speaker: speaker.clone(),
+                    tier: dropped.tier.clone(),
+                    word_index: dropped.word_index,
+                    start_ms: dropped.start_ms,
+                    end_ms: dropped.end_ms,
+                    bound_ms: *to_ms,
+                })
+                .collect(),
             Self::EndClampedInterleavedWords {
                 edge,
                 clamped_to_ms,
@@ -612,6 +686,43 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
                     .iter()
                     .map(DroppedWordTimingTrace::from)
                     .collect(),
+            },
+            MonotonicityEffect::YieldedToKeptBullet {
+                line_idx,
+                utterance_idx,
+                speaker,
+                kept_line_idx,
+                kept_utterance_idx,
+                kept_speaker,
+                kept_boundary_ms,
+                outcome,
+            } => Self::YieldedToKeptBullet {
+                line_idx,
+                utterance_idx: utterance_idx.raw(),
+                speaker,
+                kept_line_idx,
+                kept_utterance_idx: kept_utterance_idx.raw(),
+                kept_speaker,
+                kept_boundary_ms,
+                outcome: match outcome {
+                    crate::chat_ops::fa::KeptBulletYield::StartMoved {
+                        from_ms,
+                        to_ms,
+                        words_trimmed,
+                        words_dropped,
+                    } => KeptBulletYieldTrace::StartMoved {
+                        from_ms,
+                        to_ms,
+                        words_trimmed,
+                        words_dropped: words_dropped
+                            .iter()
+                            .map(DroppedWordTimingTrace::from)
+                            .collect(),
+                    },
+                    crate::chat_ops::fa::KeptBulletYield::Stripped { start_ms, end_ms } => {
+                        KeptBulletYieldTrace::Stripped { start_ms, end_ms }
+                    }
+                },
             },
         }
     }

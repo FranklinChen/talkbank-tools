@@ -1702,6 +1702,7 @@ mod fa_language_support_tests {
                 gap_healing: crate::chat_ops::fa::WordGapHealing::Heal,
                 existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy::Preserve,
                 end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy::ClampAllAdjacent,
+                main_bullets: crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,
                 engine,
                 cache_policy: crate::types::params::CachePolicy::UseCache,
                 wor_tier: crate::types::params::WorTierPolicy::Include,

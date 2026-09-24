@@ -175,6 +175,31 @@ mod tests {
     }
 }
 
+/// Everything about one input file that is fixed at the read, before the UTR
+/// pre-pass edits the model: the bytes, the parse errors, and the main
+/// bullets the run's `--main-bullets` policy bound at that same parse.
+///
+/// Grouped because all three are facts about the input as read, and every
+/// one of them is wrong if taken from the model after UTR has run.
+struct AlignFileAsRead {
+    /// The bytes this file was read as, kept beside the model they were
+    /// parsed into.
+    ///
+    /// Align promises a `@Options: dummy` or `NoAlign` document back
+    /// byte-identical, and only the ORIGINAL bytes can keep that promise: a
+    /// re-serialization of the model is a parse-and-serialize round trip, and
+    /// the pass-through route judges nothing, so any difference it makes
+    /// reaches disk unexamined. Carried rather than re-read because the file
+    /// on disk is the file this run is about to overwrite.
+    text: String,
+    /// The errors the parse reported.
+    parse_errors: Vec<crate::chat_ops::ParseError>,
+    /// The main-bullet policy bound to the bullets this parse found. Bound
+    /// here, not later, because two-pass UTR writes ordinary bullets onto
+    /// unbulleted utterances and nothing afterwards can tell them apart.
+    main_bullets: crate::chat_ops::fa::MainBulletAuthority,
+}
+
 struct AlignAudioTask<'a> {
     host: DispatchHostContext,
     job_id: crate::api::JobId,
@@ -195,17 +220,8 @@ struct AlignAudioTask<'a> {
     audio_identity: crate::chat_ops::fa::AudioIdentity,
     total_audio_ms: Option<u64>,
     chat_file: crate::chat_ops::ChatFile,
-    /// The bytes this file was read as, kept beside the model they were parsed
-    /// into.
-    ///
-    /// Align promises a `@Options: dummy` or `NoAlign` document back
-    /// byte-identical, and only the ORIGINAL bytes can keep that promise: a
-    /// re-serialization of the model is a parse-and-serialize round trip, and
-    /// the pass-through route judges nothing, so any difference it makes
-    /// reaches disk unexamined. Carried rather than re-read because the file on
-    /// disk is the file this run is about to overwrite.
-    chat_text: String,
-    parse_errors: Vec<crate::chat_ops::ParseError>,
+    /// What the file was AS READ, before the UTR pre-pass edited the model.
+    read: AlignFileAsRead,
     had_unrecovered_untimed: bool,
     utr_fallback_attempted: bool,
     /// Whether a timing-recovery pass ran for this file, and with which
@@ -266,8 +282,9 @@ impl AudioFileTask for AlignAudioTask<'_> {
         // callee a model it was already holding.
         let document = crate::fa::FaInputDocument::new(
             self.chat_file.clone(),
-            self.parse_errors.clone(),
-            &self.chat_text,
+            self.read.parse_errors.clone(),
+            &self.read.text,
+            self.read.main_bullets.clone(),
         );
         if let Some(ref bt) = before_text {
             crate::fa::process_fa_incremental(
@@ -346,6 +363,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
             &self.utr_contribution,
             false,
             self.output.incremental_enabled,
+            self.admitted.params().main_bullets,
         );
         // A named transition on the proof, re-gated at align's own admitted
         // level. It used to be `inject_provenance_into_text` on a bare string
@@ -663,6 +681,25 @@ async fn process_one_fa_file(
     let (mut chat_file, parse_errors) =
         batchalign_transform::parse::parse_lenient(&fa_parser, &chat_text);
 
+    // Bind `--main-bullets` to the bullets THIS parse found, before the UTR
+    // pre-pass below can write any: two-pass UTR writes ordinary bullets onto
+    // unbulleted utterances, and nothing downstream could tell those from the
+    // input's own. The default binds nothing; `keep` refuses a backward bullet.
+    let main_bullets =
+        match crate::chat_ops::fa::MainBulletAuthority::bind(fa_params.main_bullets, &chat_file) {
+            Ok(main_bullets) => main_bullets,
+            Err(backward) => {
+                lifecycle
+                    .fail(
+                        &backward.to_string(),
+                        FailureCategory::Validation,
+                        unix_now(),
+                    )
+                    .await;
+                return FileTaskOutcome::TerminalStateRecorded;
+            }
+        };
+
     // Resolve the WHOLE `@Languages:` header against the job's `--lang` in one
     // step. The resolution lives on `DeclaredLanguages` rather than here
     // because doing it here is what made header ORDER decide admission: the
@@ -808,8 +845,11 @@ async fn process_one_fa_file(
         audio_identity,
         total_audio_ms,
         chat_file,
-        chat_text,
-        parse_errors,
+        read: AlignFileAsRead {
+            text: chat_text,
+            parse_errors,
+            main_bullets,
+        },
         had_unrecovered_untimed,
         utr_fallback_attempted: false,
         utr_contribution,

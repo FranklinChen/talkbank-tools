@@ -442,6 +442,36 @@ fn align_rebuild_boundary_flag_reaches_typed_options() {
 }
 
 #[test]
+fn align_keep_main_bullets_flag_reaches_typed_options() {
+    let cli = Cli::parse_from(["batchalign3", "align", "input/", "--main-bullets", "keep"]);
+    let options = build_typed_options(&cli.command, &cli.global)
+        .expect("enrollments validate")
+        .expect("typed align options");
+    let CommandOptions::Align(options) = options else {
+        panic!("expected Align");
+    };
+    assert_eq!(
+        options.boundaries.main_bullets,
+        crate::chat_ops::fa::MainBulletPolicy::KeepGiven
+    );
+}
+
+#[test]
+fn align_main_bullets_defaults_to_the_one_named_constant() {
+    let cli = Cli::parse_from(["batchalign3", "align", "input/"]);
+    let options = build_typed_options(&cli.command, &cli.global)
+        .expect("enrollments validate")
+        .expect("typed align options");
+    let CommandOptions::Align(options) = options else {
+        panic!("expected Align");
+    };
+    assert_eq!(
+        options.boundaries.main_bullets,
+        crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY
+    );
+}
+
+#[test]
 fn align_default_end_overlap_policy_is_the_one_named_constant() {
     // No `--end-overlap-policy` flag: the CLI's `default_value_t` and
     // `AlignBoundaryOptions`'s own `Default` must both read

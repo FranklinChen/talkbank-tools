@@ -166,6 +166,14 @@ pub struct AlignBoundaryArgs {
     /// Treatment of an earlier utterance end that crosses the next start.
     #[arg(long, value_enum, default_value_t = crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY)]
     pub end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy,
+
+    /// Whether utterance bullets already on the input may change.
+    ///
+    /// Use `keep` for a transcript whose bullets are authoritative, such as a
+    /// hand-checked or merged transcript. It changes only how alignment is
+    /// written into the transcript, never what is aligned or cached.
+    #[arg(long, value_enum, default_value_t = crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY)]
+    pub main_bullets: crate::chat_ops::fa::MainBulletPolicy,
 }
 
 /// Arguments for the `align` subcommand (forced alignment).

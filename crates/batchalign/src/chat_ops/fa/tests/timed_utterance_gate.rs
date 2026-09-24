@@ -44,7 +44,8 @@ fn pass1_stripped_utterance_gets_no_wor_tier() {
         WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
         true,
     )
-    .then_finalize(&mut chat, BulletRepairPolicy::Disabled);
+    .then_finalize(&mut chat, BulletRepairPolicy::Disabled)
+    .expect("finalization under the default policy holds");
 
     let utt1 = get_test_utterance(&mut chat, 1);
     assert!(
@@ -90,7 +91,8 @@ fn untimed_word_with_inherited_bullet_gets_no_wor_tier() {
         WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
         true,
     )
-    .then_finalize(&mut chat, BulletRepairPolicy::Disabled);
+    .then_finalize(&mut chat, BulletRepairPolicy::Disabled)
+    .expect("finalization under the default policy holds");
 
     let utt0 = get_test_utterance(&mut chat, 0);
     assert_eq!(

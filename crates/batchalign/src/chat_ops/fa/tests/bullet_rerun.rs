@@ -53,7 +53,8 @@ fn test_rerun_fa_strips_stale_x_tiers_even_when_no_new_decisions() {
         WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
         false,
     )
-    .then_finalize(&mut chat, BulletRepairPolicy::Disabled);
+    .then_finalize(&mut chat, BulletRepairPolicy::Disabled)
+    .expect("finalization under the default policy holds");
 
     // Through the same owner production uses. This test used to hand-simulate
     // `fa/mod.rs` step 9d, including its BUG (inject-and-strip only when the
@@ -247,7 +248,8 @@ fn test_rescued_rerun_bullet_does_not_clamp_new_fa_words() {
 ";
     let mut chat = parse_chat(input);
 
-    let decisions = rescue_narrow_bullets(&mut chat);
+    let decisions = rescue_narrow_bullets(&mut chat, &MainBulletAuthority::DeriveFromWords)
+        .expect("the default policy refers to no given bullet");
     assert_eq!(decisions.len(), 1, "narrow-bullet rescue should fire");
 
     {
@@ -562,15 +564,16 @@ fn test_fast_path_strips_backward_wor_timestamps_and_removes_stale_wor_tier() {
     );
 
     // Step 2 (fast path FIX): enforce the declared complete projection policy.
-    let finalized = finalize_without_injection(
-        &mut chat,
+    let projection = FaProjection::new(
         FaProjectionPolicy::new(
             WordEndPolicy::measured(WordGapHealing::Heal),
             ExistingWorBoundaryPolicy::Preserve,
             EndOverlapPolicy::ClampAllAdjacent,
         ),
-        BulletRepairPolicy::Disabled,
+        MainBulletAuthority::DeriveFromWords,
     );
+    let finalized = finalize_without_injection(&mut chat, projection, BulletRepairPolicy::Disabled)
+        .expect("finalization under the default policy holds");
 
     // Step 3 (fast path FIX): remove %wor from utterances whose bullets were
     // stripped, so the next re-run cannot reconstruct the backward bullet again.
