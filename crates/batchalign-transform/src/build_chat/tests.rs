@@ -66,12 +66,15 @@ fn json_word_assembly_preserves_parser_refusal() {
                     {"text": "."}
                 ]}]
             });
-            let desc: TranscriptDescription = serde_json::from_value(wire.clone())
-                .expect("wire decoding is not CHAT admission");
+            let desc: TranscriptDescription =
+                serde_json::from_value(wire.clone()).expect("wire decoding is not CHAT admission");
             match build_chat(&desc).expect_err("malformed token must refuse the whole build") {
                 BuildChatError::Word { text, diagnostics } => {
                     assert_eq!(text, token);
-                    assert!(!diagnostics.is_empty(), "retain parser evidence for {token:?}");
+                    assert!(
+                        !diagnostics.is_empty(),
+                        "retain parser evidence for {token:?}"
+                    );
                 }
                 other => panic!("unexpected failure for {token:?}/{kind}: {other}"),
             }
