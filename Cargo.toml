@@ -32,7 +32,7 @@ categories = ["parser-implementations", "text-processing"]
 # Workspace-level lint policy.
 #
 # Panic-as-control-flow is the dominant footgun in long-lived Rust code
-# (LSP, server, async workers). The CLAUDE.md standard is "no panics in
+# (LSP, server, async workers). The AGENTS.md standard is "no panics in
 # long-lived logic, recoverable conditions go through Result with thiserror
 # domain types." These warn-level lints make every new panic site visible
 # without one-shot breaking the existing tree (see docs/panic-audit/baseline.md
@@ -111,25 +111,25 @@ batchalign-transform = { path = "crates/batchalign-transform" }
 # ../chatter/crates/...; never commit a path override here. Adopt a newer chatter
 # by bumping the tag. talkbank-transform is the GENERIC transform;
 # batchalign-transform (above) holds the ML accretion.
-talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.26.0", default-features = false }
+talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.27.0", default-features = false }
 # Stage 1 dedup: talkbank-tools no longer carries its own copies of these.
-talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.26.0" }
-talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.26.0" }
-talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.26.0" }
+talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.27.0" }
+talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.27.0" }
+talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.27.0" }
 
 tempfile = "3.27"
-thiserror = "^2.0.20"
+thiserror = "^2.0.21"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
 toml = "^1.1.6"
 tracing-appender = "0.2"
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry = "0.34"
 tower-http = { version = "0.7", features = ["cors", "fs", "limit", "trace", "compression-gzip", "compression-br", "catch-panic", "timeout"] }
-opentelemetry = { version = "0.32", features = ["trace"] }
-opentelemetry_sdk = { version = "0.32", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
-utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+opentelemetry = { version = "0.33", features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 whatlang = "0.18"
 sysinfo = "0.39"

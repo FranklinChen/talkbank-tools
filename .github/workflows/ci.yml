@@ -48,7 +48,7 @@ jobs:
 
       # Every tracked shell script must pass shellcheck at its default
       # (strictest) severity. The runner finds every *.sh plus shebang
-      # scripts via git ls-files. See CLAUDE.md.
+      # scripts via git ls-files. See AGENTS.md.
       - name: shellcheck all shell scripts
         run: make lint-shell
       - name: Verify exact-tree gate receipts

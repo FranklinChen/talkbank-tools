@@ -7,7 +7,7 @@ fixtures. The convention matches `align/`, see the top-level
 
 No fixtures yet. Add the first one when a user reports a translate
 failure that should be tracked permanently. Use the official trim tool
-(see the "CRITICAL RULES" at the top of `CLAUDE.md`); never hand-roll
+(see the "CRITICAL RULES" at the top of `AGENTS.md`); never hand-roll
 a clip.
 
 Translate fixtures need `input.cha` with main-tier source-language

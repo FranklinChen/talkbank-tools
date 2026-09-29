@@ -1,7 +1,7 @@
 # Dashboard E2E Test Entry Points
 
 **Status:** Current
-**Last updated:** 2026-04-29 13:54 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 
 This document provides a unified reference for all dashboard e2e test entry points across local development, CI workflows, and orchestration scripts.
 
@@ -302,7 +302,7 @@ Need to validate API sync?
 
 ## Related Documentation
 
-- **Frontend architecture & tech stack:** `frontend/CLAUDE.md`
+- **Frontend architecture & tech stack:** `frontend/AGENTS.md`
 - **Full test files:** `frontend/e2e/tests/`
 - **Contributing guide:** `CONTRIBUTING.md` (section on dashboard changes)
 - **Batchalign-specific e2e tests:** `batchalign/tests/cli/test_cli_e2e.py`

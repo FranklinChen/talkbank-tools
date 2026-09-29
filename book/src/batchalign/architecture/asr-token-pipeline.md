@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:56 EDT
+**Last updated:** 2026-09-27 17:38 EDT
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -350,12 +350,19 @@ fixtures this way.
 The progression is **asymmetric on purpose**: `AsrRawText` and
 `AsrNormalizedText` are pipeline-internal and carry whatever the
 provider returned; `ChatWordText` is the handoff boundary into CHAT
-assembly, and its constructor is the enforcement point for the
-invariant that every word in a `ChatFile` is CHAT-legal. Attempting
+assembly, and its fallible constructors enforce structural admission (plus
+language-aware checks for the `_lang` variants). Attempting
 to construct a `ChatWordText` from text the CHAT grammar rejects
 fails loudly at the boundary with a typed error naming the offending
 utterance, speaker, language, and token, rather than producing a
 `ChatFile` that fails silently at a downstream parse gate.
+
+The constructors above check their inputs, but transparent JSON decoding does
+not invoke them. CHAT assembly therefore requires a clean word-fragment parse
+before attaching timing or forming regular/retraced word nodes. Refusal or
+recovery returns `BuildChatError::Word` with the supplied token and structured
+diagnostics; no unchecked word is substituted and no partial file is returned.
+This is structural admission, not a replacement for language-aware validation.
 
 All three types use `#[serde(transparent)]`, `as_str()`, `Display`,
 `AsRef<str>`. `AsrNormalizedText` additionally provides `map()` for

@@ -1,7 +1,7 @@
 # Python/Rust Interface Map
 
 **Status:** Current
-**Last updated:** 2026-09-15 14:00 EDT
+**Last updated:** 2026-09-22 17:57 EDT
 
 This document is the unified reference for all Python/Rust interface boundaries in batchalign3.
 
@@ -279,9 +279,9 @@ per monologue; the bridges report provider surfaces unchanged.
 - `book/src/batchalign/developer/maturin-pyo3-surface.md`: PyO3 wheel packaging, editable installs
 
 ### Crate Documentation (Source Code)
-- `crates/batchalign-pyo3/CLAUDE.md`: Pyo3 crate architecture, standards, rules
-- `crates/batchalign/CLAUDE.md`: Server module map, job lifecycle, concurrency model
-- `crates/batchalign-types/CLAUDE.md`: Domain types, newtype conventions (if exists)
+- `crates/batchalign-pyo3/AGENTS.md`: Pyo3 crate architecture, standards, rules
+- `crates/batchalign/AGENTS.md`: Server module map, job lifecycle, concurrency model
+- `crates/batchalign-types/AGENTS.md`: Domain types, newtype conventions (if exists)
 
 ### In-Code Documentation
 - `crates/batchalign-pyo3/src/lib.rs`: Module registration, what each function does

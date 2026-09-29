@@ -519,7 +519,7 @@ mod tests {
     // postcondition. The current constructor (`pub fn new(s: impl
     // Into<String>) -> Self`, `asr_types.rs:167`) is infallible and
     // performs no validation, so the type documents a promise that the
-    // code does not keep. CLAUDE.md rule 6a: `From<T>` / infallible
+    // code does not keep. AGENTS.md rule 6a: `From<T>` / infallible
     // `new` constructors are forbidden on types whose construction can
     // fail; use `TryFrom` instead.
     //

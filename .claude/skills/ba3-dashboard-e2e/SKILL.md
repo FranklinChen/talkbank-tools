@@ -20,6 +20,6 @@ Quick entry points:
   generated API bindings come from `npm run generate:types` /
   `generate:schema`, never hand-edited.
 
-Invariants (frontend/CLAUDE.md): the desktop runtime seam is the one
+Invariants (frontend/AGENTS.md): the desktop runtime seam is the one
 ownership boundary; comment discipline per that file; SPA state of
 record lives server-side.

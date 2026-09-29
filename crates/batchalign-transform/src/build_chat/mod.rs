@@ -42,7 +42,7 @@ use utterances::build_utterance_lines;
 
 /// Why building a CHAT file from a [`TranscriptDescription`] failed.
 ///
-/// These five modes were previously flattened into `String`, which is the
+/// These failure modes were previously flattened into `String`, which is the
 /// primitive obsession rule 6 bans: a caller could not tell an unusable media
 /// name (operator input, fixable) from a parser init failure (environment,
 /// not fixable) without matching on prose. `chatter`'s equivalent builder has
@@ -56,6 +56,15 @@ pub enum BuildChatError {
     /// The tree-sitter parser could not be created.
     #[error("failed to create parser: {0}")]
     ParserInit(String),
+
+    /// A supplied word was refused or required parser recovery.
+    #[error("word {text:?} could not be parsed cleanly as CHAT: {diagnostics:?}")]
+    Word {
+        /// The supplied token, without an invented replacement.
+        text: String,
+        /// Parser diagnostics retained for callers, including recovery evidence.
+        diagnostics: Vec<talkbank_model::ParseError>,
+    },
 
     /// A language code in `@Languages` or on an utterance is not valid.
     #[error("invalid language code {code:?}: {source}")]

@@ -139,23 +139,24 @@ fn build_text_utterance(
     Ok(None)
 }
 
-/// Parse a single word, falling back to unchecked for ASR tokens.
-fn parse_asr_word(parser: &TreeSitterParser, text: &str) -> Word {
-    let errors = talkbank_model::NullErrorSink;
-    match parser.parse_word_fragment(text, 0, &errors).into_option() {
-        Some(parsed) => parsed,
-        None => {
-            tracing::warn!(
-                word = text,
-                "ASR word is not valid CHAT syntax; using unchecked fallback"
-            );
-            Word::new_unchecked(text, text)
+/// Admit a word only after a clean fragment parse, including for JSON input.
+fn parse_asr_word(parser: &TreeSitterParser, text: &str) -> Result<Word, BuildChatError> {
+    let errors = talkbank_model::ErrorCollector::new();
+    let outcome = parser.parse_word_fragment(text, 0, &errors);
+    let diagnostics = errors.into_vec();
+    match outcome {
+        talkbank_model::ParseOutcome::Parsed(word) if diagnostics.is_empty() => Ok(word),
+        talkbank_model::ParseOutcome::Parsed(_) | talkbank_model::ParseOutcome::Rejected => {
+            Err(BuildChatError::Word {
+                text: text.to_owned(),
+                diagnostics,
+            })
         }
     }
 }
 
 /// Parse a word and attach inline bullet timing, updating utterance-level
-/// timing bookkeeping. Returns the parsed `Word` and whether timing was present.
+/// timing bookkeeping only after successful word admission.
 fn parse_and_time_word(
     parser: &TreeSitterParser,
     text: &str,
@@ -164,8 +165,8 @@ fn parse_and_time_word(
     utt_start_ms: &mut Option<u64>,
     utt_end_ms: &mut Option<u64>,
     has_timing: &mut bool,
-) -> Word {
-    let mut word = parse_asr_word(parser, text);
+) -> Result<Word, BuildChatError> {
+    let mut word = parse_asr_word(parser, text)?;
     if let (Some(start), Some(end)) = (start_ms, end_ms) {
         word.inline_bullet = Some(Bullet::new(start, end));
         *has_timing = true;
@@ -174,7 +175,7 @@ fn parse_and_time_word(
         }
         *utt_end_ms = Some(end);
     }
-    word
+    Ok(word)
 }
 
 /// Build a word-level utterance from individual word tokens.
@@ -239,7 +240,7 @@ fn build_word_utterance(
                 &mut utt_start_ms,
                 &mut utt_end_ms,
                 &mut has_timing,
-            );
+            )?;
             continue;
         }
 
@@ -251,7 +252,7 @@ fn build_word_utterance(
             &mut utt_start_ms,
             &mut utt_end_ms,
             &mut has_timing,
-        );
+        )?;
         content.push(UtteranceContent::Word(Box::new(parsed)));
         index += 1;
     }
@@ -284,7 +285,7 @@ fn push_retrace_run(
     utt_start_ms: &mut Option<u64>,
     utt_end_ms: &mut Option<u64>,
     has_timing: &mut bool,
-) -> usize {
+) -> Result<usize, BuildChatError> {
     let mut end_index = start_index;
     while end_index < words.len() && words[end_index].kind == asr_postprocess::WordKind::Retrace {
         end_index += 1;
@@ -304,12 +305,12 @@ fn push_retrace_run(
             utt_start_ms,
             utt_end_ms,
             has_timing,
-        );
+        )?;
         parsed.push(word);
     }
 
     push_retrace_content(parsed, content);
-    end_index
+    Ok(end_index)
 }
 
 fn push_retrace_content(parsed: Vec<Word>, content: &mut Vec<UtteranceContent>) {

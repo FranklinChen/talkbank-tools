@@ -1,8 +1,8 @@
 # Batchalign agent guidance
 
-**Last modified:** 2026-09-09 20:36 EDT
+**Last modified:** 2026-09-22 17:57 EDT
 
-Canonical guidance for all coding agents. `CLAUDE.md` imports this file. Read
+Canonical guidance for all coding agents. Read
 applicable nested guidance in the affected crates and frontend, plus the
 references relevant to the task.
 
@@ -57,8 +57,8 @@ Shell scripts must pass default-severity shellcheck. Preserve release gates.
 | Dependencies, crate ownership and morphology | [Architecture](docs/agent-reference/architecture.md) |
 | Typestate, error handling and real-boundary tests | [Design](docs/agent-reference/design.md) |
 | Builds, releases and debugging | [Development](docs/agent-reference/development.md), `book/src/batchalign/developer/` |
-| Pipeline/runtime/worker/cache work | `crates/batchalign/CLAUDE.md` |
-| Python bridge or dashboard | `crates/batchalign-pyo3/CLAUDE.md`, `frontend/CLAUDE.md` |
+| Pipeline/runtime/worker/cache work | `crates/batchalign/AGENTS.md` |
+| Python bridge or dashboard | `crates/batchalign-pyo3/AGENTS.md`, `frontend/AGENTS.md` |
 
 This entry point resolves workflow conflicts in the references. Historical
 examples are not current dependency versions or live runtime evidence. Generic

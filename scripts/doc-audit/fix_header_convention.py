@@ -6,7 +6,7 @@
    a `**Status:**` line.
 
 Both fixes target the documentation convention used by the canonical
-Bucket A pages and described in the workspace CLAUDE.md.
+Bucket A pages and described in the workspace AGENTS.md.
 
 Idempotent: re-running the script on a fixed tree is a no-op.
 

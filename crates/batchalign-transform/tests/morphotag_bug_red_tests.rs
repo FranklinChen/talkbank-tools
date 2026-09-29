@@ -249,7 +249,7 @@ fn bug_009_level_pitch_separator_in_long_utterance_with_bullet_must_not_leak() -
 // Rather than write a hollow assertion that can't fail today, the
 // test below is `#[ignore]`'d with an explanatory message. The
 // ignore-with-message pattern is the project's standard for
-// "not_implemented spec" gates (see `talkbank-tools/CLAUDE.md` §
+// "not_implemented spec" gates (see `talkbank-tools/AGENTS.md` §
 // "Known Testing Gaps").
 // =====================================================================
 

@@ -7,10 +7,10 @@ edition = "2021"
 license = "BSD-3-Clause"
 
 [build-dependencies]
-tauri-build = { version = "2.6", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2.11", features = [] }
+tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }

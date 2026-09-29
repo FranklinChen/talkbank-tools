@@ -7,7 +7,7 @@ top-level `test-fixtures/README.md` for the directory layout and the
 
 No fixtures yet. Add the first one when a user reports a coref
 failure that should be tracked permanently. Use the official trim tool
-(see the "CRITICAL RULES" at the top of `CLAUDE.md`); never hand-roll
+(see the "CRITICAL RULES" at the top of `AGENTS.md`); never hand-roll
 a clip.
 
 Coref fixtures need `input.cha` with multi-utterance discourse and an

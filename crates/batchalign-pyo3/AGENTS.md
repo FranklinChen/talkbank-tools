@@ -1,7 +1,7 @@
 # batchalign-core: Rust Worker Runtime
 
 **Status:** Current
-**Last modified:** 2026-08-21 11:04 EDT
+**Last modified:** 2026-09-22 17:57 EDT
 
 ## Overview
 
@@ -126,7 +126,7 @@ cd /path/to/talkbank-tools && uv run maturin develop
 
 ## Rust Coding Standards
 
-See root `CLAUDE.md` for workspace-universal Rust standards (edition, error
+See root `AGENTS.md` for workspace-universal Rust standards (edition, error
 handling, logging, file size limits, git conventions). This crate follows all
 of those. Crate-specific additions below.
 

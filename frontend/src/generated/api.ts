@@ -329,12 +329,12 @@ export interface components {
          *     would break all but the TUI; the route handler does enrichment instead.
          */
         CancellationRequest: {
-            correlation_id?: null | components["schemas"]["CorrelationId"];
-            host?: null | components["schemas"]["CallerHost"];
-            in_flight_filename?: null | components["schemas"]["DisplayPath"];
-            pid?: null | components["schemas"]["CallerPid"];
-            reason?: null | components["schemas"]["CancelReason"];
-            source?: null | components["schemas"]["CancelSource"];
+            correlation_id?: components["schemas"]["CorrelationId"] | null;
+            host?: components["schemas"]["CallerHost"] | null;
+            in_flight_filename?: components["schemas"]["DisplayPath"] | null;
+            pid?: components["schemas"]["CallerPid"] | null;
+            reason?: components["schemas"]["CancelReason"] | null;
+            source?: components["schemas"]["CancelSource"] | null;
         };
         /** @description The outcome of admitting one worker key's capability report. */
         CapabilityAdmissionOutcome: {
@@ -454,7 +454,7 @@ export interface components {
             execution_host: string;
             /** @description How the job is being executed. */
             mode: components["schemas"]["ExecutionMode"];
-            remote_job_id?: null | components["schemas"]["JobId"];
+            remote_job_id?: components["schemas"]["JobId"] | null;
             /** @description Current lifecycle stage of the execution plan. */
             stage: components["schemas"]["ExecutionStage"];
         };
@@ -588,7 +588,7 @@ export interface components {
             bug_report_id?: string | null;
             /** @description Human-readable error message.  Present only when `status` is `Error`. */
             error?: string | null;
-            error_category?: null | components["schemas"]["FailureCategory"];
+            error_category?: components["schemas"]["FailureCategory"] | null;
             /**
              * @description CHAT validation error codes (e.g. `["E362", "E704"]`) when the failure
              *     was a validation rejection.  Empty or absent for non-validation errors.
@@ -606,8 +606,8 @@ export interface components {
              *     Backslashes are normalized to forward slashes on construction.
              */
             filename: components["schemas"]["DisplayPath"];
-            finished_at?: null | components["schemas"]["UnixTimestamp"];
-            next_eligible_at?: null | components["schemas"]["UnixTimestamp"];
+            finished_at?: components["schemas"]["UnixTimestamp"] | null;
+            next_eligible_at?: components["schemas"]["UnixTimestamp"] | null;
             /**
              * Format: int64
              * @description Number of sub-steps completed so far (e.g. utterances processed).
@@ -622,7 +622,7 @@ export interface components {
              *     render friendly text without hard-coding label mappings in every UI.
              */
             progress_label?: string | null;
-            progress_stage?: null | components["schemas"]["FileProgressStage"];
+            progress_stage?: components["schemas"]["FileProgressStage"] | null;
             /**
              * Format: int64
              * @description Total number of sub-steps expected for this file.
@@ -635,7 +635,7 @@ export interface components {
              *     job database.
              */
             stamp?: components["schemas"]["FileStampOutcome"];
-            started_at?: null | components["schemas"]["UnixTimestamp"];
+            started_at?: components["schemas"]["UnixTimestamp"] | null;
             /** @description Current lifecycle state of this file. */
             status: components["schemas"]["FileStatusKind"];
         };
@@ -886,7 +886,7 @@ export interface components {
          *     live-updating tables.
          */
         JobInfo: {
-            active_lease?: null | components["schemas"]["LeaseRecord"];
+            active_lease?: components["schemas"]["LeaseRecord"] | null;
             /** @description Batchalign command that was submitted (e.g. "morphotag", "align"). */
             command: components["schemas"]["ReleasedCommand"];
             /** @description ISO 8601 timestamp of when the job reached a terminal state. */
@@ -897,19 +897,19 @@ export interface components {
              *     Invariant: `0 <= completed_files <= total_files`.
              */
             completed_files: number;
-            control_plane?: null | components["schemas"]["JobControlPlaneInfo"];
+            control_plane?: components["schemas"]["JobControlPlaneInfo"] | null;
             /**
              * @description Filename currently being processed.  `None` when the job is queued
              *     or has reached a terminal state.
              */
             current_file?: string | null;
-            duration_s?: null | components["schemas"]["DurationSeconds"];
+            duration_s?: components["schemas"]["DurationSeconds"] | null;
             /**
              * @description Job-level error message (e.g. worker pool exhaustion, memory gate
              *     timeout).  Distinct from per-file errors in `file_statuses`.
              */
             error?: string | null;
-            execution_plan?: null | components["schemas"]["ExecutionPlan"];
+            execution_plan?: components["schemas"]["ExecutionPlan"] | null;
             /** @description Per-file processing status, one entry per submitted file. */
             file_statuses?: components["schemas"]["FileStatusEntry"][];
             /** @description Server-assigned UUID (v4) for this job. */
@@ -919,7 +919,7 @@ export interface components {
              *     code-switched pair such as `"eng,spa"`.
              */
             lang?: components["schemas"]["LanguageSpec"];
-            last_cancelled_at?: null | components["schemas"]["UnixTimestamp"];
+            last_cancelled_at?: components["schemas"]["UnixTimestamp"] | null;
             /** @description Caller-reported host of the most recent cancel attempt. */
             last_cancelled_host?: string | null;
             /** @description Caller-reported reason of the most recent cancel attempt. */
@@ -929,7 +929,7 @@ export interface components {
              *     (`tui`, `api`, `signal`, ...). See `CancelSource`.
              */
             last_cancelled_source?: string | null;
-            next_eligible_at?: null | components["schemas"]["UnixTimestamp"];
+            next_eligible_at?: components["schemas"]["UnixTimestamp"] | null;
             /**
              * Format: int64
              * @description Number of concurrent Python workers used for this job.  Determined
@@ -979,7 +979,7 @@ export interface components {
          *     suitable for listing many jobs at once.
          */
         JobListItem: {
-            active_lease?: null | components["schemas"]["LeaseRecord"];
+            active_lease?: components["schemas"]["LeaseRecord"] | null;
             /** @description Batchalign command (e.g. "morphotag", "align"). */
             command: components["schemas"]["ReleasedCommand"];
             /** @description ISO 8601 timestamp of when the job reached a terminal state. */
@@ -989,8 +989,8 @@ export interface components {
              * @description Number of files that finished successfully (`Done`).
              */
             completed_files: number;
-            control_plane?: null | components["schemas"]["JobControlPlaneInfo"];
-            duration_s?: null | components["schemas"]["DurationSeconds"];
+            control_plane?: components["schemas"]["JobControlPlaneInfo"] | null;
+            duration_s?: components["schemas"]["DurationSeconds"] | null;
             /**
              * @description Job-level error message when the job failed (the aggregated per-file
              *     failure reason). Surfaces the cause in the `/jobs` list and the live
@@ -1010,7 +1010,7 @@ export interface components {
              *     code-switched pair such as `"eng,spa"`.
              */
             lang?: components["schemas"]["LanguageSpec"];
-            next_eligible_at?: null | components["schemas"]["UnixTimestamp"];
+            next_eligible_at?: components["schemas"]["UnixTimestamp"] | null;
             /**
              * Format: int64
              * @description Number of concurrent Python workers used for this job.

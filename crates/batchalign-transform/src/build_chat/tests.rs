@@ -50,6 +50,36 @@ fn test_build_chat_minimal() {
     assert!(output.contains("*PAR:\thello world ."));
 }
 
+/// JSON can deserialize token text without invoking ChatWordText's constructor.
+/// Assembly must refuse it rather than emit an unchecked or recovered word.
+#[test]
+fn json_word_assembly_preserves_parser_refusal() {
+    for token in ["cookies@", "be(cause", "hello world"] {
+        for kind in ["Regular", "Retrace"] {
+            let wire = serde_json::json!({
+                "langs": ["eng"],
+                "participants": [{"id": "PAR"}],
+                "write_wor": true,
+                "utterances": [{"speaker": "PAR", "words": [
+                    {"text": "hello", "start_ms": 0, "end_ms": 100},
+                    {"text": token, "kind": kind, "start_ms": 100, "end_ms": 200},
+                    {"text": "."}
+                ]}]
+            });
+            let desc: TranscriptDescription = serde_json::from_value(wire.clone())
+                .expect("wire decoding is not CHAT admission");
+            match build_chat(&desc).expect_err("malformed token must refuse the whole build") {
+                BuildChatError::Word { text, diagnostics } => {
+                    assert_eq!(text, token);
+                    assert!(!diagnostics.is_empty(), "retain parser evidence for {token:?}");
+                }
+                other => panic!("unexpected failure for {token:?}/{kind}: {other}"),
+            }
+            assert!(build_chat_from_json(&wire.to_string()).is_err());
+        }
+    }
+}
+
 #[test]
 fn test_build_chat_with_timing() {
     let parser = TreeSitterParser::new().unwrap();

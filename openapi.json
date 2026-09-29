@@ -33,66 +33,66 @@
           "correlation_id": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/CorrelationId",
                 "description": "Caller-side correlation ID for cross-system tracing."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "host": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/CallerHost",
                 "description": "Caller's hostname or IP. Server fills with peer-addr if unspecified."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "in_flight_filename": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DisplayPath",
                 "description": "Filename being processed at cancel time (TUI snapshots from\n`runtime.state` so we can show \"cancel pending; finishing X\" in\nthe cancel-feedback render)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "pid": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/CallerPid",
                 "description": "Caller process ID, if known."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "reason": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/CancelReason",
                 "description": "Free-form reason (\"user-pressed-cancel\", \"ctrl-c-shutdown\", etc.)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "source": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/CancelSource",
                 "description": "Where the cancel originated. Defaults to `Api` if unspecified."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -275,11 +275,11 @@
           "remote_job_id": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/JobId",
                 "description": "For staged-remote jobs: the job ID on the remote server.\n`None` until the remote job is submitted."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -554,11 +554,11 @@
           "error_category": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FailureCategory",
                 "description": "Broad classification of the failure. Helps the dashboard and retry\nlogic group failures without parsing free-form messages."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -587,22 +587,22 @@
           "finished_at": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/UnixTimestamp",
                 "description": "Unix timestamp (seconds since epoch) when processing finished\n(successfully or with error)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "next_eligible_at": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/UnixTimestamp",
                 "description": "When the file is deferred for a retry, the earliest unix timestamp at\nwhich another attempt should start. `None` when no retry is pending."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -624,11 +624,11 @@
           "progress_stage": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FileProgressStage",
                 "description": "Machine-readable code for the current in-flight processing stage.\n\nThis is the stable field clients should use for branching or\nconditional UI. [`Self::progress_label`] is derived display text."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -647,11 +647,11 @@
           "started_at": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/UnixTimestamp",
                 "description": "Unix timestamp (seconds since epoch) when the worker began processing\nthis file."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -917,11 +917,11 @@
           "active_lease": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/LeaseRecord",
                 "description": "Active lease information when this job is currently claimed by a node."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -944,11 +944,11 @@
           "control_plane": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/JobControlPlaneInfo",
                 "description": "Per-language-group progress for batched text commands (morphotag,\nServer control-plane metadata for this job when returned by a server."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -962,11 +962,11 @@
           "duration_s": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DurationSeconds",
                 "description": "Wall-clock duration from first file dispatched to last file finished,\nin seconds.  `None` while the job is still active."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -980,11 +980,11 @@
           "execution_plan": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ExecutionPlan",
                 "description": "Execution plan describing where and how this job is processed.\nPresent for staged-remote jobs; `None` for local execution."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1006,11 +1006,11 @@
           "last_cancelled_at": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/UnixTimestamp",
                 "description": "Wall-clock timestamp of the most recent cancel attempt against\nthis job. `None` until at least one cancel arrives. Denormalized\nfrom the `cancellations` audit table for fast list-view rendering\nwithout a JOIN. See `CancellationRecord` for the full audit\nhistory via `GET /jobs/{id}/cancellations`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1038,11 +1038,11 @@
           "next_eligible_at": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/UnixTimestamp",
                 "description": "When the job is deferred before execution, the earliest unix timestamp\nat which it should be retried. `None` when the job is immediately\neligible to run."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1108,11 +1108,11 @@
           "active_lease": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/LeaseRecord",
                 "description": "Active lease information when this job is currently claimed by a node."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1135,22 +1135,22 @@
           "control_plane": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/JobControlPlaneInfo",
                 "description": "Server control-plane metadata for this job when returned by a server."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "duration_s": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DurationSeconds",
                 "description": "Wall-clock duration in seconds.  `None` while the job is active."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1177,11 +1177,11 @@
           "next_eligible_at": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/UnixTimestamp",
                 "description": "When the job is deferred before execution, the earliest unix timestamp\nat which it should be retried. `None` when immediately eligible."
+              },
+              {
+                "type": "null"
               }
             ]
           },

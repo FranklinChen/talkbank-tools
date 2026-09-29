@@ -1,7 +1,7 @@
 # batchalign: HTTP Server, Job Store, and NLP Orchestration
 
 **Status:** Current
-**Last modified:** 2026-09-15 18:27 EDT
+**Last modified:** 2026-09-22 17:57 EDT
 
 ## Overview
 
@@ -13,7 +13,7 @@ Python workers provide stateless NLP inference only).
 
 Build identity is a `git describe` string assembled in `build.rs`;
 staleness is judged by build identity, never semver. Details: the
-repo-root `CLAUDE.md` and the book's deployment pages.
+repo-root `AGENTS.md` and the book's deployment pages.
 
 ## Module Map
 

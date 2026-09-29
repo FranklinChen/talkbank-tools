@@ -118,7 +118,7 @@ pub struct MinUtrCoveragePercent(pub u8);
 impl<'de> Deserialize<'de> for MinUtrCoveragePercent {
     /// Enforces the `0..=100` invariant at manifest-load time rather than
     /// letting a nonsensical `>100` threshold silently make the assertion
-    /// impossible to satisfy. Matches CLAUDE.md #6a: fallible construction
+    /// impossible to satisfy. Matches AGENTS.md #6a: fallible construction
     /// should not live behind an infallible `From`/`#[serde(transparent)]`.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = u8::deserialize(d)?;

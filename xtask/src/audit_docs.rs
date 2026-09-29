@@ -18,7 +18,7 @@
 //!     contributing, developer chapters). Sample-vetted; not
 //!     release-blocking.
 //!   - **C**: won't-vet: internal docs (postmortems, handoffs,
-//!     contributor CLAUDE.md, etc.). One-time Status-header sweep
+//!     contributor AGENTS.md, etc.). One-time Status-header sweep
 //!     ensures readers know the doc is historical or reference;
 //!     no claim verification.
 //!
@@ -486,7 +486,7 @@ fn extract_field(line: &str, name: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn classify_audience(rel: &str) -> String {
-    if rel.ends_with("CLAUDE.md") {
+    if rel.ends_with("AGENTS.md") {
         return "dev".to_string();
     }
     if rel.starts_with("book/src/")
@@ -538,7 +538,7 @@ fn classify_priority(rel: &str, content: &str) -> i64 {
     if rel == "README.md" || rel == "CONTRIBUTING.md" || rel == "SECURITY.md" {
         return 1;
     }
-    if rel.ends_with("CLAUDE.md") {
+    if rel.ends_with("AGENTS.md") {
         return 2;
     }
     if rel.starts_with("book/src/")
@@ -596,7 +596,7 @@ fn classify_bucket(rel: &str) -> Bucket {
 
     // Bucket C: internal-only docs, contributor guidance, postmortems,
     // handoffs, investigations, decision records.
-    if rel.ends_with("CLAUDE.md")
+    if rel.ends_with("AGENTS.md")
         || rel.starts_with("docs/postmortems/")
         || rel.starts_with("docs/handoffs/")
         || rel.starts_with("docs/investigations/")
