@@ -220,7 +220,7 @@ impl LiveServerSession {
                 lang: WorkerLanguage::try_from(lang).expect("test warmup lang must be valid"),
             })
             .collect();
-        let snapshot = tokio::task::spawn_blocking(move || {
+        let snapshot = batchalign::blocking::spawn_in_span(move || {
             request_session_snapshot(&bridge_for_request, warmups)
         })
         .await
@@ -290,7 +290,7 @@ impl LiveServerSession {
     /// Shut down the isolated session deterministically.
     pub async fn close(mut self) {
         if let Some((bridge, slot)) = self.begin_release() {
-            tokio::task::spawn_blocking(move || {
+            batchalign::blocking::spawn_in_span(move || {
                 let _ = release_active_session(&bridge);
                 drop(slot);
             })
@@ -342,7 +342,7 @@ impl LiveDirectSession {
                 lang: WorkerLanguage::try_from(lang).expect("test warmup lang must be valid"),
             })
             .collect();
-        let snapshot = tokio::task::spawn_blocking(move || {
+        let snapshot = batchalign::blocking::spawn_in_span(move || {
             request_direct_snapshot(&bridge_for_request, warmups)
         })
         .await

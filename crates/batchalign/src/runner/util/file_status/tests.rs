@@ -52,6 +52,67 @@ async fn dropping_file_supervision_retires_the_child_task() {
         .expect("child retired");
 }
 
+/// An event emitted inside a file task names its file. `tokio::spawn` starts a
+/// future with no span, and the code that emits pipeline decisions does not
+/// know its file, so without the span the spawn helper enters, a batch's
+/// "needs review" lines could not be traced to a file. Checked on the text the
+/// server log's formatter actually writes.
+#[tokio::test]
+async fn events_inside_a_file_task_name_the_file() {
+    use std::sync::Mutex;
+
+    /// Every line the formatter writes, kept for the assertion.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    // A current-thread test runtime runs the spawned task on this thread, so
+    // the thread's default subscriber sees its events.
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let task = spawn_supervised_file_task(DisplayPath::from("lecture.cha"), "test", async {
+        tracing::warn!("a decision that needs review");
+        FileTaskOutcome::TerminalStateRecorded
+    });
+    let abnormal = drain_supervised_file_tasks(
+        &RecordingSink::default(),
+        &JobId::from("job-span"),
+        &CancellationToken::new(),
+        vec![task],
+    )
+    .await;
+    assert_eq!(abnormal, 0, "the task recorded its own terminal state");
+
+    let text = String::from_utf8(captured.0.lock().expect("capture lock").clone())
+        .expect("the log is UTF-8");
+    let line = text
+        .lines()
+        .find(|line| line.contains("a decision that needs review"))
+        .expect("the event was logged");
+    assert!(
+        line.contains("file=lecture.cha"),
+        "the event does not name its file: {line}"
+    );
+}
+
 fn test_config() -> crate::config::ServerConfig {
     crate::config::ServerConfig {
         max_concurrent_jobs: Some(2),

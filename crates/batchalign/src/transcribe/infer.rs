@@ -114,7 +114,7 @@ async fn infer_whisper_rs_asr(
 
     let audio_path = audio_path.to_path_buf();
     let lang_for_call = requested.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = crate::blocking::spawn_in_span(move || {
         crate::whisper_native::transcribe(&audio_path, lang_for_call, &cfg)
     })
     .await

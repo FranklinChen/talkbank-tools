@@ -170,7 +170,7 @@ impl PreparedArtifactStoreV2 {
         let id = id.clone();
         let source = source.to_path_buf();
 
-        tokio::task::spawn_blocking(move || {
+        crate::blocking::spawn_in_span(move || {
             fs::create_dir_all(root.join(AUDIO_DIR_NAME))?;
             let output_path = root.join(AUDIO_DIR_NAME).join(format!("{id}.pcm"));
 
@@ -232,7 +232,7 @@ impl PreparedArtifactStoreV2 {
         let id = id.clone();
         let source = source.to_path_buf();
 
-        tokio::task::spawn_blocking(move || {
+        crate::blocking::spawn_in_span(move || {
             fs::create_dir_all(root.join(AUDIO_DIR_NAME))?;
             let output_path = root.join(AUDIO_DIR_NAME).join(format!("{id}.pcm"));
 
@@ -273,7 +273,7 @@ impl PreparedArtifactStoreV2 {
         let root = self.root.clone();
         let id = id.clone();
 
-        tokio::task::spawn_blocking(move || {
+        crate::blocking::spawn_in_span(move || {
             fs::create_dir_all(root.join(AUDIO_DIR_NAME))?;
             let mut source = tempfile::Builder::new()
                 .prefix("verified-source-")

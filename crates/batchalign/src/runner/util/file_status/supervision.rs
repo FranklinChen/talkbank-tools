@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument;
 
 use crate::api::{DisplayPath, JobId};
 use crate::runner::job_scope::{FileTaskScope, SpawnScope};
@@ -69,23 +70,30 @@ where
     F: Future<Output = FileTaskOutcome> + Send + 'static,
 {
     let scope = FileTaskScope::current();
-    let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-        match scope {
-            SpawnScope::Job(scope) => scope.supervise(future).await,
-            // Only tests of this module spawn outside a runner. In
-            // production it would mean a dispatch path that bypassed
-            // `run_hosted_job`: say so, because such a task can be neither
-            // cancelled nor found by a cancel's worker kill.
-            SpawnScope::Unscoped => {
-                tracing::warn!(
-                    role,
-                    "supervised file task spawned outside a job scope; \
+    // Every event the task emits carries its file and job (see
+    // `SpawnScope::file_span`); `tokio::spawn` would otherwise start it with
+    // no span at all.
+    let span = scope.file_span(&filename, role);
+    let handle = AbortOnDropHandle::new(tokio::spawn(
+        async move {
+            match scope {
+                SpawnScope::Job(scope) => scope.supervise(future).await,
+                // Only tests of this module spawn outside a runner. In
+                // production it would mean a dispatch path that bypassed
+                // `run_hosted_job`: say so, because such a task can be neither
+                // cancelled nor found by a cancel's worker kill.
+                SpawnScope::Unscoped => {
+                    tracing::warn!(
+                        role,
+                        "supervised file task spawned outside a job scope; \
                      job cancellation cannot stop it"
-                );
-                future.await
+                    );
+                    future.await
+                }
             }
         }
-    }));
+        .instrument(span),
+    ));
 
     SpawnedFileTask {
         role,

@@ -58,7 +58,7 @@ fn load_whisper_context(model_path: &Path) -> Result<Arc<WhisperContext>, Whispe
 /// `super::cache` for the cache policy and race-window behavior.
 ///
 /// **Async caveat**: this function is sync. Callers in async context
-/// must dispatch via `tokio::task::spawn_blocking` (or the existing
+/// must dispatch via `crate::blocking::spawn_in_span` (or the existing
 /// worker-pool `execute_v2` machinery, which already isolates
 /// blocking work); otherwise inference will stall the executor for
 /// minutes per call.

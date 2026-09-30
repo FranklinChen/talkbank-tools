@@ -209,7 +209,7 @@ pub async fn acquire_spawn_permit(config: &WorkerConfig) -> Result<SpawnPermit, 
     let lang = config.lang.clone();
     let engine_overrides = config.engine_overrides.clone();
     let timeout = Duration::from_secs(config.ready_timeout_s.max(1));
-    let host_lease = tokio::task::spawn_blocking(move || {
+    let host_lease = crate::blocking::spawn_in_span(move || {
         coordinator.acquire_worker_startup_lease(
             profile,
             startup_reservation,

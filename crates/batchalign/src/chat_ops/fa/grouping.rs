@@ -353,7 +353,7 @@ enum WindowRefusal {
     #[error(transparent)]
     OutsideRecording(#[from] WindowFault),
     #[error(
-        "audio window duration {duration} ms exceeds alignment budget {budget} ms; narrower evidence is required"
+        "audio window duration {duration} exceeds alignment budget {budget}; narrower evidence is required"
     )]
     Oversized { duration: Ms, budget: Ms },
 }

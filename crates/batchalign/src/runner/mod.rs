@@ -23,6 +23,7 @@ pub(crate) mod debug_dumper;
 mod dispatch;
 mod execution;
 mod job_scope;
+pub(crate) use job_scope::current_file_span;
 mod policy;
 mod routing;
 mod test_echo;

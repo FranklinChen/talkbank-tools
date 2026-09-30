@@ -151,6 +151,7 @@ pub use types::{api, config, options, params, runtime, scheduling, traces};
 
 // ── Engine modules (always available) ────────────────────────────────
 pub mod benchmark;
+pub mod blocking;
 pub mod cache;
 pub(crate) mod capability;
 pub mod chat_ops;

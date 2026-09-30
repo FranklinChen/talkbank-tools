@@ -401,7 +401,7 @@ pub enum WindowFault {
     /// ordering and before containment; this is the one place a window's
     /// non-emptiness is decided, so no consumer (grouping, partial UTR, the
     /// transcode) restates it.
-    #[error("audio window at {at} ms has no positive extent")]
+    #[error("audio window at {at} has no positive extent")]
     Empty {
         /// The position at which the window starts and ends.
         at: FileMs,

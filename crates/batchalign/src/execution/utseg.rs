@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use tracing::Instrument;
 use tracing::warn;
 
 use crate::planning;
@@ -100,27 +101,33 @@ pub(crate) async fn dispatch_utseg_job(
         let job_for_task = job.clone();
         let plan_for_task = Arc::clone(&plan);
         let merge_abbrev = should_merge_abbrev;
-        joinset.spawn(crate::worker::pool::job_tracker::inherit_job(async move {
-            let _permit = permit; // released on drop after the task completes
-            let single = vec![file_input];
-            let results = gateway_for_task
-                .utseg_batch(
-                    &single,
-                    route.language(),
-                    route.fallback().is_allowed(),
-                    crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
+        // This file's events (pipeline decisions above all) carry its file
+        // and job, as every supervised file task's do.
+        let file_span = crate::runner::current_file_span(&file_input.filename, "utseg");
+        joinset.spawn(crate::worker::pool::job_tracker::inherit_job(
+            async move {
+                let _permit = permit; // released on drop after the task completes
+                let single = vec![file_input];
+                let results = gateway_for_task
+                    .utseg_batch(
+                        &single,
+                        route.language(),
+                        route.fallback().is_allowed(),
+                        crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
+                    )
+                    .await;
+                write_text_results(
+                    &job_for_task,
+                    &host_for_task,
+                    &plan_for_task,
+                    results,
+                    merge_abbrev,
+                    "Utseg",
                 )
                 .await;
-            write_text_results(
-                &job_for_task,
-                &host_for_task,
-                &plan_for_task,
-                results,
-                merge_abbrev,
-                "Utseg",
-            )
-            .await;
-        }));
+            }
+            .instrument(file_span),
+        ));
     }
 
     while let Some(join_result) = joinset.join_next().await {

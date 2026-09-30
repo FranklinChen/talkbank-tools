@@ -8,7 +8,7 @@
 //! routes Whisper jobs here when `opts.backend == AsrBackend::RustWhisperRs`.
 //! That dispatch reads `BATCHALIGN_WHISPER_RS_MODEL` via
 //! [`WhisperNativeConfig::from_env`], resolves the language, and calls
-//! [`transcribe`] inside `tokio::task::spawn_blocking` so the executor is not
+//! [`transcribe`] inside `crate::blocking::spawn_in_span` (a blocking thread that keeps the caller's tracing span) so the executor is not
 //! stalled by whisper.cpp's sync inference loop.
 //!
 //! The `WhisperContext` is held process-wide in a single-slot

@@ -330,7 +330,7 @@ pub(super) async fn dispatch_single_server(
             });
 
             // TUI on blocking thread
-            let mut tui_handle = tokio::task::spawn_blocking(move || {
+            let mut tui_handle = crate::blocking::spawn_in_span(move || {
                 crate::cli::tui::run_tui_loop(tui_runtime, Some(cancel_tx))
             });
 

@@ -1,0 +1,8 @@
+# Workspace clippy configuration, read by the gate's `cargo clippy -D warnings`.
+
+disallowed-methods = [
+    # A blocking pool thread starts with no tracing span, so whatever it logs
+    # names no file or job. `batchalign::blocking::spawn_in_span` carries the
+    # caller's subscriber and span across; it holds the one allowed call.
+    { path = "tokio::task::spawn_blocking", reason = "use batchalign::blocking::spawn_in_span, which keeps the caller's tracing span (file and job)" },
+]

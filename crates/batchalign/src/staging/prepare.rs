@@ -99,7 +99,7 @@ async fn resolve_adjacent_media(chat_path: &Path) -> MediaLookup {
     let (dir, stem) = (dir.to_path_buf(), stem.to_owned());
     let listed = dir.clone();
     // The lookup lists a directory, so it runs on a blocking thread.
-    tokio::task::spawn_blocking(move || MediaExtensions::find_under(&dir, Path::new(""), &stem))
+    crate::blocking::spawn_in_span(move || MediaExtensions::find_under(&dir, Path::new(""), &stem))
         .await
         .unwrap_or_else(|error| {
             MediaLookup::Missed(Missed::Unreadable {

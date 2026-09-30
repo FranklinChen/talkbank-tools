@@ -571,7 +571,7 @@ async fn cli_morphotag_real_server() {
     let in_str = in_dir.to_str().unwrap().to_string();
     let out_str = out_dir.to_str().unwrap().to_string();
     let url = server.base_url().to_string();
-    let cli_result = tokio::task::spawn_blocking(move || {
+    let cli_result = batchalign::blocking::spawn_in_span(move || {
         let harness = CliHarness::new();
         let mut command = harness.cmd();
         command
@@ -674,7 +674,7 @@ async fn cli_align_real_server_live_fa_succeeds() {
     let in_str = in_dir.to_str().unwrap().to_string();
     let out_str = out_dir.to_str().unwrap().to_string();
     let url = server.base_url().to_string();
-    let cli_result = tokio::task::spawn_blocking(move || {
+    let cli_result = batchalign::blocking::spawn_in_span(move || {
         let harness = CliHarness::new();
         let mut command = harness.cmd();
         command
@@ -1124,7 +1124,7 @@ async fn cli_compare_explicit_loopback_uses_shared_paths_mode() {
     let in_str = in_dir.to_str().unwrap().to_string();
     let out_str = out_dir.to_str().unwrap().to_string();
     let url = server_url.clone();
-    let cli_result = tokio::task::spawn_blocking(move || {
+    let cli_result = batchalign::blocking::spawn_in_span(move || {
         let mut command = cmd();
         command.env("HOME", &home);
         command

@@ -34,7 +34,7 @@ async fn infer_revai_evidence(
 ) -> Result<RevAsrInferenceOutcome, ServerError> {
     let api_key =
         load_revai_api_key().map_err(|error| ServerError::Validation(error.to_string()))?;
-    tokio::task::spawn_blocking(move || {
+    crate::blocking::spawn_in_span(move || {
         let media = run
             .provider_media
             .verify()

@@ -174,7 +174,7 @@ pub async fn ensure_wav(
     let source_path = source_path.to_path_buf();
     let cache_dir = cache_dir.map(Path::to_path_buf);
 
-    tokio::task::spawn_blocking(move || -> Result<PathBuf, EnsureWavError> {
+    crate::blocking::spawn_in_span(move || -> Result<PathBuf, EnsureWavError> {
         let effective_cache_dir = match cache_dir {
             Some(p) => p,
             None => default_cache_dir(),
@@ -234,7 +234,7 @@ pub async fn extract_audio_segment(
     // others, none of them where the pair originates.
     let (start_ms, end_ms) = (window.audio_start().get(), window.end().get());
 
-    tokio::task::spawn_blocking(move || -> Result<PathBuf, EnsureWavError> {
+    crate::blocking::spawn_in_span(move || -> Result<PathBuf, EnsureWavError> {
         let cache_dir = default_cache_dir();
         std::fs::create_dir_all(&cache_dir)?;
 

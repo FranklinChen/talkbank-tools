@@ -15,6 +15,7 @@
 //! files currently in flight rather than the entire batch.
 
 use std::sync::Arc;
+use tracing::Instrument;
 
 use crate::api::NumWorkers;
 use crate::planning;
@@ -95,103 +96,111 @@ pub(crate) async fn dispatch_morphotag_job(
             .cloned();
         let progress_port = reporter.port(file_input.filename.clone());
 
-        joinset.spawn(crate::worker::pool::job_tracker::inherit_job(async move {
-            let _permit = permit;
+        // This file's events (pipeline decisions above all) carry its file
+        // and job, as every supervised file task's do.
+        let file_span = crate::runner::current_file_span(&file_input.filename, "morphotag");
+        joinset.spawn(crate::worker::pool::job_tracker::inherit_job(
+            async move {
+                let _permit = permit;
 
-            // Open this file's attempt only AFTER its semaphore permit is
-            // held: i.e. exactly when a worker slot is actually busy with
-            // this file. The previous version of this loop pre-marked every
-            // pending file as `processing` upfront, which made `file_statuses`
-            // claim 38 000+ files were running on 8 workers and gave every
-            // file the same `started_at` (= job-submit time), useless for
-            // per-file timing or ETA. FA and media-analysis-v2 follow this
-            // same in-task pattern: see `runner/dispatch/fa_pipeline.rs`
-            // around the `FileRunTracker::new` + `begin_first_attempt`
-            // sequence inside `process_one_align_file`, and
-            // `runner/dispatch/media_analysis_v2.rs:116-125` for the
-            // media-analysis equivalent.
-            let lifecycle = FileRunTracker::new(
-                sink_for_task.as_ref(),
-                &job_id_for_task,
-                file_input.filename.as_ref(),
-            );
-            // Parsing is the file's first real work, so it is the stage the
-            // attempt opens in. `FileProgressStage::Parsing` existed in the API
-            // enum with no producer anywhere until 2026-07-30; reporting it here
-            // makes the declared stage true rather than deleting it, since a
-            // large file's parse is not instant and it is genuinely a phase
-            // distinct from the inference that follows.
-            lifecycle
-                .begin_first_attempt(WorkUnitKind::BatchInfer, unix_now(), FileStage::Parsing)
-                .await;
+                // Open this file's attempt only AFTER its semaphore permit is
+                // held: i.e. exactly when a worker slot is actually busy with
+                // this file. The previous version of this loop pre-marked every
+                // pending file as `processing` upfront, which made `file_statuses`
+                // claim 38 000+ files were running on 8 workers and gave every
+                // file the same `started_at` (= job-submit time), useless for
+                // per-file timing or ETA. FA and media-analysis-v2 follow this
+                // same in-task pattern: see `runner/dispatch/fa_pipeline.rs`
+                // around the `FileRunTracker::new` + `begin_first_attempt`
+                // sequence inside `process_one_align_file`, and
+                // `runner/dispatch/media_analysis_v2.rs:116-125` for the
+                // media-analysis equivalent.
+                let lifecycle = FileRunTracker::new(
+                    sink_for_task.as_ref(),
+                    &job_id_for_task,
+                    file_input.filename.as_ref(),
+                );
+                // Parsing is the file's first real work, so it is the stage the
+                // attempt opens in. `FileProgressStage::Parsing` existed in the API
+                // enum with no producer anywhere until 2026-07-30; reporting it here
+                // makes the declared stage true rather than deleting it, since a
+                // large file's parse is not instant and it is genuinely a phase
+                // distinct from the inference that follows.
+                lifecycle
+                    .begin_first_attempt(WorkUnitKind::BatchInfer, unix_now(), FileStage::Parsing)
+                    .await;
 
-            // Resolve language per-file from the CHAT file's own
-            // `@Languages:` header. No job-level lang, no eng fallback
-            // a missing or malformed header surfaces as a typed file-level
-            // error in the job's status.
-            let parser = crate::chat_parser();
-            let (parsed_chat, _parse_errors) =
-                batchalign_transform::parse::parse_lenient(&parser, file_input.chat_text.as_ref());
-            let file_lang = match crate::pipeline::morphosyntax::resolve_per_file_lang(&parsed_chat)
-            {
-                Ok(code) => code,
-                Err(err) => {
-                    let file_result = TextBatchFileResult::err(
-                        file_input.filename.clone(),
-                        crate::text_batch::TextWorkflowFileError::from_server_error(&err),
-                    );
-                    write_morphotag_results(
-                        &job_for_task,
-                        &host_for_task,
-                        &plan_for_task,
-                        vec![file_result],
-                        options_for_task.should_merge_abbrev,
+                // Resolve language per-file from the CHAT file's own
+                // `@Languages:` header. No job-level lang, no eng fallback
+                // a missing or malformed header surfaces as a typed file-level
+                // error in the job's status.
+                let parser = crate::chat_parser();
+                let (parsed_chat, _parse_errors) = batchalign_transform::parse::parse_lenient(
+                    &parser,
+                    file_input.chat_text.as_ref(),
+                );
+                let file_lang =
+                    match crate::pipeline::morphosyntax::resolve_per_file_lang(&parsed_chat) {
+                        Ok(code) => code,
+                        Err(err) => {
+                            let file_result = TextBatchFileResult::err(
+                                file_input.filename.clone(),
+                                crate::text_batch::TextWorkflowFileError::from_server_error(&err),
+                            );
+                            write_morphotag_results(
+                                &job_for_task,
+                                &host_for_task,
+                                &plan_for_task,
+                                vec![file_result],
+                                options_for_task.should_merge_abbrev,
+                            )
+                            .await;
+                            lifecycle
+                                .fail(
+                                    &err.to_string(),
+                                    crate::scheduling::FailureCategory::Validation,
+                                    unix_now(),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                // Parse done, language resolved: the file is now in inference, which
+                // is the stage its utterance counts are published under.
+                lifecycle.stage(FileStage::Analyzing).await;
+
+                let result = gateway_for_task
+                    .morphotag_single(
+                        &file_input.chat_text,
+                        before_text.as_deref(),
+                        &file_lang,
+                        options_for_task.clone(),
+                        progress_port.as_ref(),
+                        crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
                     )
                     .await;
-                    lifecycle
-                        .fail(
-                            &err.to_string(),
-                            crate::scheduling::FailureCategory::Validation,
-                            unix_now(),
-                        )
-                        .await;
-                    return;
-                }
-            };
-
-            // Parse done, language resolved: the file is now in inference, which
-            // is the stage its utterance counts are published under.
-            lifecycle.stage(FileStage::Analyzing).await;
-
-            let result = gateway_for_task
-                .morphotag_single(
-                    &file_input.chat_text,
-                    before_text.as_deref(),
-                    &file_lang,
-                    options_for_task.clone(),
-                    progress_port.as_ref(),
-                    crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
+                let file_result = match result {
+                    Ok(output) => TextBatchFileResult::ok(file_input.filename.clone(), output),
+                    // `from_server_error`, not `to_string()`: a post-validation
+                    // refusal is a validity failure, and stringifying it reported
+                    // bad CHAT to the control plane as a provider failure.
+                    Err(error) => TextBatchFileResult::err(
+                        file_input.filename.clone(),
+                        crate::text_batch::TextWorkflowFileError::from_server_error(&error),
+                    ),
+                };
+                write_morphotag_results(
+                    &job_for_task,
+                    &host_for_task,
+                    &plan_for_task,
+                    vec![file_result],
+                    options_for_task.should_merge_abbrev,
                 )
                 .await;
-            let file_result = match result {
-                Ok(output) => TextBatchFileResult::ok(file_input.filename.clone(), output),
-                // `from_server_error`, not `to_string()`: a post-validation
-                // refusal is a validity failure, and stringifying it reported
-                // bad CHAT to the control plane as a provider failure.
-                Err(error) => TextBatchFileResult::err(
-                    file_input.filename.clone(),
-                    crate::text_batch::TextWorkflowFileError::from_server_error(&error),
-                ),
-            };
-            write_morphotag_results(
-                &job_for_task,
-                &host_for_task,
-                &plan_for_task,
-                vec![file_result],
-                options_for_task.should_merge_abbrev,
-            )
-            .await;
-        }));
+            }
+            .instrument(file_span),
+        ));
     }
 
     while let Some(join_result) = joinset.join_next().await {

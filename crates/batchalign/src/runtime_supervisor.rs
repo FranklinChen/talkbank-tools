@@ -375,7 +375,7 @@ mod tests {
         let supervisor = RuntimeSupervisor::new();
         let sup = supervisor.clone();
 
-        let outcome = tokio::task::spawn_blocking(move || {
+        let outcome = crate::blocking::spawn_in_span(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

@@ -1,7 +1,7 @@
 # Tracing and Debugging
 
 **Status:** Current
-**Last updated:** 2026-09-15 07:21 EDT
+**Last updated:** 2026-09-30 18:56 EDT
 
 This document describes the tracing and debugging strategy across the
 batchalign3 stack: Rust (batchalign-core PyO3 bridge), Rust (CLI and server
@@ -45,6 +45,29 @@ For long-running production servers, periodically truncate:
 ```bash
 : > ~/.batchalign3/server.log  # truncate without restarting
 ```
+
+## Every file's log lines name the file
+
+A batch interleaves hundreds of files across workers, so a log line is only
+actionable if it says which file it came from. The code that emits most of
+them (pipeline decisions from `DecisionRecord::trace`, engine warnings) does
+not know its file, and should not. The file is attached by a tracing span
+instead:
+
+- **Per-file work runs in a `file` span** (`file=`, `role=`, and `job_id=`
+  inside a runner), built by `runner::current_file_span` from the job scope.
+  The supervised file tasks (`spawn_supervised_file_task`: align, transcribe,
+  benchmark, media analysis, speaker identity) and the morphotag and utseg
+  fan-outs enter it. A server log line then reads
+  `file{job_id=... file=lecture.cha role=...}: WARN pipeline decision ...`.
+- **Blocking work keeps the span.** A `tokio::task::spawn_blocking` thread
+  starts with no span, so anything logged there names no file.
+  `batchalign::blocking::spawn_in_span` carries the caller's subscriber and
+  span across, and the workspace `clippy.toml` disallows `spawn_blocking`
+  directly, so the gate refuses a new call site that would drop the context.
+
+When adding a new way to fan files out, enter `current_file_span` around each
+file's future; `tokio::spawn` does not inherit spans.
 
 ## Verbosity Levels
 

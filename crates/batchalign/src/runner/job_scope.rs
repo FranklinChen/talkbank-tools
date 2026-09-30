@@ -16,7 +16,7 @@ use std::future::Future;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::api::JobId;
+use crate::api::{DisplayPath, JobId};
 use crate::worker::pool::job_tracker::CURRENT_JOB_ID;
 
 use super::util::FileTaskOutcome;
@@ -34,6 +34,33 @@ pub(crate) enum SpawnScope {
     /// Outside any runner. Only tests of the supervision layer spawn here; in
     /// production it would be a dispatch path that bypassed `run_hosted_job`.
     Unscoped,
+}
+
+impl SpawnScope {
+    /// The tracing span a file task runs in, naming its file and, inside a
+    /// runner, its job.
+    ///
+    /// `tokio::spawn` starts a future with no span, and the events a file's
+    /// work emits (pipeline decisions, engine warnings) come from code that
+    /// does not know which file it is working on. Without this span a
+    /// 152-file batch interleaves thousands of "needs review" lines that
+    /// nothing ties to a file. Built here because the scope is what holds the
+    /// job id; the spawn helper, the one route every file task takes, enters it.
+    pub(crate) fn file_span(&self, filename: &DisplayPath, role: &'static str) -> tracing::Span {
+        match self {
+            Self::Job(scope) => {
+                tracing::info_span!("file", job_id = %scope.job_id, file = %filename, role)
+            }
+            Self::Unscoped => tracing::info_span!("file", file = %filename, role),
+        }
+    }
+}
+
+/// The span for a file's work spawned from the current task: the one entry
+/// every per-file spawn uses (the supervised file tasks, and the morphotag and
+/// utseg fan-outs, which run on their own `JoinSet`).
+pub(crate) fn current_file_span(filename: &DisplayPath, role: &'static str) -> tracing::Span {
+    FileTaskScope::current().file_span(filename, role)
 }
 
 /// What every file task of one job attempt inherits from its runner.
