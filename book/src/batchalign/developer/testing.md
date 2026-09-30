@@ -62,11 +62,11 @@ release and run on another fail for reasons that have nothing to do with the
 code under test.
 
 So there is one release, named with its source hash in
-`scripts/ffmpeg-pin.env`:
+`scripts/ffmpeg-pin.sh`:
 
 ```mermaid
 flowchart LR
-    pin["scripts/ffmpeg-pin.env\nversion + source SHA-256"]
+    pin["scripts/ffmpeg-pin.sh\nversion + source SHA-256"]
     install["install-pinned-ffmpeg.sh\nbuilds ffmpeg.org's tarball"]
     action[".github/actions/pinned-ffmpeg\ncached by the pin's hash"]
     check["check-ffmpeg-pin.sh\nfirst step of batchalign-ci-rust"]

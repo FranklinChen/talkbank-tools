@@ -4,7 +4,7 @@
 //! Every test REQUIRES ffmpeg and ffprobe and fails without them; a skipped
 //! boundary test reads as a pass in a log nobody opens. What a decode produces
 //! is a property of the ffmpeg RELEASE, so these run against the one release
-//! `scripts/ffmpeg-pin.env` names; the gate refuses any other before they run.
+//! `scripts/ffmpeg-pin.sh` names; the gate refuses any other before they run.
 
 use std::path::Path;
 

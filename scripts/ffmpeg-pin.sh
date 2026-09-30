@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # The one ffmpeg release every media test is measured against.
 #
 # The media tests generate audio with ffmpeg's encoders and compare what
@@ -13,7 +14,10 @@
 # release tarball, taken from a download whose signature by the FFmpeg release
 # key (FCF986EA15E6E293A5644F10B4322F04D67658D8) verified.
 #
-# Read by scripts/check-ffmpeg-pin.sh (the gate) and
-# scripts/install-pinned-ffmpeg.sh (CI's build of exactly this release).
+# Sourced (never run) by scripts/check-ffmpeg-pin.sh (the gate) and
+# scripts/install-pinned-ffmpeg.sh (CI's build of exactly this release), which
+# is why the assignments below are unused within this file.
+# shellcheck disable=SC2034  # read by the scripts that source this file
 FFMPEG_VERSION=9.0.2
+# shellcheck disable=SC2034  # read by the scripts that source this file
 FFMPEG_SOURCE_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e

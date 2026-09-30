@@ -36,7 +36,7 @@ jobs:
 
       - name: Install pinned ffmpeg
         # The media tests measure ffmpeg's own behaviour, so they run against
-        # the one release scripts/ffmpeg-pin.env names, never the distribution
+        # the one release scripts/ffmpeg-pin.sh names, never the distribution
         # package; the gate below refuses any other.
         uses: ./.github/actions/pinned-ffmpeg
 

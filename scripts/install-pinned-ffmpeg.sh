@@ -23,8 +23,8 @@ fi
 prefix="$1"
 
 here="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=scripts/ffmpeg-pin.env
-source "$here/ffmpeg-pin.env"
+# shellcheck source=scripts/ffmpeg-pin.sh
+source "$here/ffmpeg-pin.sh"
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT

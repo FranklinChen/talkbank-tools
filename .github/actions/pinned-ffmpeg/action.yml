@@ -1,6 +1,6 @@
 name: Pinned ffmpeg
 description: >
-  Put exactly the ffmpeg release named in scripts/ffmpeg-pin.env on PATH, and
+  Put exactly the ffmpeg release named in scripts/ffmpeg-pin.sh on PATH, and
   prove it. The media tests measure ffmpeg's own behaviour (what ffprobe
   states, what a decode produces), and Ubuntu's package is a different
   release from the developer's: on 2026-09-30 two tests that passed locally
@@ -26,7 +26,7 @@ runs:
       uses: actions/cache@v6
       with:
         path: ~/.local/ffmpeg-pinned
-        key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ffmpeg-pin.env', 'scripts/install-pinned-ffmpeg.sh') }}
+        key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ffmpeg-pin.sh', 'scripts/install-pinned-ffmpeg.sh') }}
 
     - name: Build pinned ffmpeg
       if: steps.cache.outputs.cache-hit != 'true'

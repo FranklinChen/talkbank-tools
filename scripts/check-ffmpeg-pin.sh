@@ -11,8 +11,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=scripts/ffmpeg-pin.env
-source "$here/ffmpeg-pin.env"
+# shellcheck source=scripts/ffmpeg-pin.sh
+source "$here/ffmpeg-pin.sh"
 
 for tool in ffmpeg ffprobe; do
     if ! banner="$("$tool" -version 2>/dev/null)"; then
@@ -22,7 +22,7 @@ for tool in ffmpeg ffprobe; do
     first_line="${banner%%$'\n'*}"
     if [[ "$first_line" != "$tool version $FFMPEG_VERSION "* ]]; then
         echo "ERROR: $tool on PATH reports '$first_line'," >&2
-        echo "  but the media tests are pinned to $FFMPEG_VERSION (scripts/ffmpeg-pin.env)." >&2
+        echo "  but the media tests are pinned to $FFMPEG_VERSION (scripts/ffmpeg-pin.sh)." >&2
         echo "  Install that release (scripts/install-pinned-ffmpeg.sh builds it), or" >&2
         echo "  re-measure the media tests against the new release and bump the pin." >&2
         exit 1
