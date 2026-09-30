@@ -15,6 +15,7 @@ def test_cpu_echo_worker_does_not_import_model_stacks(profile: str) -> None:
     # ML modules. Fail at the import boundary instead of asserting host timing.
     program = """
 import importlib.abc
+import os
 import runpy
 import sys
 
@@ -24,7 +25,12 @@ class NoModelImports(importlib.abc.MetaPathFinder):
             raise RuntimeError('model-free startup imported ' + fullname)
 
 sys.meta_path.insert(0, NoModelImports())
-sys.argv = ['batchalign.worker', '--test-echo', '--force-cpu', '--profile', sys.argv[1]]
+# `--serving` is decided by the Rust pool; under --force-cpu on a GIL runtime it
+# is 'sequential' for every profile (worker/serving.rs).
+# A stdio worker watches its launcher and exits with it; here the launcher
+# is the pytest process that spawned this interpreter.
+sys.argv = ['batchalign.worker', '--test-echo', '--force-cpu', '--serving', 'sequential',
+            '--supervisor-pid', str(os.getppid()), '--profile', sys.argv[1]]
 runpy.run_module('batchalign.worker', run_name='__main__')
 """
     result = subprocess.run(

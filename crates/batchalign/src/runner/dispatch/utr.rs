@@ -12,7 +12,9 @@ use std::path::Path;
 
 use super::options::ResolvedUtrStrategy;
 use crate::api::{DurationMs, LanguageCode3, NumSpeakers};
-use crate::cache::{UtrAsrCacheEligibility, UtrAsrCacheNamespace, UtteranceCache, tasks};
+use crate::cache::{
+    InferenceLease, UtrAsrCacheEligibility, UtrAsrCacheNamespace, UtteranceCache, tasks,
+};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Recording, WindowMs};
 use crate::chat_ops::fa::origin::EngineId;
@@ -223,21 +225,23 @@ pub(in crate::runner) async fn run_utr_pass(
                                     end_ms,
                                     "Failed to extract audio segment, falling back to full UTR"
                                 );
+                                // Release this segment's single-flight lease
+                                // now: a waiter for the same segment must not
+                                // sit behind a whole-file pass it is not part of.
+                                drop(miss);
                                 return run_utr_pass_full(chat_file, context).await;
                             }
                         };
 
                         match miss.infer(&segment_path, context).await {
-                            Ok(response) => {
-                                store_utr_asr_cache(
-                                    context.services.cache,
-                                    &seg_cache_key,
-                                    &cache_namespace,
-                                    &response,
-                                    context.filename,
-                                )
-                                .await;
-                                response
+                            Ok(inferred) => {
+                                inferred
+                                    .commit(
+                                        context.services.cache,
+                                        &seg_cache_key,
+                                        context.filename,
+                                    )
+                                    .await
                             }
                             Err(error) => {
                                 warn!(
@@ -365,16 +369,10 @@ async fn run_utr_pass_full(
                 "UTR ASR cache miss, running inference"
             );
             match miss.infer(context.audio_path, context).await {
-                Ok(response) => {
-                    store_utr_asr_cache(
-                        context.services.cache,
-                        &cache_key,
-                        &cache_namespace,
-                        &response,
-                        context.filename,
-                    )
-                    .await;
-                    response
+                Ok(inferred) => {
+                    inferred
+                        .commit(context.services.cache, &cache_key, context.filename)
+                        .await
                 }
                 Err(error) => {
                     warn!(context.filename, error = %error, "UTR ASR inference failed");
@@ -500,32 +498,118 @@ enum UtrAsrCacheLookup {
 }
 
 /// Proof that the normalized UTR cache was safely absent or explicitly
-/// bypassed. Consuming it is the only full-file route to inference.
+/// bypassed. Consuming it is the only route to inference, and inference is the
+/// only route to [`UtrAsrInferred`], whose commit is the only write.
 #[derive(Debug)]
-struct UtrAsrCacheMiss;
+struct UtrAsrCacheMiss {
+    /// Whether, and how, the result may be stored and shared.
+    authority: UtrAsrWriteAuthority,
+}
+
+/// What a miss is allowed to do with the response it produces.
+///
+/// A sum rather than an `Option<namespace>`: the two arms are different facts
+/// about the run, and the store path must say which one it is in.
+#[derive(Debug)]
+enum UtrAsrWriteAuthority {
+    /// Every model is pinned: the response is stored under `namespace`, and
+    /// `lease` makes this the ONE inference for the cache key in this process.
+    /// A concurrent identical request waits on the lease and then replays
+    /// what this one stores, rather than running the same inference again.
+    Shared {
+        namespace: UtrAsrCacheNamespace,
+        lease: InferenceLease,
+    },
+    /// A floating plan: nothing is stored, because no later run could prove a
+    /// stored row came from the same weights.
+    Unshared,
+}
 
 impl UtrAsrCacheMiss {
     async fn infer(
         self,
         audio_path: &Path,
         context: UtrPassContext<'_>,
-    ) -> Result<crate::transcribe::AsrResponse, crate::error::ServerError> {
+    ) -> Result<UtrAsrInferred, crate::error::ServerError> {
         match (context.cache_policy, context.engine) {
-            // The normalized UTR entry is derived. Rev may rebuild it from the
-            // separately retained raw transcript, whose own required-cache
-            // gate still refuses a provider call on a raw miss.
-            (CachePolicy::RequireCache, UtrEngine::RevAi) => {
-                infer_utr_asr_response(audio_path, context).await
-            }
             (CachePolicy::RequireCache, UtrEngine::Whisper | UtrEngine::HkTencent) => {
                 Err(crate::error::ServerError::Persistence(
                     "required UTR ASR evidence is missing for the selected ASR backend".to_owned(),
                 ))
             }
-            (CachePolicy::UseCache | CachePolicy::SkipCache, _) => {
-                infer_utr_asr_response(audio_path, context).await
+            // The normalized UTR entry is derived. Rev may rebuild it from the
+            // separately retained raw transcript, whose own required-cache
+            // gate still refuses a provider call on a raw miss.
+            (CachePolicy::RequireCache, UtrEngine::RevAi)
+            | (CachePolicy::UseCache | CachePolicy::SkipCache, _) => {
+                self.run(infer_utr_asr_response(audio_path, context)).await
             }
         }
+    }
+
+    /// Run one inference under this miss's authority.
+    ///
+    /// The inference is a parameter so the typestate (miss, then inferred,
+    /// then committed) is the same whichever backend produced the response.
+    async fn run(
+        self,
+        inference: impl Future<
+            Output = Result<crate::transcribe::AsrResponse, crate::error::ServerError>,
+        >,
+    ) -> Result<UtrAsrInferred, crate::error::ServerError> {
+        let response = inference.await?;
+        Ok(UtrAsrInferred {
+            response,
+            authority: self.authority,
+        })
+    }
+}
+
+/// A response produced under a miss's authority, not yet stored.
+#[derive(Debug)]
+struct UtrAsrInferred {
+    response: crate::transcribe::AsrResponse,
+    authority: UtrAsrWriteAuthority,
+}
+
+impl UtrAsrInferred {
+    /// Store the response (when the plan is pinned) and hand it back.
+    ///
+    /// The one write both recovery paths use. A failed write (or a response
+    /// that does not serialize) is logged and otherwise ignored: the response
+    /// is still used for this run, and a later run recomputes what was not
+    /// stored.
+    async fn commit(
+        self,
+        cache: &UtteranceCache,
+        cache_key: &CacheKey,
+        filename: &str,
+    ) -> crate::transcribe::AsrResponse {
+        match self.authority {
+            // Nothing is written for a floating plan. A row whose models
+            // cannot be named would be unreadable by construction anyway.
+            UtrAsrWriteAuthority::Unshared => {}
+            UtrAsrWriteAuthority::Shared { namespace, lease } => {
+                let stored = match serde_json::to_value(&self.response) {
+                    Ok(value) => cache
+                        .put(cache_key.as_str(), tasks::UTR_ASR, &namespace, &value)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                match stored {
+                    // Waiters re-read the cache after this lease drops; the
+                    // mark lets a forced refresh replay this fresh result.
+                    Ok(()) => lease.mark_committed(),
+                    // A waiter then finds no row and runs its own inference:
+                    // the failure costs a repeat, never a wrong answer.
+                    Err(error) => {
+                        warn!(filename, %error, "Failed to cache UTR ASR response (non-fatal)");
+                    }
+                }
+            }
+        }
+        self.response
     }
 }
 
@@ -553,69 +637,76 @@ fn utr_cache_eligibility(context: UtrPassContext<'_>) -> UtrAsrCacheEligibility 
     }
 }
 
+/// Look up one UTR ASR response, or take the single right to infer it.
+///
+/// For a pinned plan the lookup runs under an [`InferenceLease`] keyed by the
+/// same cache key the row is stored under (the key string already names the
+/// engine, the audio and the language, which determine the namespace). A
+/// second identical request therefore waits for the first to commit and then
+/// replays its row, instead of each running the same inference.
 async fn lookup_utr_asr_cache(
     cache: &UtteranceCache,
     cache_key: &CacheKey,
     eligibility: &UtrAsrCacheEligibility,
     policy: CachePolicy,
 ) -> Result<UtrAsrCacheLookup, crate::error::ServerError> {
-    match policy {
-        CachePolicy::SkipCache => return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss)),
-        CachePolicy::UseCache | CachePolicy::RequireCache => {}
-    }
-    let cache_namespace = match eligibility {
+    let namespace = match eligibility {
         // A floating plan cannot promise a stored row came from the same
-        // weights, so there is nothing safe to read. Reported as a miss, the
-        // same shape a deliberately skipped cache already produces, so the
-        // caller's inference path needs no new branch.
+        // weights, so there is nothing safe to read and nothing to share.
         UtrAsrCacheEligibility::Floating => {
-            return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss));
+            return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
+                authority: UtrAsrWriteAuthority::Unshared,
+            }));
         }
-        UtrAsrCacheEligibility::Pinned(namespace) => namespace,
+        UtrAsrCacheEligibility::Pinned(namespace) => namespace.clone(),
     };
+    // A warm row needs no lease: hits stay lock-free, and only a miss pays
+    // for single flight (then reads again under the lease, below).
+    match policy {
+        CachePolicy::UseCache | CachePolicy::RequireCache => {
+            if let Some(response) = read_utr_asr_cache(cache, cache_key, &namespace).await? {
+                return Ok(UtrAsrCacheLookup::Hit(Box::new(response)));
+            }
+        }
+        CachePolicy::SkipCache => {}
+    }
+    let lease = InferenceLease::acquire(cache_key, cache).await;
+    match policy {
+        // A forced refresh still replays a result another request committed
+        // while this one waited: that result is exactly as fresh.
+        CachePolicy::SkipCache if !lease.observed_commit_while_waiting() => {
+            return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
+                authority: UtrAsrWriteAuthority::Shared { namespace, lease },
+            }));
+        }
+        CachePolicy::UseCache | CachePolicy::RequireCache | CachePolicy::SkipCache => {}
+    }
+    match read_utr_asr_cache(cache, cache_key, &namespace).await? {
+        Some(response) => Ok(UtrAsrCacheLookup::Hit(Box::new(response))),
+        None => Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
+            authority: UtrAsrWriteAuthority::Shared { namespace, lease },
+        })),
+    }
+}
+
+/// Read one stored UTR ASR response. A malformed row fails closed.
+async fn read_utr_asr_cache(
+    cache: &UtteranceCache,
+    cache_key: &CacheKey,
+    namespace: &UtrAsrCacheNamespace,
+) -> Result<Option<crate::transcribe::AsrResponse>, crate::error::ServerError> {
     let stored = cache
-        .get(cache_key.as_str(), tasks::UTR_ASR, cache_namespace)
+        .get(cache_key.as_str(), tasks::UTR_ASR, namespace)
         .await
         .map_err(|error| crate::error::ServerError::Persistence(error.to_string()))?;
     let Some(stored) = stored else {
-        return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss));
+        return Ok(None);
     };
-    let response = serde_json::from_value(stored).map_err(|error| {
+    serde_json::from_value(stored).map(Some).map_err(|error| {
         crate::error::ServerError::Persistence(format!(
             "invalid cached UTR ASR response for key {cache_key}: {error}"
         ))
-    })?;
-    Ok(UtrAsrCacheLookup::Hit(Box::new(response)))
-}
-
-/// Store one UTR ASR response under the UTR engine's namespace.
-///
-/// The one write both recovery paths use. A failed write (or a response that
-/// does not serialize) is logged and otherwise ignored: the response is still
-/// used for this run, and a later run recomputes what was not stored.
-async fn store_utr_asr_cache(
-    cache: &UtteranceCache,
-    cache_key: &CacheKey,
-    eligibility: &UtrAsrCacheEligibility,
-    response: &crate::transcribe::AsrResponse,
-    filename: &str,
-) {
-    // Nothing is written for a floating plan. A row whose models cannot be
-    // named would be unreadable by construction anyway, and writing it would
-    // only leave storage that no later run can ever match.
-    let UtrAsrCacheEligibility::Pinned(cache_namespace) = eligibility else {
-        return;
-    };
-    let stored = match serde_json::to_value(response) {
-        Ok(value) => cache
-            .put(cache_key.as_str(), tasks::UTR_ASR, cache_namespace, &value)
-            .await
-            .map_err(|error| error.to_string()),
-        Err(error) => Err(error.to_string()),
-    };
-    if let Err(error) = stored {
-        warn!(filename, %error, "Failed to cache UTR ASR response (non-fatal)");
-    }
+    })
 }
 
 async fn resolve_rev_utr_asr_response<I: crate::revai::RevAsrEvidenceInference>(
@@ -1124,6 +1215,83 @@ mod utr_evidence_cache_tests {
             .await
             .expect_err("corrupt cache must not become an inference-authorizing miss");
         assert!(matches!(error, ServerError::Persistence(_)));
+    }
+
+    /// Two jobs asking for the same recording's UTR ASR at the same moment must
+    /// share ONE inference (two jobs over the same recordings each logged "UTR ASR
+    /// cache miss, running inference" within a millisecond of each other, and
+    /// both ran the same long Whisper pass per file).
+    ///
+    /// The first lookup is the in-flight leader: it holds a miss. A second
+    /// identical lookup must PARK behind it rather than authorize a second
+    /// inference, and must then replay what the leader stored. The wait is
+    /// observed through the lease registry, never a clock: before the fix the
+    /// second lookup finishes on its own with a miss, which ends the loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_identical_utr_lookups_share_one_inference() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cache = std::sync::Arc::new(
+            UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
+                .await
+                .expect("cache"),
+        );
+        let key = CacheKey::from_content("single-flight UTR ASR lookup");
+        let eligibility = std::sync::Arc::new(test_eligibility(&UtrEngine::Whisper));
+
+        let leader = lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::UseCache)
+            .await
+            .expect("cold lookup");
+        let UtrAsrCacheLookup::Miss(leader) = leader else {
+            panic!("an empty cache must authorize the first inference")
+        };
+
+        let follower = {
+            let (cache, key, eligibility) = (cache.clone(), key.clone(), eligibility.clone());
+            tokio::spawn(async move {
+                lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::UseCache).await
+            })
+        };
+        // Either the follower parks behind the leader's lease (two contenders),
+        // or it finishes by itself, which is the defect.
+        while !follower.is_finished() && crate::cache::InferenceLease::contenders_for_test(&key) < 2
+        {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !follower.is_finished(),
+            "a second identical lookup completed while the first inference was \
+             still in flight: {:?}; both would run the same inference",
+            follower.await.expect("follower task")
+        );
+
+        let response = crate::transcribe::AsrResponse {
+            tokens: Vec::new(),
+            lang: LanguageCode3::eng(),
+            source_monologues: None,
+            model: None,
+        };
+        let stored = leader
+            .run(async { Ok(response.clone()) })
+            .await
+            .expect("leader inference")
+            .commit(&cache, &key, "leader.cha")
+            .await;
+        assert_eq!(
+            serde_json::to_value(&stored).expect("stored JSON"),
+            serde_json::to_value(&response).expect("response JSON")
+        );
+
+        let replay = follower
+            .await
+            .expect("follower task")
+            .expect("follower lookup");
+        let UtrAsrCacheLookup::Hit(replayed) = replay else {
+            panic!("the follower must replay the leader's result, not infer again")
+        };
+        assert_eq!(
+            serde_json::to_value(*replayed).expect("replayed JSON"),
+            serde_json::to_value(&response).expect("response JSON")
+        );
     }
 
     #[tokio::test]

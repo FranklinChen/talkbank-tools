@@ -144,14 +144,22 @@ pub(crate) async fn set_file_progress(
 /// Explicit completion contract for one supervised file task.
 ///
 /// A task returns `TerminalStateRecorded` only after it has already written the
-/// final file status that the runner should trust. Any early return, panic, or
-/// cancellation that skips that write path must surface as
-/// `MissingTerminalState` so the supervisor can record a concrete failure.
+/// final file status that the runner should trust. An early return or panic
+/// that skips that write path surfaces as `MissingTerminalState` so the
+/// supervisor can record a concrete failure. A job cancellation that stopped
+/// the task mid-flight is its own outcome, issued only by the supervision
+/// wrapper that observed the cancellation.
+#[derive(Debug)]
 pub(crate) enum FileTaskOutcome {
     /// The task itself recorded success or terminal failure for the file.
     TerminalStateRecorded,
     /// The task exited without recording a terminal file state.
     MissingTerminalState,
+    /// The job was cancelled and the supervisor dropped the task's future
+    /// wherever it was: in a worker dispatch, a cache wait, or between stages.
+    /// Nothing after that point ran, so no output, debug dump or cache write
+    /// belongs to a cancelled job.
+    StoppedByCancellation,
 }
 
 // ---------------------------------------------------------------------------

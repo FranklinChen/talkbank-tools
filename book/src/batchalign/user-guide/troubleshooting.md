@@ -1,7 +1,7 @@
 # Troubleshooting
 
 **Status:** Current
-**Last updated:** 2026-09-02 07:45 EDT
+**Last updated:** 2026-09-29 15:29 EDT
 
 ## Start with verbose output
 
@@ -168,6 +168,13 @@ execution host itself (or over SSH/VNC), or make sure the same corpus path is
 mounted there. If the corpus root and media root differ on that host, configure
 local `media_mappings` or pass a server-visible `--media-dir`. See
 [Media Resolution](../reference/media-conversion.md#media-resolution).
+
+If the message says a file was found "whose name differs ... only in letter
+case or Unicode form", the recording is there but spelled differently from
+what the transcript implies (for example `Session.WAV` for `session`, or a
+decomposed accent). Rename it to the spelling the message gives; names are
+matched exactly on every host
+([File Name Matching](../reference/file-name-matching.md)).
 
 **Media conversion failed, ffmpeg not found:** MP4 (and M4A, WebM, WMA)
 files require ffmpeg for conversion to WAV. Install ffmpeg:

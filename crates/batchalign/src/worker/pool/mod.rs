@@ -786,7 +786,8 @@ pub struct WorkerPool {
     pub(super) config: PoolConfig,
     /// Sequential worker groups (Stanza, IO profiles).
     pub(super) groups: GroupsMap,
-    /// Shared GPU workers for concurrent V2 dispatch (GPU profile, stdio).
+    /// Shared workers for concurrent V2 dispatch (keys whose
+    /// `WorkerServing` is `SharedConcurrent`, stdio).
     ///
     /// The value is a [`GpuWorkerSlot`], not a worker: an entry appears when a
     /// key's spawn STARTS, and holds a worker once that spawn succeeds. The map
@@ -828,7 +829,7 @@ pub struct WorkerPool {
     stanza_registry: std::sync::OnceLock<Box<crate::stanza_registry::StanzaRegistry>>,
     /// Side-table mapping each active job to the worker PIDs currently
     /// dispatching for it. Populated by `TrackerGuard` instances created
-    /// inside the dispatch path; consulted by `shutdown_workers_for_job`
+    /// inside the dispatch path; drained by `detach_workers_for_job`
     /// when a cancel arrives. See `pool/job_tracker.rs`.
     pub(crate) job_tracker: job_tracker::JobWorkerTracker,
     /// Monotonic counters for every worker-admission rejection reason.
@@ -1051,7 +1052,7 @@ impl WorkerPool {
     /// read-only accessor for integration tests that need to wait
     /// for dispatch registration before firing a cancel, the
     /// alternative (sleeping a fixed duration) is flaky on slow
-    /// hosts. Runtime callers use `shutdown_workers_for_job`.
+    /// hosts. The cancel path uses `detach_workers_for_job`.
     #[doc(hidden)]
     pub fn workers_for_job(&self, job_id: &crate::api::JobId) -> Vec<crate::worker::WorkerPid> {
         self.job_tracker.snapshot(job_id)
@@ -1069,21 +1070,40 @@ impl WorkerPool {
         job_tracker::CURRENT_JOB_ID.scope(job_id, fut).await
     }
 
+    /// Detach and terminate in one step; for callers with no cancellation to
+    /// publish in between (tests). The cancel path splits the two, see
+    /// [`Self::detach_workers_for_job`].
+    ///
     /// SIGTERM every worker dispatching for `job_id`, escalating to
     /// SIGKILL after a 2s grace. Long enough for a well-behaved
     /// Python worker to handle the signal cleanly, short enough
     /// that interactive cancel feels responsive.
     pub async fn shutdown_workers_for_job(&self, job_id: &crate::api::JobId) {
-        let pids = self.job_tracker.drain(job_id);
-        if pids.is_empty() {
-            return;
+        self.detach_workers_for_job(job_id).terminate().await;
+    }
+
+    /// Take the workers dispatching for `job_id` out of the tracker, to be
+    /// terminated once the job's cancellation has been published.
+    ///
+    /// The cancel path needs the two steps apart, in this order. Publishing
+    /// the cancellation drops the job's file tasks, and a dropped dispatch
+    /// unregisters its worker from the tracker as it unwinds; a drain AFTER
+    /// the publish could therefore find nothing and leave a shared worker
+    /// computing a result nobody will read. Detaching first captures every
+    /// worker that was in flight when the cancel arrived.
+    pub fn detach_workers_for_job(&self, job_id: &crate::api::JobId) -> JobWorkersToTerminate {
+        JobWorkersToTerminate {
+            job_id: job_id.clone(),
+            pids: self.job_tracker.drain(job_id),
         }
-        tracing::info!(
-            job_id = %job_id,
-            worker_count = pids.len(),
-            "Cancel: terminating in-flight workers for job"
-        );
-        job_tracker::signal_workers(&pids, std::time::Duration::from_secs(2)).await;
+    }
+
+    /// How workers for `target` serve requests, and therefore how this pool
+    /// dispatches to them: into one shared process per key, or by exclusive
+    /// checkout from up to `max_workers_per_key` processes. The same value
+    /// the worker is launched with (`--serving`), so the two cannot disagree.
+    pub(crate) fn serving(&self, target: WorkerTarget) -> crate::worker::serving::WorkerServing {
+        crate::worker::serving::WorkerServing::decide(target.profile_kind(), &self.config.runtime)
     }
 
     /// Maximum workers allowed per `(target, lang, engine_overrides)` key
@@ -1261,7 +1281,7 @@ impl WorkerPool {
                     target = %key.target.label(),
                     lang = %key.language,
                     pid = %handle.pid(),
-                    "GPU worker spawned (concurrent mode)"
+                    "Shared GPU worker spawned (serves requests concurrently)"
                 );
                 self.spawn_runtime.adopt_shared_gpu_worker(handle).await
             })
@@ -1354,6 +1374,32 @@ impl WorkerPool {
             .server_instance_id
             .as_deref()
             .expect("WorkerPool::new always assigns a server instance id")
+    }
+}
+
+/// Workers that were dispatching for a cancelled job, detached from the
+/// tracker by [`WorkerPool::detach_workers_for_job`].
+///
+/// `#[must_use]`: detaching without terminating leaves exactly the in-flight
+/// work the cancel exists to stop.
+#[must_use = "detached workers keep computing until they are terminated"]
+pub struct JobWorkersToTerminate {
+    job_id: crate::api::JobId,
+    pids: Vec<crate::worker::WorkerPid>,
+}
+
+impl JobWorkersToTerminate {
+    /// SIGTERM every detached worker, escalating to SIGKILL after a 2s grace.
+    pub async fn terminate(self) {
+        if self.pids.is_empty() {
+            return;
+        }
+        tracing::info!(
+            job_id = %self.job_id,
+            worker_count = self.pids.len(),
+            "Cancel: terminating in-flight workers for job"
+        );
+        job_tracker::signal_workers(&self.pids, std::time::Duration::from_secs(2)).await;
     }
 }
 
@@ -1515,7 +1561,7 @@ mod default_pool_config_tests {
             WorkerBootstrapMode::LazyProfile,
         );
 
-        assert!(key.target.is_concurrent());
+        assert_eq!(key.target.profile_kind(), WorkerProfile::Gpu);
         assert_eq!(
             key.engine_selection.worker_config_json(),
             r#"{"fa":"wave2vec"}"#

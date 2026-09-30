@@ -342,7 +342,9 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
             Ok(())
         }
         Commands::Cache(a) => cache_cmd::run(a).await,
-        Commands::Worker(a) => worker_cmd::run(a, cli.global.verbose).await,
+        Commands::Worker(a) => {
+            worker_cmd::run(a, cli.global.verbose, cli.global.engine_overrides.as_ref()).await
+        }
         Commands::Doctor(a) => doctor_cmd::run(a).await,
         Commands::Replay(a) => replay_cmd::run(a).await,
         Commands::Eval(a) => eval_cmd::run(a).await,

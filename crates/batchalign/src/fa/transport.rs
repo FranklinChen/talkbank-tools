@@ -282,16 +282,21 @@ async fn infer_groups_v2(
         {
             Ok(response) => response,
             Err(ServerError::EmptyFaAudioSegment(ref segment)) => {
-                // Extraction produced no frames. That does not prove the
-                // window is past EOF; very short in-range windows can do this.
-                // Leave this group's words unaligned rather than failing the
-                // whole file: the transcript is still useful without timing.
+                // The window is an `FaWindow`, admitted inside the probed
+                // recording, so past-EOF cannot be the cause; report its
+                // length, the recording's, and what the decode measured.
+                // Leave the group's words unaligned; the transcript is still
+                // useful without timing.
                 warn!(
                     group = group_index,
                     start_ms = segment.window.start().get(),
                     end_ms = segment.window.end().get(),
+                    window_ms = window.len().0,
+                    recording_ms = window.recording().duration().get(),
+                    decoded = %segment.reason,
                     path = %segment.path,
-                    "FA group decoded no audio samples; leaving words unaligned"
+                    "FA group window inside the recording decoded to no whole audio sample; \
+                     leaving words unaligned"
                 );
                 parsed_results.push(unaligned_group_result(group_index, group));
                 continue;

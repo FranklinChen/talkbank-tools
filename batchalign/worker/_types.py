@@ -85,13 +85,26 @@ class InferTask(str, Enum):
     SPEAKER = "speaker"
 
 
+class WorkerServing(str, Enum):
+    """How one worker process serves requests.
+
+    Decided by the Rust pool (``batchalign::worker::serving::WorkerServing``),
+    which routes its requests by the same value and passes it as
+    ``--serving``. The worker obeys it and never derives its own: two owners of
+    this decision disagreed on 2026-09-30.
+    """
+
+    CONCURRENT = "concurrent"
+    SEQUENTIAL = "sequential"
+
+
 class WorkerProfile(str, Enum):
     """Worker profile grouping related InferTasks into fewer processes.
 
     Instead of spawning one worker per InferTask, profiles group related tasks
     to share loaded models within a single process:
 
-    - GPU: ASR, FA, Speaker, GPU-bound models, concurrent via ThreadPoolExecutor
+    - GPU: ASR, FA, Speaker, GPU-bound models
     - STANZA: Morphosyntax, Utseg, Coref, Stanza NLP processors
     - IO: Translate, OpenSMILE, AVQI, lightweight API/library calls
     """

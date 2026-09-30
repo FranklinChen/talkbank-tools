@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 if TYPE_CHECKING:
     import argparse
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from batchalign.inference._domain_types import TcpPort
 
 from batchalign.device import DevicePolicy
-from batchalign.runtime import FREE_THREADED
 from batchalign.worker._model_loading import (
     enable_test_echo,
     load_worker_profile,
@@ -44,34 +43,16 @@ from batchalign.worker._protocol import (
 from batchalign.worker._stanza_capabilities import (
     refresh_resources_manifest_if_present,
 )
+from batchalign.worker._supervisor import watch_supervisor
 from batchalign.worker._types import (
     InferTask,
     WorkerBootstrapRuntime,
     WorkerProfile,
+    WorkerServing,
     _state,
 )
 
 L = logging.getLogger("batchalign.worker")
-
-
-def _gpu_has_cuda_device(force_cpu: bool) -> bool:
-    """Check whether GPU profile workers should use concurrent serving.
-
-    Returns ``True`` only when CUDA is available AND the user has not forced
-    CPU-only mode. GPU profile workers use a ``ThreadPoolExecutor`` for
-    concurrent inference that depends on the GIL being released during CUDA
-    kernels. On CPU, this causes thread oversubscription because each thread's
-    PyTorch ops use all cores via OpenMP.
-
-    Forced CPU serving needs no device probe, including lazy and echo workers
-    that have not loaded any models.
-    """
-    if force_cpu:
-        return False
-
-    import torch
-
-    return torch.cuda.is_available()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -121,7 +102,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--gpu-thread-pool-size",
         type=int,
         default=4,
-        help="Maximum concurrent requests served inside one GPU worker process.",
+        help="Maximum concurrent requests served inside one worker process "
+        "when --serving is concurrent.",
+    )
+    parser.add_argument(
+        "--supervisor-pid",
+        type=int,
+        default=None,
+        help="PID of the server that launched this stdio worker; the worker "
+        "exits when that process exits. Required for --transport stdio.",
+    )
+    parser.add_argument(
+        "--serving",
+        choices=[mode.value for mode in WorkerServing],
+        required=True,
+        help="How this process serves requests, decided by the Rust pool that "
+        "launched it and routes to it: 'concurrent' (threads sharing the "
+        "loaded models) or 'sequential' (one request at a time).",
     )
 
     parser.add_argument(
@@ -229,6 +226,19 @@ def main() -> None:
             "audio: could not route torchaudio.load through soundfile: %s", error
         )
 
+    # A stdio worker never outlives the server that launched it: armed before
+    # any model loads, since the server can die during a long load too. A TCP
+    # daemon is detached by design and retired by its owning server instead.
+    match (args.transport, args.supervisor_pid):
+        case ("stdio", int(supervisor_pid)):
+            watch_supervisor(supervisor_pid)
+        case ("stdio", None):
+            parser.error("--supervisor-pid is required for --transport stdio")
+        case ("tcp", _):
+            pass
+        case _:
+            parser.error(f"unsupported transport {args.transport!r}")
+
     try:
         bootstrap = build_worker_bootstrap_runtime(args)
     except ValueError as error:
@@ -266,58 +276,33 @@ def main() -> None:
     # expected by the Rust supervisor (stdio) or becomes a persistent daemon
     # (TCP).
     #
-    # GPU profile workers use concurrent serving (ThreadPoolExecutor) ONLY
-    # when CUDA is available, because PyTorch releases the GIL during CUDA
-    # kernels: enabling real parallelism across threads sharing one model.
-    #
-    # On CPU (Apple Silicon fleet with MPS excluded, or any non-CUDA machine),
-    # concurrent serving causes thread oversubscription: each thread's PyTorch
-    # ops use ALL CPU cores via OpenMP, so N threads × all cores = massive
-    # contention. Sequential serving lets each request use all cores optimally.
-    #
-    # MPS is not a supported inference backend, so the non-CUDA path is CPU only.
-    #
-    # Stanza (morphotag/utseg) workers also use concurrent serving on
-    # free-threaded Python 3.14t, because:
-    # - Multiple threads share ONE loaded Stanza model (77% memory reduction vs
-    #   per-process copies: see python-versioning.md benchmarks, 2026-02-19)
-    # - Stanza's C extensions release the GIL during neural inference, so
-    #   thread-level concurrency does not cause OpenMP oversubscription
-    # On GIL=1, Stanza workers use sequential serving (one process per slot).
-    use_concurrent = (
-        bootstrap.profile == WorkerProfile.GPU and _gpu_has_cuda_device(args.force_cpu)
-    ) or (bootstrap.profile == WorkerProfile.STANZA and FREE_THREADED)
-    if use_concurrent and bootstrap.profile == WorkerProfile.GPU:
-        L.info(
-            "GPU profile with CUDA: concurrent serving (pool=%d)",
-            args.gpu_thread_pool_size,
-        )
-    elif bootstrap.profile == WorkerProfile.GPU:
-        L.info(
-            "GPU profile without CUDA: sequential serving "
-            "(CPU-only, no thread oversubscription)",
-        )
-    elif use_concurrent and bootstrap.profile == WorkerProfile.STANZA:
-        L.info(
-            "Stanza profile with free-threaded Python: concurrent serving "
-            "(shared model, pool=%d)",
-            args.gpu_thread_pool_size,
-        )
-
+    # Whether that loop is concurrent is NOT decided here. The Rust pool
+    # decides it (`batchalign::worker::serving::WorkerServing`), routes its
+    # requests by the same decision, and passes it as `--serving`. Deciding it
+    # here as well, from a CUDA probe, is what let the two sides disagree on
+    # 2026-09-30: the pool multiplexed every request for a key into one
+    # "concurrent" process that served them one at a time.
+    serving = WorkerServing(args.serving)
+    threads = max(1, args.gpu_thread_pool_size)
+    L.info("serving=%s threads=%d", serving.value, threads)
     if args.transport == "tcp":
         port = args.port if args.port != 0 else _auto_assign_port(args.host)
-        if use_concurrent:
-            _serve_tcp_concurrent(
-                args.host, port, max_threads=max(1, args.gpu_thread_pool_size)
-            )
-        else:
-            _serve_tcp(args.host, port)
+        match serving:
+            case WorkerServing.CONCURRENT:
+                _serve_tcp_concurrent(args.host, port, max_threads=threads)
+            case WorkerServing.SEQUENTIAL:
+                _serve_tcp(args.host, port)
+            case _:
+                assert_never(serving)
     else:
         _print_ready()
-        if use_concurrent:
-            _serve_stdio_concurrent(max_threads=max(1, args.gpu_thread_pool_size))
-        else:
-            _serve_stdio()
+        match serving:
+            case WorkerServing.CONCURRENT:
+                _serve_stdio_concurrent(max_threads=threads)
+            case WorkerServing.SEQUENTIAL:
+                _serve_stdio()
+            case _:
+                assert_never(serving)
 
 
 def _auto_assign_port(host: str) -> TcpPort:

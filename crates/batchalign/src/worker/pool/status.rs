@@ -37,8 +37,9 @@ impl WorkerPool {
             self.config.runtime.bootstrap_mode,
         );
 
-        // GPU profile workers are always "available" (shared, concurrent).
-        if key.target.is_concurrent() {
+        // A shared worker (`WorkerServing::SharedConcurrent`) is "available"
+        // whenever it exists: it multiplexes requests.
+        if self.serving(key.target).is_shared() {
             // Check TCP GPU workers first.
             {
                 let tcp_gpu_workers = self.gpu_tcp_workers.lock().await;

@@ -4,6 +4,25 @@
 //! The supervision layer ensures that once a spawned file task stops running,
 //! the runner knows whether the file reached a terminal state. Panics, early
 //! returns, and cancellations are caught and converted to explicit failures.
+//!
+//! # A file task belongs to its job, and a cancelled job stops its tasks
+//!
+//! Every file task runs inside the `FileTaskScope` its runner established
+//! around command dispatch. The scope carries two facts a spawned task would
+//! otherwise lose, because `tokio::spawn` does not inherit task-locals:
+//!
+//! - the job id, re-established as the worker pool's `CURRENT_JOB_ID`, so a
+//!   worker dispatch registers against the job and a cancel can find it;
+//! - the job's cancellation token, which the supervisor races against the
+//!   task. On cancel the task's future is DROPPED wherever it is, so no later
+//!   stage (inference, forced alignment, output, debug dump) runs for a
+//!   cancelled job, and a checked-out worker with a request in flight is
+//!   discarded rather than returned to the pool.
+//!
+//! Before this, neither fact crossed the spawn: a cancelled align job's
+//! in-flight files ran to completion,
+//! because no dispatch had registered against the job for the cancel to kill
+//! and nothing told the tasks to stop.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -12,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::api::{DisplayPath, JobId};
+use crate::runner::job_scope::{FileTaskScope, SpawnScope};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition};
 use crate::store::unix_now;
 
@@ -37,8 +57,9 @@ pub(crate) struct SpawnedFileTask {
 /// Spawn one supervised file task.
 ///
 /// The inner future still owns the real command logic. The supervision layer is
-/// responsible only for one invariant: once the task stops running, the runner
-/// must know whether the corresponding file already reached a terminal state.
+/// responsible for two invariants: once the task stops running, the runner
+/// must know whether the corresponding file already reached a terminal state;
+/// and a task of a cancelled job stops (see the module docs).
 pub(crate) fn spawn_supervised_file_task<F>(
     filename: DisplayPath,
     role: &'static str,
@@ -47,7 +68,24 @@ pub(crate) fn spawn_supervised_file_task<F>(
 where
     F: Future<Output = FileTaskOutcome> + Send + 'static,
 {
-    let handle = AbortOnDropHandle::new(tokio::spawn(future));
+    let scope = FileTaskScope::current();
+    let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+        match scope {
+            SpawnScope::Job(scope) => scope.supervise(future).await,
+            // Only tests of this module spawn outside a runner. In
+            // production it would mean a dispatch path that bypassed
+            // `run_hosted_job`: say so, because such a task can be neither
+            // cancelled nor found by a cancel's worker kill.
+            SpawnScope::Unscoped => {
+                tracing::warn!(
+                    role,
+                    "supervised file task spawned outside a job scope; \
+                     job cancellation cannot stop it"
+                );
+                future.await
+            }
+        }
+    }));
 
     SpawnedFileTask {
         role,
@@ -74,33 +112,30 @@ pub(crate) async fn drain_supervised_file_tasks(
     let mut abnormal_exits = 0usize;
 
     for task in tasks {
-        match task.handle.await {
-            Ok(FileTaskOutcome::TerminalStateRecorded) => {}
-            Ok(FileTaskOutcome::MissingTerminalState) => {
-                abnormal_exits += 1;
+        // A task that returned or died without a terminal state is attributed
+        // to the cancellation when the job was cancelled: it may have seen the
+        // token itself and returned early.
+        let exit = match (task.handle.await, cancel_token.is_cancelled()) {
+            (Ok(FileTaskOutcome::TerminalStateRecorded), _) => continue,
+            // The supervisor stopped it: an expected consequence of the
+            // cancel, not an abnormal exit.
+            (Ok(FileTaskOutcome::StoppedByCancellation), _) => {
                 record_abnormal_file_task_exit(
                     sink,
                     job_id,
                     task.filename.as_ref(),
                     task.role,
-                    cancel_token.is_cancelled(),
-                    None,
+                    FileTaskExit::Cancelled,
                 )
                 .await;
+                continue;
             }
-            Err(join_error) => {
-                abnormal_exits += 1;
-                record_abnormal_file_task_exit(
-                    sink,
-                    job_id,
-                    task.filename.as_ref(),
-                    task.role,
-                    cancel_token.is_cancelled(),
-                    Some(join_error.to_string()),
-                )
-                .await;
-            }
-        }
+            (Ok(FileTaskOutcome::MissingTerminalState) | Err(_), true) => FileTaskExit::Cancelled,
+            (Ok(FileTaskOutcome::MissingTerminalState), false) => FileTaskExit::NoTerminalState,
+            (Err(join_error), false) => FileTaskExit::Panicked(join_error.to_string()),
+        };
+        abnormal_exits += 1;
+        record_abnormal_file_task_exit(sink, job_id, task.filename.as_ref(), task.role, exit).await;
     }
 
     abnormal_exits
@@ -215,6 +250,16 @@ pub(crate) async fn record_file_cancelled_before_dispatch(
 // record_abnormal_file_task_exit: internal helper
 // ---------------------------------------------------------------------------
 
+/// Why a file task ended without recording its own terminal state.
+enum FileTaskExit {
+    /// The job was cancelled.
+    Cancelled,
+    /// The task panicked or was aborted; the join error says which.
+    Panicked(String),
+    /// The task returned without recording a terminal state.
+    NoTerminalState,
+}
+
 /// Record a non-standard file-task exit as an explicit terminal failure.
 ///
 /// This path is only for supervision failures: task panic, task cancellation,
@@ -224,28 +269,25 @@ async fn record_abnormal_file_task_exit(
     job_id: &JobId,
     filename: &str,
     role: &str,
-    job_cancelled: bool,
-    join_error: Option<String>,
+    exit: FileTaskExit,
 ) {
     let finished_at = unix_now();
-    let (message, category, outcome) = if job_cancelled {
-        (
+    let (message, category, outcome) = match exit {
+        FileTaskExit::Cancelled => (
             format!("{role} stopped after job cancellation before recording a terminal file state"),
             FailureCategory::Cancelled,
             AttemptOutcome::Cancelled,
-        )
-    } else if let Some(join_error) = join_error {
-        (
+        ),
+        FileTaskExit::Panicked(join_error) => (
             format!("{role} panicked before recording a terminal file state: {join_error}"),
             FailureCategory::System,
             AttemptOutcome::Failed,
-        )
-    } else {
-        (
+        ),
+        FileTaskExit::NoTerminalState => (
             format!("{role} exited without recording a terminal file state"),
             FailureCategory::System,
             AttemptOutcome::Failed,
-        )
+        ),
     };
 
     sink.finish_file_attempt(

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::info;
 
-use crate::media::MediaExtensions;
+use crate::media::{MediaExtensions, MediaLookup, Missed};
 use crate::runner::DispatchHostContext;
 use crate::store::RunnerJobSnapshot;
 
@@ -55,8 +55,10 @@ pub(crate) enum SearchedPlace {
         root: PathBuf,
         subdir: String,
     },
-    /// A media mapping inferred from the client's source path.
-    InferredMediaMapping { dir: PathBuf },
+    /// A media mapping inferred from the client's source path: the mapping's
+    /// root and the repo-relative subdir under it, kept apart so the
+    /// subdir's spelling is checked name by name.
+    InferredMediaMapping { root: PathBuf, subdir: String },
     /// One of the server's configured media roots.
     ServerMediaRoot { root: PathBuf },
 }
@@ -113,7 +115,7 @@ impl SearchedPlace {
                 ..
             } => beside(media_dir.as_ref(), transcript),
             Self::LocalMediaMapping { root, subdir, .. } => vec![under(root, subdir)],
-            Self::InferredMediaMapping { dir } => vec![SearchDirectory::at(dir.clone())],
+            Self::InferredMediaMapping { root, subdir } => vec![under(root, subdir)],
             Self::ServerMediaRoot { root } => vec![SearchDirectory::at(root.clone())],
         }
     }
@@ -149,8 +151,12 @@ impl fmt::Display for SearchedPlace {
                 "local media mapping '{key}' root '{}' subdir '{subdir}'",
                 root.display()
             ),
-            Self::InferredMediaMapping { dir } => {
-                write!(f, "inferred media mapping '{}'", dir.display())
+            Self::InferredMediaMapping { root, subdir } => {
+                write!(
+                    f,
+                    "inferred media mapping '{}'",
+                    root.join(subdir).display()
+                )
             }
             Self::ServerMediaRoot { root } => {
                 write!(f, "server media root '{}'", root.display())
@@ -163,6 +169,12 @@ impl fmt::Display for SearchedPlace {
 pub(crate) struct MediaSearch {
     stem: String,
     searched: Vec<SearchedPlace>,
+    /// What a place held that was not the media but belongs in the error if
+    /// nothing is found: a file spelled differently, a directory that
+    /// could not be listed. Neither stops the search, because a host with a
+    /// case-sensitive filesystem would simply move on, and every host must
+    /// give the same answer.
+    notes: Vec<Missed>,
 }
 
 impl MediaSearch {
@@ -170,6 +182,7 @@ impl MediaSearch {
         Self {
             stem: stem.into(),
             searched: Vec::new(),
+            notes: Vec::new(),
         }
     }
 
@@ -195,12 +208,14 @@ impl MediaSearch {
         for directory in directories {
             let stem = self.stem.clone();
             match crate::media::access::access(directory.root, move |root| {
-                MediaExtensions::find_in_blocking(&root.path().join(directory.subdir), &stem)
+                MediaExtensions::find_under(root.path(), &directory.subdir, &stem)
             })
             .await
             {
-                Ok(Some(found)) => return Ok(Some(found)),
-                Ok(None) | Err(crate::media::access::MediaAccessError::Missing { .. }) => {}
+                Ok(MediaLookup::Found(found)) => return Ok(Some(found)),
+                Ok(MediaLookup::Missed(missed)) => self.notes.push(missed),
+                Ok(MediaLookup::Absent)
+                | Err(crate::media::access::MediaAccessError::Missing { .. }) => {}
                 Err(error) => {
                     return Err(UnresolvedMedia {
                         message: error.to_string(),
@@ -223,11 +238,13 @@ impl MediaSearch {
         &self.searched
     }
 
-    /// The rendered list, joined for an error message.
+    /// The rendered list, joined for an error message, followed by anything
+    /// a place held that was not the media.
     pub(crate) fn describe(&self) -> String {
         self.searched
             .iter()
             .map(SearchedPlace::to_string)
+            .chain(self.notes.iter().map(Missed::to_string))
             .collect::<Vec<_>>()
             .join("; ")
     }
@@ -254,6 +271,37 @@ mod tests {
         };
         assert_eq!(search.try_place(place.clone()).await.unwrap(), None);
         assert_eq!(search.places(), [place]);
+    }
+
+    /// A file spelled differently does not end the search (a
+    /// case-sensitive host would move on), the next place's exact file is used, and the near miss
+    /// is kept for the error in case nothing else turns up.
+    #[tokio::test]
+    async fn a_near_miss_is_reported_and_the_search_moves_on() {
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+        write(&first.path().join("Talk.WAV"));
+        write(&second.path().join("talk.mp3"));
+        let mut search = MediaSearch::for_stem("talk");
+        let found = search
+            .try_place(SearchedPlace::ServerMediaRoot {
+                root: first.path().to_path_buf(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(found, None);
+        let described = search.describe();
+        assert!(
+            described.contains("Talk.WAV") && described.contains("letter case"),
+            "{described}"
+        );
+        let found = search
+            .try_place(SearchedPlace::ServerMediaRoot {
+                root: second.path().to_path_buf(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(found, Some(second.path().join("talk.mp3")));
     }
 
     #[tokio::test]
@@ -555,10 +603,10 @@ pub(crate) async fn resolve_transcript_media(
                     &host.config().media_mappings,
                 )
         {
-            let search_dir = repo_subdir.resolve_on_server(&inferred_root);
             original_audio_path = search
                 .try_place(SearchedPlace::InferredMediaMapping {
-                    dir: search_dir.as_path().to_path_buf(),
+                    root: inferred_root.as_path().to_path_buf(),
+                    subdir: repo_subdir.as_str().to_owned(),
                 })
                 .await?;
             if original_audio_path.is_some() {

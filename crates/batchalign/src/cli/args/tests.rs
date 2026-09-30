@@ -3062,3 +3062,27 @@ fn speaker_identify_cross_argument_problems_are_refused_before_options_are_built
         "build_typed_options must surface the refusal, not return an absent value"
     );
 }
+
+/// `worker start` must parse. Its own `--engine-overrides: String` collided
+/// with the global typed `--engine-overrides`, so clap panicked on every
+/// `batchalign3 worker start` ("Mismatch between definition and access of
+/// `engine_overrides`"). The daemon now takes the global, parsed flag.
+#[test]
+fn parse_worker_start_with_engine_overrides() {
+    let cli = Cli::try_parse_from([
+        "batchalign3",
+        "--engine-overrides",
+        r#"{"asr": "tencent"}"#,
+        "worker",
+        "start",
+        "--profile",
+        "gpu",
+    ])
+    .expect("worker start parses");
+    assert!(matches!(cli.command, Commands::Worker(_)));
+    let overrides = cli
+        .global
+        .engine_overrides
+        .expect("the global flag carries the daemon's engine selection");
+    assert_eq!(overrides.asr, Some(AsrEngineName::HkTencent));
+}

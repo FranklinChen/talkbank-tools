@@ -857,9 +857,9 @@ async fn stanza_sequential_dispatch_reuses_worker() {
 /// request; never the queue-wait while earlier requests are being served.
 ///
 /// Reproduces an operator's hung Malayalam corpus job (`04a11009-1d0`, 2026-04-25)
-/// at unit-test scale. With `gpu_thread_pool_size = 1` the Python worker's
-/// `ThreadPoolExecutor` strictly serializes execute_v2; with
-/// `test_delay_ms = 200` each response takes ~200 ms; with N=8 callers the
+/// at unit-test scale. With `gpu_thread_pool_size = 2` the Python worker's
+/// `ThreadPoolExecutor` serves two execute_v2 at a time; with
+/// `test_delay_ms = 200` each response takes ~200 ms; with N=16 callers the
 /// last response arrives around t = 1.6 s. With `audio_task_timeout_s = 1`
 /// the per-request timeout is 1 s; well above any single response's
 /// work-time but below the *queue-wait + work-time* the late callers see
@@ -879,11 +879,16 @@ async fn stanza_sequential_dispatch_reuses_worker() {
 async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_timeout() {
     let python = require_python!();
 
-    // Force strict serialization on the Python side and a generous-by-itself,
-    // tight-when-summed per-request timeout. With 1 thread × 200 ms ×
-    // 8 callers the last response arrives ~1.6 s after dispatch; ahead of
+    // A shared worker serving two requests at a time, and a generous-by-itself,
+    // tight-when-summed per-request timeout. With 2 threads × 200 ms ×
+    // 16 callers the last response arrives ~1.6 s after dispatch; ahead of
     // any individual request's work-time but past the per-request 1 s
     // budget if (and only if) queue-wait is being charged against it.
+    //
+    // Two threads, not one: since 2026-09-30 a GPU worker admitting ONE
+    // request at a time is not a shared worker at all
+    // (`batchalign::worker::serving::WorkerServing`), so the pool scales it
+    // out instead of queueing on it, and this queue could not form.
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: 600,
@@ -892,7 +897,7 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: WorkerRuntimeConfig {
-            gpu_thread_pool_size: 1,
+            gpu_thread_pool_size: 2,
             ..Default::default()
         },
         audio_task_timeout_s: 1,
@@ -909,7 +914,7 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
     .await
     .expect("ASR is a dispatchable task");
 
-    let n = 8;
+    let n = 16;
     let mut handles = Vec::new();
     for i in 0..n {
         let request = gpu_execute_request(&format!("queue-wait-{i}"));
@@ -1503,3 +1508,9 @@ async fn concurrent_callers_at_a_cold_key_spawn_exactly_one_worker() {
 #[cfg(unix)]
 #[path = "gpu_concurrent_dispatch/recovery.rs"]
 mod recovery;
+
+#[path = "gpu_concurrent_dispatch/cancellation.rs"]
+mod cancellation;
+
+#[path = "gpu_concurrent_dispatch/serving.rs"]
+mod serving;

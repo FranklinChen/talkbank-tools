@@ -67,9 +67,10 @@ impl ExecutionEngine {
     }
 
     /// Borrow the underlying worker pool for cancel-driven shutdown.
-    /// The cancel pathway in `ServerBackend::cancel_job` calls
-    /// `pool.shutdown_workers_for_job` after the store cancel completes;
-    /// without this accessor, the backend has no way to reach the pool.
+    /// The cancel pathway in `ServerBackend::cancel_job` detaches the job's
+    /// in-flight workers from the pool before publishing the cancel and
+    /// terminates them after; without this accessor, the backend has no way
+    /// to reach the pool.
     pub(crate) fn pool(&self) -> &Arc<WorkerPool> {
         &self.context.pool
     }
@@ -164,9 +165,8 @@ impl ServerExecutionHost {
     }
 
     /// Access the underlying worker pool. Backends call this from
-    /// `cancel_job` to invoke `pool.shutdown_workers_for_job`, which
-    /// SIGTERMs every in-flight worker registered to the cancelled job
-    /// (see `worker/pool/job_tracker.rs`).
+    /// `cancel_job` to detach and then terminate every in-flight worker
+    /// registered to the cancelled job (see `worker/pool/job_tracker.rs`).
     pub(crate) fn pool(&self) -> &Arc<WorkerPool> {
         self.engine.pool()
     }

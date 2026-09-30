@@ -97,6 +97,13 @@ batchalign3 serve status --server http://myserver:8000
 batchalign3 serve stop
 ```
 
+`serve stop` asks the server to shut down and waits up to 60 seconds for it to
+finish: the server records its running jobs as interrupted (they resume on the
+next start) and retires its workers. Only a server that has not finished by
+then is killed. Its workers never outlive it either way: every worker watches
+the server that launched it and exits when that process exits, even in the
+middle of an inference.
+
 Inspect remote jobs:
 
 ```bash

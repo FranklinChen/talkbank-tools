@@ -16,9 +16,13 @@ use crate::cli::args::{WorkerAction, WorkerArgs, WorkerStartArgs, WorkerStopArgs
 use crate::cli::error::CliError;
 
 /// Dispatch the `batchalign3 worker` subcommand.
-pub async fn run(args: &WorkerArgs, verbose: u8) -> Result<(), CliError> {
+pub async fn run(
+    args: &WorkerArgs,
+    verbose: u8,
+    engine_overrides: Option<&crate::types::engines::EngineOverrides>,
+) -> Result<(), CliError> {
     match &args.action {
-        WorkerAction::Start(start_args) => start(start_args, verbose),
+        WorkerAction::Start(start_args) => start(start_args, verbose, engine_overrides),
         WorkerAction::List => list().await,
         WorkerAction::Stop(stop_args) => stop(stop_args).await,
     }
@@ -28,10 +32,14 @@ pub async fn run(args: &WorkerArgs, verbose: u8) -> Result<(), CliError> {
 ///
 /// Execs `python -m batchalign.worker --transport tcp --profile ... --port ...`.
 /// On Unix this replaces the current process; on Windows it spawns and waits.
-fn start(args: &WorkerStartArgs, verbose: u8) -> Result<(), CliError> {
+fn start(
+    args: &WorkerStartArgs,
+    verbose: u8,
+    engine_overrides: Option<&crate::types::engines::EngineOverrides>,
+) -> Result<(), CliError> {
     let python_path = resolve_python_executable();
 
-    if WorkerProfile::try_from_name(&args.profile).is_none() {
+    let Some(profile) = WorkerProfile::try_from_name(&args.profile) else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
@@ -40,7 +48,7 @@ fn start(args: &WorkerStartArgs, verbose: u8) -> Result<(), CliError> {
             ),
         )
         .into());
-    }
+    };
 
     let mut cmd = Command::new(&python_path);
     // The daemon records this build in its registry entry; a server of a
@@ -65,13 +73,34 @@ fn start(args: &WorkerStartArgs, verbose: u8) -> Result<(), CliError> {
         cmd.arg("--port").arg(args.port.to_string());
     }
 
-    if !args.engine_overrides.is_empty() {
-        cmd.arg("--engine-overrides").arg(&args.engine_overrides);
+    if let Some(overrides) = engine_overrides {
+        cmd.arg("--engine-overrides")
+            .arg(overrides.to_dispatch_json_string());
     }
 
     if verbose > 0 {
         cmd.arg("--verbose").arg(verbose.to_string());
     }
+
+    // Serve the way a server on this host would route to this daemon once it
+    // adopts it: the same host-resolved device policy, the same decision.
+    let (server_config, warnings) = crate::config::load_validated_config_from_layout(
+        &crate::config::RuntimeLayout::from_env(),
+        None,
+    )?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+    let effective = crate::host_facts::EffectiveConfig::resolve_from_server_config(&server_config);
+    if effective.force_cpu {
+        cmd.arg("--force-cpu");
+    }
+    let runtime = crate::worker::handle::WorkerRuntimeConfig {
+        force_cpu: effective.force_cpu,
+        gpu_thread_pool_size: effective.gpu_thread_pool_size,
+        ..crate::worker::handle::WorkerRuntimeConfig::default()
+    };
+    cmd.args(crate::worker::serving::WorkerServing::decide(profile, &runtime).worker_args());
 
     eprintln!(
         "Starting {} worker (lang={}, host={}, port={})...",

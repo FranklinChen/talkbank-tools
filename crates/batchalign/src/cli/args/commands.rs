@@ -1548,9 +1548,9 @@ pub struct WorkerStartArgs {
     /// TCP bind address.
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
-    /// Engine overrides as JSON (e.g. '{"asr":"tencent"}').
-    #[arg(long, default_value = "")]
-    pub engine_overrides: String,
+    // Engine overrides come from the global `--engine-overrides`, already
+    // parsed; a second, string-typed flag of the same name here made clap
+    // panic on every `worker start`.
 }
 
 /// Arguments for `worker stop`.

@@ -22,6 +22,7 @@ mod context;
 pub(crate) mod debug_dumper;
 mod dispatch;
 mod execution;
+mod job_scope;
 mod policy;
 mod routing;
 mod test_echo;

@@ -82,8 +82,15 @@ engine)` key.
 
 - **User control**: `max_workers_per_key` in `server.yaml` (not a
   CLI flag, operator concern).
-- **Default**: 8 per key. GPU profile: 1 process (concurrent via
-  threads). Stanza profile: auto-tuned. IO profile: 1 process.
+- **Default**: 8 per key. GPU profile: 1 process. Stanza profile:
+  auto-tuned. IO profile: 1 process.
+- **Which workers it governs**: every key whose workers serve one
+  request at a time (`WorkerServing::OneRequestPerProcess`,
+  `worker/serving.rs`). That includes GPU workers under `force_cpu` or
+  `gpu_thread_pool_size: 1`, the normal state of a CPU-only host, where
+  raising it is how GPU commands use more cores. A key whose worker is
+  a shared concurrent process (`SharedConcurrent`) has exactly one
+  process and Layer 3 is its concurrency.
 - **Implementation**: `worker/pool/mod.rs` manages worker
   lifecycle. Workers are spawned lazily and cached.
 
@@ -95,7 +102,10 @@ shared GPU worker.
 - **User control**: `gpu_thread_pool_size` in `server.yaml`
   (default 4). Single knob sets both Python
   `ThreadPoolExecutor(max_workers=K)` and Rust-side
-  `dispatch_semaphore` permit count.
+  `dispatch_semaphore` permit count. It applies only while the worker
+  is shared: with `force_cpu`, or with `K = 1`, the server launches GPU
+  workers with `--serving sequential` and scales them per key (Layer 2)
+  instead of queueing every request on one process.
 - **Default**: 4. On Apple Silicon (MPS excluded for batchalign3),
   set to 1, there is no compute parallelism to gain, and a higher
   value just means CPU-bound inferences contending for cores.

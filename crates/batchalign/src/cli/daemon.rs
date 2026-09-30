@@ -374,7 +374,7 @@ fn stop_profile(profile: DaemonProfile) -> Result<bool, CliError> {
         None => return Ok(false),
     };
 
-    let killed = kill_process(info.pid);
+    let killed = stop_server_process(info.pid);
     cleanup_state_file_for(profile, dir);
     Ok(killed)
 }
@@ -498,7 +498,7 @@ async fn ensure_daemon_locked(
                     },
                     crate::build_hash(),
                 );
-                kill_process(info.pid);
+                stop_server_process(info.pid);
                 cleanup_state_file_for(profile, dir);
                 return start_daemon(
                     profile,
@@ -520,7 +520,7 @@ async fn ensure_daemon_locked(
                     info.allow_mps,
                     device_flags.resolved_allow_mps,
                 );
-                kill_process(info.pid);
+                stop_server_process(info.pid);
                 cleanup_state_file_for(profile, dir);
                 return start_daemon(
                     profile,
@@ -590,7 +590,7 @@ async fn ensure_daemon_locked(
                 return Ok(Some(format!("http://127.0.0.1:{published}")));
             }
 
-            kill_process(info.pid);
+            stop_server_process(info.pid);
             cleanup_state_file_for(profile, dir);
             return start_daemon(
                 profile,
@@ -1131,7 +1131,7 @@ async fn start_daemon(
                 profile.label(),
                 log_path.display()
             );
-            kill_process(pid);
+            stop_server_process(pid);
             cleanup_state_file_for(profile, dir);
             return Ok(None);
         }
@@ -1153,7 +1153,7 @@ async fn start_daemon(
         profile = profile.label(),
         port, "Daemon failed to become healthy"
     );
-    kill_process(pid);
+    stop_server_process(pid);
     cleanup_state_file_for(profile, dir);
 
     eprintln!(
@@ -1285,7 +1285,8 @@ fn cleanup_state_file_for(profile: DaemonProfile, dir: &Path) {
     let _ = std::fs::remove_file(profile.state_file(dir));
 }
 
-fn is_process_alive(pid: u32) -> bool {
+/// Whether a process exists, via `kill(pid, 0)`.
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, 0) == 0
@@ -1297,10 +1298,25 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-/// Kill a daemon process: SIGTERM the process group, then the process
-/// directly, then wait up to 3 seconds and escalate to SIGKILL if still
-/// alive. Returns `true` if the process was signalled at all.
-fn kill_process(pid: u32) -> bool {
+/// How long a stop waits for a server's own graceful shutdown before SIGKILL.
+///
+/// Long enough for the server to record its running jobs as interrupted
+/// (runners get fifteen seconds) and retire its workers (up to seven seconds
+/// each for a shared one). The old three-second wait always ended in SIGKILL
+/// when a job was running, skipping that teardown.
+pub(crate) const GRACEFUL_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a stop waits silently before saying it is still waiting.
+const QUIET_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Stop a server process: SIGTERM its process group and the process, wait up
+/// to [`GRACEFUL_STOP_DEADLINE`] for it to finish shutting down, then SIGKILL.
+/// Returns `true` if the process was signalled at all.
+///
+/// The one stop routine for every server this CLI stops, the main and sidecar
+/// daemons and `serve stop` alike. Its workers exit with it however it ends
+/// (they watch `--supervisor-pid`); the wait is for an orderly teardown.
+pub(crate) fn stop_server_process(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let pgid_ok = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) == 0 };
@@ -1310,17 +1326,21 @@ fn kill_process(pid: u32) -> bool {
             return false;
         }
 
-        // Wait for the process to exit before returning so the port is
-        // released by the time the caller tries to rebind.
-        for _ in 0..6 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if !is_process_alive(pid) {
-                return true;
-            }
+        if wait_for_exit(pid, QUIET_STOP_WAIT) {
+            return true;
+        }
+        eprintln!(
+            "Waiting for the server (PID {pid}) to finish shutting down (up to {}s)...",
+            GRACEFUL_STOP_DEADLINE.as_secs()
+        );
+        if wait_for_exit(pid, GRACEFUL_STOP_DEADLINE - QUIET_STOP_WAIT) {
+            return true;
         }
 
-        // Still alive after 3 seconds -- escalate to SIGKILL.
-        debug!(pid, "Process did not exit after SIGTERM, sending SIGKILL");
+        eprintln!(
+            "warning: server (PID {pid}) did not finish shutting down in {}s; killing it",
+            GRACEFUL_STOP_DEADLINE.as_secs()
+        );
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
@@ -1333,6 +1353,24 @@ fn kill_process(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+/// Whether `pid` exits within `limit`. The server is not our child, so there
+/// is no wait handle to block on; its liveness is checked every half second,
+/// first immediately.
+#[cfg(unix)]
+fn wait_for_exit(pid: u32, limit: std::time::Duration) -> bool {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    let started = std::time::Instant::now();
+    loop {
+        if !is_process_alive(pid) {
+            return true;
+        }
+        if started.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(POLL);
     }
 }
 

@@ -90,7 +90,7 @@ impl WorkerPool {
 
         // TCP worker shortcut: if a TCP worker already exists for this
         // profile/lang, skip spawning: the worker is already running.
-        if key.target.is_concurrent() {
+        if self.serving(key.target).is_shared() {
             if matches!(key.target, WorkerTarget::Profile(_))
                 && self.gpu_tcp_workers.lock().await.contains_key(&key)
             {
@@ -119,11 +119,11 @@ impl WorkerPool {
             }
         }
 
-        // GPU workers use the shared concurrent worker map. Pre-creating the
+        // Shared-serving keys use the shared worker map. Pre-creating the
         // worker here ensures it's ready before file dispatch begins, avoiding
         // the TOCTOU race in `get_or_create_gpu_worker` where multiple tasks
         // would each try to spawn their own worker process.
-        if key.target.is_concurrent() {
+        if self.serving(key.target).is_shared() {
             match self.get_or_create_gpu_worker(&key).await {
                 Ok(_) => {
                     info!(

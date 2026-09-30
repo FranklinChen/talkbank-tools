@@ -255,7 +255,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
           python-version: "3.13"

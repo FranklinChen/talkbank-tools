@@ -2,8 +2,8 @@
 //!
 //! Without this, cancel waits for the in-flight worker call (Whisper,
 //! Stanza, etc.) to complete naturally, minutes for long ASR passes.
-//! `WorkerPool::shutdown_workers_for_job` drains the relevant PIDs
-//! and SIGTERMs them so the dispatch future returns BrokenPipe and
+//! `WorkerPool::detach_workers_for_job` drains the relevant PIDs
+//! and `JobWorkersToTerminate::terminate` SIGTERMs them so the dispatch future returns BrokenPipe and
 //! the runner unwinds at the next iteration.
 //!
 //! Registration is opt-in: callers under a `CURRENT_JOB_ID` scope
@@ -30,6 +30,27 @@ tokio::task_local! {
 
 pub(crate) fn current_job_id() -> Option<JobId> {
     CURRENT_JOB_ID.try_with(|j| j.clone()).ok()
+}
+
+/// Carry the caller's job, if it has one, into work about to be spawned.
+///
+/// `tokio::spawn` does not inherit task-locals, so a dispatch inside a spawned
+/// task would otherwise register against no job, and a cancel's worker kill
+/// (`WorkerPool::detach_workers_for_job`) could not find it. Every spawn under
+/// a job that can reach a worker wraps its future in this, or goes through the
+/// runner's file-task scope, which does the same and also races the cancel.
+/// Outside a job (direct CLI runs, health probes) the work runs unregistered,
+/// as it would have in place.
+pub(crate) fn inherit_job<F: std::future::Future>(
+    work: F,
+) -> impl std::future::Future<Output = F::Output> {
+    let job = current_job_id();
+    async move {
+        match job {
+            Some(job_id) => CURRENT_JOB_ID.scope(job_id, work).await,
+            None => work.await,
+        }
+    }
 }
 
 /// Thread-safe map from job to checked-out worker PIDs. Uses

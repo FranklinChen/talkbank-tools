@@ -141,3 +141,28 @@ pub async fn prepare_workers(
     );
     Ok(prepared)
 }
+
+/// Echo workers behind the REAL job runner, for tests of runner behaviour
+/// (cancellation, file-task supervision) at the daemon HTTP boundary.
+///
+/// [`prepare_workers`] couples two things for a test-echo pool: the workers
+/// answer with placeholders, AND the runner short-circuits every job before
+/// dispatch, because a placeholder must never be read as a result. A test of
+/// what the runner does WHILE a dispatch is in flight needs the first without
+/// the second; it must never read a result, and it is refused a pool whose
+/// workers are real.
+#[doc(hidden)]
+pub async fn prepare_echo_workers_behind_live_runner(
+    pool_config: PoolConfig,
+) -> Result<PreparedWorkers, crate::error::ServerError> {
+    if !pool_config.test_echo {
+        return Err(crate::error::ServerError::Validation(
+            "a live runner over echo workers needs a test-echo pool".to_owned(),
+        ));
+    }
+    let prepared = prepare_workers(pool_config, RegistryDiscovery::Ignore).await?;
+    Ok(PreparedWorkers {
+        pool: prepared.pool,
+        test_echo_mode: false,
+    })
+}

@@ -15,6 +15,7 @@ use super::config::WorkerConfig;
 use super::protocol::TcpReadySignal;
 use crate::worker::error::WorkerError;
 use crate::worker::provider_credentials::HkAsrCredentialSources;
+use crate::worker::serving::WorkerServing;
 use crate::worker::target::task_name;
 use crate::worker::{WorkerBootstrapMode, WorkerProfile, WorkerTarget};
 
@@ -58,6 +59,13 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
     cmd.arg("--num-speakers")
         .arg(config.num_speakers.0.to_string());
 
+    // The worker watches this process and exits with it, including while it
+    // is in the middle of a request: a stdio worker's results can reach no
+    // one once the server holding its pipes is gone, however the server
+    // ended (a graceful stop, a SIGKILL after a stop timed out, a crash).
+    cmd.arg("--supervisor-pid")
+        .arg(std::process::id().to_string());
+
     if !config.engine_overrides.is_empty() {
         cmd.arg("--engine-overrides").arg(&config.engine_overrides);
     }
@@ -74,10 +82,7 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
         cmd.arg("--verbose").arg(config.verbose.to_string());
     }
 
-    if config.profile == WorkerProfile::Gpu {
-        cmd.arg("--gpu-thread-pool-size")
-            .arg(config.runtime.gpu_thread_pool_size.to_string());
-    }
+    cmd.args(serving_args(config));
 
     if config.test_delay_ms > 0 {
         cmd.arg("--test-delay-ms")
@@ -188,10 +193,7 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
         cmd.arg("--verbose").arg(config.verbose.to_string());
     }
 
-    if config.profile == WorkerProfile::Gpu {
-        cmd.arg("--gpu-thread-pool-size")
-            .arg(config.runtime.gpu_thread_pool_size.to_string());
-    }
+    cmd.args(serving_args(config));
 
     if config.test_delay_ms > 0 {
         cmd.arg("--test-delay-ms")
@@ -326,6 +328,12 @@ async fn read_tcp_ready_signal<R: tokio::io::AsyncBufRead + Unpin>(
             Err(e) => return Err(format!("Failed to read TCP daemon stderr: {e}")),
         }
     }
+}
+
+/// How this worker serves requests: the pool's decision, the same value the
+/// pool routes by, which the worker obeys rather than deriving its own.
+fn serving_args(config: &WorkerConfig) -> [String; 4] {
+    WorkerServing::decide(config.bootstrap_target().profile_kind(), &config.runtime).worker_args()
 }
 
 /// Build environment variables for HK ASR provider credentials.

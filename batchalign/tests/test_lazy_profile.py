@@ -26,7 +26,9 @@ def _reset_state() -> None:
 
 def _build_gpu_bootstrap():
     """Build a GPU profile bootstrap runtime for testing."""
-    args = parse_worker_args(["--profile", "gpu", "--lazy", "--lang", "eng"])
+    args = parse_worker_args(
+        ["--profile", "gpu", "--lazy", "--lang", "eng", "--serving", "sequential"]
+    )
     return build_worker_bootstrap_runtime(
         args,
         environ={"HOME": "/tmp/test-home"},
@@ -166,9 +168,13 @@ class TestCLILazyFlag:
     """Verify the --lazy CLI flag is parsed correctly."""
 
     def test_lazy_flag_parsed(self) -> None:
-        args = parse_worker_args(["--profile", "gpu", "--lazy", "--lang", "eng"])
+        args = parse_worker_args(
+            ["--profile", "gpu", "--lazy", "--lang", "eng", "--serving", "sequential"]
+        )
         assert args.lazy is True
 
     def test_no_lazy_flag_default(self) -> None:
-        args = parse_worker_args(["--profile", "gpu", "--lang", "eng"])
+        args = parse_worker_args(
+            ["--profile", "gpu", "--lang", "eng", "--serving", "sequential"]
+        )
         assert args.lazy is False

@@ -542,8 +542,8 @@ mod tests {
         // Calls the real resolution verb. This test used to re-implement the
         // production loop and then assert its own copy worked, so it could not
         // have failed for any change to production code.
-        let found = crate::media::MediaExtensions::find_in(media_root.path(), "ACWT01a").await;
-        assert!(found.is_some(), "Should find audio in media_root");
-        assert!(found.unwrap().ends_with("ACWT01a.wav"));
+        let found =
+            crate::media::MediaExtensions::find_under(media_root.path(), Path::new(""), "ACWT01a");
+        assert_eq!(found, crate::media::MediaLookup::Found(wav));
     }
 }

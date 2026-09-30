@@ -75,30 +75,13 @@ impl WorkerProfile {
         }
     }
 
-    /// Like `is_concurrent`, but takes an explicit free-threaded flag.
-    ///
-    /// Use this in tests or contexts where the runtime flag is supplied externally.
-    /// The non-parametric `is_concurrent()` variant lives in `batchalign::worker::target`
-    /// because it calls `batchalign`'s `is_free_threaded_runtime()`.
-    ///
-    /// GPU workers always use concurrent serving (PyTorch releases the GIL during
-    /// CUDA kernels). Stanza workers use concurrent serving only when running on
-    /// free-threaded Python 3.14t, where OS threads share one model instance
-    /// instead of each process holding a full private copy.
-    pub fn is_concurrent_for_runtime(&self, free_threaded: bool) -> bool {
-        match self {
-            Self::Gpu => true,
-            // Stanza workers share one model via ThreadPoolExecutor on 3.14t,
-            // giving the same throughput as separate processes with 77% less
-            // memory (see python-versioning.md benchmarks, 2026-02-19).
-            Self::Stanza => free_threaded,
-            Self::Io => false,
-        }
-    }
-
     /// Default maximum worker processes per ``(profile, lang, engine_overrides)`` key.
     ///
-    /// GPU: 1 process (concurrent via threads).
+    /// GPU: 1 process. Where a GPU worker serves several requests at once on
+    /// threads, one process is the whole capacity. Where it serves one request
+    /// at a time (`batchalign::worker::serving::WorkerServing`), this default
+    /// keeps one process per key, and an operator raises
+    /// `max_workers_per_key` to scale out; the memory gate admits each spawn.
     /// Stanza: `auto_tune` (multiple processes for CPU parallelism).
     /// IO: 1 process (lightweight).
     pub fn default_max_workers(&self, auto_tune: usize) -> usize {

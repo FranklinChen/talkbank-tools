@@ -95,7 +95,7 @@ pub(crate) async fn dispatch_morphotag_job(
             .cloned();
         let progress_port = reporter.port(file_input.filename.clone());
 
-        joinset.spawn(async move {
+        joinset.spawn(crate::worker::pool::job_tracker::inherit_job(async move {
             let _permit = permit;
 
             // Open this file's attempt only AFTER its semaphore permit is
@@ -191,7 +191,7 @@ pub(crate) async fn dispatch_morphotag_job(
                 options_for_task.should_merge_abbrev,
             )
             .await;
-        });
+        }));
     }
 
     while let Some(join_result) = joinset.join_next().await {

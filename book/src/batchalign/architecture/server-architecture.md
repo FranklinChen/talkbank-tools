@@ -380,12 +380,36 @@ purpose: malformed request payloads and unreadable prepared artifacts stay in
 is reported as `runtime_failure`. That keeps bad Python/SDK result shapes from
 masquerading as caller input mistakes.
 
-### Concurrent dispatch for GPU workers
+### How a worker serves requests: one owner
 
-GPU profile workers support concurrent V2 requests via request_id multiplexing:
+Whether one worker process serves several requests at once is decided once, in
+Rust, by `WorkerServing::decide` (`worker/serving.rs`), from the same runtime
+inputs the worker is launched with. The pool routes by that value and passes it
+to Python as `--serving concurrent|sequential`; the worker obeys it and does not
+derive its own.
 
-- Rust sends multiple `execute_v2` requests to one GPU worker without waiting for responses
-- Python's `_serve_stdio_concurrent()` dispatches to a `ThreadPoolExecutor` (4 threads)
+| Serving | When | How the pool dispatches |
+|---|---|---|
+| `SharedConcurrent { in_flight }` | GPU profile, not `force_cpu`, `gpu_thread_pool_size` above 1; Stanza on free-threaded Python | One process per key (`gpu_workers` / `SharedGpuWorker`), up to `in_flight` requests multiplexed into it |
+| `OneRequestPerProcess` | GPU profile with `force_cpu` or a pool size of 1; Stanza on GIL Python; IO | Exclusive checkout from up to `max_workers_per_key` processes per key |
+
+The two halves used to have separate owners. The pool treated every
+GPU-profile worker as shared and kept one per key; the worker probed CUDA and,
+on a CPU-only host, served its requests one after another. On such a host every
+request for a key queued on one process while `max_workers_per_key` went
+unused, and concurrent Whisper UTR requests ran strictly one at a time.
+Forced-CPU work is one request per process because
+each CPU PyTorch request already uses every core; threads in one process only
+oversubscribe them, while separate processes let the configured capacity and
+the memory gate decide how many run.
+
+### Concurrent dispatch for shared workers
+
+A `SharedConcurrent` worker supports concurrent V2 requests via request_id
+multiplexing:
+
+- Rust sends multiple `execute_v2` requests to one worker without waiting for responses
+- Python's `_serve_stdio_concurrent()` dispatches to a `ThreadPoolExecutor` of `in_flight` threads
 - Responses carry `request_id` fields, Rust's background reader routes them to pending oneshot channels
 - Non-V2 ops (health, capabilities, shutdown) use a separate sequential control channel
 
@@ -456,6 +480,16 @@ polling, validation, and durable commit through `batchalign::revai`
 Only a typed cache miss can authorize a paid request, and a per-key lease makes
 concurrent identical requests converge on one service crossing. The same
 server-owned boundary handles Rev-backed timed-word recovery for `align` UTR.
+
+The normalized UTR ASR cache has the same single flight, for every UTR engine
+(`runner/dispatch/utr.rs`). A pinned-plan lookup takes an `InferenceLease` on
+the cache key before reading, and the miss it returns holds that lease through
+inference and commit (`UtrAsrCacheMiss` then `UtrAsrInferred`). A concurrent
+identical request, keyed exactly as the cache row is (the key names engine,
+audio identity and language, which fix the namespace), waits and then replays
+the stored row. Two jobs over the same recordings used to run the same
+long Whisper pass once each. If the leader is cancelled or fails, its
+lease drops and the next waiter finds no row and becomes the leader.
 
 The legacy batch preflight upload path is deliberately disabled: it submitted
 before evidence lookup and could not enforce the typed miss authorization

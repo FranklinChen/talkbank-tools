@@ -68,6 +68,10 @@ pub async fn run(args: &ReplayArgs) -> Result<(), CliError> {
     // 3. Spawn a fresh worker
     let mut cmd = Command::new(&python);
     cmd.args(["-m", "batchalign.worker", "--task", task, "--lang", lang]);
+    // A replay sends one request at a time to a worker this process owns.
+    cmd.args(crate::worker::serving::WorkerServing::OneRequestPerProcess.worker_args());
+    cmd.arg("--supervisor-pid")
+        .arg(std::process::id().to_string());
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

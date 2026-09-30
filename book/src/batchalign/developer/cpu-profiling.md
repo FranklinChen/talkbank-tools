@@ -38,6 +38,7 @@ and source revision on both sides:
 ```bash
 uv run --no-sync python - <<'PY'
 import json
+import os
 import subprocess
 import sys
 import time
@@ -46,7 +47,8 @@ with open("worker-imports.log", "w") as imports:
     started = time.monotonic()
     with subprocess.Popen(
         [sys.executable, "-X", "importtime", "-m", "batchalign.worker",
-         "--test-echo", "--profile", "gpu", "--force-cpu"],
+         "--test-echo", "--profile", "gpu", "--force-cpu",
+         "--serving", "sequential", "--supervisor-pid", str(os.getpid())],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=imports,
         text=True,
     ) as worker:

@@ -104,7 +104,18 @@ def _run_lazy_stanza_worker(
     the process returns.
     """
     proc = subprocess.Popen(
-        [sys.executable, "-m", "batchalign.worker", "--lazy", "--profile", "stanza"],
+        [
+            sys.executable,
+            "-m",
+            "batchalign.worker",
+            "--lazy",
+            "--profile",
+            "stanza",
+            "--serving",
+            "sequential",
+            "--supervisor-pid",
+            str(os.getpid()),
+        ],
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

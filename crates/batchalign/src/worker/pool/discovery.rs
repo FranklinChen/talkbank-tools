@@ -88,7 +88,7 @@ impl WorkerPool {
                 );
                 continue;
             }
-            if target.is_concurrent() {
+            if self.serving(target).is_shared() {
                 let info = TcpWorkerInfo {
                     host: worker.entry.host.clone(),
                     port: worker.entry.port,

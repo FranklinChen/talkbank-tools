@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::api::JobId;
-use crate::media::MediaExtensions;
+use crate::media::{MediaExtensions, MediaLookup, Missed};
 
 use super::rsync::StagingError;
 
@@ -46,25 +46,31 @@ pub async fn prepare_staging_dir(
         tokio::fs::copy(source_path, &dest).await?;
         staged_count += 1;
 
-        // Resolve and copy the media file (audio/video)
-        if let Some(media_path) = resolve_adjacent_media(source_path).await {
-            // PathBuf invariant: `resolve_adjacent_media` only
-            // returns `Some(path)` for paths it resolved by sibling
-            // lookup, which always yields an absolute path with a
-            // file_name component. A `Some(...)` without a file_name
-            // would be impossible given that contract.
-            #[allow(clippy::expect_used)]
-            let media_filename = media_path
-                .file_name()
-                .expect("resolved media path has a filename");
-            let media_dest = staging_dir.join(media_filename);
-            tokio::fs::copy(&media_path, &media_dest).await?;
-            media_count += 1;
-        } else {
-            warn!(
+        // Resolve and copy the media file (audio/video). A file present only
+        // under another spelling is not staged: that is what a Linux host
+        // would do, and the name has to be fixed at its source (see
+        // `MediaLookup`).
+        match resolve_adjacent_media(source_path).await {
+            MediaLookup::Found(media_path) => {
+                // PathBuf invariant: `MediaLookup::Found` holds a directory
+                // joined with a `{stem}.{extension}` name, so it always has a
+                // file_name component.
+                #[allow(clippy::expect_used)]
+                let media_filename = media_path
+                    .file_name()
+                    .expect("resolved media path has a filename");
+                let media_dest = staging_dir.join(media_filename);
+                tokio::fs::copy(&media_path, &media_dest).await?;
+                media_count += 1;
+            }
+            MediaLookup::Missed(missed) => warn!(
+                chat_file = %source_path.display(),
+                "No media staged: {missed}"
+            ),
+            MediaLookup::Absent => warn!(
                 chat_file = %source_path.display(),
                 "No adjacent media file found for staging"
-            );
+            ),
         }
     }
 
@@ -82,7 +88,23 @@ pub async fn prepare_staging_dir(
 ///
 /// This is a simplified version of `runner::util::media::resolve_audio_for_chat`
 /// that doesn't require the runner module's visibility scope.
-async fn resolve_adjacent_media(chat_path: &Path) -> Option<PathBuf> {
-    let stem = chat_path.file_stem()?.to_str()?;
-    MediaExtensions::find_in(chat_path.parent()?, stem).await
+async fn resolve_adjacent_media(chat_path: &Path) -> MediaLookup {
+    let (Some(dir), Some(stem)) = (
+        chat_path.parent(),
+        chat_path.file_stem().and_then(|stem| stem.to_str()),
+    ) else {
+        // A path with no parent or a non-UTF-8 stem names no media by stem.
+        return MediaLookup::Absent;
+    };
+    let (dir, stem) = (dir.to_path_buf(), stem.to_owned());
+    let listed = dir.clone();
+    // The lookup lists a directory, so it runs on a blocking thread.
+    tokio::task::spawn_blocking(move || MediaExtensions::find_under(&dir, Path::new(""), &stem))
+        .await
+        .unwrap_or_else(|error| {
+            MediaLookup::Missed(Missed::Unreadable {
+                dir: listed,
+                error: error.to_string(),
+            })
+        })
 }

@@ -74,10 +74,12 @@ For a single file, the server always uses 1 worker, no parallelism needed.
 If `max_workers_per_job` is set in `server.yaml`, it overrides auto-tuning
 (still capped by file count and the category max).
 
-**Why GPU commands allow parallelism:** GPU-heavy commands share a single
-`SharedGpuWorker` process with a thread pool. While file N's ASR runs on the
-GPU, file N+1 can do post-processing, utseg, or morphosyntax on CPU. The GPU
-itself serializes inference, but pipeline stages overlap. On a machine with
+**Why GPU commands allow parallelism:** on a CUDA host, GPU-heavy commands
+share a single worker process with a thread pool. While file N's ASR runs on
+the GPU, file N+1 can do post-processing, utseg, or morphosyntax on CPU. On a
+CPU-only host (`force_cpu`, or `gpu_thread_pool_size: 1`) each GPU worker
+serves one request at a time, and parallel files run on separate worker
+processes, up to `max_workers_per_key` per model key. On a machine with
 256 GB RAM, the coordinator may grant 4-8 parallel files for transcribe.
 
 ## Worker profiles and host bootstrap mode
@@ -103,10 +105,15 @@ That lets a weak laptop load only `infer:asr` or `infer:morphosyntax` instead
 of speculatively loading every model in a profile. The machine trades some
 reuse for a much lower idle footprint.
 
-GPU workers handle multiple requests concurrently via internal threading only on
-CUDA-capable hosts. On CPU-only hosts they stay sequential to avoid
-oversubscribing OpenMP threads. Stanza and IO workers handle one request at a
-time but can run multiple processes in parallel for CPU-bound workloads.
+GPU workers handle multiple requests concurrently via internal threading only
+when the server is not forcing CPU and `gpu_thread_pool_size` is above 1. With
+`force_cpu` (the recommendation on every non-CUDA host) or a pool size of 1,
+each GPU worker serves one request at a time and the server runs several of
+them per model key instead, up to `max_workers_per_key` (default 1 for GPU, so
+raise it to use more cores; each spawn still passes the memory gate). Stanza
+and IO workers handle one request at a time but can run multiple processes in
+parallel for CPU-bound workloads. The server makes this decision and tells each
+worker which way to serve (`--serving`), so the two cannot disagree.
 
 ## Per-command memory profiles
 

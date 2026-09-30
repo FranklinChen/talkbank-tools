@@ -32,21 +32,6 @@ pub enum WorkerBootstrapMode {
     Task,
 }
 
-/// Whether this profile uses concurrent request handling inside one process.
-///
-/// GPU workers always use concurrent serving.  Stanza workers are concurrent
-/// only on free-threaded Python 3.14t.  IO workers are never concurrent.
-///
-/// This wraps [`WorkerProfile::is_concurrent_for_runtime`] with the live
-/// runtime detection from [`crate::types::runtime::is_free_threaded_runtime`].
-/// Lives here (not as a method on `WorkerProfile` in `batchalign-types`)
-/// because the runtime detection function lives in `batchalign` and reaching
-/// across crates would create a circular dep. This is a permanent scaffold,
-/// not a Phase β transitional scaffold.
-pub fn worker_profile_is_concurrent(profile: WorkerProfile) -> bool {
-    profile.is_concurrent_for_runtime(crate::types::runtime::is_free_threaded_runtime())
-}
-
 /// Bootstrap target for one Python worker process.
 ///
 /// Python workers are model hosts for one infer task such as ASR or forced
@@ -123,11 +108,6 @@ impl WorkerTarget {
             Self::Profile(_) => None,
             Self::InferTask(task) => Some(*task),
         }
-    }
-
-    /// Whether the target uses concurrent dispatch inside one process.
-    pub fn is_concurrent(&self) -> bool {
-        worker_profile_is_concurrent(self.profile_kind())
     }
 
     /// Return the infer-task worker target used for one released command.
@@ -260,19 +240,6 @@ mod tests {
             WorkerProfile::Io
         );
         assert_eq!(WorkerProfile::for_task(InferTask::Avqi), WorkerProfile::Io);
-    }
-
-    #[test]
-    fn gpu_profile_is_concurrent() {
-        // GPU is always concurrent.
-        assert!(WorkerProfile::Gpu.is_concurrent_for_runtime(false));
-        assert!(WorkerProfile::Gpu.is_concurrent_for_runtime(true));
-        // Stanza is concurrent only on free-threaded Python.
-        assert!(!WorkerProfile::Stanza.is_concurrent_for_runtime(false));
-        assert!(WorkerProfile::Stanza.is_concurrent_for_runtime(true));
-        // IO is never concurrent.
-        assert!(!WorkerProfile::Io.is_concurrent_for_runtime(false));
-        assert!(!WorkerProfile::Io.is_concurrent_for_runtime(true));
     }
 
     #[test]

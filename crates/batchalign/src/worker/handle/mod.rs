@@ -456,6 +456,55 @@ mod tests {
             args.windows(2)
                 .any(|window| { window[0] == "--gpu-thread-pool-size" && window[1] == "7" })
         );
+        assert!(
+            args.windows(2)
+                .any(|window| { window[0] == "--serving" && window[1] == "concurrent" })
+        );
+    }
+
+    /// Wire format: a stdio worker is told which process supervises it, so it
+    /// exits with the server that launched it.
+    #[test]
+    fn worker_command_names_this_process_as_the_supervisor() {
+        let args = command_args(&WorkerConfig {
+            python_path: "python3".to_string(),
+            ..Default::default()
+        });
+        let own_pid = std::process::id().to_string();
+
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "--supervisor-pid" && window[1] == own_pid)
+        );
+    }
+
+    /// Wire format: a forced-CPU GPU worker is told to serve one request at a
+    /// time, with one serving thread, whatever the configured pool size. The
+    /// pool routes it by exclusive checkout from the same decision.
+    #[test]
+    fn worker_command_tells_a_forced_cpu_gpu_worker_to_serve_sequentially() {
+        let args = command_args(&WorkerConfig {
+            python_path: "python3".to_string(),
+            profile: WorkerProfile::Gpu,
+            runtime: WorkerRuntimeConfig::from_sources(
+                true,
+                false,
+                None,
+                7,
+                HostMemoryRuntimeConfig::default(),
+                crate::types::runtime::MemoryTier::detect(),
+            ),
+            ..Default::default()
+        });
+
+        assert!(
+            args.windows(2)
+                .any(|window| { window[0] == "--serving" && window[1] == "sequential" })
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| { window[0] == "--gpu-thread-pool-size" && window[1] == "1" })
+        );
     }
 
     #[test]

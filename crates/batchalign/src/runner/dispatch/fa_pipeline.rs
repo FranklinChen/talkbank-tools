@@ -951,7 +951,8 @@ mod auto_detect_tests {
         let mut search = MediaSearch::for_stem(stem);
         let found = search
             .try_place(SearchedPlace::InferredMediaMapping {
-                dir: search_dir.as_path().to_path_buf(),
+                root: inferred_root.as_path().to_path_buf(),
+                subdir: repo_subdir.as_str().to_owned(),
             })
             .await
             .unwrap();
@@ -1001,11 +1002,11 @@ mod auto_detect_tests {
              mapped subdir onto it"
         );
 
-        let search_dir = repo_subdir.resolve_on_server(&root);
         let mut search = MediaSearch::for_stem("p08aul13");
         let found = search
             .try_place(SearchedPlace::InferredMediaMapping {
-                dir: search_dir.as_path().to_path_buf(),
+                root: root.as_path().to_path_buf(),
+                subdir: repo_subdir.as_str().to_owned(),
             })
             .await
             .unwrap();

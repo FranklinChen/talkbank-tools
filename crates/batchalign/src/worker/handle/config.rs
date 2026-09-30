@@ -21,7 +21,8 @@ pub struct WorkerRuntimeConfig {
     pub allow_mps: bool,
     /// Optional Rev.AI key already resolved by the Rust control plane.
     pub revai_api_key: Option<String>,
-    /// Maximum concurrent requests served inside one GPU worker process.
+    /// Maximum concurrent requests served inside one GPU worker process
+    /// when it serves concurrently; see `worker::serving::WorkerServing`.
     pub gpu_thread_pool_size: u32,
     /// Host-memory coordination settings shared with the worker spawn path.
     pub host_memory: HostMemoryRuntimeConfig,

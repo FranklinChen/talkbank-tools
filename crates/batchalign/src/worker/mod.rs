@@ -33,6 +33,7 @@ pub mod python;
 pub mod registry;
 pub mod request_builder_v2;
 pub mod runtime_identity;
+pub mod serving;
 pub mod speaker_embedding_request_v2;
 pub mod speaker_request_v2;
 pub mod speaker_result_v2;

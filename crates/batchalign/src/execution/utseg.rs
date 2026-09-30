@@ -100,7 +100,7 @@ pub(crate) async fn dispatch_utseg_job(
         let job_for_task = job.clone();
         let plan_for_task = Arc::clone(&plan);
         let merge_abbrev = should_merge_abbrev;
-        joinset.spawn(async move {
+        joinset.spawn(crate::worker::pool::job_tracker::inherit_job(async move {
             let _permit = permit; // released on drop after the task completes
             let single = vec![file_input];
             let results = gateway_for_task
@@ -120,7 +120,7 @@ pub(crate) async fn dispatch_utseg_job(
                 "Utseg",
             )
             .await;
-        });
+        }));
     }
 
     while let Some(join_result) = joinset.join_next().await {

@@ -155,7 +155,9 @@ The `failed_ipc_{timestamp}.json` dump includes the full request JSON.
 An AI can:
 1. Read the dump
 2. Extract the request
-3. Pipe it to `python -m batchalign.worker --task morphosyntax --lang eng`
+3. Pipe it to `python -m batchalign.worker --task morphosyntax --lang eng
+   --serving sequential --supervisor-pid $$` (every stdio worker names the
+   process it serves and must exit with; `$$` is the calling shell)
 4. Compare the output to the dump
 
 This is the foundation for the planned `batchalign3 replay` tool.

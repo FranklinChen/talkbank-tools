@@ -355,15 +355,19 @@ async fn run_hosted_job(
         .await;
     }
 
-    if let Err(error) = engine
-        .dispatch_job(
+    // Every file task the dispatch spawns inherits this attempt's job id and
+    // cancellation token (see `runner::job_scope`).
+    let file_task_scope =
+        super::job_scope::FileTaskScope::new(job_id.clone(), job.cancel_token.clone());
+    if let Err(error) = file_task_scope
+        .enclose(engine.dispatch_job(
             JobDispatchRequest {
                 job: job.clone(),
                 file_list,
                 num_workers,
             },
             &host_context,
-        )
+        ))
         .await
     {
         let message = error.to_string();

@@ -428,58 +428,12 @@ fn stop_server(layout: &RuntimeLayout) -> bool {
 
     // Check if the process is actually alive before signalling.
     // Avoids sending signals to an unrelated process that reused the PID.
-    if !is_process_alive(pid) {
+    if !daemon::is_process_alive(pid) {
         let _ = ServerHandshake::remove(state_dir, HandshakeSlot::Main);
         return false;
     }
 
-    let killed = kill_pid(pid);
+    let killed = daemon::stop_server_process(pid);
     let _ = ServerHandshake::remove(state_dir, HandshakeSlot::Main);
     killed
-}
-
-/// Check if a process is alive via `kill(pid, 0)`.
-#[cfg(unix)]
-fn is_process_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn is_process_alive(_pid: u32) -> bool {
-    false
-}
-
-/// Kill a server process: SIGTERM the process group, wait up to 3 seconds,
-/// then escalate to SIGKILL if still alive.
-fn kill_pid(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let pgid_ok = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) == 0 };
-        let pid_ok = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 };
-
-        if !pgid_ok && !pid_ok {
-            return false;
-        }
-
-        // Wait for the process to exit so the port is released.
-        for _ in 0..6 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if !is_process_alive(pid) {
-                return true;
-            }
-        }
-
-        // Still alive after 3 seconds -- escalate to SIGKILL.
-        unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        true
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
 }

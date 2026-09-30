@@ -13,6 +13,7 @@ Marked @pytest.mark.integration because they spawn subprocesses.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,10 @@ def _start_test_echo_worker() -> subprocess.Popen[str]:
             "--test-echo",
             "--task",
             "morphosyntax",
+            "--serving",
+            "sequential",
+            "--supervisor-pid",
+            str(os.getpid()),
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

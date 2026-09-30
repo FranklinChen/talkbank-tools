@@ -322,10 +322,14 @@ impl ServerBackend for LocalServerBackend {
         job_id: &JobId,
         provenance: CancellationRequest,
     ) -> Result<(), ServerError> {
+        // Detach the job's in-flight workers BEFORE publishing the cancel:
+        // the publish drops the job's file tasks, whose dispatches then
+        // unregister from the tracker as they unwind, so a drain afterwards
+        // could miss a shared worker still computing for this job.
+        let in_flight = self.host.pool().detach_workers_for_job(job_id);
         self.store.cancel(job_id, provenance).await?;
-        // Reap in-flight workers so dispatch futures unwind instead
-        // of awaiting natural completion of the current ML call.
-        self.host.pool().shutdown_workers_for_job(job_id).await;
+        // Reap them so no inference keeps running for a cancelled job.
+        in_flight.terminate().await;
         Ok(())
     }
 

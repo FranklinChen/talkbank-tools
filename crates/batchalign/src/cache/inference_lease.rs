@@ -131,6 +131,21 @@ impl InferenceLease {
             .is_some_and(|generation| *generation > self.generation_before_wait)
     }
 
+    /// How many callers currently hold or wait for `cache_key`'s lease.
+    ///
+    /// Test observation only: it lets a test tell, without a clock, that a
+    /// second identical request has parked behind the first rather than
+    /// running its own inference. The registry keeps only weak references, so
+    /// every strong reference is one holder or one waiter.
+    #[cfg(test)]
+    pub(crate) fn contenders_for_test(cache_key: &CacheKey) -> usize {
+        inference_locks()
+            .get(cache_key.as_str())
+            .and_then(|entry| entry.value().upgrade())
+            // The upgrade itself is one more strong reference; do not count it.
+            .map_or(0, |cell| Arc::strong_count(&cell) - 1)
+    }
+
     /// Record a successful durable commit before releasing the lease.
     pub(crate) fn mark_committed(&self) {
         self.cell

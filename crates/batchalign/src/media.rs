@@ -1,6 +1,6 @@
-//! Media resolution: port of `batchalign/serve/media.py`.
+//! Media listing and lookup: originally a port of `batchalign/serve/media.py`.
 //!
-//! Searches configured media_roots for audio/video files. Results are cached
+//! Lists configured media_roots for audio/video files. Results are cached
 //! with a 60-second TTL to avoid rescanning NFS mounts on every request.
 //!
 //! Finding media and PROCESSING it are both media concerns, so the external
@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub use declared::DeclaredMedia;
-pub use extensions::MediaExtensions;
+use extensions::DirWalk;
+pub use extensions::{MediaExtensions, MediaLookup, Missed};
 
 use dashmap::DashMap;
 use tracing::{debug, warn};
@@ -54,18 +55,48 @@ impl MediaEntry {
     }
 }
 
+/// `root/subdir` reached by exact names, or `None` if it is not there as
+/// spelled.
+///
+/// Names are checked BEFORE `canonicalize`, which on macOS returns the on-disk
+/// spelling and so would list `Brown/` for a request for `brown/` there and
+/// nothing on a case-sensitive host (see [`MediaLookup`]). A subdir spelled
+/// differently (letter case or Unicode form) is logged and lists nothing, the
+/// same on every host. The
+/// callers' `canonicalize` then still guards against a symlink leading out of
+/// the root, which a name check cannot see.
+fn exact_subdir(root: &str, subdir: &str) -> Option<PathBuf> {
+    match DirWalk::of(Path::new(root), Path::new(subdir)) {
+        Ok(walk) if walk.is_exact() => Some(walk.on_disk),
+        Ok(walk) => {
+            warn!(
+                wanted = %walk.wanted.display(),
+                on_disk = %walk.on_disk.display(),
+                "Media subdir is spelled differently (letter case or Unicode form); nothing listed"
+            );
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 /// Cached walk results: `(timestamp, entries)`.
 type CacheEntry = (Instant, Vec<MediaEntry>);
 
-/// Locates audio/video files across configured media roots and named
-/// media mappings.
+/// Lists audio/video files across configured media roots and named media
+/// mappings, for `/media/list`.
 ///
-/// Provides two resolution strategies:
-/// - **Root search** (`resolve`/`list_files`): walks all `media_roots`
-///   recursively, matching by exact filename or stem (e.g., `sample` finds
-///   `sample.wav`).
-/// - **Mapped search** (`resolve_mapped`/`list_mapped`): restricts to a
-///   specific `mapping_root/subdir` path with traversal protection.
+/// Two listings:
+/// - **Root listing** (`list_files`): walks all `media_roots` recursively.
+/// - **Mapped listing** (`list_mapped`): restricted to one
+///   `mapping_root/subdir`, with traversal protection.
+///
+/// It resolves nothing. Finding the recording for a transcript is
+/// `runner::dispatch::media_search`, through
+/// [`MediaExtensions`]'s exact-name lookup. This type's own `resolve` and
+/// `resolve_mapped` had no production caller and were deleted on 2026-09-29;
+/// the mapped one `canonicalize`d its directory, which on macOS silently
+/// repairs a directory spelled differently (see [`MediaLookup`]).
 ///
 /// Walk results are cached in a concurrent `DashMap` with a 60-second TTL
 /// to avoid rescanning large NFS volumes on every request. The cache can be
@@ -193,99 +224,10 @@ impl MediaResolver {
         entries
     }
 
-    /// Find a media file matching `name` under the configured media_roots.
-    ///
-    /// Search strategy:
-    /// 1. Exact filename match (recursive) in each root
-    /// 2. Stem match: if `name` has no media extension, try matching stem
-    ///    against files with known audio/video extensions
-    ///
-    /// Returns the absolute path to the first match, or None.
-    pub fn resolve(&self, name: &str, media_roots: &[String]) -> Option<String> {
-        if name.is_empty() {
-            return None;
-        }
-
-        let name_path = Path::new(name);
-        let name_stem = name_path.file_stem().unwrap_or_default().to_string_lossy();
-        let name_has_media_ext = MediaExtensions::matches(name);
-
-        for root in media_roots {
-            let entries = self.walk_media(root);
-
-            // Pass 1: exact filename match
-            for entry in &entries {
-                if entry.filename == name {
-                    return Some(entry.full_path());
-                }
-            }
-
-            // Pass 2: stem match with known extensions (only if name isn't already exact)
-            if !name_has_media_ext {
-                for entry in &entries {
-                    let fp = Path::new(&entry.filename);
-                    let f_stem = fp.file_stem().unwrap_or_default().to_string_lossy();
-                    if f_stem == name_stem && MediaExtensions::matches(&entry.filename) {
-                        return Some(entry.full_path());
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Find a media file in a specific mapped directory.
-    ///
-    /// Uses a deterministic path: `mapping_root / subdir`.
-    pub fn resolve_mapped(&self, name: &str, mapping_root: &str, subdir: &str) -> Option<String> {
-        if name.is_empty() {
-            return None;
-        }
-
-        let search_dir = PathBuf::from(mapping_root).join(subdir);
-        let search_dir = match search_dir.canonicalize() {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-        let root_resolved = match PathBuf::from(mapping_root).canonicalize() {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-
-        if !search_dir.starts_with(&root_resolved) {
-            return None; // path traversal
-        }
-        if !search_dir.is_dir() {
-            return None;
-        }
-
-        let name_path = Path::new(name);
-        let name_stem = name_path.file_stem().unwrap_or_default().to_string_lossy();
-        let name_has_media_ext = MediaExtensions::matches(name);
-
-        // Pass 1: exact filename match (flat)
-        let candidate = search_dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().to_string());
-        }
-
-        // Pass 2: stem match with known extensions
-        if !name_has_media_ext
-            && let Some(candidate) = MediaExtensions::find_in_blocking(&search_dir, &name_stem)
-        {
-            return Some(candidate.to_string_lossy().to_string());
-        }
-
-        None
-    }
-
     /// List audio/video filenames under a mapping root + subdir.
     fn list_mapped(&self, mapping_root: &str, subdir: &str) -> Vec<String> {
-        let search_dir = if subdir.is_empty() {
-            PathBuf::from(mapping_root)
-        } else {
-            PathBuf::from(mapping_root).join(subdir)
+        let Some(search_dir) = exact_subdir(mapping_root, subdir) else {
+            return Vec::new();
         };
         let search_dir = match search_dir.canonicalize() {
             Ok(p) => p,
@@ -318,7 +260,9 @@ impl MediaResolver {
             let search_dir = if subdir.is_empty() {
                 root.clone()
             } else {
-                let search_path = PathBuf::from(root).join(subdir);
+                let Some(search_path) = exact_subdir(root, subdir) else {
+                    continue;
+                };
                 let search_resolved = match search_path.canonicalize() {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -393,39 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_match() {
-        let dir = setup_media_dir();
-        let resolver = MediaResolver::new();
-        let roots = vec![dir.path().to_string_lossy().to_string()];
-
-        let result = resolver.resolve("audio.wav", &roots);
-        assert!(result.is_some());
-        assert!(result.unwrap().ends_with("audio.wav"));
-    }
-
-    #[test]
-    fn stem_match() {
-        let dir = setup_media_dir();
-        let resolver = MediaResolver::new();
-        let roots = vec![dir.path().to_string_lossy().to_string()];
-
-        // Search by stem without extension
-        let result = resolver.resolve("audio", &roots);
-        assert!(result.is_some());
-        assert!(result.unwrap().ends_with("audio.wav"));
-    }
-
-    #[test]
-    fn not_found() {
-        let dir = setup_media_dir();
-        let resolver = MediaResolver::new();
-        let roots = vec![dir.path().to_string_lossy().to_string()];
-
-        let result = resolver.resolve("nonexistent.wav", &roots);
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn list_files_all() {
         let dir = setup_media_dir();
         let resolver = MediaResolver::new();
@@ -446,33 +357,12 @@ mod tests {
         let roots = vec![root.clone()];
 
         // Populate cache
-        let _ = resolver.resolve("audio.wav", &roots);
+        let _ = resolver.list_files(&roots, "");
         assert!(!resolver.cache.is_empty());
 
         // Invalidate
         resolver.invalidate(Some(&root));
         assert!(resolver.cache.is_empty());
-    }
-
-    #[test]
-    fn mapped_resolve() {
-        let dir = setup_media_dir();
-        let resolver = MediaResolver::new();
-        let root = dir.path().to_string_lossy().to_string();
-
-        let result = resolver.resolve_mapped("deep.flac", &root, "subdir");
-        assert!(result.is_some());
-        assert!(result.unwrap().ends_with("deep.flac"));
-    }
-
-    #[test]
-    fn mapped_stem_match() {
-        let dir = setup_media_dir();
-        let resolver = MediaResolver::new();
-        let root = dir.path().to_string_lossy().to_string();
-
-        let result = resolver.resolve_mapped("deep", &root, "subdir");
-        assert!(result.is_some());
     }
 
     #[test]
@@ -483,13 +373,6 @@ mod tests {
 
         let files = resolver.list_mapped(&root, "subdir");
         assert_eq!(files, vec!["deep.flac"]);
-    }
-
-    #[test]
-    fn empty_name_returns_none() {
-        let resolver = MediaResolver::new();
-        assert!(resolver.resolve("", &[]).is_none());
-        assert!(resolver.resolve_mapped("", "/tmp", "").is_none());
     }
 
     #[test]
@@ -588,14 +471,30 @@ mod tests {
         );
     }
 
+    /// On macOS, `canonicalize` alone would list `subdir/` for `SUBDIR`; the
+    /// answer must be the same on every host.
+    #[test]
+    fn a_subdir_spelled_with_other_case_lists_nothing() {
+        let dir = setup_media_dir();
+        let resolver = MediaResolver::new();
+        let root = dir.path().to_string_lossy().to_string();
+        assert_eq!(resolver.list_mapped(&root, "subdir"), vec!["deep.flac"]);
+        assert!(resolver.list_mapped(&root, "SUBDIR").is_empty());
+        assert!(
+            !resolver
+                .list_files(std::slice::from_ref(&root), "SUBDIR")
+                .contains(&"deep.flac".to_owned())
+        );
+    }
+
     #[test]
     fn mapped_traversal_blocked() {
         let dir = setup_media_dir();
         let resolver = MediaResolver::new();
         let root = dir.path().to_string_lossy().to_string();
 
-        // Attempting path traversal via ".." should return None.
-        let result = resolver.resolve_mapped("audio.wav", &root, "../../../etc");
-        assert!(result.is_none(), "path traversal should be blocked");
+        // A subdir that climbs out of the mapping root lists nothing.
+        let files = resolver.list_mapped(&root, "../../../etc");
+        assert!(files.is_empty(), "path traversal should be blocked");
     }
 }

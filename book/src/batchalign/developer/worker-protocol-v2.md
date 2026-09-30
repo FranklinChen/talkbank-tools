@@ -919,8 +919,11 @@ multiplexing. This restores the model-sharing throughput of batchalign-next's
 
 ### Python side
 
-GPU workers run `_serve_stdio_concurrent(max_threads=4)` instead of the
-sequential `_serve_stdio()`. The main thread reads stdin and submits each
+A worker launched with `--serving concurrent` runs
+`_serve_stdio_concurrent(max_threads=K)` (K from `--gpu-thread-pool-size`)
+instead of the sequential `_serve_stdio()`. The Rust pool decides the mode
+(`worker/serving.rs::WorkerServing`) and routes by the same value; the worker
+never derives it. The main thread reads stdin and submits each
 request to a `ThreadPoolExecutor`. PyTorch releases the GIL during CUDA
 kernels, enabling real concurrent GPU inference across threads sharing the
 same loaded model weights.
@@ -1020,8 +1023,8 @@ Tuning rule by underlying device:
 
 The regression test for the contract:
 `tests/gpu_concurrent_dispatch.rs::gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_timeout`
-uses `test_delay_ms = 200`, `gpu_thread_pool_size = 1`, and
-`audio_task_timeout_s = 1` to assert that N=8 concurrent callers all
+uses `test_delay_ms = 200`, `gpu_thread_pool_size = 2`, and
+`audio_task_timeout_s = 1` to assert that N=16 concurrent callers all
 succeed: each caller's per-request budget governs work-time only,
 never queue-wait.
 
@@ -1048,8 +1051,9 @@ daemon's spawn arguments.
 
 ### Profile routing
 
-`WorkerPool::dispatch_execute_v2()` checks `WorkerProfile::is_concurrent()`:
-- GPU profile → `dispatch_gpu_execute_v2()` → `SharedGpuWorker::execute_v2()`
-- Stanza/IO profile → `checkout()` → `CheckedOutWorker::execute_v2()`
-
-Stanza and IO profiles keep the existing sequential checkout model.
+`WorkerPool::dispatch_execute_v2()` asks `WorkerPool::serving(target)`:
+- `SharedConcurrent` (GPU with `force_cpu` off and a pool above 1; Stanza on
+  free-threaded Python) → `dispatch_gpu_execute_v2()` → `SharedGpuWorker::execute_v2()`
+- `OneRequestPerProcess` (GPU with `force_cpu` or a pool of 1; Stanza on GIL
+  Python; IO) → `checkout()` → `CheckedOutWorker::execute_v2()`, scaled to
+  `max_workers_per_key` processes per key.

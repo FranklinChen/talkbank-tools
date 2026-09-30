@@ -314,6 +314,38 @@ If the daemon stays alive across CLI sessions, neither step runs: the
 bootstrap spawn after `load_from_db()` is the only mechanism that rescues
 orphaned `Queued` jobs.
 
+### What a cancel stops
+
+A cancel stops the job's in-flight file work, not only the files not yet
+started. Every file task a runner spawns runs inside a `FileTaskScope`
+(`runner/job_scope.rs`), established by `run_hosted_job` around command
+dispatch, because `tokio::spawn` does not inherit task-locals. The scope
+carries two facts into each task:
+
+- the job id, re-established as the pool's `CURRENT_JOB_ID`, so every worker
+  dispatch registers against the job;
+- the job's cancellation token, which the supervisor races against the task.
+  On cancel the task's future is dropped wherever it is (a worker dispatch, a
+  cache wait, between stages) and the file is recorded with the typed outcome
+  `FileTaskOutcome::StoppedByCancellation`, category `cancelled`. Nothing after
+  that point runs: no further inference, forced alignment, output write or
+  debug dump belongs to a cancelled job. A checked-out worker dropped with a
+  request in flight is discarded, not returned to the pool.
+
+`ServerBackend::cancel_job` detaches the job's registered workers from the
+tracker BEFORE publishing the cancel and terminates them after, because the
+publish drops the tasks and a dropped dispatch unregisters its worker as it
+unwinds; a drain after the publish could miss a shared worker still computing
+for the job.
+
+Before this, neither fact crossed the spawn. A cancelled `align` job's
+in-flight files ran to completion, each
+finishing its Whisper pass, dumping UTR debug data, running forced alignment
+and holding the worker the live job also needed, because no dispatch had
+registered for the cancel's worker kill to find and nothing told the tasks to
+stop. Contract test: `tests/gpu_concurrent_dispatch/cancellation.rs`, which
+cancels a real transcribe job over HTTP while an echo worker holds its file.
+
 ### Cancelled vs Interrupted at shutdown
 
 `JobStatus::Cancelled` is reserved for user gestures (TUI cancel, HTTP

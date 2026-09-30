@@ -147,6 +147,7 @@
 - [%wor Tier](batchalign/reference/wor-tier.md)
 - [TextGrid Format](batchalign/reference/textgrid.md)
 - [Media Conversion](batchalign/reference/media-conversion.md)
+- [File Name Matching](batchalign/reference/file-name-matching.md)
 - [Command I/O Parity](batchalign/reference/command-io.md)
 - [Filesystem Paths](batchalign/reference/filesystem-paths.md)
 - [Overlapping Speech](batchalign/reference/overlap-markers.md)

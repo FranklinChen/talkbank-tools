@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-09-10 01:43 EDT
+**Last updated:** 2026-09-29 15:29 EDT
 
 ## Overview
 
@@ -245,6 +245,16 @@ sent. The server resolves media from server-visible places only, in the
 order given on [Server Mode](../user-guide/server-mode.md#how-the-server-finds-a-recording);
 a client's private directory layout is never dereferenced, so a recording
 that exists only on the client cannot be used.
+
+### Names are matched exactly
+
+Every place is searched by comparing names as strings against a listing of
+the directory, never by asking the filesystem whether a path exists. So
+`ACWT01a` finds `ACWT01a.mp4` and does not find `acwt01a.mp4`, `ACWT01a.MP4`,
+or a spelling of the name in another Unicode form. A file that differs only in
+letter case or Unicode form is reported as a near miss, never used. The
+reasons, the messages and how to fix them are on
+[File Name Matching](file-name-matching.md).
 
 ## MP4 Media on Network Volumes
 

@@ -2,8 +2,9 @@
 //!
 //! Contains the core `checkout()` loop (semaphore acquire → pop idle worker →
 //! RAII guard), `dispatch_batch_infer`, `dispatch_execute_v2`, and TCP worker
-//! checkout/return helpers. Routes GPU-profile tasks to shared concurrent
-//! workers; non-GPU tasks use the traditional exclusive-checkout model.
+//! checkout/return helpers. Routes keys whose workers serve concurrently
+//! (`WorkerServing::SharedConcurrent`) to one shared worker; every other key
+//! uses the exclusive-checkout model.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -319,7 +320,7 @@ impl WorkerPool {
 
     /// Dispatch one typed worker-protocol V2 execute request.
     ///
-    /// GPU profile tasks are routed to a shared concurrent worker (multiple
+    /// Shared-serving keys (`WorkerServing`) are routed to a shared concurrent worker (multiple
     /// requests in flight to one process). Non-GPU tasks try TCP workers first,
     /// then fall back to the traditional exclusive checkout model.
     pub async fn dispatch_execute_v2(
@@ -346,8 +347,8 @@ impl WorkerPool {
         let lang = lang.into();
         let key = execute_v2_worker_key(lang, request, self.config.runtime.bootstrap_mode)?;
 
-        if key.target.is_concurrent() {
-            // GPU workers don't support progress forwarding yet.
+        if self.serving(key.target).is_shared() {
+            // Shared workers don't support progress forwarding yet.
             return self.dispatch_gpu_execute_v2(&key, request).await;
         }
 
@@ -484,7 +485,7 @@ impl WorkerPool {
         let overrides = (!overrides.is_empty()).then_some(overrides);
         let timeout_s = self.config.effective_ensure_task_timeout_s();
 
-        let reports = if key.target.is_concurrent() {
+        let reports = if self.serving(key.target).is_shared() {
             let registry_worker = if matches!(key.target, WorkerTarget::Profile(_)) {
                 self.gpu_tcp_workers.lock().await.get(&key).cloned()
             } else {
@@ -610,7 +611,7 @@ mod tcp_checkout_tests {
             pool.bootstrap_mode(),
         );
         assert!(
-            matches!(key.target, WorkerTarget::Profile(_)) && !key.target.is_concurrent(),
+            matches!(key.target, WorkerTarget::Profile(_)) && !pool.serving(key.target).is_shared(),
             "precondition: morphotag dispatches through the sequential TCP path"
         );
         let handle = TcpWorkerHandle::connect(TcpWorkerInfo {
