@@ -37,54 +37,56 @@ class SupervisorGone(Exception):
     """The supervisor exited before its exit could be watched."""
 
 
-class _KqueueExitWatch:
-    """``NOTE_EXIT`` on a process, through kqueue (macOS and the BSDs)."""
+# One `_ExitWatch` per platform, chosen at module level. mypy evaluates a
+# module-level `sys.platform` branch for the platform it checks, so each
+# platform type-checks only the implementation it can run; a runtime guard
+# inside one class (the first version of this module) made the rest of that
+# class unreachable to mypy on the other platform, which then could not
+# determine its attributes.
+if sys.platform == "linux":
 
-    def __init__(self, pid: int) -> None:
-        if sys.platform == "linux":
-            raise OSError("kqueue is not available on Linux")
-        self._kqueue = select.kqueue()
-        event = select.kevent(
-            pid,
-            filter=select.KQ_FILTER_PROC,
-            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-            fflags=select.KQ_NOTE_EXIT,
-        )
-        try:
-            # Registration only; a process that no longer exists is refused.
-            self._kqueue.control([event], 0, 0)
-        except ProcessLookupError as error:
-            raise SupervisorGone(str(error)) from error
+    class _ExitWatch:
+        """A pidfd, readable once the watched process exits (Linux)."""
 
-    def wait(self) -> None:
-        """Block until the watched process exits."""
-        self._kqueue.control(None, 1, None)
+        def __init__(self, pid: int) -> None:
+            try:
+                self._pidfd = os.pidfd_open(pid)
+            except ProcessLookupError as error:
+                raise SupervisorGone(str(error)) from error
+
+        def wait(self) -> None:
+            """Block until the watched process exits."""
+            poller = select.poll()
+            poller.register(self._pidfd, select.POLLIN)
+            poller.poll()
+
+else:
+
+    class _ExitWatch:
+        """``NOTE_EXIT`` on the watched process, through kqueue (macOS, BSDs)."""
+
+        def __init__(self, pid: int) -> None:
+            self._kqueue = select.kqueue()
+            event = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                # Registration only; a process that no longer exists is refused.
+                self._kqueue.control([event], 0, 0)
+            except ProcessLookupError as error:
+                raise SupervisorGone(str(error)) from error
+
+        def wait(self) -> None:
+            """Block until the watched process exits."""
+            self._kqueue.control(None, 1, None)
 
 
-class _PidfdExitWatch:
-    """A pidfd, readable once the process exits (Linux)."""
-
-    def __init__(self, pid: int) -> None:
-        self._pidfd: int
-        if sys.platform != "linux":
-            raise OSError("pidfd is available only on Linux")
-        try:
-            self._pidfd = os.pidfd_open(pid)
-        except ProcessLookupError as error:
-            raise SupervisorGone(str(error)) from error
-
-    def wait(self) -> None:
-        """Block until the watched process exits."""
-        poller = select.poll()
-        poller.register(self._pidfd, select.POLLIN)
-        poller.poll()
-
-
-def _arm_exit_watch(pid: int) -> _KqueueExitWatch | _PidfdExitWatch:
+def _arm_exit_watch(pid: int) -> _ExitWatch:
     """Arm this platform's exit notification for ``pid``."""
-    if sys.platform == "linux":
-        return _PidfdExitWatch(pid)
-    return _KqueueExitWatch(pid)
+    return _ExitWatch(pid)
 
 
 class _GroupRole(Enum):
