@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-09-07 18:37 EDT
+**Last updated:** 2026-09-30 08:00 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -284,7 +284,8 @@ cargo test --manifest-path crates/batchalign-pyo3/Cargo.toml
 Run the current mypy gate before every commit:
 
 ```bash
-uv run mypy                       # mypy only
+uv run mypy --platform linux     # mypy for Linux (what GitHub CI runs on)
+uv run mypy --platform darwin    # and for macOS; the gate runs both
 make batchalign-typecheck-python  # mypy under the batchalign- target group used by CI
 make lint-affected                # affected-Rust clippy + affected Python mypy
 ```

@@ -259,8 +259,13 @@ _batchalign-typecheck-python:
 	@echo "==> Running imported Batchalign CI hygiene..."
 	cargo run -q -p xtask -- lint-ci-hygiene
 	@$(MAKE) batchalign-runtime-check
-	@echo "==> Running imported Batchalign Python typecheck..."
-	uv run --no-sync mypy
+	@echo "==> Running imported Batchalign Python typecheck (Linux and macOS)..."
+	@# mypy checks only the platform it is told to, defaulting to the host's.
+	@# Code branching on sys.platform (the worker supervisor's exit watch) passed
+	@# a macOS gate and failed Linux CI on 2026-09-30, so both run everywhere:
+	@# the local gate sees CI's platform and CI sees the developer's.
+	uv run --no-sync mypy --platform linux
+	uv run --no-sync mypy --platform darwin
 
 batchalign-typecheck-python: batchalign-python-prepare
 	@$(MAKE) _batchalign-typecheck-python

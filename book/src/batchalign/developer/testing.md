@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-15 16:18 EDT
+**Last updated:** 2026-09-30 08:00 EDT
 
 ## Philosophy
 
@@ -625,7 +625,8 @@ npm run test:e2e:setup
 ## Type checking
 
 ```bash
-uv run mypy                       # mypy only
+uv run mypy --platform linux     # mypy for Linux (what GitHub CI runs on)
+uv run mypy --platform darwin    # and for macOS; the gate runs both
 make batchalign-typecheck-python  # mypy under the batchalign-* target group
 make lint-affected                # affected-Rust clippy + affected Python mypy
 ```
