@@ -17,8 +17,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::media::transcode::{PcmEncoding, Transcode, TranscodeError};
-use crate::media::window::{DecodedFrames, EmptySegment, MediaWindow};
+use crate::media::window::{DecodedFrames, EmptySegment};
 use crate::types::worker_v2::{
     ArtifactRefV2, ByteLengthV2, ByteOffsetV2, ChannelCountV2, FrameCountV2,
     PreparedAudioEncodingV2, PreparedAudioRefV2, PreparedTextEncodingV2, PreparedTextRefV2,
@@ -55,9 +56,9 @@ pub enum PreparedArtifactErrorV2 {
     /// on the value, so the message states it instead of inventing one.
     ///
     /// This doc also used to say it served "a window that holds nothing" as
-    /// well as one that produced nothing. It does not: `MediaWindow::new`
-    /// refuses a window whose end is not after its start, so the first of
-    /// those two is unconstructible and only the second reaches here.
+    /// well as one that produced nothing. It does not: `FaWindow` refuses a
+    /// window whose end is not after its start, so only the second reaches
+    /// here.
     #[error("empty audio segment: {0}")]
     EmptyAudioSegment(EmptySegment),
 
@@ -163,7 +164,7 @@ impl PreparedArtifactStoreV2 {
         &self,
         id: &WorkerArtifactIdV2,
         source: &Path,
-        window: MediaWindow,
+        window: FaWindow,
     ) -> Result<PreparedAudioRefV2, PreparedArtifactErrorV2> {
         let root = self.root.clone();
         let id = id.clone();
@@ -358,6 +359,7 @@ impl PreparedArtifactRuntimeV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_ops::fa::coordinates::{Ms, Recording};
     use crate::media::tools::MediaTool;
     // Named only here: the production path receives a reason from
     // `DecodedFrames::measure_f32le` and never spells the type.
@@ -488,7 +490,7 @@ mod tests {
             .extract_prepared_audio_segment_f32le(
                 &WorkerArtifactIdV2::from("audio-segment-ref"),
                 &wav_path,
-                MediaWindow::new(FileMs::new(0), FileMs::new(100)).expect("non-empty"),
+                fixture_window(250, 0, 100),
             )
             .await
             .expect("extract prepared audio segment");
@@ -498,6 +500,13 @@ mod tests {
         assert!(descriptor.frame_count.0 > 0);
         assert!(descriptor.byte_len.0 > 0);
         assert!(Path::new(descriptor.path.as_ref()).exists());
+    }
+
+    /// A window `start..end` inside a fixture recording of `recording_ms`.
+    fn fixture_window(recording_ms: u64, start: u64, end: u64) -> FaWindow {
+        let recording = Recording::of_duration(Ms(recording_ms)).expect("non-empty recording");
+        FaWindow::within(&recording, FileMs::new(start), FileMs::new(end))
+            .expect("window inside the recording")
     }
 
     /// Helper: generate a short tone WAV for artifact tests.
@@ -543,7 +552,11 @@ mod tests {
             .extract_prepared_audio_segment_f32le(
                 &WorkerArtifactIdV2::from("empty-audio-test"),
                 &wav_path,
-                MediaWindow::new(FileMs::new(500), FileMs::new(600)).expect("non-empty"),
+                // Inside a recording CLAIMED to be a second long, while the
+                // file really holds 100 ms: the one assumption the window's
+                // type cannot carry (that its recording was measured from
+                // this file) is what this test deliberately breaks.
+                fixture_window(1_000, 500, 600),
             )
             .await;
 
@@ -552,7 +565,7 @@ mod tests {
         };
         // The window travels whole, so the test can assert it as one value
         // rather than pattern-matching two loose integers out of the variant.
-        assert_eq!(segment.window.start().get(), 500);
+        assert_eq!(segment.window.audio_start().get(), 500);
         assert_eq!(segment.window.end().get(), 600);
         // And the reason is the one the measurement actually saw. This is the
         // real past-the-end case, so ffmpeg writes nothing at all; the value
@@ -572,8 +585,7 @@ mod tests {
     /// it: bytes WERE written, so the segment plainly was not past the end.
     #[test]
     fn an_empty_segment_reports_what_was_measured_not_a_guessed_cause() {
-        let window = MediaWindow::new(FileMs::new(0), FileMs::new(100))
-            .expect("a window that ends after it starts");
+        let window = fixture_window(1_000, 0, 100);
         let rendered = PreparedArtifactErrorV2::EmptyAudioSegment(EmptySegment {
             path: "clip.wav".to_owned(),
             window,

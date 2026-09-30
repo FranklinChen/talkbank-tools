@@ -23,7 +23,7 @@
 //! # Invariants for contributors
 //!
 //! - FA worker timestamps are chunk-relative; `parse_fa_response` must convert
-//!   them to file-absolute ms with `audio_start_ms`.
+//!   them to file-absolute ms through `FaWindow::to_file`.
 //! - `apply_fa_results` ordering is load-bearing:
 //!   inject → postprocess → utterance bullet update → `%wor` generation
 //!   → monotonicity (E362) → same-speaker overlap enforcement (E704).

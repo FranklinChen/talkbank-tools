@@ -15,7 +15,8 @@ use crate::chat_ops::CacheKey;
 use crate::error::{MissingRequiredEvidence, MissingSpeakerEvidence, ServerError};
 use crate::params::CachePolicy;
 use crate::types::worker_v2::{
-    ProtocolErrorCodeV2, SpeakerBackendV2, SpeakerInferenceEvidenceV2, SpeakerSegmentV2,
+    DecodeBudgetSeconds, ProtocolErrorCodeV2, SpeakerBackendV2, SpeakerInferenceEvidenceV2,
+    SpeakerSegmentV2,
 };
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::asr_request_v2::{
@@ -51,6 +52,16 @@ pub(crate) struct AsrInferParams<'a> {
     /// function sees what the user actually requested, the `backend`
     /// enum only encodes WHICH engine, not its configuration.
     pub extras: &'a std::collections::BTreeMap<String, String>,
+    /// Decode budget for `audio_path`, derived by the caller from a length it
+    /// already measured, or `None` when it could not measure one (the request
+    /// then carries no budget and the transport uses its named fallback
+    /// ceiling, exactly as a failed probe used to).
+    ///
+    /// A budget and not the `AudioDuration` itself because one caller (partial
+    /// UTR) transcribes a SEGMENT of the recording, whose length is the
+    /// window's own and not the whole file's, and an `AudioDuration` can only
+    /// be minted by probing a file. Only provider-media backends read it.
+    pub decode_budget: Option<DecodeBudgetSeconds>,
 }
 
 /// Call the Python worker for ASR inference on a single audio file.
@@ -188,6 +199,7 @@ async fn infer_asr_via_worker_v2(
             lang: worker_lang,
             backend: worker_mode.as_v2_backend(),
             extras: params.extras,
+            decode_budget: params.decode_budget,
         },
     )
     .await

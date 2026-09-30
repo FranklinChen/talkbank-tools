@@ -141,6 +141,20 @@ impl AsrWorkerMode {
         }
     }
 
+    /// Whether this mode hands the worker the media file itself (a provider
+    /// reads it) rather than audio Rust prepared.
+    ///
+    /// Decides whether a caller needs to measure the file's length for a
+    /// decode budget at all: a prepared-audio request derives its budget from
+    /// the attachment it built, so measuring for it would be a wasted walk of
+    /// the file. Exhaustive, so a new mode must say which it is.
+    pub(crate) fn reads_provider_media(self) -> bool {
+        match self {
+            Self::LocalWhisperV2 | Self::WhisperHubV2 => false,
+            Self::HkTencentV2 | Self::HkAliyunV2 | Self::HkFunaudioV2 | Self::HkQwenV2 => true,
+        }
+    }
+
     /// Stable engine name written into transcript provenance, checked as
     /// stamp-safe text at compile time.
     fn provenance_name(self) -> crate::api::StampSafeText {

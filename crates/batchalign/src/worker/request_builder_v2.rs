@@ -26,8 +26,7 @@ use crate::types::worker_v2::{
 };
 
 use super::artifacts_v2::{PreparedArtifactErrorV2, PreparedArtifactStoreV2};
-use crate::media::window::{EmptySegment, MediaWindow};
-use crate::time::FileMs;
+use crate::media::window::EmptySegment;
 
 /// Prepared text payload that Rust writes for one V2 forced-alignment request.
 ///
@@ -120,19 +119,6 @@ pub enum ForcedAlignmentRequestBuildErrorV2 {
     #[error("forced-alignment infer item is missing an audio path")]
     MissingAudioPath,
 
-    /// Audio window bounds were invalid.
-    #[error("forced-alignment infer item has invalid audio window start={start_ms} end={end_ms}")]
-    InvalidAudioWindow {
-        /// Inclusive start of the FA audio window.
-        ///
-        /// `FileMs`, not `DurationMs`: these are OFFSETS into the media file,
-        /// and reporting them as durations is the conflation the window type
-        /// itself stopped carrying.
-        start_ms: FileMs,
-        /// Exclusive end of the FA audio window.
-        end_ms: FileMs,
-    },
-
     /// The requested audio segment produced zero whole samples. Callers should
     /// skip the affected FA group rather than propagating a hard failure.
     ///
@@ -161,7 +147,7 @@ pub async fn build_forced_alignment_request_v2(
     store: &PreparedArtifactStoreV2,
     input: ForcedAlignmentBuildInputV2<'_>,
 ) -> Result<ExecuteRequestV2, ForcedAlignmentRequestBuildErrorV2> {
-    let window = validate_fa_infer_item(input.infer_item)?;
+    validate_fa_infer_item(input.infer_item)?;
 
     let payload = PreparedFaPayloadV2::from_infer_item(input.infer_item);
     let payload_attachment = store
@@ -172,7 +158,9 @@ pub async fn build_forced_alignment_request_v2(
         .extract_prepared_audio_segment_f32le(
             &input.ids.audio_ref_id,
             Path::new(&input.infer_item.audio_path),
-            window,
+            // The item's own window, proof intact: it is not rebuilt from
+            // integers here.
+            input.infer_item.window,
         )
         .await
         .map_err(|err| match err {
@@ -244,9 +232,14 @@ pub(crate) fn text_mode_for(backend: FaBackendV2, gap_healing: WordGapHealing) -
 
 /// Validate that the existing infer item is coherent enough to be frozen into a
 /// prepared-artifact request.
+///
+/// It no longer checks the audio window. It used to rebuild a `MediaWindow`
+/// from two integers to prove the window non-empty; the item now carries an
+/// [`FaWindow`](crate::chat_ops::fa::coordinates::FaWindow), already proven
+/// ordered, non-empty and inside its recording.
 fn validate_fa_infer_item(
     infer_item: &FaInferItem,
-) -> Result<MediaWindow, ForcedAlignmentRequestBuildErrorV2> {
+) -> Result<(), ForcedAlignmentRequestBuildErrorV2> {
     let expected = infer_item.words.len();
     for (field, actual) in [
         ("word_ids", infer_item.word_ids.len()),
@@ -274,19 +267,7 @@ fn validate_fa_infer_item(
         return Err(ForcedAlignmentRequestBuildErrorV2::MissingAudioPath);
     }
 
-    // The window is PROVEN here and returned, rather than checked here and
-    // checked again inside the extractor on the same two numbers. That second
-    // check was the third statement of one comparison, in two subsystems.
-    MediaWindow::new(
-        FileMs::new(infer_item.audio_start_ms),
-        FileMs::new(infer_item.audio_end_ms),
-    )
-    .map_err(
-        |empty| ForcedAlignmentRequestBuildErrorV2::InvalidAudioWindow {
-            start_ms: empty.start,
-            end_ms: empty.end,
-        },
-    )
+    Ok(())
 }
 
 #[cfg(test)]
@@ -295,6 +276,8 @@ mod tests {
     use std::path::Path;
 
     use crate::chat_ops::fa::WordGapHealing;
+    use crate::chat_ops::fa::coordinates::{FaWindow, Ms, Recording};
+    use crate::time::FileMs;
 
     use super::*;
     use crate::media::tools::MediaTool;
@@ -309,6 +292,13 @@ mod tests {
         (store, dir)
     }
 
+    /// The first 100 ms of a recording as long as the generated tone (250 ms).
+    fn test_window() -> FaWindow {
+        let recording = Recording::of_duration(Ms(250)).expect("non-empty recording");
+        FaWindow::within(&recording, FileMs::new(0), FileMs::new(100))
+            .expect("window inside the recording")
+    }
+
     /// Return a small infer item for staged V2 builder tests.
     fn test_infer_item(audio_path: &Path) -> FaInferItem {
         FaInferItem {
@@ -317,8 +307,7 @@ mod tests {
             word_utterance_indices: vec![0, 0],
             word_utterance_word_indices: vec![0, 1],
             audio_path: audio_path.to_string_lossy().into_owned(),
-            audio_start_ms: 0,
-            audio_end_ms: 100,
+            window: test_window(),
             gap_healing: WordGapHealing::PreserveMeasured,
         }
     }
@@ -355,8 +344,7 @@ mod tests {
             word_utterance_indices: vec![0, 0],
             word_utterance_word_indices: vec![0, 1],
             audio_path: "fixture.wav".into(),
-            audio_start_ms: 0,
-            audio_end_ms: 100,
+            window: test_window(),
             gap_healing: WordGapHealing::Heal,
         })
         .expect_err("mismatched arrays should fail");

@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 use crate::api::WorkerLanguage;
-use crate::media::probe::MediaProbe;
 use crate::types::worker_v2::{
     ArtifactRefV2, AsrBackendV2, AsrInputV2, AsrRequestV2, DecodeBudgetSeconds, ExecuteRequestV2,
     InferenceTaskV2, PreparedAudioInputV2, ProviderDiarizationV2, ProviderMediaInputV2,
@@ -24,35 +23,6 @@ use crate::types::worker_v2::{
 };
 
 use super::artifacts_v2::{PreparedArtifactErrorV2, PreparedArtifactStoreV2};
-
-/// Derive a request's decode budget from a media file's probed duration.
-///
-/// `None` when the duration could not be probed (ffprobe missing, refused
-/// the file, or could not be started): this is the honest "unknown to
-/// Rust" case, not a fabricated budget, and callers fall back to
-/// [`crate::types::worker_v2::PROVIDER_MEDIA_ASR_TRANSPORT_CEILING_SECONDS`]
-/// for it (see `TaskRequestV2::timeout_seconds_with_config`). A probe
-/// failure never blocks request construction: ASR still runs, it just
-/// gets the generous named fallback ceiling instead of a duration-derived
-/// one.
-///
-/// Known cost: a timeout budget needs no exact length, but `MediaProbe` only
-/// returns an exact one, so an MP3 or ADTS file is walked in full for it (and
-/// the align path has usually probed the same file already). The deeper
-/// change is to hand the caller's `AudioDuration` in, as the FA path does.
-async fn probe_decode_budget_seconds(media_path: &Path) -> Option<DecodeBudgetSeconds> {
-    match MediaProbe::new(media_path).duration().await {
-        Ok(duration) => Some(DecodeBudgetSeconds::for_duration_ms(duration.length().0)),
-        Err(error) => {
-            tracing::debug!(
-                path = %media_path.display(),
-                %error,
-                "could not probe ASR provider-media duration; falling back to the named ceiling",
-            );
-            None
-        }
-    }
-}
 
 /// Stable ids for the prepared artifacts and envelope of one V2 ASR request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +100,19 @@ pub struct AsrBuildInputV2<'a> {
     /// argv preserves what the user asked for, the typed `backend`
     /// enum only encodes WHICH engine to load, not its configuration.
     pub extras: &'a std::collections::BTreeMap<String, String>,
+    /// The decode budget for `audio_path`, derived by the CALLER from a length
+    /// it already measured (`DecodeBudgetSeconds::for_duration_ms`), or `None`
+    /// when the caller could not measure it: the honest "unknown to Rust" case,
+    /// which reaches the wire as no budget and so falls back to the named
+    /// transport ceiling (see `TaskRequestV2::timeout_seconds_with_config`),
+    /// never a fabricated number.
+    ///
+    /// Consulted only by the provider-media backends. The prepared-audio
+    /// backends derive their budget from the attachment Rust just prepared,
+    /// which is exact, and ignore this. This builder used to probe the media
+    /// file itself for it, a whole-file walk for MP3 or ADTS and the same walk
+    /// the caller's pipeline had usually already paid for; the probe is gone.
+    pub decode_budget: Option<DecodeBudgetSeconds>,
 }
 
 /// Errors produced while building a live V2 ASR request.
@@ -189,10 +172,10 @@ pub async fn build_asr_request_v2(
             }
 
             // No prepared attachment carries this input's duration (Rust
-            // never decodes provider media locally), so it is probed
-            // directly from the file. `None` on probe failure, never a
-            // fabricated budget; see `probe_decode_budget_seconds`.
-            let decode_budget_seconds = probe_decode_budget_seconds(media_path).await;
+            // never decodes provider media locally), so the caller's own
+            // measurement is used. `None` when it could not measure, never a
+            // fabricated budget; see `AsrBuildInputV2::decode_budget`.
+            let decode_budget_seconds = input.decode_budget;
 
             (
                 AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
@@ -282,6 +265,7 @@ mod tests {
                     backend,
                     models: &models,
                     extras: &extras,
+                    decode_budget: None,
                 },
             )
             .await;
@@ -324,6 +308,7 @@ mod tests {
                     backend,
                     models: &models,
                     extras: &empty_extras,
+                    decode_budget: Some(DecodeBudgetSeconds::for_duration_ms(2_000)),
                 },
             )
             .await
@@ -333,6 +318,12 @@ mod tests {
             let TaskRequestV2::Asr(payload) = request.payload else {
                 panic!("expected ASR payload");
             };
+            // The budget is the caller's measurement, carried as given: the
+            // missing file here could not have been probed for one.
+            assert_eq!(
+                payload.decode_budget_seconds,
+                Some(DecodeBudgetSeconds::for_duration_ms(2_000))
+            );
             let AsrInputV2::ProviderMedia(provider_media) = payload.input else {
                 panic!("expected provider-media input");
             };

@@ -1,23 +1,20 @@
-//! A window of a media file, which cannot be empty.
+//! Media-side window vocabulary: the non-empty [`MediaWindow`], the ffmpeg seek
+//! spelling, and the facts about what a windowed decode produced.
 //!
-//! Its own module because it is a MEDIA primitive, not a transcode detail: the
-//! CHAT-analysis side produces windows (`chat_ops::fa::find_untimed_windows`)
-//! and the transcode side consumes them, so putting it under either would make
-//! the other depend on a neighbour it has no business knowing.
+//! # How this relates to `FaWindow`
 //!
-//! # Why it exists
-//!
-//! The same `end <= start` comparison was written in THREE places, none of them
-//! where the window originates: `validate_fa_infer_item` checked it, then
-//! `extract_prepared_audio_segment_f32le` checked it again on the same numbers,
-//! and `extract_audio_segment` checked it a third time for the UTR path. The
-//! producer, `find_untimed_windows`, returned bare `(u64, u64)` tuples and
-//! checked nothing, while being the one place that could actually build an
-//! inverted one.
+//! The transcode, extraction and UTR paths take the recording-bound
+//! [`FaWindow`] (`chat_ops::fa::coordinates`), which proves a window is
+//! ordered, non-empty and inside its recording. This module therefore DOES
+//! depend on the CHAT-analysis side ([`EmptySegment`] reports the `FaWindow`
+//! that was asked for), and `coordinates` imports nothing from here. [`MediaWindow`] remains for windows that have no
+//! recording to be inside, such as speaker enrollment spans: it proves
+//! ordering and non-emptiness only.
 
 use std::ffi::OsString;
 use std::num::NonZeroU64;
 
+use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::time::FileMs;
 
 /// A non-empty half-open window of a source file.
@@ -77,16 +74,20 @@ impl MediaWindow {
     pub fn end(self) -> FileMs {
         self.end
     }
+}
 
-    /// `ffmpeg`'s seconds-with-milliseconds spelling of this window.
-    pub(in crate::media) fn as_seek_args(self) -> [OsString; 4] {
-        [
-            OsString::from("-ss"),
-            OsString::from(format!("{:.3}", self.start.get() as f64 / 1000.0)),
-            OsString::from("-to"),
-            OsString::from(format!("{:.3}", self.end.get() as f64 / 1000.0)),
-        ]
-    }
+/// `ffmpeg`'s seconds-with-milliseconds spelling of a window's two positions.
+///
+/// The one place the `-ss`/`-to` argument spelling exists. It takes positions,
+/// not a window type, because the only caller holds an `FaWindow`; the
+/// `MediaWindow` method that used to spell this had no caller left and is gone.
+pub(in crate::media) fn seek_args(start: FileMs, end: FileMs) -> [OsString; 4] {
+    [
+        OsString::from("-ss"),
+        OsString::from(format!("{:.3}", start.get() as f64 / 1000.0)),
+        OsString::from("-to"),
+        OsString::from(format!("{:.3}", end.get() as f64 / 1000.0)),
+    ]
 }
 
 /// Why a decode of a [`MediaWindow`] produced no whole sample frames.
@@ -256,12 +257,17 @@ impl DecodedFrames {
 /// and `DurationMs` in `ServerError`, converted in passing by one of the
 /// rebuilds. Carrying the [`MediaWindow`] that was ASKED FOR removes both
 /// problems: one declaration, and the window keeps the type it was proven at.
+///
+/// That type is [`FaWindow`], not [`MediaWindow`], since the transcode now
+/// takes the recording-bound window: the value reported is the very one that
+/// was asked for, with its containment proof, and no conversion back from a
+/// bare media window (which could not say which recording it fit) is needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmptySegment {
     /// Source media the window was requested from.
     pub path: String,
     /// The window that produced nothing.
-    pub window: MediaWindow,
+    pub window: FaWindow,
     /// What the measurement saw, issued by the party that measured it.
     ///
     /// Added 2026-09-07. Without it the value said a segment was empty and
@@ -275,7 +281,7 @@ impl std::fmt::Display for EmptySegment {
         write!(
             f,
             "[{}ms..{}ms) in {}: {}",
-            self.window.start().get(),
+            self.window.audio_start().get(),
             self.window.end().get(),
             self.path,
             self.reason

@@ -1538,6 +1538,18 @@ If those warnings appear on a recording's final seconds again, compare the
 probed length (logged at debug as `Probed audio duration` with its basis)
 against a full decode before suspecting the engine.
 
+The window keeps that proof all the way to the decode. `FaInferItem.window`,
+`find_untimed_windows`, `extract_prepared_audio_segment_f32le`,
+`extract_audio_segment` and `Transcode::window` all carry an `FaWindow` rather
+than millisecond integers. When ffmpeg reports decoding errors, a windowed
+transcode judges the decode against the window's own length, since the window
+is proven inside the recording; only a whole-file transcode probes the source
+(once). Previously the proof was erased to integers at the worker boundary and
+every damaged window re-walked the whole file to learn its length. What the
+proof does not cover is stated on `Transcode::window`.
+`FaWindow::within` also refuses an empty window (`WindowFault::Empty`), so
+non-emptiness is decided in one place.
+
 ### Empty audio windows
 
 An FA window can decode to zero PCM frames even when ffmpeg exits successfully.

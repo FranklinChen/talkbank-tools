@@ -81,7 +81,6 @@
 use std::cmp::Ordering;
 
 use crate::media::probe::AudioDuration;
-use crate::media::window::MediaWindow;
 
 // One definition, in `crate::time`; this spelling is the one FA call sites
 // already use. See that module for why it is not this one.
@@ -398,6 +397,15 @@ pub enum WindowFault {
         /// The proposed end, which precedes it.
         end: FileMs,
     },
+    /// The start equals the end, so the window holds no audio. Checked after
+    /// ordering and before containment; this is the one place a window's
+    /// non-emptiness is decided, so no consumer (grouping, partial UTR, the
+    /// transcode) restates it.
+    #[error("audio window at {at} ms has no positive extent")]
+    Empty {
+        /// The position at which the window starts and ends.
+        at: FileMs,
+    },
     /// The window extends past the end of the recording it is cut from, so
     /// audio the engine would be told about does not exist.
     #[error("window ends at {end}, {exceeds_by} past the end of the recording")]
@@ -445,8 +453,8 @@ pub enum OutsideWindow {
 /// was still inside the recording.
 ///
 /// Constructible only through [`FaWindow::within`], which refuses a window that
-/// is inverted or extends past its recording, so possession of one is proof
-/// that the audio it names exists.
+/// is inverted, empty or extends past its recording, so possession of one is
+/// proof that the audio it names exists and is not zero-length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaWindow {
     start: FileMs,
@@ -457,13 +465,15 @@ pub struct FaWindow {
 impl FaWindow {
     /// The only constructor: a window over a recording, checked against it.
     ///
-    /// Ordering is checked before containment, because an inverted window's
-    /// length is meaningless and every containment answer computed from it
-    /// would be as well.
+    /// Ordering is checked before anything else, because an inverted window's
+    /// length is meaningless and every later answer computed from it would be
+    /// as well; an empty window is refused before containment for the same
+    /// reason. So the order is inverted, then empty, then past-the-end.
     pub fn within(recording: &Recording, start: FileMs, end: FileMs) -> Result<Self, WindowFault> {
         match start.cmp(&end) {
             Ordering::Greater => Err(WindowFault::Inverted { start, end }),
-            Ordering::Less | Ordering::Equal => match recording.overshoot_of(end) {
+            Ordering::Equal => Err(WindowFault::Empty { at: start }),
+            Ordering::Less => match recording.overshoot_of(end) {
                 Some(exceeds_by) => Err(WindowFault::PastRecording { end, exceeds_by }),
                 None => Ok(Self {
                     start,
@@ -472,21 +482,6 @@ impl FaWindow {
                 }),
             },
         }
-    }
-
-    /// A window over a recording, from a [`MediaWindow`] that already proved
-    /// its own ordering.
-    ///
-    /// The single owner of the `MediaWindow` to `FaWindow` conversion. Callers
-    /// used to destructure the media window into two `u64`s and hand them to
-    /// [`FaWindow::within`], which re-proved ordering the media window had
-    /// already established and passed the containment question through raw
-    /// integers: the proof was discarded and rebuilt, and nothing typed the gap
-    /// between the two. One conversion means one place where the extra fact
-    /// (does this window fit the recording?) is added to the one the media
-    /// window already carries.
-    pub fn over(recording: &Recording, window: MediaWindow) -> Result<Self, WindowFault> {
-        Self::within(recording, window.start(), window.end())
     }
 
     /// The recording this window is cut from.
@@ -669,6 +664,29 @@ mod tests {
                 end: FileMs::new(4_000),
             })
         );
+    }
+
+    #[test]
+    fn an_empty_window_is_refused_and_inversion_is_checked_first() {
+        let rec = recording(10_000);
+        let at = FileMs::new(4_000);
+        assert_eq!(
+            FaWindow::within(&rec, at, at),
+            Err(WindowFault::Empty { at })
+        );
+        // Emptiness is decided before containment: an empty window past the
+        // end is reported as empty.
+        let past = FileMs::new(20_000);
+        assert_eq!(
+            FaWindow::within(&rec, past, past),
+            Err(WindowFault::Empty { at: past })
+        );
+        // Ordering is decided before emptiness.
+        assert!(matches!(
+            FaWindow::within(&rec, FileMs::new(4_001), FileMs::new(4_000)),
+            Err(WindowFault::Inverted { .. })
+        ));
+        assert!(FaWindow::within(&rec, at, FileMs::new(4_001)).is_ok());
     }
 
     #[test]

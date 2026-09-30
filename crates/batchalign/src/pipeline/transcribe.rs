@@ -36,11 +36,11 @@ use crate::runner::debug_dumper::DebugDumper;
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 use crate::transcribe::replay::AdmittedLegacyTranscribeReplay;
 use crate::transcribe::{
-    AsrInferParams, AsrResponse, SpeakerEvidenceRunParams, SpeakerEvidenceSource,
+    AsrInferParams, AsrResponse, NonRevAsrBackend, SpeakerEvidenceRunParams, SpeakerEvidenceSource,
     TranscribeOptions, convert_asr_response, infer_asr, resolve_speaker_evidence_for_audio,
 };
 use crate::transcribe::{ReplayAsrPlan, TranscribeAsrPlan, TranscribePlan};
-use crate::types::worker_v2::{SpeakerBackendV2, SpeakerSegmentV2};
+use crate::types::worker_v2::{DecodeBudgetSeconds, SpeakerBackendV2, SpeakerSegmentV2};
 use crate::utseg::TranscribeUtsegExecution;
 use crate::utseg_evidence::{UtsegEvidencePhase, UtsegEvidenceSink, UtsegEvidenceTrace};
 
@@ -485,6 +485,22 @@ async fn stage_asr_infer<'a>(
             speakers,
             language,
         } => {
+            // Measured ONCE, here, and only when the request needs it: a
+            // provider-media backend sizes its decode budget from the file's
+            // length, while a prepared-audio backend derives the budget from
+            // the audio it prepares. The request builder used to probe the file
+            // itself (a whole-file walk for MP3 or ADTS), out of this
+            // pipeline's sight. `probe_audio_duration` is reused rather than
+            // probing here, so there is one owner of "measure the length and
+            // log the failure".
+            let decode_budget = match backend {
+                NonRevAsrBackend::Worker(mode) if mode.reads_provider_media() => {
+                    crate::runner::util::probe_audio_duration(ctx.audio_path)
+                        .await
+                        .map(|duration| DecodeBudgetSeconds::for_duration_ms(duration.length().0))
+                }
+                NonRevAsrBackend::Worker(_) | NonRevAsrBackend::RustWhisperRs => None,
+            };
             infer_asr(
                 ctx.services.pool,
                 &AsrInferParams {
@@ -493,6 +509,7 @@ async fn stage_asr_infer<'a>(
                     lang: language,
                     num_speakers: NumSpeakers(speakers.get()),
                     extras: &ctx.opts.engine_extras,
+                    decode_budget,
                 },
             )
             .await?

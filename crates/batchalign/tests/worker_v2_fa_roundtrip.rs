@@ -96,6 +96,16 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
     let wav_path = tempdir.path().join("tone.wav");
     write_test_tone(&wav_path).await;
 
+    // The recording is MEASURED from the tone this test generated, the one
+    // route production has (`of_duration` is `cfg(test)`-only and integration
+    // tests cannot see it). Both windows below are proven against it, and the
+    // request window travels into the transcode with that proof intact.
+    let measured = MediaProbe::new(&wav_path)
+        .duration()
+        .await
+        .expect("the generated tone should probe");
+    let recording = Recording::of_audio(measured);
+
     let request = build_forced_alignment_request_v2(
         &store,
         ForcedAlignmentBuildInputV2 {
@@ -110,8 +120,8 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
                 word_utterance_indices: vec![0, 0],
                 word_utterance_word_indices: vec![0, 1],
                 audio_path: wav_path.to_string_lossy().into_owned(),
-                audio_start_ms: 0,
-                audio_end_ms: 150,
+                window: FaWindow::within(&recording, FileMs::new(0), FileMs::new(150))
+                    .expect("request window inside the recording"),
                 gap_healing: WordGapHealing::Heal,
             },
             engine: batchalign::types::engines::FaEngineName::Whisper,
@@ -152,18 +162,8 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
     let timings = parse_forced_alignment_result_v2(
         &response,
         &make_words(&["hello", "world"]),
-        &{
-            // The recording is MEASURED from the tone this test generated, the
-            // one route production has (`of_duration` is `cfg(test)`-only and
-            // integration tests cannot see it).
-            let measured = MediaProbe::new(&wav_path)
-                .duration()
-                .await
-                .expect("the generated tone should probe");
-            let recording = Recording::of_audio(measured);
-            FaWindow::within(&recording, FileMs::new(0), FileMs::new(800))
-                .expect("window inside the recording")
-        },
+        &FaWindow::within(&recording, FileMs::new(0), FileMs::new(800))
+            .expect("window inside the recording"),
         &EngineId::new("test-fa"),
     )
     .expect("staged response should parse back into Rust FA domain");

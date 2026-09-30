@@ -352,8 +352,6 @@ struct GroupWindow {
 enum WindowRefusal {
     #[error(transparent)]
     OutsideRecording(#[from] WindowFault),
-    #[error("audio window at {start} ms has no positive extent")]
-    Empty { start: FileMs },
     #[error(
         "audio window duration {duration} ms exceeds alignment budget {budget} ms; narrower evidence is required"
     )]
@@ -367,12 +365,9 @@ impl GroupWindow {
             FileMs::new(span.start_ms),
             FileMs::new(span.end_ms),
         )?;
+        // Non-emptiness is already proven: `FaWindow::within` refused an empty
+        // span above, through `WindowFault::Empty`.
         let duration = window.len();
-        if duration.0 == 0 {
-            return Err(WindowRefusal::Empty {
-                start: window.audio_start(),
-            });
-        }
         if duration.0 > budget.0 {
             return Err(WindowRefusal::Oversized { duration, budget });
         }

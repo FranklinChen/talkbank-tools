@@ -460,8 +460,9 @@ and the execute key equal by construction instead of by coincidence.
 decode budget, derived once by Rust from the audio's duration and a named
 realtime factor (`DecodeBudgetSeconds`,
 `crates/batchalign-types/src/worker_v2/requests.rs`). `null` means Rust could
-not derive one for this request (a `ProviderMediaInput` whose duration could
-not be probed); the receiving engine then derives its own, exactly the
+not derive one for this request (a `ProviderMediaInput` whose caller could
+not measure the duration; the caller measures it once and passes the budget in,
+the request builder does not probe); the receiving engine then derives its own, exactly the
 pre-existing fallback. Two consumers read it from one value rather than
 computing two independent numbers that can drift apart: Python's native
 Qwen3-ASR decode loop (`_qwen_chunking.DecodeBudget`) bounds decode time with

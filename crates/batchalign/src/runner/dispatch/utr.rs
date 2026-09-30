@@ -24,6 +24,7 @@ use crate::options::UtrEngine;
 use crate::params::CachePolicy;
 use crate::pipeline::PipelineServices;
 use crate::runner::debug_dumper::DebugDumper;
+use crate::types::worker_v2::DecodeBudgetSeconds;
 use tracing::{info, warn};
 
 /// Immutable runtime inputs for one UTR execution.
@@ -181,7 +182,24 @@ pub(in crate::runner) async fn run_utr_pass(
         // comment.
         // Passing the recording deletes the second derivation, the panic and
         // the argument together.
-        let windows = crate::chat_ops::fa::find_untimed_windows(chat_file, &recording, 500);
+        //
+        // The windows come back as `FaWindow`s, proven inside this recording,
+        // and stay that way through the segment extraction (whose transcode
+        // then needs no probe of the source to bound a damaged decode) and the
+        // token conversion below. Partial UTR is an optimisation, so a window
+        // that is somehow not inside the recording degrades to full-file
+        // recovery like the other failures here.
+        let windows = match crate::chat_ops::fa::find_untimed_windows(chat_file, &recording, 500) {
+            Ok(windows) => windows,
+            Err(why) => {
+                warn!(
+                    context.filename,
+                    error = %why,
+                    "Partial UTR window is not inside the recording, falling back to full-file recovery"
+                );
+                return run_utr_pass_full(chat_file, context).await;
+            }
+        };
 
         if windows.is_empty() {
             info!(
@@ -199,7 +217,7 @@ pub(in crate::runner) async fn run_utr_pass(
             let total_windows = windows.len() as i64;
 
             for (window_idx, window) in windows.iter().enumerate() {
-                let (start_ms, end_ms) = (window.start().get(), window.end().get());
+                let (start_ms, end_ms) = (window.audio_start().get(), window.end().get());
                 let seg_cache_key = crate::chat_ops::fa::utr_asr_segment_cache_key(
                     context.audio_identity,
                     context.engine,
@@ -244,7 +262,13 @@ pub(in crate::runner) async fn run_utr_pass(
                             }
                         };
 
-                        match miss.infer(&segment_path, context).await {
+                        // A segment's budget is the window's own length: it is the
+                        // audio handed to the engine, and the window is proven
+                        // inside the recording. (The whole file's duration would
+                        // be a far looser bound than this segment needs.)
+                        let segment_budget =
+                            Some(DecodeBudgetSeconds::for_duration_ms(window.len().0));
+                        match miss.infer(&segment_path, segment_budget, context).await {
                             Ok(inferred) => {
                                 inferred
                                     .commit(
@@ -266,30 +290,10 @@ pub(in crate::runner) async fn run_utr_pass(
                     }
                 };
 
-                // The segment handed to the engine, as a window inside the
-                // recording. `find_untimed_windows` already clamps both ends,
-                // so this cannot fail; the failure arm is written out rather
-                // than unwrapped so that a change there breaks here instead of
-                // silently reinstating an unbounded offset.
-                //
-                // Converted from the `MediaWindow` itself rather than from the
-                // two integers destructured out of it, so the ordering proof it
-                // already carries is not thrown away and rebuilt here.
-                let fa_window = match FaWindow::over(&recording, *window) {
-                    Ok(window) => window,
-                    Err(why) => {
-                        warn!(
-                            context.filename,
-                            error = %why,
-                            start_ms,
-                            end_ms,
-                            "UTR window is not inside the recording, skipping it"
-                        );
-                        continue;
-                    }
-                };
-                let converted =
-                    asr_response_to_utr_tokens(&seg_response, &fa_window, &utr_engine_id);
+                // The segment handed to the engine is the window itself, already
+                // inside the recording: the second conversion (`FaWindow::over`)
+                // and its unreachable skip arm are gone.
+                let converted = asr_response_to_utr_tokens(&seg_response, window, &utr_engine_id);
                 converted.warn_if_lossy(&context);
                 all_tokens.extend(converted.tokens);
 
@@ -379,7 +383,15 @@ async fn run_utr_pass_full(
                 engine = context.engine.as_wire_name(),
                 "UTR ASR cache miss, running inference"
             );
-            match miss.infer(context.audio_path, context).await {
+            // The whole file: the duration the pipeline measured once, if it
+            // could; otherwise no budget and the transport's fallback ceiling.
+            let whole_file_budget = context
+                .audio_duration
+                .map(|duration| DecodeBudgetSeconds::for_duration_ms(duration.length().0));
+            match miss
+                .infer(context.audio_path, whole_file_budget, context)
+                .await
+            {
                 Ok(inferred) => {
                     inferred
                         .commit(context.services.cache, &cache_key, context.filename)
@@ -444,6 +456,7 @@ async fn run_utr_pass_full(
 /// shared `AsrResponse` cache format.
 async fn infer_utr_asr_response(
     audio_path: &Path,
+    decode_budget: Option<DecodeBudgetSeconds>,
     context: UtrPassContext<'_>,
 ) -> Result<crate::transcribe::AsrResponse, crate::error::ServerError> {
     match crate::transcribe::AsrBackend::from(context.engine).as_non_rev() {
@@ -490,6 +503,7 @@ async fn infer_utr_asr_response(
                     lang: &crate::transcribe::SingleAsrLanguage::One(context.lang.clone()),
                     num_speakers: NumSpeakers(1),
                     extras: &empty_extras,
+                    decode_budget,
                 },
             )
             .await
@@ -540,6 +554,7 @@ impl UtrAsrCacheMiss {
     async fn infer(
         self,
         audio_path: &Path,
+        decode_budget: Option<DecodeBudgetSeconds>,
         context: UtrPassContext<'_>,
     ) -> Result<UtrAsrInferred, crate::error::ServerError> {
         match (context.cache_policy, context.engine) {
@@ -553,7 +568,8 @@ impl UtrAsrCacheMiss {
             // gate still refuses a provider call on a raw miss.
             (CachePolicy::RequireCache, UtrEngine::RevAi)
             | (CachePolicy::UseCache | CachePolicy::SkipCache, _) => {
-                self.run(infer_utr_asr_response(audio_path, context)).await
+                self.run(infer_utr_asr_response(audio_path, decode_budget, context))
+                    .await
             }
         }
     }

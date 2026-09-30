@@ -1,8 +1,9 @@
 //! Media resolution, preflight validation, and output path handling.
 
 use std::collections::HashMap;
+use std::path::Path;
 #[cfg(test)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::store::PendingJobFile;
 use batchalign_types::paths::ClientPath;
@@ -112,11 +113,16 @@ pub(in crate::runner) async fn compute_audio_identity(
 ///
 /// Returns the probe's [`AudioDuration`] rather than its milliseconds, so every
 /// bound built from it is the probe's measurement (see `media::probe`).
-pub(in crate::runner) async fn probe_audio_duration(audio_path: &str) -> Option<AudioDuration> {
+///
+/// The one place that measures an audio file's length AND logs the failure.
+/// Crate-visible so the transcribe pipeline's ASR stage, which needs the length
+/// to size a provider request's decode budget, reuses it instead of keeping a
+/// second probe-and-log of its own.
+pub(crate) async fn probe_audio_duration(audio_path: &Path) -> Option<AudioDuration> {
     match MediaProbe::new(audio_path).duration().await {
         Ok(duration) => {
             debug!(
-                audio = %audio_path,
+                audio = %audio_path.display(),
                 length_ms = duration.length().0,
                 basis = ?duration.basis(),
                 "Probed audio duration"
@@ -125,9 +131,9 @@ pub(in crate::runner) async fn probe_audio_duration(audio_path: &str) -> Option<
         }
         Err(error) => {
             warn!(
-                audio = %audio_path,
+                audio = %audio_path.display(),
                 error = %error,
-                "Could not determine audio duration; untimed utterances will be estimated without it"
+                "Could not determine audio duration; steps that need it fall back to their defaults"
             );
             None
         }

@@ -289,7 +289,7 @@ async fn infer_groups_v2(
                 // useful without timing.
                 warn!(
                     group = group_index,
-                    start_ms = segment.window.start().get(),
+                    start_ms = segment.window.audio_start().get(),
                     end_ms = segment.window.end().get(),
                     window_ms = window.len().0,
                     recording_ms = window.recording().duration().get(),
@@ -794,8 +794,9 @@ fn build_fa_infer_item(batch: &FaWorkerBatch<'_>, group_index: usize) -> FaInfer
             .map(|word| word.utterance_word_index.raw())
             .collect(),
         audio_path: batch.audio_path.to_string_lossy().into_owned(),
-        audio_start_ms: group.audio_start_ms(),
-        audio_end_ms: group.audio_end_ms(),
+        // The group's own window, proof included: nothing is lowered to
+        // integers here for the request builder to rebuild.
+        window: group.window(),
         gap_healing: batch.gap_healing,
     }
 }
@@ -914,8 +915,8 @@ mod tests {
         assert_eq!(item.word_utterance_indices, vec![0, 0]);
         assert_eq!(item.word_utterance_word_indices, vec![0, 1]);
         assert_eq!(item.audio_path, "/tmp/input.wav");
-        assert_eq!(item.audio_start_ms, 100);
-        assert_eq!(item.audio_end_ms, 900);
+        assert_eq!(item.window.audio_start().get(), 100);
+        assert_eq!(item.window.end().get(), 900);
         assert_eq!(item.gap_healing, WordGapHealing::PreserveMeasured);
     }
 

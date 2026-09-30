@@ -689,7 +689,7 @@ async fn process_one_fa_file(
     // How long the audio runs, measured once for UTR and FA alike. Optional
     // here because a failure is logged and FA probes again for the recording
     // it cannot run without, reporting that failure as the file's error.
-    let audio_duration = probe_audio_duration(&audio_path_str).await;
+    let audio_duration = probe_audio_duration(&audio_path).await;
     let utr_audio_path = if utr_engine.as_ref().is_some_and(|e| e.is_rust_owned()) {
         original_audio_path.as_path()
     } else {

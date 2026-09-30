@@ -972,21 +972,6 @@ fn test_estimate_boundaries_interpolates_from_neighbors() {
 }
 
 #[test]
-fn snapshot_fa_infer_item() {
-    let item = FaInferItem {
-        words: vec!["hello".into(), "world".into()],
-        word_ids: vec!["u0:w0".into(), "u0:w1".into()],
-        word_utterance_indices: vec![0, 0],
-        word_utterance_word_indices: vec![0, 1],
-        audio_path: "/data/test.mp3".into(),
-        audio_start_ms: 1500,
-        audio_end_ms: 3200,
-        gap_healing: WordGapHealing::PreserveMeasured,
-    };
-    insta::assert_json_snapshot!(item);
-}
-
-#[test]
 fn test_apply_fa_results_excludes_xxx_from_wor_tier() {
     // Fixture: an utterance with `xxx`. The stale %wor has 5 words (no xxx)
     // this matches what the new policy will produce after FA.

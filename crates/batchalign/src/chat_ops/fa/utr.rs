@@ -30,9 +30,7 @@ use batchalign_transform::dp_align::{self, MatchMode};
 
 use tracing::debug;
 
-use crate::media::window::MediaWindow;
-
-use super::coordinates::{FileMs, Recording};
+use super::coordinates::{FaWindow, FileMs, Recording, WindowFault};
 
 use super::extraction::collect_fa_words;
 
@@ -882,7 +880,13 @@ impl RunBoundary {
 /// Adjacent untimed utterances are merged into a single window.
 /// Windows of audio with no timing, for UTR to transcribe.
 ///
-/// Returns PROVEN windows. This used to hand back bare `(u64, u64)` pairs, and
+/// Returns [`FaWindow`]s, each proven inside `recording`, so the proof reaches
+/// the audio extraction and its transcode rather than being rebuilt (or
+/// dropped) on the way. The caller used to convert each bare `MediaWindow`
+/// back with `FaWindow::over`, a second fallible step with a `continue` arm for
+/// a failure that could not occur.
+///
+/// This used to hand back bare `(u64, u64)` pairs, and
 /// it is the one place that can build a degenerate one: `padded_end` is clamped
 /// to `total_audio_ms` while `padded_start` was not, so an utterance whose
 /// bullet starts past the end of the audio produced an INVERTED window. Every
@@ -893,11 +897,18 @@ impl RunBoundary {
 /// of zero or negative length contains no audio to transcribe. The count is
 /// logged: a silent drop and an empty result are the same thing to a reader,
 /// which is the failure this crate keeps finding.
+///
+/// # Errors
+///
+/// [`WindowFault`] if a merged window is inverted or not inside `recording`.
+/// Both edges are clamped to it and empties are skipped, so this is not
+/// expected to occur; it is surfaced, not dropped, so that a change to the clamping breaks
+/// loudly instead of silently shrinking the set of windows.
 pub fn find_untimed_windows(
     chat_file: &ChatFile,
     recording: &Recording,
     padding_ms: u64,
-) -> Vec<MediaWindow> {
+) -> Result<Vec<FaWindow>, WindowFault> {
     // Collect bullet info for each utterance in order
     let mut utt_bullets: Vec<Option<(u64, u64)>> = Vec::new();
     for line in &chat_file.lines {
@@ -913,7 +924,7 @@ pub fn find_untimed_windows(
     }
 
     if utt_bullets.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Find contiguous runs of untimed utterances and compute their windows
@@ -958,7 +969,7 @@ pub fn find_untimed_windows(
 
     // Merge overlapping windows
     if raw_windows.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     raw_windows.sort_by_key(|&(start, _)| start);
     let mut merged: Vec<(u64, u64)> = vec![raw_windows[0]];
@@ -975,13 +986,20 @@ pub fn find_untimed_windows(
     }
 
     // The merged pairs become proven windows here, at the last moment they are
-    // still pairs. A degenerate one cannot be transcribed, so it is dropped
-    // and counted rather than passed on for three consumers to re-check.
+    // still pairs. A window holding nothing cannot be transcribed, and
+    // `FaWindow::within` refuses it as `WindowFault::Empty`: it is dropped and
+    // counted rather than passed on. Any other fault is returned.
     let total = merged.len();
-    let windows: Vec<MediaWindow> = merged
-        .into_iter()
-        .filter_map(|(start, end)| MediaWindow::new(FileMs::new(start), FileMs::new(end)).ok())
-        .collect();
+    let mut windows: Vec<FaWindow> = Vec::with_capacity(total);
+    for (start, end) in merged {
+        match FaWindow::within(recording, FileMs::new(start), FileMs::new(end)) {
+            Ok(window) => windows.push(window),
+            Err(WindowFault::Empty { .. }) => {}
+            Err(fault @ (WindowFault::Inverted { .. } | WindowFault::PastRecording { .. })) => {
+                return Err(fault);
+            }
+        }
+    }
     if windows.len() != total {
         debug!(
             dropped = total - windows.len(),
@@ -989,7 +1007,7 @@ pub fn find_untimed_windows(
             "Dropped degenerate untimed windows (zero-length after clamping)"
         );
     }
-    windows
+    Ok(windows)
 }
 
 #[cfg(test)]
@@ -1693,7 +1711,8 @@ mod tests {
     fn test_find_untimed_windows_all_timed() {
         let input = include_str!("../../../../../test-fixtures/fa_two_timed_utterances.cha");
         let chat = parse_chat(input);
-        let windows = super::find_untimed_windows(&chat, &recording(60000), 500);
+        let windows = super::find_untimed_windows(&chat, &recording(60000), 500)
+            .expect("clamped windows lie inside the recording");
         assert!(windows.is_empty(), "all timed → no windows");
     }
 
@@ -1703,12 +1722,13 @@ mod tests {
             include_str!("../../../../../test-fixtures/fa_mixed_timed_untimed_interleaved.cha");
         let chat = parse_chat(input);
         // This fixture has 3 timed and 3 untimed utterances interleaved
-        let windows = super::find_untimed_windows(&chat, &recording(60000), 500);
+        let windows = super::find_untimed_windows(&chat, &recording(60000), 500)
+            .expect("clamped windows lie inside the recording");
         assert!(!windows.is_empty(), "should find untimed windows");
         // Windows should be non-overlapping and ordered
         for w in windows.windows(2) {
             assert!(
-                w[0].end() <= w[1].start(),
+                w[0].end() <= w[1].audio_start(),
                 "windows should be non-overlapping"
             );
         }
@@ -1718,9 +1738,10 @@ mod tests {
     fn test_find_untimed_windows_all_untimed() {
         let input = include_str!("../../../../../test-fixtures/fa_two_untimed_with_media.cha");
         let chat = parse_chat(input);
-        let windows = super::find_untimed_windows(&chat, &recording(30000), 500);
+        let windows = super::find_untimed_windows(&chat, &recording(30000), 500)
+            .expect("clamped windows lie inside the recording");
         assert_eq!(windows.len(), 1, "all untimed → one merged window");
-        assert_eq!(windows[0].start(), FileMs::new(0), "starts at 0");
+        assert_eq!(windows[0].audio_start(), FileMs::new(0), "starts at 0");
         assert_eq!(
             windows[0].end(),
             FileMs::new(30000),

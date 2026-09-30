@@ -26,6 +26,7 @@ pub mod utr;
 #[cfg(test)]
 pub(crate) mod tests;
 
+use self::coordinates::FaWindow;
 use self::origin::Origin;
 use crate::types::engines::FaTimingResolution;
 use serde::{Deserialize, Serialize};
@@ -862,8 +863,21 @@ impl DroppedWordTimings {
     }
 }
 
-/// Wire type for the FA infer protocol -- one group sent to a Python worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One FA group, as the Rust request builder consumes it on its way to a
+/// Python worker.
+///
+/// Not a wire type, and deliberately neither `Serialize` nor `Deserialize`:
+/// the worker receives the prepared text payload and audio artifact this is
+/// turned into, never this value. Its only serialization was one snapshot test.
+/// Adding serde to it would need a serde [`FaWindow`], and a deserialized
+/// window would be a label rather than a proof that the audio exists.
+///
+/// The audio window is an [`FaWindow`] and not a pair of millisecond integers.
+/// The integers erased the proof that the window lies inside the recording, so
+/// the audio extractor rebuilt a window from them and, on a damaged decode,
+/// re-measured the whole media file to learn what the window's own type already
+/// said.
+#[derive(Debug, Clone)]
 pub struct FaInferItem {
     /// Words to align (cleaned text).
     pub words: Vec<String>,
@@ -875,19 +889,10 @@ pub struct FaInferItem {
     pub word_utterance_word_indices: Vec<usize>,
     /// Path to the audio file.
     pub audio_path: String,
-    /// Start of the audio window (ms).
-    pub audio_start_ms: u64,
-    /// End of the audio window (ms).
-    pub audio_end_ms: u64,
+    /// The audio window, proven to lie inside the recording at `audio_path`.
+    pub window: FaWindow,
     /// How to handle word end times during post-processing.
     pub gap_healing: WordGapHealing,
-}
-
-impl FaInferItem {
-    /// Audio window as a [`TimeSpan`].
-    pub fn audio_span(&self) -> TimeSpan {
-        TimeSpan::new(self.audio_start_ms, self.audio_end_ms)
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -26,9 +26,9 @@
 //! # What this makes unrepresentable
 //!
 //! - An argv this crate does not support. There is no way to spell one.
-//! - A window whose end does not follow its start. [`MediaWindow`] refuses it
-//!   at construction, so the check cannot be forgotten by a new call site and
-//!   cannot be reported (as it once was) as an I/O error.
+//! - A window that is empty, inverted or outside its recording. [`FaWindow`]
+//!   refuses each at construction, so the transcode has nothing to check and
+//!   no such refusal can be reported (as it once was) as an I/O error.
 //! - A partial output file surviving a failed transcode. The cleanup is inside
 //!   [`Transcode::produce`], not restated by each caller.
 //! - A spawn failure read as a transcode failure, or the reverse.
@@ -54,9 +54,10 @@ use std::path::{Path, PathBuf};
 
 use super::probe::{MediaProbe, ProbeError};
 use super::tools::{MediaTool, MediaToolError};
-use super::window::DecodedFrames;
-pub use super::window::{EmptyWindow, MediaWindow};
+pub use super::window::MediaWindow;
+use super::window::{DecodedFrames, seek_args};
 use crate::api::DurationMs;
+use crate::chat_ops::fa::coordinates::FaWindow;
 
 /// How far the decoded audio may fall short of the source's declared length
 /// when ffmpeg reported decoding errors, and still be admitted.
@@ -190,11 +191,27 @@ impl PcmEncoding {
     }
 }
 
+/// Which part of the source a transcode reads.
+///
+/// A closed sum rather than `Option<MediaWindow>`: the two cases need different
+/// facts when a decode reports damage (see [`Transcode::admit_damaged`]), and
+/// `None` said only "no window" without saying what that obliges.
+#[derive(Clone, Copy, Debug)]
+enum Span {
+    /// The whole file. Its expected length is the source's own, so it has to
+    /// be measured.
+    Whole,
+    /// One window. [`FaWindow`] proves it lies within the measured recording
+    /// and holds audio, so its own length IS the expected decode length and
+    /// nothing is measured, and its positions are the ffmpeg seek arguments.
+    Window(FaWindow),
+}
+
 /// A transcode this crate knows how to ask for.
 #[derive(Clone, Debug)]
 pub struct Transcode {
     source: PathBuf,
-    window: Option<MediaWindow>,
+    span: Span,
     encoding: PcmEncoding,
 }
 
@@ -333,16 +350,26 @@ impl Transcode {
     pub fn whole(source: impl Into<PathBuf>, encoding: PcmEncoding) -> Self {
         Self {
             source: source.into(),
-            window: None,
+            span: Span::Whole,
             encoding,
         }
     }
 
     /// Transcode one window of a file.
-    pub fn window(source: impl Into<PathBuf>, window: MediaWindow, encoding: PcmEncoding) -> Self {
+    ///
+    /// Takes the recording-bound [`FaWindow`], so the proof that the window
+    /// lies inside the measured audio and is not empty travels all the way to
+    /// the decode; there is nothing left to refuse here.
+    ///
+    /// # The assumption the types do not carry
+    ///
+    /// That the window's recording was measured from THIS `source` path. Both
+    /// callers (forced alignment and partial UTR) probe and transcode the same
+    /// audio path; nothing checks it. This is the one place it is stated.
+    pub fn window(source: impl Into<PathBuf>, window: FaWindow, encoding: PcmEncoding) -> Self {
         Self {
             source: source.into(),
-            window: Some(window),
+            span: Span::Window(window),
             encoding,
         }
     }
@@ -406,16 +433,21 @@ impl Transcode {
     }
 
     /// Admit a decode that reported errors, or refuse it: measure the
-    /// source's probed length for the requested span against what was
-    /// decoded, and let [`ConcealedDamage::admit`] rule. Asked only after
-    /// ffmpeg reported errors, so a clean decode pays for no probe.
+    /// span's expected length against what was decoded, and let
+    /// [`ConcealedDamage::admit`] rule. Asked only after ffmpeg reported
+    /// errors, so a clean decode pays for no probe.
     ///
-    /// Known cost: the source's length is used only to clip a window that
-    /// might run past the end, and for MPEG audio or ADTS the probe walks the
-    /// whole file, once per DAMAGED window. An FA window was already proved
-    /// inside the recording (`FaWindow::within`), but that proof is erased to a
-    /// bare `MediaWindow` at the worker's infer-item boundary. Carrying it
-    /// across would let a proved window skip this probe entirely.
+    /// The rule: a WINDOW is judged against its own length, and only a WHOLE
+    /// file is judged against a probe of the source. A window is an
+    /// [`FaWindow`], which was proved inside the recording when it was built,
+    /// so it cannot run past the end and needs no clipping to the source
+    /// length; the probe that clipped it is gone. This removed what used to be
+    /// a known cost: for MPEG audio or ADTS that probe walks the whole file,
+    /// and it ran once per DAMAGED window, because the proof was erased to a
+    /// bare `MediaWindow` at the worker's infer-item boundary. The whole-file
+    /// case still probes once, as before.
+    ///
+    /// See [`Transcode::window`] for the one assumption the types do not carry.
     fn admit_damaged(
         &self,
         destination: &Path,
@@ -427,19 +459,13 @@ impl Transcode {
             input: input.to_owned(),
             source,
         };
-        let source = MediaProbe::new(&self.source)
-            .duration_blocking()
-            .map_err(unmeasured)?
-            .length();
-        let expected = DurationMs(match self.window {
-            // A window reaching past the source's end can only decode what the
-            // source holds, so the expectation is clipped to it.
-            Some(window) => source
-                .0
-                .min(window.end().get())
-                .saturating_sub(window.start().get()),
-            None => source.0,
-        });
+        let expected = match self.span {
+            Span::Window(window) => DurationMs(window.len().0),
+            Span::Whole => MediaProbe::new(&self.source)
+                .duration_blocking()
+                .map_err(unmeasured)?
+                .length(),
+        };
         let decoded = match self.encoding {
             // Raw float PCM: the length follows from the frame count.
             PcmEncoding::F32LeRaw => DurationMs(match DecodedFrames::measure_f32le(byte_len) {
@@ -480,8 +506,11 @@ impl Transcode {
             .into_iter()
             .map(OsString::from)
             .collect();
-        if let Some(window) = self.window {
-            args.extend(window.as_seek_args());
+        match self.span {
+            Span::Window(window) => {
+                args.extend(seek_args(window.audio_start(), window.end()));
+            }
+            Span::Whole => {}
         }
         args.push(OsString::from("-i"));
         args.push(self.source.clone().into_os_string());
@@ -511,7 +540,16 @@ fn discard_partial(destination: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_ops::fa::coordinates::{Ms, Recording};
     use crate::time::FileMs;
+
+    /// A window `start..end` inside a fixture recording of `recording_ms`, built
+    /// the only way one can be: checked against the recording.
+    fn fa_window(recording_ms: u64, start: u64, end: u64) -> FaWindow {
+        let recording = Recording::of_duration(Ms(recording_ms)).expect("non-empty recording");
+        FaWindow::within(&recording, FileMs::new(start), FileMs::new(end))
+            .expect("window inside the recording")
+    }
 
     /// A truncated PCM sample is a real decoder error that ffmpeg tolerates
     /// with exit zero and all but one sample still emitted: the damage lost
@@ -647,7 +685,7 @@ mod tests {
     /// because raw PCM has no container for the extension to imply.
     #[test]
     fn a_windowed_raw_transcode_seeks_before_input_and_states_its_format() {
-        let window = MediaWindow::new(ms(1_500), ms(2_250)).expect("non-empty window");
+        let window = fa_window(10_000, 1_500, 2_250);
         let args =
             Transcode::window("/in.wav", window, PcmEncoding::F32LeRaw).args(Path::new("/out.pcm"));
         let rendered: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
@@ -675,5 +713,54 @@ mod tests {
                 "/out.pcm",
             ]
         );
+    }
+
+    /// A damaged WINDOWED decode is judged against the window's own length and
+    /// needs no probe of the source: the source path here does not exist, so a
+    /// probe could only fail, and the decode is admitted regardless. The same
+    /// damage on a whole-file transcode of the same missing source cannot be
+    /// judged, because the whole file's length is the one thing that must be
+    /// measured.
+    #[test]
+    fn a_damaged_windowed_decode_is_judged_against_the_window_with_no_probe() {
+        let source = Path::new("/nonexistent/never-probed.mp3");
+        let destination = Path::new("/nonexistent/out.pcm");
+        // 525 ms of 16 kHz mono f32 samples, less one sample: within tolerance.
+        let byte_len = (525 * 16) * 4 - 4;
+        let window = fa_window(10_000, 100, 625);
+        let concealed = Transcode::window(source, window, PcmEncoding::F32LeRaw)
+            .admit_damaged(destination, byte_len, "in", "damaged packet".into())
+            .expect("a window is judged against its own length, with no probe");
+        assert_eq!(concealed.expected(), DurationMs(525));
+        assert_eq!(concealed.decoded(), DurationMs(524));
+
+        // A window that lost audio is still refused, against the same length.
+        let lost = Transcode::window(source, window, PcmEncoding::F32LeRaw).admit_damaged(
+            destination,
+            4 * 16 * 100,
+            "in",
+            "damaged packet".into(),
+        );
+        assert!(matches!(
+            lost,
+            Err(TranscodeError::DamagedAudioLost {
+                expected_ms: 525,
+                decoded_ms: 100,
+                ..
+            })
+        ));
+
+        // The whole file has no such proof, so it probes, and the missing
+        // source makes that probe fail.
+        let whole = Transcode::whole(source, PcmEncoding::F32LeRaw).admit_damaged(
+            destination,
+            byte_len,
+            "in",
+            "damaged packet".into(),
+        );
+        assert!(matches!(
+            whole,
+            Err(TranscodeError::DamageUnmeasured { .. })
+        ));
     }
 }

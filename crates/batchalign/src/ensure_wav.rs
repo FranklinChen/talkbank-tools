@@ -28,8 +28,8 @@ use fs2::FileExt;
 use thiserror::Error;
 use tracing::{debug, info};
 
+use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::media::transcode::{PcmEncoding, Transcode, TranscodeError};
-use crate::media::window::MediaWindow;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -220,15 +220,19 @@ pub async fn ensure_wav(
 ///
 /// Uses ffmpeg `-ss {start} -to {end}` with pcm_s16le 16kHz mono.
 /// Result is cached in media_cache keyed by source fingerprint + time window.
+///
+/// Takes the recording-bound [`FaWindow`], so a damaged decode is judged
+/// against the window's own length instead of a probe of the whole source. See
+/// `Transcode::window` for what the window's proof does not cover.
 pub async fn extract_audio_segment(
     source: &Path,
-    window: MediaWindow,
+    window: FaWindow,
 ) -> Result<PathBuf, EnsureWavError> {
     let source = source.to_path_buf();
     // Only for the cache key: the window itself is already proven, so nothing
     // here re-checks it. That check used to live in this function, and in two
     // others, none of them where the pair originates.
-    let (start_ms, end_ms) = (window.start().get(), window.end().get());
+    let (start_ms, end_ms) = (window.audio_start().get(), window.end().get());
 
     tokio::task::spawn_blocking(move || -> Result<PathBuf, EnsureWavError> {
         let cache_dir = default_cache_dir();
@@ -506,8 +510,16 @@ mod tests {
     async fn segment_refuses_unreadable_source_identity() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.wav");
-        let window =
-            MediaWindow::new(crate::time::FileMs::new(0), crate::time::FileMs::new(100)).unwrap();
+        let recording = crate::chat_ops::fa::coordinates::Recording::of_duration(
+            crate::chat_ops::fa::coordinates::Ms(1_000),
+        )
+        .unwrap();
+        let window = FaWindow::within(
+            &recording,
+            crate::time::FileMs::new(0),
+            crate::time::FileMs::new(100),
+        )
+        .unwrap();
         assert!(matches!(extract_audio_segment(&missing, window).await,
             Err(EnsureWavError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound));
     }
