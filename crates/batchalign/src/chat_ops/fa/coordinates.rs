@@ -145,7 +145,11 @@ pub struct Recording {
     duration: FileMs,
 }
 
-/// Why a recording could not be constructed.
+/// Why a fixture recording could not be constructed.
+///
+/// `cfg(test)` like its only producer, [`Recording::of_duration`]: the
+/// production route, [`Recording::of_audio`], cannot fail.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum NotARecording {
     /// A zero-length file cannot contain speech, and treating it as a bound
@@ -223,7 +227,8 @@ impl Recording {
         }
     }
 
-    /// The recording a probe measured: the route production takes.
+    /// The recording a probe measured: the ONLY route outside `cfg(test)`
+    /// ([`Recording::of_duration`] is test-only).
     ///
     /// Takes an [`AudioDuration`], which only the media probe can build, never
     /// from a bitrate estimate and never of zero length, so this cannot fail
@@ -238,8 +243,13 @@ impl Recording {
 
     /// A recording of a duration the caller vouches for.
     ///
-    /// For fixtures, which state a length rather than measure one. Production
-    /// holds an [`AudioDuration`] and uses [`Recording::of_audio`].
+    /// Compiled only under `cfg(test)`, so the rule is enforced by the
+    /// compiler rather than stated in a comment: fixtures state a length
+    /// rather than measure one, and production cannot. Production holds an
+    /// [`AudioDuration`] and is left exactly one route, [`Recording::of_audio`].
+    /// An integration test, which cannot see `cfg(test)` items, measures a
+    /// real file with `MediaProbe` and takes that route too.
+    #[cfg(test)]
     pub fn of_duration(duration: Ms) -> Result<Self, NotARecording> {
         match duration {
             Ms(0) => Err(NotARecording::ZeroDuration),

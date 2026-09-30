@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-30 10:59 EDT
+**Last updated:** 2026-09-30 13:50 EDT
 
 ## Philosophy
 
@@ -82,9 +82,17 @@ flowchart LR
   starts with `scripts/check-ffmpeg-pin.sh`, which refuses any other `ffmpeg`
   or `ffprobe` on `PATH`. A Homebrew upgrade on a developer machine therefore
   fails the gate with the reason, rather than moving a test's expected value.
+- The tests enforce the pin themselves, so a bare `cargo test` cannot
+  escape it. In this crate's test builds, `MediaTool::command()` and
+  `async_command()` check the release once per process before the first
+  spawn, which covers every unit test that generates or decodes audio,
+  including the production code under test, with no call to remember.
+  Integration tests link the non-test build and call
+  `MediaTool::require_pinned_release()` (which reads `scripts/ffmpeg-pin.sh`
+  at compile time) before spawning.
 - Tests that need ffmpeg REQUIRE it. They used to return early when it was
-  missing, which read as a pass; the gate now guarantees it, so an absence is
-  a broken environment to report.
+  missing, which read as a pass; now a missing or wrong release fails with
+  the pin's own message.
 - Oracles are content, where the content is known. The probe tests compare a
   stated length with the length of the tone they generated, not with a decode.
 

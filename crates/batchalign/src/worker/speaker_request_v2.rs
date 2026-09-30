@@ -163,16 +163,6 @@ mod tests {
             .expect("artifact store should exist");
         let ids = PreparedSpeakerRequestIdsV2::new("req-speaker-v2-prepared", "audio-speaker-v2");
         let media_path = tempdir.path().join("speaker-input.wav");
-        // ffmpeg is a runtime prereq for align/asr commands; tests must skip
-        // gracefully when it isn't installed (e.g. CI runners without ffmpeg).
-        // Asked the same way as every other skip-guard in the crate. This block
-        // used to read `ErrorKind::NotFound` off the spawn itself, which is a
-        // second reading of a policy `MediaTool` owns, in the one file that
-        // synthesizes rather than transcodes and so never adopted the seam.
-        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
-        MediaTool::Ffmpeg
-            .banner()
-            .expect("ffmpeg is installed at the pinned release");
         let ffmpeg_out = MediaTool::Ffmpeg
             .async_command()
             .args([

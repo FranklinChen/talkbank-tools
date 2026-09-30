@@ -35,6 +35,11 @@ use super::artifacts_v2::{PreparedArtifactErrorV2, PreparedArtifactStoreV2};
 /// failure never blocks request construction: ASR still runs, it just
 /// gets the generous named fallback ceiling instead of a duration-derived
 /// one.
+///
+/// Known cost: a timeout budget needs no exact length, but `MediaProbe` only
+/// returns an exact one, so an MP3 or ADTS file is walked in full for it (and
+/// the align path has usually probed the same file already). The deeper
+/// change is to hand the caller's `AudioDuration` in, as the FA path does.
 async fn probe_decode_budget_seconds(media_path: &Path) -> Option<DecodeBudgetSeconds> {
     match MediaProbe::new(media_path).duration().await {
         Ok(duration) => Some(DecodeBudgetSeconds::for_duration_ms(duration.length().0)),

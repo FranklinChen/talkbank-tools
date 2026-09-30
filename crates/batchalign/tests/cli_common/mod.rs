@@ -254,6 +254,7 @@ pub fn write_silent_wav(path: &Path) {
 }
 
 pub fn write_silent_mp4(path: &Path) {
+    MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
     let output = MediaTool::Ffmpeg
         .command()
         .args([
@@ -278,6 +279,7 @@ pub fn write_silent_mp4(path: &Path) {
 }
 
 pub fn transcode_audio_to_mp4(input: &Path, output: &Path) {
+    MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
     let ffmpeg_output = MediaTool::Ffmpeg
         .command()
         .args([

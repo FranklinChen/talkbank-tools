@@ -462,11 +462,6 @@ mod tests {
 
     #[tokio::test]
     async fn extracts_prepared_audio_segment_with_ffmpeg() {
-        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
-        MediaTool::Ffmpeg
-            .banner()
-            .expect("ffmpeg is installed at the pinned release");
-
         let (store, dir) = test_store();
         let wav_path = dir.path().join("tone.wav");
         let ffmpeg_out = MediaTool::Ffmpeg
@@ -538,11 +533,6 @@ mod tests {
     /// the extractor returns `PreparedArtifactErrorV2::EmptyAudioSegment`.
     #[tokio::test]
     async fn extract_returns_empty_audio_segment_error_when_segment_past_end_of_file() {
-        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
-        MediaTool::Ffmpeg
-            .banner()
-            .expect("ffmpeg is installed at the pinned release");
-
         let (store, dir) = test_store();
         let wav_path = dir.path().join("short.wav");
         // Generate a 0.1-second WAV, valid range is 0..100ms.

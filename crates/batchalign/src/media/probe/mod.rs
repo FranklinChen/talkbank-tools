@@ -152,15 +152,11 @@ impl MediaProbe {
         let header = MediaTool::Ffprobe
             .run_async(self.args(HEADER_ENTRIES))
             .await;
-        match self
-            .answer::<header::HeaderAnswer>(header)?
-            .route(&self.input())?
-        {
+        match self.route(header)? {
             header::DurationRoute::Stated(duration) => Ok(duration),
             header::DurationRoute::Walk(reason) => {
                 let walk = MediaTool::Ffprobe.run_async(self.args(WALK_ENTRIES)).await;
-                self.answer::<walk::WalkAnswer>(walk)?
-                    .length(&self.input(), reason)
+                self.walked(walk, reason)
             }
         }
     }
@@ -168,20 +164,39 @@ impl MediaProbe {
     /// How long the audio runs, for a caller already on a blocking thread
     /// (a transcode checking what a damaged decode produced). The same
     /// questions and the same reading of the answers as [`Self::duration`];
-    /// only the spawns differ.
+    /// only the spawns differ, which is why each public function sequences
+    /// its own spawns and leaves every spawn-free step to [`Self::route`]
+    /// and [`Self::walked`].
     pub fn duration_blocking(&self) -> Result<AudioDuration, ProbeError> {
         let header = MediaTool::Ffprobe.run(self.args(HEADER_ENTRIES));
-        match self
-            .answer::<header::HeaderAnswer>(header)?
-            .route(&self.input())?
-        {
+        match self.route(header)? {
             header::DurationRoute::Stated(duration) => Ok(duration),
             header::DurationRoute::Walk(reason) => {
                 let walk = MediaTool::Ffprobe.run(self.args(WALK_ENTRIES));
-                self.answer::<walk::WalkAnswer>(walk)?
-                    .length(&self.input(), reason)
+                self.walked(walk, reason)
             }
         }
+    }
+
+    /// The spawn-free step after the header question: read the header run and
+    /// decide whether the file states its length or must be walked.
+    fn route(
+        &self,
+        header: Result<std::process::Output, MediaToolError>,
+    ) -> Result<header::DurationRoute, ProbeError> {
+        self.answer::<header::HeaderAnswer>(header)?
+            .route(&self.input())
+    }
+
+    /// The spawn-free step after the walk question: read the walk run into the
+    /// length, for the `reason` the header sent the file to a walk.
+    fn walked(
+        &self,
+        walk: Result<std::process::Output, MediaToolError>,
+        reason: WalkReason,
+    ) -> Result<AudioDuration, ProbeError> {
+        self.answer::<walk::WalkAnswer>(walk)?
+            .length(&self.input(), reason)
     }
 
     /// The argv for one question: the entries asked for, about the first

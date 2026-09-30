@@ -49,15 +49,34 @@ impl MediaTool {
     /// A blocking `Command` already naming this tool.
     ///
     /// Callers add arguments; they never name the program, which is the point.
+    ///
+    /// In this crate's own test builds, the first spawn of the process first
+    /// checks that the tools on `PATH` are the pinned release
+    /// ([`Self::require_pinned_release`]). Every media spawn goes through here
+    /// or [`Self::async_command`], the production code under test included, so
+    /// no unit test can generate or decode audio with an unpinned ffmpeg and
+    /// no test has to remember to ask. Integration tests link the non-test
+    /// build and call the check themselves.
     #[must_use]
     pub fn command(self) -> std::process::Command {
-        std::process::Command::new(self.program())
+        #[cfg(test)]
+        pin_check::ensure();
+        self.unchecked_command()
     }
 
-    /// An async `Command` already naming this tool.
+    /// An async `Command` already naming this tool; pin-checked in test
+    /// builds exactly as [`Self::command`] is.
     #[must_use]
     pub fn async_command(self) -> tokio::process::Command {
+        #[cfg(test)]
+        pin_check::ensure();
         tokio::process::Command::new(self.program())
+    }
+
+    /// The `Command` with no test-build pin check: for [`Self::banner`],
+    /// which the pin check itself calls to read the release.
+    fn unchecked_command(self) -> std::process::Command {
+        std::process::Command::new(self.program())
     }
 
     /// The first line of `<tool> -version`, or `None` when it cannot be run.
@@ -75,7 +94,7 @@ impl MediaTool {
     #[must_use]
     pub fn banner(self) -> Option<String> {
         let output = self
-            .command()
+            .unchecked_command()
             .arg("-version")
             .stdin(std::process::Stdio::null())
             .output()
@@ -153,6 +172,122 @@ impl MediaTool {
     }
 }
 
+/// The release pin, read at compile time from the one file CI and the local
+/// gate also read, so the tests cannot disagree with them about the release.
+const PIN_FILE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../scripts/ffmpeg-pin.sh"
+));
+
+/// The value of the `FFMPEG_VERSION=` line in the text of `ffmpeg-pin.sh`.
+///
+/// `None` when no such line exists; the caller turns that into a loud failure
+/// rather than a default, because a pin that silently became "anything" would
+/// let every media test run against the wrong decoder again.
+fn pinned_version(pin_file: &str) -> Option<&str> {
+    pin_file
+        .lines()
+        .find_map(|line| line.strip_prefix("FFMPEG_VERSION="))
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+}
+
+/// Why the tools on `PATH` are not the pinned release: the three ways the
+/// test-support check can fail, each naming what to fix.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PinMismatch {
+    /// The pin file itself states no release.
+    #[error("scripts/ffmpeg-pin.sh has no FFMPEG_VERSION= line")]
+    NoPin,
+    /// The tool runs, but it is another release.
+    #[error(
+        "{tool} reports {banner:?}, but the media tests are pinned to {pin} (scripts/ffmpeg-pin.sh)"
+    )]
+    WrongRelease {
+        /// `ffmpeg` or `ffprobe`.
+        tool: &'static str,
+        /// The first line of its `-version` output.
+        banner: String,
+        /// The pinned release.
+        pin: &'static str,
+    },
+    /// The tool cannot be run at all.
+    #[error(
+        "{tool} is not runnable, and the media tests need release {pin} (scripts/ffmpeg-pin.sh)"
+    )]
+    NotRunnable {
+        /// `ffmpeg` or `ffprobe`.
+        tool: &'static str,
+        /// The pinned release.
+        pin: &'static str,
+    },
+}
+
+impl MediaTool {
+    /// TEST SUPPORT: whether BOTH `ffmpeg` and `ffprobe` on `PATH` are the
+    /// release pinned in `scripts/ffmpeg-pin.sh`.
+    ///
+    /// Every media test generates audio with ffmpeg's encoders and compares what
+    /// ffprobe states with what ffmpeg decodes, so its answers are properties
+    /// of the RELEASE (ffmpeg 6.1 decodes an AAC-in-MP4 tone 17.5 ms longer
+    /// than 9.0 does). The shell gate `scripts/check-ffmpeg-pin.sh` enforces
+    /// the pin for `make` and CI, but a bare `cargo test` bypasses it; this is
+    /// the same check, made by the tests themselves, with the same comparison
+    /// (first banner line starts with `<tool> version <pin> `).
+    ///
+    /// Returns the mismatch rather than panicking: library code never panics,
+    /// and a test turns an `Err` into its failure. In this crate's test builds
+    /// [`Self::command`] makes that call itself; integration tests make it
+    /// explicitly. Checked once per process, since every spawn asks.
+    ///
+    /// `pub` and `doc(hidden)` only because integration tests under `tests/`
+    /// cannot see `#[cfg(test)]` items; it is not a production API.
+    #[doc(hidden)]
+    pub fn require_pinned_release() -> Result<(), PinMismatch> {
+        static CHECKED: std::sync::OnceLock<Result<(), PinMismatch>> = std::sync::OnceLock::new();
+        CHECKED
+            .get_or_init(|| {
+                let pin = pinned_version(PIN_FILE).ok_or(PinMismatch::NoPin)?;
+                for tool in [Self::Ffmpeg, Self::Ffprobe] {
+                    let expected = format!("{} version {pin} ", tool.program());
+                    // The trailing space in `expected` matches the gate: a banner
+                    // is followed by more text, and `9.0.2` must not match `9.0.21`.
+                    match tool.banner() {
+                        Some(banner) if banner.starts_with(&expected) => {}
+                        Some(banner) => {
+                            return Err(PinMismatch::WrongRelease {
+                                tool: tool.program(),
+                                banner,
+                                pin,
+                            });
+                        }
+                        None => {
+                            return Err(PinMismatch::NotRunnable {
+                                tool: tool.program(),
+                                pin,
+                            });
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .clone()
+    }
+}
+
+/// The test-build half of the spawn-path check: a test that spawns a media
+/// tool fails, with the mismatch's own message, unless the pinned release is
+/// on `PATH`. A `cfg(test)` module, so the failure is test code's to raise.
+#[cfg(test)]
+mod pin_check {
+    pub(super) fn ensure() {
+        if let Err(mismatch) = super::MediaTool::require_pinned_release() {
+            panic!("{mismatch}");
+        }
+    }
+}
+
 /// Why a media tool could not be RUN.
 ///
 /// Module-internal: consumers outside `crate::media` see the OPERATION's
@@ -224,6 +359,23 @@ mod tests {
         ));
     }
 
+    /// The pin is read out of the real `scripts/ffmpeg-pin.sh`, and a text with
+    /// no `FFMPEG_VERSION=` line (or an empty one) has no pin.
+    #[test]
+    fn the_pin_is_read_from_the_pin_file() {
+        let pin = pinned_version(PIN_FILE).expect("the real pin file states a version");
+        assert!(
+            pin.chars().all(|c| c.is_ascii_digit() || c == '.') && pin.contains('.'),
+            "not a dotted release number: {pin:?}"
+        );
+        assert_eq!(
+            pinned_version("x\nFFMPEG_VERSION=9.0.2\ny\n"),
+            Some("9.0.2")
+        );
+        assert_eq!(pinned_version("# no pin here\nOTHER=1\n"), None);
+        assert_eq!(pinned_version("FFMPEG_VERSION=\n"), None);
+    }
+
     /// A tool that RAN and failed is `Ok`. Only failing to reach it is an error.
     ///
     /// This is the half of `run`'s contract that a caller most easily gets
@@ -232,8 +384,6 @@ mod tests {
     /// media file as an uninstalled binary.
     #[test]
     fn a_tool_that_ran_and_failed_is_not_an_error() {
-        // Required, not optional: the gate pins ffmpeg before tests run, and a
-        // test that returned early without it would read as a pass.
         let output = MediaTool::Ffmpeg
             .run(["-nonsense-flag-that-does-not-exist"])
             .expect("ffmpeg is installed, so running it must not be a spawn error");

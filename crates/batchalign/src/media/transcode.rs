@@ -409,6 +409,13 @@ impl Transcode {
     /// source's probed length for the requested span against what was
     /// decoded, and let [`ConcealedDamage::admit`] rule. Asked only after
     /// ffmpeg reported errors, so a clean decode pays for no probe.
+    ///
+    /// Known cost: the source's length is used only to clip a window that
+    /// might run past the end, and for MPEG audio or ADTS the probe walks the
+    /// whole file, once per DAMAGED window. An FA window was already proved
+    /// inside the recording (`FaWindow::within`), but that proof is erased to a
+    /// bare `MediaWindow` at the worker's infer-item boundary. Carrying it
+    /// across would let a proved window skip this probe entirely.
     fn admit_damaged(
         &self,
         destination: &Path,
@@ -511,7 +518,6 @@ mod tests {
     /// no audio, so the decode is admitted, its diagnostics kept.
     #[test]
     fn decoder_errors_that_lose_no_audio_are_admitted_with_their_diagnostics() {
-        assert!(MediaTool::Ffmpeg.banner().is_some(), "test requires ffmpeg");
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("truncated.wav");
         let destination = dir.path().join("output.wav");

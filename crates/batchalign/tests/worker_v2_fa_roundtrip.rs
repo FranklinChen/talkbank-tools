@@ -24,10 +24,11 @@ use crate::common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use batchalign::chat_ops::fa::coordinates::{FaWindow, FileMs, Ms, Recording};
+use batchalign::chat_ops::fa::coordinates::{FaWindow, FileMs, Recording};
 use batchalign::chat_ops::fa::origin::EngineId;
 use batchalign::chat_ops::fa::{FaInferItem, FaWord, WordGapHealing};
 use batchalign::chat_ops::{UtteranceIdx, WordIdx};
+use batchalign::media::probe::MediaProbe;
 use batchalign::media::tools::MediaTool;
 use batchalign::worker::artifacts_v2::PreparedArtifactStoreV2;
 use batchalign::worker::fa_result_v2::parse_forced_alignment_result_v2;
@@ -44,6 +45,7 @@ fn repo_root() -> PathBuf {
 
 /// Write a short WAV tone fixture for the staged V2 request builder.
 async fn write_test_tone(path: &Path) {
+    MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
     let output = MediaTool::Ffmpeg
         .async_command()
         .args([
@@ -53,7 +55,7 @@ async fn write_test_tone(path: &Path) {
             "-i",
             "sine=frequency=440:sample_rate=16000",
             "-t",
-            "0.30",
+            "1.0",
             path.to_string_lossy().as_ref(),
         ])
         .output()
@@ -85,11 +87,7 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
         eprintln!("SKIP: Python with batchalign.worker._fa_v2 not available");
         return;
     };
-    // Required, not optional: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh)
-    // before any test runs, so a missing one is a broken environment to report.
-    MediaTool::Ffmpeg
-        .banner()
-        .expect("ffmpeg is installed at the pinned release");
+    MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
 
     let repo_root = repo_root();
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -155,8 +153,15 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
         &response,
         &make_words(&["hello", "world"]),
         &{
-            let recording = Recording::of_duration(Ms(600_000)).expect("non-zero");
-            FaWindow::within(&recording, FileMs::new(0), FileMs::new(60_000))
+            // The recording is MEASURED from the tone this test generated, the
+            // one route production has (`of_duration` is `cfg(test)`-only and
+            // integration tests cannot see it).
+            let measured = MediaProbe::new(&wav_path)
+                .duration()
+                .await
+                .expect("the generated tone should probe");
+            let recording = Recording::of_audio(measured);
+            FaWindow::within(&recording, FileMs::new(0), FileMs::new(800))
                 .expect("window inside the recording")
         },
         &EngineId::new("test-fa"),

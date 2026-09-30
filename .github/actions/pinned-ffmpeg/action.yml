@@ -12,26 +12,43 @@ description: >
   same route; a job that installed the distribution package instead would
   test against a decoder nobody pinned.
 
+  Expects the caller to have run `apt-get update` already (both callers do,
+  for their own packages), so the package lists are not refreshed twice.
+
 runs:
   using: composite
   steps:
-    - name: Install ffmpeg build and runtime libraries
-      # libmp3lame is the pinned build's one external library, needed at run
-      # time as well as build time; nasm and pkg-config are for a rebuild.
-      shell: bash
-      run: sudo apt-get update && sudo apt-get install -y libmp3lame-dev nasm pkg-config
-
     - name: Restore pinned ffmpeg
       id: cache
-      uses: actions/cache@v6
+      uses: actions/cache/restore@v6
       with:
         path: ~/.local/ffmpeg-pinned
         key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ffmpeg-pin.sh', 'scripts/install-pinned-ffmpeg.sh') }}
 
+    - name: Install the pinned build's runtime library
+      # libmp3lame is the build's one external library. A restored build
+      # needs only the runtime package; the headers and assembler are for a
+      # rebuild.
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: sudo apt-get install -y libmp3lame0
+
     - name: Build pinned ffmpeg
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
-      run: bash scripts/install-pinned-ffmpeg.sh "$HOME/.local/ffmpeg-pinned"
+      run: |
+        sudo apt-get install -y libmp3lame-dev nasm pkg-config
+        bash scripts/install-pinned-ffmpeg.sh "$HOME/.local/ffmpeg-pinned"
+
+    - name: Save pinned ffmpeg
+      # Saved here, right after the build, rather than by a post-job step:
+      # a post-job save is skipped when any later step fails, which would
+      # throw away a finished multi-minute build on every red run.
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.local/ffmpeg-pinned
+        key: ${{ steps.cache.outputs.cache-primary-key }}
 
     - name: Put pinned ffmpeg on PATH and check it
       shell: bash
