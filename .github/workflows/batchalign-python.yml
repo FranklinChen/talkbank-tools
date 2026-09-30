@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
@@ -138,7 +138,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - uses: astral-sh/setup-uv@v10.2.0
@@ -199,7 +199,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend deps
@@ -230,7 +230,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - uses: astral-sh/setup-uv@v10.2.0
@@ -298,10 +298,10 @@ jobs:
           components: llvm-tools-preview
       - name: Install native coverage prerequisites
         run: |
-          sudo apt-get update && sudo apt-get install -y protobuf-compiler ffmpeg
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
           protoc --version
-          ffmpeg -version
-          ffprobe -version
+      - name: Install pinned ffmpeg
+        uses: ./.github/actions/pinned-ffmpeg
       # Instrumented dependencies live in a different target directory. Sharing
       # the ordinary build key restored an immutable full match, then rebuilt
       # the entire coverage graph on every attempt without ever caching it.
@@ -351,7 +351,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: |
             frontend/package-lock.json
@@ -398,7 +398,7 @@ jobs:
           uv pip install --no-deps dist/*.whl
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: |
             frontend/package-lock.json

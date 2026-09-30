@@ -414,10 +414,10 @@ mod tests {
 
     #[tokio::test]
     async fn builds_forced_alignment_execute_request_with_prepared_artifacts() {
-        if MediaTool::Ffmpeg.banner().is_none() {
-            eprintln!("skipping: ffmpeg not installed");
-            return;
-        }
+        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
+        MediaTool::Ffmpeg
+            .banner()
+            .expect("ffmpeg is installed at the pinned release");
 
         let (store, dir) = test_store();
         let wav_path = dir.path().join("tone.wav");

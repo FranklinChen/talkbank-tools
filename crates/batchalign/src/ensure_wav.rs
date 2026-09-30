@@ -538,10 +538,10 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_wav_converts_mp4() {
-        if MediaTool::Ffmpeg.banner().is_none() {
-            eprintln!("skipping: ffmpeg not installed");
-            return;
-        }
+        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
+        MediaTool::Ffmpeg
+            .banner()
+            .expect("ffmpeg is installed at the pinned release");
 
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = dir.path().join("cache");
@@ -586,10 +586,10 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_wav_converts_m4a() {
-        if MediaTool::Ffmpeg.banner().is_none() {
-            eprintln!("skipping: ffmpeg not installed");
-            return;
-        }
+        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
+        MediaTool::Ffmpeg
+            .banner()
+            .expect("ffmpeg is installed at the pinned release");
 
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = dir.path().join("cache");
@@ -621,10 +621,10 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_wav_cache_stats_and_clear() {
-        if MediaTool::Ffmpeg.banner().is_none() {
-            eprintln!("skipping: ffmpeg not installed");
-            return;
-        }
+        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
+        MediaTool::Ffmpeg
+            .banner()
+            .expect("ffmpeg is installed at the pinned release");
 
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = dir.path().join("cache");

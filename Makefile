@@ -367,6 +367,11 @@ batchalign-ci-rust:
 	@# calling them here made the Rust workflow die with `Error 127` on a runner
 	@# that has neither. The developer-facing target that mirrors ALL of CI is
 	@# `make gate`; use that before pushing.
+	@# The one exception is ffmpeg, which the workflow installs at the release
+	@# scripts/ffmpeg-pin.env names. The media tests measure ffmpeg's own
+	@# behaviour, so this gate refuses any other release, here and in CI alike:
+	@# on 2026-09-30 tests green on a local 9.0.2 went red on CI's 6.1.1.
+	bash scripts/check-ffmpeg-pin.sh
 	@$(MAKE) lint
 	@$(MAKE) batchalign-check
 	@$(MAKE) batchalign-test-rust

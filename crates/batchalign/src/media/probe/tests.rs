@@ -2,7 +2,9 @@
 //! real ffprobe, checked against what a real ffmpeg decode produces.
 //!
 //! Every test REQUIRES ffmpeg and ffprobe and fails without them; a skipped
-//! boundary test reads as a pass in a log nobody opens.
+//! boundary test reads as a pass in a log nobody opens. What a decode produces
+//! is a property of the ffmpeg RELEASE, so these run against the one release
+//! `scripts/ffmpeg-pin.env` names; the gate refuses any other before they run.
 
 use std::path::Path;
 
@@ -61,12 +63,28 @@ fn decoded_ms(path: &Path, rate_hz: u64) -> u64 {
     (samples * 1000).div_ceil(rate_hz)
 }
 
-/// Encode a 440 Hz tone of `seconds` at 44.1 kHz with ffmpeg into `path`.
-fn encode(path: &Path, seconds: &str, codec_args: &[&str]) {
-    let tone = format!("sine=frequency=440:sample_rate=44100:duration={seconds}");
+/// The length of a generated tone: the CONTENT a fixture holds, which is the
+/// same on every host, unlike what a given ffmpeg's decoder returns for it.
+#[derive(Clone, Copy)]
+struct ToneMs(u64);
+
+impl ToneMs {
+    /// The tone most fixtures encode: long enough that a 0.23% estimate error
+    /// is tens of milliseconds, and not a whole number of codec frames.
+    const LONG: Self = Self(20_300);
+
+    /// The lavfi source that generates this tone at 44.1 kHz.
+    fn source(self) -> String {
+        format!("sine=frequency=440:sample_rate=44100:duration={}ms", self.0)
+    }
+}
+
+/// Encode a 440 Hz tone at 44.1 kHz with ffmpeg into `path`.
+fn encode(path: &Path, tone: ToneMs, codec_args: &[&str]) {
     let status = MediaTool::Ffmpeg
         .command()
-        .args(["-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", &tone])
+        .args(["-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(tone.source())
         .args(codec_args)
         .arg(path)
         .status()
@@ -129,7 +147,7 @@ async fn a_vbr_mp3_without_an_info_header_is_walked() {
     let source = dir.path().join("vbr.mp3");
     encode(
         &source,
-        "20.3",
+        ToneMs::LONG,
         &["-acodec", "libmp3lame", "-q:a", "2", "-write_xing", "0"],
     );
     let decoded = decoded_ms(&source, 44_100);
@@ -148,7 +166,11 @@ async fn a_vbr_mp3_without_an_info_header_is_walked() {
 async fn trimmed_priming_is_not_counted_as_audio() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = dir.path().join("lame.mp3");
-    encode(&source, "20.3", &["-acodec", "libmp3lame", "-b:a", "128k"]);
+    encode(
+        &source,
+        ToneMs::LONG,
+        &["-acodec", "libmp3lame", "-b:a", "128k"],
+    );
     let decoded = decoded_ms(&source, 44_100);
     let probed = MediaProbe::new(&source).duration().await.expect("probes");
     assert_eq!(probed.length(), DurationMs(decoded));
@@ -159,10 +181,17 @@ async fn trimmed_priming_is_not_counted_as_audio() {
 }
 
 /// Every container whose STATED length is admitted, generated with ffmpeg's
-/// own encoders and compared against a full decode: the measurement that
-/// admits them, repeated wherever the tests run. A stated length may exceed
-/// the decode by a few milliseconds (codec priming the container counts), and
-/// must never fall short of it, which is the direction that discards speech.
+/// own encoders: the measurement that admits them, repeated wherever the
+/// tests run.
+///
+/// The oracle is the tone's CONTENT length. A stated length may exceed the
+/// content by a few milliseconds (codec priming the container counts) and must
+/// never fall short of it, the direction that discards speech. The decode must
+/// not run past the stated length either, or the bound would cut off audio an
+/// engine receives. That second property is the pinned release's: ffmpeg 6.1
+/// ignores an ISO media edit list's duration and decodes a 20.3 s AAC tone
+/// 17.5 ms long (its untrimmed end padding), which is how these tests failed
+/// on an unpinned CI runner.
 #[tokio::test]
 async fn stated_lengths_agree_with_a_full_decode() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -191,14 +220,18 @@ async fn stated_lengths_agree_with_a_full_decode() {
         ("wma.wma", &["-acodec", "wmav2"][..], StatingContainer::Asf),
     ] {
         let source = dir.path().join(name);
-        encode(&source, "20.3", codec);
-        let decoded = decoded_ms(&source, 44_100);
+        encode(&source, ToneMs::LONG, codec);
         let probed = MediaProbe::new(&source).duration().await.expect("probes");
         assert_eq!(probed.basis(), DurationBasis::Stated(container), "{name}");
-        let stated = probed.length().0;
+        let (stated, content) = (probed.length().0, ToneMs::LONG.0);
         assert!(
-            stated >= decoded && stated - decoded <= 50,
-            "{name}: stated {stated} ms, decoded {decoded} ms"
+            stated >= content && stated - content <= 50,
+            "{name}: stated {stated} ms for {content} ms of content"
+        );
+        let decoded = decoded_ms(&source, 44_100);
+        assert!(
+            decoded <= stated,
+            "{name}: decoded {decoded} ms, past the stated {stated} ms"
         );
     }
 }
@@ -218,7 +251,7 @@ async fn a_flac_that_states_no_length_is_walked() {
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=440:sample_rate=44100:duration=20.3",
+            &ToneMs::LONG.source(),
             "-acodec",
             "flac",
             "-f",
@@ -245,7 +278,7 @@ async fn a_flac_that_states_no_length_is_walked() {
 async fn an_unmeasured_container_is_refused_by_name() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = dir.path().join("tone.aiff");
-    encode(&source, "2", &["-acodec", "pcm_s16be"]);
+    encode(&source, ToneMs(2_000), &["-acodec", "pcm_s16be"]);
     match MediaProbe::new(&source).duration().await {
         Err(ProbeError::UnmeasuredContainer { demuxer, .. }) => assert_eq!(demuxer, "aiff"),
         other => panic!("expected a refusal, got {other:?}"),
@@ -268,11 +301,12 @@ async fn an_unreadable_file_is_refused_with_ffprobe_diagnostics() {
 
 /// An MP4 whose video runs past its audio: ffprobe states 10 s for the file
 /// and 6 s for the audio stream. The probe measures AUDIO, so it takes the
-/// stream's length, which is what the audio decodes to.
+/// stream's length: the tone's, not the video's.
 #[tokio::test]
 async fn an_mp4_with_longer_video_is_measured_by_its_audio() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = dir.path().join("lecture.mp4");
+    let tone = ToneMs(6_000);
     let status = MediaTool::Ffmpeg
         .command()
         .args([
@@ -287,7 +321,7 @@ async fn an_mp4_with_longer_video_is_measured_by_its_audio() {
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=440:sample_rate=44100:duration=6",
+            &tone.source(),
             "-map",
             "0:v",
             "-map",
@@ -306,9 +340,10 @@ async fn an_mp4_with_longer_video_is_measured_by_its_audio() {
         "premise: the file states the video's length"
     );
     let probed = MediaProbe::new(&source).duration().await.expect("probes");
-    assert_eq!(probed.length(), DurationMs(decoded_ms(&source, 44_100)));
+    assert_eq!(probed.length(), DurationMs(tone.0));
     assert_eq!(
         probed.basis(),
         DurationBasis::Stated(StatingContainer::IsoMedia)
     );
+    assert_eq!(decoded_ms(&source, 44_100), tone.0);
 }

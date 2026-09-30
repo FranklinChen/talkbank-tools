@@ -462,10 +462,10 @@ mod tests {
 
     #[tokio::test]
     async fn extracts_prepared_audio_segment_with_ffmpeg() {
-        if MediaTool::Ffmpeg.banner().is_none() {
-            eprintln!("skipping: ffmpeg not installed");
-            return;
-        }
+        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
+        MediaTool::Ffmpeg
+            .banner()
+            .expect("ffmpeg is installed at the pinned release");
 
         let (store, dir) = test_store();
         let wav_path = dir.path().join("tone.wav");
@@ -538,10 +538,10 @@ mod tests {
     /// the extractor returns `PreparedArtifactErrorV2::EmptyAudioSegment`.
     #[tokio::test]
     async fn extract_returns_empty_audio_segment_error_when_segment_past_end_of_file() {
-        if MediaTool::Ffmpeg.banner().is_none() {
-            eprintln!("skipping: ffmpeg not installed");
-            return;
-        }
+        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
+        MediaTool::Ffmpeg
+            .banner()
+            .expect("ffmpeg is installed at the pinned release");
 
         let (store, dir) = test_store();
         let wav_path = dir.path().join("short.wav");

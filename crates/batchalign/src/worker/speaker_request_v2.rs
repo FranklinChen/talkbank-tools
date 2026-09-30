@@ -169,10 +169,10 @@ mod tests {
         // used to read `ErrorKind::NotFound` off the spawn itself, which is a
         // second reading of a policy `MediaTool` owns, in the one file that
         // synthesizes rather than transcodes and so never adopted the seam.
-        if MediaTool::Ffmpeg.banner().is_none() {
-            eprintln!("skipping: ffmpeg not installed");
-            return;
-        }
+        // Required: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh).
+        MediaTool::Ffmpeg
+            .banner()
+            .expect("ffmpeg is installed at the pinned release");
         let ffmpeg_out = MediaTool::Ffmpeg
             .async_command()
             .args([

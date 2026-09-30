@@ -1,0 +1,40 @@
+name: Pinned ffmpeg
+description: >
+  Put exactly the ffmpeg release named in scripts/ffmpeg-pin.env on PATH, and
+  prove it. The media tests measure ffmpeg's own behaviour (what ffprobe
+  states, what a decode produces), and Ubuntu's package is a different
+  release from the developer's: on 2026-09-30 two tests that passed locally
+  on 9.0.2 failed on the runner's 6.1.1. The release is built once from its
+  hash-checked source tarball and cached by the pin, so a bump rebuilds and
+  every other run restores it in seconds.
+
+  One action so that every job needing ffmpeg gets the same release by the
+  same route; a job that installed the distribution package instead would
+  test against a decoder nobody pinned.
+
+runs:
+  using: composite
+  steps:
+    - name: Install ffmpeg build and runtime libraries
+      # libmp3lame is the pinned build's one external library, needed at run
+      # time as well as build time; nasm and pkg-config are for a rebuild.
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y libmp3lame-dev nasm pkg-config
+
+    - name: Restore pinned ffmpeg
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: ~/.local/ffmpeg-pinned
+        key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ffmpeg-pin.env', 'scripts/install-pinned-ffmpeg.sh') }}
+
+    - name: Build pinned ffmpeg
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: bash scripts/install-pinned-ffmpeg.sh "$HOME/.local/ffmpeg-pinned"
+
+    - name: Put pinned ffmpeg on PATH and check it
+      shell: bash
+      run: |
+        echo "$HOME/.local/ffmpeg-pinned/bin" >> "$GITHUB_PATH"
+        PATH="$HOME/.local/ffmpeg-pinned/bin:$PATH" bash scripts/check-ffmpeg-pin.sh

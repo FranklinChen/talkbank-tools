@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-30 08:00 EDT
+**Last updated:** 2026-09-30 10:59 EDT
 
 ## Philosophy
 
@@ -20,9 +20,9 @@ package set. This exclusion does not remove PyO3 coverage; the former separate
 PyO3 step repeated tests that the workspace command already selects. Coverage
 remains an explicit measurement job, not an inner-loop test command.
 Its native compile restores the dashboard artifact produced by the same
-workflow before compiling the embedded server assets. It installs and probes
-`protoc`, `ffmpeg` and `ffprobe` before the instrumented build, because coverage
-also exercises real media boundaries. PyO3 uses the same virtual-environment
+workflow before compiling the embedded server assets. It installs `protoc` and
+the pinned ffmpeg (below) before the instrumented build, because coverage also
+exercises real media boundaries. PyO3 uses the same virtual-environment
 interpreter as the installed wheel.
 The instrumented Rust coverage job sets `RUST_TEST_THREADS=1` on its small
 runner. Independent CLI tests otherwise reserve host memory as separate
@@ -50,6 +50,49 @@ The memory-tier architecture test scans Rust files in process and parses the
 embedded runtime TOML. It requires no `rg` subprocess or workspace-root search;
 unreadable source files fail the check. This keeps ordinary test and coverage
 environments equivalent without adding a search executable to every runner.
+
+### Media tests run against one pinned ffmpeg
+
+The media tests generate audio with ffmpeg's encoders and compare what ffprobe
+states with what ffmpeg decodes, so their expected values are properties of the
+ffmpeg RELEASE. Releases differ: ffmpeg 6.1 ignores an MP4 edit list's
+duration and decodes a 20.3 s AAC tone 17.5 ms long (its untrimmed end
+padding), where 9.0 decodes it to exactly 20300 ms. Tests written on one
+release and run on another fail for reasons that have nothing to do with the
+code under test.
+
+So there is one release, named with its source hash in
+`scripts/ffmpeg-pin.env`:
+
+```mermaid
+flowchart LR
+    pin["scripts/ffmpeg-pin.env\nversion + source SHA-256"]
+    install["install-pinned-ffmpeg.sh\nbuilds ffmpeg.org's tarball"]
+    action[".github/actions/pinned-ffmpeg\ncached by the pin's hash"]
+    check["check-ffmpeg-pin.sh\nfirst step of batchalign-ci-rust"]
+    tests["media tests"]
+    pin --> install --> action --> check
+    pin --> check --> tests
+```
+
+- CI never uses the distribution package. The composite action builds the
+  pinned release from its hash-checked source tarball once and caches it by
+  the pin, so later runs restore it in seconds.
+- `make batchalign-ci-rust` (the target CI and the pre-push gate both run)
+  starts with `scripts/check-ffmpeg-pin.sh`, which refuses any other `ffmpeg`
+  or `ffprobe` on `PATH`. A Homebrew upgrade on a developer machine therefore
+  fails the gate with the reason, rather than moving a test's expected value.
+- Tests that need ffmpeg REQUIRE it. They used to return early when it was
+  missing, which read as a pass; the gate now guarantees it, so an absence is
+  a broken environment to report.
+- Oracles are content, where the content is known. The probe tests compare a
+  stated length with the length of the tone they generated, not with a decode.
+
+Bumping the pin: install the new release locally, run the media tests,
+re-measure anything they report, then change both lines of the pin together.
+`scripts/verify-pinned-ffmpeg-linux.sh` builds the pin in an Ubuntu 24.04
+container (the runner's distribution) and checks the AAC fixture, so the
+installer is proven before CI runs it.
 
 Processing-command subprocess tests own a `CliHarness`, which seeds an isolated
 HOME with setup configuration. They must not inherit the developer's setup:

@@ -232,9 +232,8 @@ mod tests {
     /// media file as an uninstalled binary.
     #[test]
     fn a_tool_that_ran_and_failed_is_not_an_error() {
-        if MediaTool::Ffmpeg.banner().is_none() {
-            return; // nothing to say on a machine without ffmpeg
-        }
+        // Required, not optional: the gate pins ffmpeg before tests run, and a
+        // test that returned early without it would read as a pass.
         let output = MediaTool::Ffmpeg
             .run(["-nonsense-flag-that-does-not-exist"])
             .expect("ffmpeg is installed, so running it must not be a spawn error");

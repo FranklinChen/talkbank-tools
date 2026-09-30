@@ -85,10 +85,11 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
         eprintln!("SKIP: Python with batchalign.worker._fa_v2 not available");
         return;
     };
-    if MediaTool::Ffmpeg.banner().is_none() {
-        eprintln!("SKIP: ffmpeg not installed");
-        return;
-    }
+    // Required, not optional: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh)
+    // before any test runs, so a missing one is a broken environment to report.
+    MediaTool::Ffmpeg
+        .banner()
+        .expect("ffmpeg is installed at the pinned release");
 
     let repo_root = repo_root();
     let tempdir = tempfile::tempdir().expect("tempdir");

@@ -948,10 +948,11 @@ fn cli_transcribe_in_place_mp4_succeeds_via_local_daemon() {
         eprintln!("SKIP: Python 3.12 with batchalign not available");
         return;
     };
-    if MediaTool::Ffmpeg.banner().is_none() {
-        eprintln!("SKIP: ffmpeg not installed");
-        return;
-    }
+    // Required, not optional: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh)
+    // before any test runs, so a missing one is a broken environment to report.
+    MediaTool::Ffmpeg
+        .banner()
+        .expect("ffmpeg is installed at the pinned release");
 
     let harness = CliHarness::new();
     let media_file = harness.home_dir().join("input").join("clip.mp4");
@@ -1005,10 +1006,11 @@ fn cli_transcribe_in_place_mp4_populates_injected_media_cache_live() {
         eprintln!("SKIP: Python 3.12 with batchalign not available");
         return;
     };
-    if MediaTool::Ffmpeg.banner().is_none() {
-        eprintln!("SKIP: ffmpeg not installed");
-        return;
-    }
+    // Required, not optional: the gate pins ffmpeg (scripts/check-ffmpeg-pin.sh)
+    // before any test runs, so a missing one is a broken environment to report.
+    MediaTool::Ffmpeg
+        .banner()
+        .expect("ffmpeg is installed at the pinned release");
 
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
