@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-09-24 00:10 EDT
+**Last updated:** 2026-09-30 10:16 EDT
 
 ## Overview
 
@@ -1514,6 +1514,29 @@ This is especially useful for confirming:
 - whether the final output was produced after fallback or after a plain cache hit.
 
 ## Known Pitfalls
+
+### Recording length is measured, never estimated
+
+Every FA window, every recovered UTR token and every engine timing is checked
+against one `Recording`, built from the media probe's `AudioDuration`
+(`Recording::of_audio`). A window ending past it is refused
+(`WindowFault::PastRecording`), the final group is extended to its end, and
+timings past it are refused rather than written.
+
+The bound is only as good as the length. Until 2026-09-30 it was ffprobe's
+container duration, which for MP3 without a Xing header is an estimate from
+the declared bitrate; on constant-bitrate MP3 with unpadded frames it is 0.23%
+short, up to 30 s on a four-hour recording. The symptom was the final seconds
+of every such recording refused as outside it, logged as
+`ASR tokens discarded before UTR ... outside_window=N` and
+`engine reported word timings past the end of the audio it was given`. The
+probe now walks MPEG audio and ADTS AAC packet by packet and reads a stated
+length only from containers measured to state it exactly; see
+[Recording Duration](media-conversion.md#recording-duration-mediaprobe).
+
+If those warnings appear on a recording's final seconds again, compare the
+probed length (logged at debug as `Probed audio duration` with its basis)
+against a full decode before suspecting the engine.
 
 ### Empty audio windows
 

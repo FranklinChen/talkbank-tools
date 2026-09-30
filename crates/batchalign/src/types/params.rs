@@ -9,11 +9,12 @@ use std::path::Path;
 
 use crate::api::{DurationMs, LanguageCode3};
 use crate::chat_ops::CacheTaskName;
-use crate::chat_ops::fa::coordinates::{Ms, Recording};
+use crate::chat_ops::fa::coordinates::Recording;
 use crate::chat_ops::fa::{AudioIdentity, WordGapHealing};
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, TokenizationMode};
 use crate::error::{RecordingDurationError, ServerError};
 use crate::infer_retry::Cancellation;
+use crate::media::probe::AudioDuration;
 use crate::types::engines::FaEngineName;
 use serde::{Deserialize, Serialize};
 
@@ -318,8 +319,8 @@ pub struct AudioContext<'a> {
     pub audio_path: &'a Path,
     /// Content-based identity for cache keying (hash of audio content).
     pub audio_identity: &'a AudioIdentity,
-    /// Total duration of the audio file in milliseconds, if known.
-    pub total_audio_ms: Option<DurationMs>,
+    /// How long the audio runs, when the pipeline already probed it.
+    pub audio_duration: Option<AudioDuration>,
 }
 
 impl AudioContext<'_> {
@@ -328,13 +329,13 @@ impl AudioContext<'_> {
     ///
     /// # Why this exists rather than each caller unwrapping the `Option`
     ///
-    /// `total_audio_ms` being optional made "we do not know how long the audio
-    /// is" a legal state, and each consumer invented its own answer for it: FA
-    /// grouping skipped untimed utterances, the final window declined to
-    /// extend, and the timing conversion simply went unbounded, which is how
-    /// word timings came to be written 28.2 seconds past the end of a
-    /// recording. None of those is a better answer than the others, because
-    /// there is no good behaviour for an unknown duration.
+    /// The duration being optional (a bare `total_audio_ms`) made "we do not
+    /// know how long the audio is" a legal state, and each consumer invented
+    /// its own answer for it: FA grouping skipped untimed utterances, the
+    /// final window declined to extend, and the timing conversion simply went
+    /// unbounded, which is how word timings came to be written 28.2 seconds
+    /// past the end of a recording. None of those is a better answer than the
+    /// others, because there is no good behaviour for an unknown duration.
     ///
     /// Forced alignment always has an audio file and the engine must read the
     /// same bytes, so the duration is always obtainable. This makes the
@@ -342,8 +343,11 @@ impl AudioContext<'_> {
     /// several. Being the single owner is the point: three call sites deriving
     /// this independently is the duplication that produced the divergent
     /// fallbacks.
+    ///
+    /// Both arms hold an [`AudioDuration`], so the bound is a measurement and
+    /// never empty (see `media::probe`).
     pub async fn recording(&self) -> Result<Recording, ServerError> {
-        let duration = match self.total_audio_ms {
+        let duration = match self.audio_duration {
             Some(known) => known,
             None => crate::media::probe::MediaProbe::new(self.audio_path)
                 .duration()
@@ -352,12 +356,7 @@ impl AudioContext<'_> {
                     ServerError::RecordingDuration(RecordingDurationError::Probe(why))
                 })?,
         };
-        Recording::of_duration(Ms(duration.0)).map_err(|source| {
-            ServerError::RecordingDuration(RecordingDurationError::NotARecording {
-                audio: self.audio_path.display().to_string(),
-                source,
-            })
-        })
+        Ok(Recording::of_audio(duration))
     }
 }
 
@@ -510,6 +509,45 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<MergeAbbrevPolicy>("false").unwrap(),
             MergeAbbrevPolicy::Keep
+        );
+    }
+
+    /// The recording the pipeline derives for an MP3 whose container duration
+    /// is an under-estimate must still admit a window that ends at the audio's
+    /// true end. With the estimate as the bound, the last 0.23% of every such
+    /// recording (up to 30 s on a four-hour lecture) lay "outside the
+    /// recording": its ASR tokens were discarded before UTR and its FA timings
+    /// refused as past the end of the audio.
+    #[tokio::test]
+    async fn a_window_at_the_true_end_of_an_underdeclared_mp3_is_admitted() {
+        use crate::chat_ops::fa::coordinates::FaWindow;
+        use crate::media::probe::fixtures::{TRUE_LENGTH_MS, write_unpadded_cbr_mp3};
+        use crate::time::FileMs;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("lecture.mp3");
+        write_unpadded_cbr_mp3(&source);
+        let identity = crate::chat_ops::fa::AudioIdentity::from_metadata("lecture.mp3", 0, 0);
+
+        let recording = super::AudioContext {
+            audio_path: &source,
+            audio_identity: &identity,
+            audio_duration: None,
+        }
+        .recording()
+        .await
+        .expect("the fixture is a recording");
+
+        // The final ten seconds, ending where the frames end. The estimate
+        // stops 689 ms earlier.
+        let window = FaWindow::within(
+            &recording,
+            FileMs::new(TRUE_LENGTH_MS - 10_000),
+            FileMs::new(TRUE_LENGTH_MS),
+        );
+        assert!(
+            window.is_ok(),
+            "a window inside the audio was refused: {window:?}"
         );
     }
 }

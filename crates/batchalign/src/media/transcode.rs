@@ -69,6 +69,12 @@ use crate::api::DurationMs;
 /// Measured on the recordings that motivated this (2026-09-24): seven MP4s
 /// with AAC "channel element is not allocated" errors, every one decoding to
 /// its container length to the millisecond.
+///
+/// The source's length is the media probe's [`super::probe::AudioDuration`]
+/// (see `media::probe`), so the comparison detects packets the DECODER drops.
+/// It does not detect bytes the DEMUXER skips while resynchronizing past
+/// garbage: those never become packets, so the probe's walk and the decode
+/// both omit them and agree.
 pub const DAMAGE_SHORTFALL_TOLERANCE_MS: u64 = 100;
 
 /// Whether a transcode decoded cleanly, or reported damage it concealed.
@@ -108,8 +114,8 @@ struct LostAudio {
 
 impl ConcealedDamage {
     /// The one statement of the admission rule. A decode LONGER than the
-    /// source declares is not a loss (containers under-declare); only a
-    /// shortfall beyond the tolerance is.
+    /// source's probed length is not a loss; only a shortfall beyond the
+    /// tolerance is.
     fn admit(
         diagnostics: String,
         expected: DurationMs,
@@ -400,7 +406,7 @@ impl Transcode {
     }
 
     /// Admit a decode that reported errors, or refuse it: measure the
-    /// source's declared length for the requested span against what was
+    /// source's probed length for the requested span against what was
     /// decoded, and let [`ConcealedDamage::admit`] rule. Asked only after
     /// ffmpeg reported errors, so a clean decode pays for no probe.
     fn admit_damaged(
@@ -416,7 +422,8 @@ impl Transcode {
         };
         let source = MediaProbe::new(&self.source)
             .duration_blocking()
-            .map_err(unmeasured)?;
+            .map_err(unmeasured)?
+            .length();
         let expected = DurationMs(match self.window {
             // A window reaching past the source's end can only decode what the
             // source holds, so the expectation is clipped to it.
@@ -437,7 +444,8 @@ impl Transcode {
             // A WAV's header size varies, so its length is read, not computed.
             PcmEncoding::S16LeWav => MediaProbe::new(destination)
                 .duration_blocking()
-                .map_err(unmeasured)?,
+                .map_err(unmeasured)?
+                .length(),
         };
         match ConcealedDamage::admit(stderr, expected, decoded) {
             Ok(concealed) => {

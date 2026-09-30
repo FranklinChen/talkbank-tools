@@ -22,7 +22,7 @@ use talkbank_model::model::{Bullet, ChatFile, Line};
 
 use std::str::FromStr;
 
-use crate::chat_ops::fa::coordinates::{Ms, Recording};
+use crate::chat_ops::fa::coordinates::Recording;
 use crate::chat_ops::fa::grouping::group_utterances;
 use batchalign_transform::dp_align::{self, MatchMode};
 
@@ -39,9 +39,14 @@ use super::{
 /// specific failure mode observed on non-English files.
 #[derive(Debug, Clone, Copy)]
 pub struct GroupingContext {
-    /// Total audio duration in milliseconds (needed for untimed boundary
-    /// estimation inside `group_utterances`).
-    pub total_audio_ms: u64,
+    /// The recording both strategies' groups are formed against (its end
+    /// bounds untimed boundary estimation inside `group_utterances`).
+    ///
+    /// A [`Recording`] rather than the raw milliseconds it held until
+    /// 2026-09-30, which `inject` re-derived into a recording on every call and
+    /// silently abandoned when that failed. The UTR pass hands over the one it
+    /// already derived.
+    pub recording: Recording,
     /// Maximum FA group duration in milliseconds.
     pub max_group_ms: u64,
 }
@@ -306,10 +311,10 @@ impl TwoPassOverlapUtr {
     }
 
     /// Create a `TwoPassOverlapUtr` with grouping context for FA stability.
-    pub fn with_grouping_context(total_audio_ms: u64, max_group_ms: u64) -> Self {
+    pub fn with_grouping_context(recording: Recording, max_group_ms: u64) -> Self {
         Self {
             grouping_context: Some(GroupingContext {
-                total_audio_ms,
+                recording,
                 max_group_ms,
             }),
             config: TwoPassConfig::default(),
@@ -347,20 +352,17 @@ impl UtrStrategy for TwoPassOverlapUtr {
             }
         };
 
-        // The group-count signal needs a recording to group against. A context
-        // whose duration is zero cannot supply one, and that is not a reason to
-        // pick a strategy: it falls through to the timed-utterance signal,
-        // exactly as a missing context does.
-        let group_counts = self.grouping_context.as_ref().and_then(|ctx| {
-            let recording = Recording::of_duration(Ms(ctx.total_audio_ms)).ok()?;
-            Some((
-                group_utterances(&two_pass_file, ctx.max_group_ms, &recording)
+        // The group-count signal, when a recording to group against was
+        // supplied; without one it falls through to the timed-utterance signal.
+        let group_counts = self.grouping_context.as_ref().map(|ctx| {
+            (
+                group_utterances(&two_pass_file, ctx.max_group_ms, &ctx.recording)
                     .groups
                     .len(),
-                group_utterances(&global_file, ctx.max_group_ms, &recording)
+                group_utterances(&global_file, ctx.max_group_ms, &ctx.recording)
                     .groups
                     .len(),
-            ))
+            )
         });
 
         let prefer_two_pass = if let Some((two_pass_groups, global_groups)) = group_counts {
@@ -822,6 +824,12 @@ pub fn recover_overlap_timing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_ops::fa::coordinates::Ms;
+
+    /// The recording the grouping-comparison fixtures group against.
+    fn sixty_second_recording() -> Recording {
+        Recording::of_duration(Ms(60_000)).expect("non-zero")
+    }
 
     #[test]
     fn overlap_word_inside_a_segment_keeps_the_provider_interval() {
@@ -1241,10 +1249,10 @@ mod tests {
             },
         ];
 
-        // With grouping context: total_audio_ms covers the full range,
+        // With grouping context: the recording covers the full range,
         // max_group_ms is small enough to create multiple groups when
         // all utterances are timed.
-        let strategy = TwoPassOverlapUtr::with_grouping_context(60000, 15000);
+        let strategy = TwoPassOverlapUtr::with_grouping_context(sixty_second_recording(), 15000);
         let result = strategy.inject(&mut chat, &tokens);
 
         // Global should be preferred because it can time "ja" (creating
@@ -1336,8 +1344,8 @@ mod tests {
             },
         ];
 
-        let strategy =
-            TwoPassOverlapUtr::with_grouping_context(60000, 15000).with_config(TwoPassConfig {
+        let strategy = TwoPassOverlapUtr::with_grouping_context(sixty_second_recording(), 15000)
+            .with_config(TwoPassConfig {
                 max_exclusion_density: UtrOverlapDensityThreshold::MAX,
                 ..TwoPassConfig::default()
             });

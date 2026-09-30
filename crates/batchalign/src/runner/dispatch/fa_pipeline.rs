@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::api::{DisplayPath, DurationMs, LanguageCode3, NumWorkers};
+use crate::api::{DisplayPath, LanguageCode3, NumWorkers};
 use crate::cache::UtteranceCache;
 use crate::engine_reports::FaCacheNamespace;
 use crate::fa::{AdmittedFaResult, FaServices};
@@ -26,7 +26,7 @@ use crate::types::request::{
 
 use super::super::util::{
     FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, compute_audio_identity,
-    drain_supervised_file_tasks, get_audio_duration_ms, spawn_progress_forwarder,
+    drain_supervised_file_tasks, probe_audio_duration, spawn_progress_forwarder,
     spawn_supervised_file_task,
 };
 use super::FaDispatchPlan;
@@ -218,7 +218,9 @@ struct AlignAudioTask<'a> {
     before_path: Option<PathBuf>,
     audio_path: PathBuf,
     audio_identity: crate::chat_ops::fa::AudioIdentity,
-    total_audio_ms: Option<u64>,
+    /// The probe's measurement of `audio_path`, taken once per file and handed
+    /// to both the UTR pass and FA so neither probes again.
+    audio_duration: Option<crate::media::probe::AudioDuration>,
     chat_file: crate::chat_ops::ChatFile,
     /// What the file was AS READ, before the UTR pre-pass edited the model.
     read: AlignFileAsRead,
@@ -273,7 +275,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
         let audio = AudioContext {
             audio_path: &self.audio_path,
             audio_identity: &self.audio_identity,
-            total_audio_ms: self.total_audio_ms.map(DurationMs),
+            audio_duration: self.audio_duration,
         };
 
         // Both branches hand over the SAME document. The incremental one used
@@ -403,7 +405,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
                     services: self.services.pipeline,
                     audio_identity: &self.audio_identity,
                     cache_policy: self.utr_cache_policy,
-                    total_audio_ms: self.total_audio_ms.map(DurationMs),
+                    audio_duration: self.audio_duration,
                     max_group_ms: Some(self.admitted.params().max_group_ms()),
                     filename: &self.filename,
                     engine: utr_engine,
@@ -684,8 +686,10 @@ async fn process_one_fa_file(
             crate::chat_ops::fa::AudioIdentity::from_metadata(&audio_path_str, 0, 0)
         });
 
-    // Get total audio duration via ffprobe (optional -- for untimed utterance estimation)
-    let total_audio_ms = get_audio_duration_ms(&audio_path_str).await;
+    // How long the audio runs, measured once for UTR and FA alike. Optional
+    // here because a failure is logged and FA probes again for the recording
+    // it cannot run without, reporting that failure as the file's error.
+    let audio_duration = probe_audio_duration(&audio_path_str).await;
     let utr_audio_path = if utr_engine.as_ref().is_some_and(|e| e.is_rust_owned()) {
         original_audio_path.as_path()
     } else {
@@ -808,7 +812,7 @@ async fn process_one_fa_file(
                         services: services.pipeline,
                         audio_identity: &audio_identity,
                         cache_policy: utr_cache_policy,
-                        total_audio_ms: total_audio_ms.map(DurationMs),
+                        audio_duration,
                         max_group_ms: Some(admitted.params().max_group_ms()),
                         filename,
                         engine: utr_engine,
@@ -860,7 +864,7 @@ async fn process_one_fa_file(
         before_path: before_path.map(Path::to_path_buf),
         audio_path,
         audio_identity,
-        total_audio_ms,
+        audio_duration,
         chat_file,
         read: AlignFileAsRead {
             text: chat_text,

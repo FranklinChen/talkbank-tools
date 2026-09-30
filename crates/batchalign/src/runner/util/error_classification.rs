@@ -291,6 +291,7 @@ mod tests {
         let refused =
             ServerError::RecordingDuration(RecordingDurationError::Probe(ProbeError::Refused {
                 input: "/audio/empty.mp3".to_owned(),
+                diagnostics: "Invalid data found when processing input".to_owned(),
             }));
         let category = classify_server_error(&refused);
         assert_eq!(category, FailureCategory::Validation);
@@ -301,10 +302,10 @@ mod tests {
             "the user must be told which file could not be read: {message}"
         );
 
-        let zero_length = ServerError::RecordingDuration(RecordingDurationError::NotARecording {
-            audio: "/audio/silent.mp3".to_owned(),
-            source: crate::chat_ops::fa::coordinates::NotARecording::ZeroDuration,
-        });
+        let zero_length =
+            ServerError::RecordingDuration(RecordingDurationError::Probe(ProbeError::EmptyAudio {
+                input: "/audio/silent.mp3".to_owned(),
+            }));
         assert_eq!(
             classify_server_error(&zero_length),
             FailureCategory::Validation

@@ -28,7 +28,7 @@ pub(super) use file_status::{
 
 #[cfg(test)]
 pub(super) use media::apply_result_filename;
-pub(super) use media::{compute_audio_identity, get_audio_duration_ms, preflight_validate_media};
+pub(super) use media::{compute_audio_identity, preflight_validate_media, probe_audio_duration};
 
 #[cfg(test)]
 mod tests {

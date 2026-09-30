@@ -19,6 +19,7 @@ use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Recording, WindowMs};
 use crate::chat_ops::fa::origin::EngineId;
 use crate::chat_ops::fa::timing::{SpanRejections, WordSpan};
+use crate::media::probe::AudioDuration;
 use crate::options::UtrEngine;
 use crate::params::CachePolicy;
 use crate::pipeline::PipelineServices;
@@ -38,8 +39,8 @@ pub(in crate::runner) struct UtrPassContext<'a> {
     pub audio_identity: &'a crate::chat_ops::fa::AudioIdentity,
     /// Cache policy selected for the current job.
     pub cache_policy: CachePolicy,
-    /// Total audio duration in milliseconds when known.
-    pub total_audio_ms: Option<DurationMs>,
+    /// How long the audio runs, when the pipeline already probed it.
+    pub audio_duration: Option<AudioDuration>,
     /// Maximum FA group duration in milliseconds. Used by the two-pass UTR
     /// strategy to compare FA grouping outcomes and detect the wider-window
     /// regression on non-English files.
@@ -59,14 +60,14 @@ impl<'a> UtrPassContext<'a> {
     ///
     /// Delegates to [`AudioContext::recording`] rather than repeating its
     /// probe-or-use logic. This context carries the same two facts an
-    /// `AudioContext` does (`audio_path`, `total_audio_ms`), so a second
+    /// `AudioContext` does (`audio_path`, `audio_duration`), so a second
     /// derivation here would be the duplication that method exists to end, with
     /// its own divergent error message. One question, one owner.
     async fn recording(&self) -> Result<Recording, crate::error::ServerError> {
         crate::params::AudioContext {
             audio_path: self.audio_path,
             audio_identity: self.audio_identity,
-            total_audio_ms: self.total_audio_ms,
+            audio_duration: self.audio_duration,
         }
         .recording()
         .await
@@ -76,14 +77,21 @@ impl<'a> UtrPassContext<'a> {
 /// Instantiate the already-resolved strategy with this recording's grouping
 /// limits. Auto has been resolved to global at option extraction; two-pass
 /// carries the submitted configuration instead of constructing defaults here.
-fn resolve_strategy(context: &UtrPassContext<'_>) -> Box<dyn crate::chat_ops::fa::UtrStrategy> {
-    let grouping_context = match (context.total_audio_ms, context.max_group_ms) {
-        (Some(total_audio_ms), Some(max_group_ms)) => Some(crate::chat_ops::fa::GroupingContext {
-            total_audio_ms: total_audio_ms.0,
-            max_group_ms: max_group_ms.0,
-        }),
-        _ => None,
-    };
+///
+/// Takes the recording the pass already derived rather than deriving another
+/// from the context, so the grouping comparison and the token bounds are
+/// checked against one value.
+fn resolve_strategy(
+    context: &UtrPassContext<'_>,
+    recording: Recording,
+) -> Box<dyn crate::chat_ops::fa::UtrStrategy> {
+    let grouping_context =
+        context
+            .max_group_ms
+            .map(|max_group_ms| crate::chat_ops::fa::GroupingContext {
+                recording,
+                max_group_ms: max_group_ms.0,
+            });
 
     match context.strategy {
         ResolvedUtrStrategy::Global => Box::new(crate::chat_ops::fa::GlobalUtr),
@@ -138,7 +146,9 @@ pub(in crate::runner) async fn run_utr_pass(
     };
     let use_partial = context.engine.supports_partial_windows()
         && untimed_ratio < 0.5
-        && context.total_audio_ms.is_some_and(|ms| ms.0 > 60_000);
+        && context
+            .audio_duration
+            .is_some_and(|duration| duration.length().0 > 60_000);
 
     if use_partial {
         // The recording every window and every recovered token is checked
@@ -166,8 +176,9 @@ pub(in crate::runner) async fn run_utr_pass(
         let cache_namespace = utr_cache_eligibility(context);
         // The recording built above is the single derivation of the audio's
         // length on this path. It used to be derived a SECOND time three lines
-        // later, from `context.total_audio_ms` through an `expect` whose safety
-        // rested on a control-flow invariant argued in a four-line comment.
+        // later, from the context's raw milliseconds through an `expect` whose
+        // safety rested on a control-flow invariant argued in a four-line
+        // comment.
         // Passing the recording deletes the second derivation, the panic and
         // the argument together.
         let windows = crate::chat_ops::fa::find_untimed_windows(chat_file, &recording, 500);
@@ -305,7 +316,7 @@ pub(in crate::runner) async fn run_utr_pass(
                 .dumper
                 .dump_utr_tokens(context.filename, &all_tokens);
 
-            let strategy = resolve_strategy(&context);
+            let strategy = resolve_strategy(&context, recording);
             let utr_result = strategy.inject(chat_file, &all_tokens);
 
             info!(
@@ -409,7 +420,7 @@ async fn run_utr_pass_full(
         .dumper
         .dump_utr_tokens(context.filename, &asr_tokens);
 
-    let strategy = resolve_strategy(&context);
+    let strategy = resolve_strategy(&context, recording);
     let utr_result = strategy.inject(chat_file, &asr_tokens);
 
     info!(

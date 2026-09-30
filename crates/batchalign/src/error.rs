@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::api::JobId;
 use crate::chat_ops::CacheKey;
-use crate::chat_ops::fa::coordinates::{NotARecording, WindowFault};
+use crate::chat_ops::fa::coordinates::WindowFault;
 use crate::media::probe::ProbeError;
 use crate::media::window::EmptySegment;
 pub use crate::revai::RetainedRevLanguageRejection;
@@ -29,14 +29,6 @@ pub enum RecordingDurationError {
     /// to the probe error's own variant; its message already names the file.
     #[error(transparent)]
     Probe(ProbeError),
-    /// The file probed as zero length, so it holds no audio.
-    #[error("{audio}: {source}")]
-    NotARecording {
-        /// The media that was probed.
-        audio: String,
-        /// Why it is not a recording.
-        source: NotARecording,
-    },
     /// The whole recording is not a valid window over itself, which a
     /// recording of positive length always is: an internal invariant.
     #[error("the whole recording is not a valid window over itself: {0}")]
@@ -59,8 +51,15 @@ impl RecordingDurationError {
     /// so a new probe failure has to take a side.
     pub(crate) fn fault(&self) -> RecordingDurationFault {
         match self {
-            Self::Probe(ProbeError::Refused { .. } | ProbeError::Unreadable { .. })
-            | Self::NotARecording { .. } => RecordingDurationFault::Media,
+            Self::Probe(
+                ProbeError::Refused { .. }
+                | ProbeError::Unreadable { .. }
+                | ProbeError::NoAudioStream { .. }
+                | ProbeError::UnmeasuredContainer { .. }
+                | ProbeError::LengthNotStated { .. }
+                | ProbeError::PacketsWithoutDuration { .. }
+                | ProbeError::EmptyAudio { .. },
+            ) => RecordingDurationFault::Media,
             Self::Probe(ProbeError::FfprobeMissing { .. } | ProbeError::Spawn { .. })
             | Self::WholeFileWindow(_) => RecordingDurationFault::Host,
         }

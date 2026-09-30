@@ -1,7 +1,7 @@
 # Command Contracts: Input Preconditions and Output Guarantees
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-09-30 10:16 EDT
 
 This document specifies, for each batchalign3 command that operates
 on CHAT files, the minimum input validity required, what the command
@@ -276,7 +276,9 @@ Only needs parseable main tier text. Non-English files pass through unchanged.
 - Main tier words (for transcript-to-audio alignment)
 - Existing timing bullets on utterances (for audio window grouping)
 - Audio file (resolved from same-stem sibling: `.wav`, `.mp3`, etc.)
-- Audio duration via `ffprobe`
+- Audio duration via `ffprobe`: measured (packet walk) or read from a
+  container that states it exactly, never a bitrate estimate; see
+  [Recording Duration](../reference/media-conversion.md#recording-duration-mediaprobe)
 - `@Options: NoAlign` (to skip files that opt out)
 
 **Writes:**

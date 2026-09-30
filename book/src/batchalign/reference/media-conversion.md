@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-09-29 15:29 EDT
+**Last updated:** 2026-09-30 10:16 EDT
 
 ## Overview
 
@@ -72,9 +72,10 @@ batchalign3 [--server http://<your-server>:8001] align input/ output/ --lang eng
   │  │     compute_audio_identity(path, mtime, size)                     │
   │  │     used as cache key component for FA results                    │
   │  │                                                                   │
-  │  │  5. AUDIO DURATION PROBE (optional)                               │
-  │  │     ffprobe → total_audio_ms                                      │
-  │  │     used for proportional estimation of untimed utterances        │
+  │  │  5. AUDIO DURATION PROBE                                          │
+  │  │     MediaProbe → AudioDuration (stated or packet-walked, never    │
+  │  │     a bitrate estimate); bounds every window, token and timing    │
+  │  │     and estimates untimed utterances                              │
   │  │                                                                   │
   │  │  6. GROUP UTTERANCES                                              │
   │  │     split into ~20s time windows (Whisper) or ~15s (Wave2Vec)    │
@@ -179,7 +180,9 @@ and decode through them. A decode that reported nothing is clean. A decode
 that reported errors is admitted only when it lost no audio: the source's
 declared length for the requested span (probed with `ffprobe`, clipped to
 the source's end for a window) and the decoded length must agree within
-`DAMAGE_SHORTFALL_TOLERANCE_MS` (100 ms). Such a decode is admitted as
+`DAMAGE_SHORTFALL_TOLERANCE_MS` (100 ms). The source's length is the
+`MediaProbe` measurement described under
+[Recording Duration](#recording-duration-mediaprobe). Such a decode is admitted as
 `DecodeIntegrity::ConcealedDamage`, carrying ffmpeg's diagnostics and both
 lengths, and logged as a warning. A shortfall beyond the tolerance
 (`DamagedAudioLost`) means ffmpeg dropped audio, which would shift every
@@ -212,6 +215,132 @@ for /path/to/media/example.mp4: [stderr]
 
 The job continues processing remaining files, one conversion failure
 does not abort the entire job.
+
+## Recording Duration (MediaProbe)
+
+**Module:** `crates/batchalign/src/media/probe/`
+
+Every bound BA3 places on a recording comes from one value,
+`media::probe::AudioDuration`, and only `MediaProbe::duration()` (or its
+blocking twin) can build one. It carries the length, rounded UP to the
+millisecond so the bound covers the audio's last instant, and its basis: how
+the length was established. A zero length is refused where it is born
+(`ProbeError::EmptyAudio`), so `Recording::of_audio` cannot fail.
+
+### Why there are two questions
+
+Until 2026-09-30 the probe asked ffprobe one question, `format=duration`, and
+trusted the answer for every file. For some demuxers that number is not read
+from the file but ESTIMATED from the file size over the declared bitrate: MPEG
+audio without a Xing/Info header, and ADTS AAC always. A constant-bitrate MP3
+whose frames are never padded (417 bytes each at 128 kbit/s and 44.1 kHz,
+where the bitrate implies 417.96) really runs at 127.7 kbit/s, so the estimate
+falls 0.23% short: about 10 s on an hour-long recording, 30 s on four hours.
+Every consumer took the end of the estimate as the end of the recording, so
+the true final seconds were refused as "outside the recording": their ASR
+tokens discarded before UTR (`ASR tokens discarded before UTR ...
+outside_window=N`), their FA timings refused (`engine reported word timings
+past the end of the audio it was given`), and the final FA window cut short.
+
+```mermaid
+flowchart TD
+    header["Header question<br/>format_name, stated duration,<br/>first audio stream's codec"]
+    route{"Demuxer and<br/>stated length"}
+    stated["AudioDuration<br/>basis: Stated(container)"]
+    walk["Walk question<br/>every packet's duration,<br/>skip_samples, discard_padding"]
+    walked["AudioDuration<br/>basis: Walked(reason)"]
+    refused["ProbeError<br/>UnmeasuredContainer,<br/>LengthNotStated, NoAudioStream"]
+    header --> route
+    route -->|"PCM WAV, FLAC, ISO media, Ogg,<br/>Matroska, ASF stating a length"| stated
+    route -->|"MPEG audio, ADTS AAC,<br/>compressed WAV, FLAC or PCM WAV<br/>stating no length"| walk
+    route -->|"any other demuxer, or Ogg, Matroska,<br/>ASF or ISO media stating no length"| refused
+    walk --> walked
+```
+
+### The routing table
+
+| Demuxer (ffprobe `format_name`) | Stated length | Route |
+|---|---|---|
+| `mp3` (MPEG audio, all layers and versions) | ignored | walk |
+| `aac` (ADTS) | ignored | walk |
+| `wav` with a compressed codec | ignored | walk |
+| `wav` with PCM, `flac` | present | stated (audio stream) |
+| `wav` with PCM, `flac` | absent | walk |
+| `mov,mp4,m4a,3gp,3g2,mj2`, `ogg` | present | stated (audio stream) |
+| `matroska,webm`, `asf` | present | stated (whole file) |
+| ISO media, `ogg`, `matroska,webm`, `asf` | absent | refused (`LengthNotStated`) |
+| anything else | any | refused (`UnmeasuredContainer`) |
+
+"Audio stream" means the first audio stream's own stated length, not the
+file's: an MP4 whose video runs past its audio states 10 s for the file and 6 s
+for the audio, and the audio's is the one taken. Matroska and ASF state no
+per-stream length (ASF's stream entry repeats the file's), so theirs is the
+whole file's: exact for audio-only files, an upper bound when video runs
+longer.
+
+Every row was measured against a full ffmpeg decode (2026-09-30, ffmpeg
+9.0.2). Stated lengths: WAV, FLAC and ISO media agree to the millisecond, Ogg
+and Matroska within 10 ms, ASF 46 ms long; none falls short. MPEG audio is
+walked even when a Xing header states a length, because that header is an
+encoder's claim a truncated or concatenated file contradicts, and ffprobe does
+not say whether it printed a count or an estimate. The walk is NOT a fallback
+for Matroska and ASF: their packets summed 0.3 s short of the decode, so a
+file of theirs that states no length is refused. A new demuxer is admitted by
+repeating the measurement, never by default; the boundary test
+`stated_lengths_agree_with_a_full_decode` repeats it for every stating
+container on each host that runs the tests.
+
+### The packet walk
+
+The walk sums every audio packet's `duration` in the stream's time base and
+subtracts the samples the decoder trims (`skip_samples` for encoder delay,
+`discard_padding` for end padding, reported as packet side data). Summing
+durations rather than multiplying a packet count by a frame size needs no
+samples-per-frame table (1152 for MPEG-1 Layer III, 576 for MPEG-2 and 2.5)
+and no constant-bitrate assumption. Without the trim subtraction a LAME file
+with an Info header would run one frame long (29 ms at 44.1 kHz, 210 ms at
+8 kHz); with it the result equals the decoded sample count. The arithmetic is
+exact, checked 128-bit rational arithmetic, and a packet without a duration
+refuses the walk (`PacketsWithoutDuration`) rather than returning a lower
+bound. The walk measures the timeline a decoder produces: bytes the demuxer
+skips while resynchronizing past garbage never become packets, so they are
+missing from the walk and the decode alike, and damage admission (above)
+cannot see them either.
+
+A walk demuxes the whole file without decoding it. Measured on a 2-hour,
+115 MB, 128 kbit/s MP3 on an NFS volume with its pages already cached: ffprobe
+alone takes 0.36 s; in-process, including reading ffprobe's JSON (about 11 MB
+for 2.5 hours), 2.6 s in a debug build. An uncached file adds one sequential
+read of the file. The pipeline probes each file ONCE: `fa_pipeline` measures
+`audio_path` and hands the same `AudioDuration` to the UTR pass
+(`UtrPassContext::audio_duration`) and to FA (`AudioContext::audio_duration`);
+only a failed first probe is retried, by `AudioContext::recording`. There is
+no cross-job probe cache.
+
+### Consumers
+
+All of them receive the `AudioDuration`, or a `Recording` built from it by
+`Recording::of_audio`:
+
+- **Window admission.** `FaWindow::within` refuses a window ending past the
+  recording (`WindowFault::PastRecording`); FA grouping extends the final group
+  to the recording's end and clamps window bounds to it
+  (`Recording::clamp_bound`).
+- **UTR.** Partial-window UTR builds its windows against the recording, and
+  every recovered ASR token is admitted only inside it (the
+  `ASR tokens discarded before UTR` line counts the rest). The two-pass
+  strategy's grouping comparison groups against the same recording
+  (`GroupingContext::recording`).
+- **FA timings.** Engine word timings past the window, and so past the
+  recording, are refused rather than written.
+- **Damage admission.** A decode that reported errors is compared with the
+  source's probed length for the requested span (above).
+- **ASR decode budget.** The request timeout is derived from the probed
+  length (`DecodeBudgetSeconds::for_duration_ms`).
+
+`Recording::of_duration` still takes raw milliseconds, for fixtures and
+replay tests that state a length rather than measure one; production code
+builds recordings with `Recording::of_audio`.
 
 ## Media Resolution
 
@@ -300,8 +429,9 @@ Total: **16,739 MP4 files** across all volumes.
 - **ffmpeg** must be on PATH for mp4/m4a/webm/wma conversion. Without it,
   those formats fail with a clear error. WAV/MP3/FLAC/OGG work without
   ffmpeg.
-- **ffprobe** (bundled with ffmpeg) is used for audio duration probing in
-  the FA pipeline. Optional, if unavailable, proportional estimation
-  uses a fallback.
+- **ffprobe** (bundled with ffmpeg) establishes every recording's duration
+  (see [Recording Duration](#recording-duration-mediaprobe)). `align` cannot
+  bound its windows without it and fails the file with a host error when it
+  is missing; the transcribe path falls back to a named decode-budget ceiling.
 - **blake3** crate for content fingerprinting.
 - **fs2** crate for cross-platform file locking.

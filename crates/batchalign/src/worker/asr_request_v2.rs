@@ -37,7 +37,7 @@ use super::artifacts_v2::{PreparedArtifactErrorV2, PreparedArtifactStoreV2};
 /// one.
 async fn probe_decode_budget_seconds(media_path: &Path) -> Option<DecodeBudgetSeconds> {
     match MediaProbe::new(media_path).duration().await {
-        Ok(duration_ms) => Some(DecodeBudgetSeconds::for_duration_ms(duration_ms.0)),
+        Ok(duration) => Some(DecodeBudgetSeconds::for_duration_ms(duration.length().0)),
         Err(error) => {
             tracing::debug!(
                 path = %media_path.display(),

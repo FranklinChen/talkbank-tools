@@ -80,6 +80,7 @@
 
 use std::cmp::Ordering;
 
+use crate::media::probe::AudioDuration;
 use crate::media::window::MediaWindow;
 
 // One definition, in `crate::time`; this spelling is the one FA call sites
@@ -222,7 +223,23 @@ impl Recording {
         }
     }
 
-    /// A recording of a known duration.
+    /// The recording a probe measured: the route production takes.
+    ///
+    /// Takes an [`AudioDuration`], which only the media probe can build, never
+    /// from a bitrate estimate and never of zero length, so this cannot fail
+    /// and the bound every window, token and timing is checked against is the
+    /// length the audio actually runs. See `media::probe` for the estimate it
+    /// replaced.
+    pub fn of_audio(duration: AudioDuration) -> Self {
+        Self {
+            duration: FileMs::new(duration.length().0),
+        }
+    }
+
+    /// A recording of a duration the caller vouches for.
+    ///
+    /// For fixtures, which state a length rather than measure one. Production
+    /// holds an [`AudioDuration`] and uses [`Recording::of_audio`].
     pub fn of_duration(duration: Ms) -> Result<Self, NotARecording> {
         match duration {
             Ms(0) => Err(NotARecording::ZeroDuration),

@@ -8,8 +8,8 @@ use crate::store::PendingJobFile;
 use batchalign_types::paths::ClientPath;
 
 use crate::media::MediaExtensions;
-use crate::media::probe::MediaProbe;
-use tracing::warn;
+use crate::media::probe::{AudioDuration, MediaProbe};
+use tracing::{debug, warn};
 
 /// Pre-validate media files before dispatch.
 ///
@@ -100,18 +100,29 @@ pub(in crate::runner) async fn compute_audio_identity(
     ))
 }
 
-/// Get audio duration in milliseconds via ffprobe.
+/// How long the audio at `audio_path` runs, as the media probe establishes it.
 ///
-/// `None` is a DOWNGRADE the caller asks for, not an erasure: the duration is
-/// optional for untimed-utterance estimation, so a failure is survivable, but
-/// the reason is logged before it is dropped. This function used to return
-/// `Option` with no logging, folding "ffprobe is not installed", "ffprobe was
-/// killed", "ffprobe refused the file" and "ffprobe printed nonsense" into one
-/// silent `None`, so an operator could not tell a missing dependency from a
-/// corrupt recording.
-pub(in crate::runner) async fn get_audio_duration_ms(audio_path: &str) -> Option<u64> {
+/// `None` is a DOWNGRADE the caller asks for, not an erasure: the reason is
+/// logged before it is dropped, and FA, which cannot run without a recording
+/// bound, probes again and reports the failure as the file's error. This
+/// function used to return `Option` with no logging, folding "ffprobe is not
+/// installed", "ffprobe was killed", "ffprobe refused the file" and "ffprobe
+/// printed nonsense" into one silent `None`, so an operator could not tell a
+/// missing dependency from a corrupt recording.
+///
+/// Returns the probe's [`AudioDuration`] rather than its milliseconds, so every
+/// bound built from it is the probe's measurement (see `media::probe`).
+pub(in crate::runner) async fn probe_audio_duration(audio_path: &str) -> Option<AudioDuration> {
     match MediaProbe::new(audio_path).duration().await {
-        Ok(duration) => Some(duration.0),
+        Ok(duration) => {
+            debug!(
+                audio = %audio_path,
+                length_ms = duration.length().0,
+                basis = ?duration.basis(),
+                "Probed audio duration"
+            );
+            Some(duration)
+        }
         Err(error) => {
             warn!(
                 audio = %audio_path,
