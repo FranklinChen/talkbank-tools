@@ -34,11 +34,15 @@ use super::coordinates::{FaWindow, FileMs, Recording, WindowFault};
 
 use super::extraction::collect_fa_words;
 
+mod anchors;
 mod evidence;
 mod lexical;
 pub mod overlap_markers;
 mod two_pass;
 
+pub use anchors::{
+    AlignableWords, AnchorDisorder, AnchorIndex, AnchorLookup, UtteranceAnchors, WordAnchor,
+};
 #[cfg(test)]
 use evidence::UtrAsrTokenOrdinal;
 use evidence::UtrWordOrdinal;
@@ -249,10 +253,17 @@ pub(super) fn run_global_utr(
             unmatched: utt_infos.len() - skipped,
             alignment: UtrAlignmentEvidence::Global { plan },
             decisions: Vec::new(),
+            // No tokens, so nothing was heard: an index that observed nothing,
+            // which never supersedes an earlier pass's anchors.
+            anchors: AnchorIndex::not_observed(),
         };
     }
     let plan = plan_global_utr_alignment_for(&utt_infos, asr_tokens, dp_match_mode, participation);
-    project_global_utr_plan(chat_file, &utt_infos, plan)
+    // Read here, the one place holding both the plan and the token stream it
+    // was built from, so every anchor's interval is the interval of the token
+    // its word was matched to and no other.
+    let anchors = AnchorIndex::from_plan(&plan, asr_tokens);
+    project_global_utr_plan(chat_file, &utt_infos, plan, anchors)
 }
 
 /// Project a global plan's typed evidence onto the transcript's bullets.
@@ -263,11 +274,13 @@ pub(super) fn run_global_utr(
 /// and disagree with the evidence it also retains: the two used to be
 /// computed twice, from the same tokens, in two places. `utt_infos` is the
 /// census the plan was built from, so its population is the plan's by
-/// construction.
+/// construction. `anchors` were read off the same plan by the caller, which
+/// alone holds the tokens; projection only carries them into the result.
 pub(super) fn project_global_utr_plan(
     chat_file: &mut ChatFile,
     utt_infos: &[UtrUtteranceInfo],
     plan: UtrAlignmentPlan,
+    anchors: AnchorIndex,
 ) -> UtrResult {
     let mut result = UtrResult {
         injected: 0,
@@ -275,6 +288,7 @@ pub(super) fn project_global_utr_plan(
         unmatched: 0,
         alignment: UtrAlignmentEvidence::NotRunNoUntimed,
         decisions: Vec::new(),
+        anchors,
     };
 
     // Build utterance ordinal → line index mapping for decision records.
@@ -1122,7 +1136,8 @@ mod tests {
                 ),
             ],
         };
-        let result = project_global_utr_plan(&mut chat, &utt_infos, plan);
+        let result =
+            project_global_utr_plan(&mut chat, &utt_infos, plan, AnchorIndex::not_observed());
         assert_eq!(
             (result.injected(), result.skipped(), result.unmatched()),
             (1, 0, 1)

@@ -66,7 +66,7 @@ fn test_rerun_fa_strips_stale_x_tiers_even_when_no_new_decisions() {
         &mut chat,
         crate::chat_ops::fa::FaDecisions {
             rescue: Vec::new(),
-            unplaceable: Vec::new(),
+            grouping: Vec::new(),
             finalized,
         },
     );

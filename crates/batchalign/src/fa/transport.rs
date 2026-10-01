@@ -1,16 +1,19 @@
 //! Transport adapter for forced-alignment worker inference.
 //!
 //! The FA pipeline delegates worker interaction through this module so the
-//! orchestration code can ask for "timings for these miss groups" without
+//! orchestration code can ask for "timings for these missed requests" without
 //! depending on the concrete worker-protocol V2 request-building details.
+//!
+//! Everything here is per DISPATCH UNIT (one request: a group's words, or one
+//! piece of an anchored group, with its window and cache key), never per
+//! group; see `super::units`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{DurationMs, WorkerLanguage};
-use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::chat_ops::fa::origin::EngineId;
-use crate::chat_ops::fa::{FaGroup, FaInferItem, WordGapHealing, WordTiming};
+use crate::chat_ops::fa::{FaInferItem, WordGapHealing, WordTiming};
 use crate::error::{MissingForcedAlignmentEvidence, MissingRequiredEvidence, ServerError};
 use crate::params::CachePolicy;
 use crate::types::engines::SelectableEngine;
@@ -26,22 +29,19 @@ use tracing::warn;
 use super::raw_evidence::{
     ExpectedFaWords, FaEvidenceRoute, FaRawEvidence, ReplayableFaRawEvidence,
 };
+use super::units::{DispatchUnit, UnitOrdinal};
 
 static NEXT_FA_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
-/// Unchecked parallel inputs for one FA worker batch.
+/// One FA worker batch: the authorized missed requests and the run facts
+/// every request is built with.
 ///
-/// This state can be assembled by orchestration but cannot be dispatched.
-/// [`UncheckedFaWorkerBatch::admit`] is the only constructor for the worker's
-/// cardinality-checked [`FaWorkerBatch`] state.
-pub(crate) struct UncheckedFaWorkerBatch<'a> {
-    /// Precomputed cleaned word texts keyed by group index.
-    pub word_texts: &'a [Vec<String>],
-    /// FA groups for the current file.
-    pub groups: &'a [FaGroup],
-    /// Semantic cache identities corresponding one-to-one with `groups`.
-    pub cache_keys: &'a [crate::chat_ops::CacheKey],
-    /// Proof that the cache policy permits inference for these miss groups.
+/// Built directly: the authorization already holds the missed units
+/// themselves, borrowed from the plan that laid them out, so there is no
+/// index to check against a separate list of units.
+#[derive(Debug)]
+pub(crate) struct FaWorkerBatch<'a> {
+    /// Proof that the cache policy permits inference for these requests.
     pub authorization: FaInferenceAuthorization<'a>,
     /// Source audio path for the current file.
     pub audio_path: &'a Path,
@@ -49,58 +49,8 @@ pub(crate) struct UncheckedFaWorkerBatch<'a> {
     pub worker_lang: WorkerLanguage,
     /// FA backend selected by the Rust control plane.
     pub engine: crate::types::engines::FaEngineName,
-    /// Gap-healing policy for every group in this batch.
+    /// Gap-healing policy for every request in this batch.
     pub gap_healing: WordGapHealing,
-}
-
-/// FA worker batch whose parallel group facts have one proven cardinality.
-#[derive(Debug)]
-pub(crate) struct FaWorkerBatch<'a> {
-    word_texts: &'a [Vec<String>],
-    groups: &'a [FaGroup],
-    cache_keys: &'a [crate::chat_ops::CacheKey],
-    authorization: FaInferenceAuthorization<'a>,
-    audio_path: &'a Path,
-    worker_lang: WorkerLanguage,
-    engine: crate::types::engines::FaEngineName,
-    gap_healing: WordGapHealing,
-}
-
-impl<'a> UncheckedFaWorkerBatch<'a> {
-    /// Prove every parallel group input and miss index before dispatch.
-    pub(crate) fn admit(self) -> Result<FaWorkerBatch<'a>, ServerError> {
-        if self.word_texts.len() != self.groups.len() || self.cache_keys.len() != self.groups.len()
-        {
-            return Err(ServerError::Validation(format!(
-                "FA worker batch cardinality drift: groups={}, word_texts={}, cache_keys={}",
-                self.groups.len(),
-                self.word_texts.len(),
-                self.cache_keys.len()
-            )));
-        }
-        if let Some(group_index) = self
-            .authorization
-            .miss_indices
-            .iter()
-            .copied()
-            .find(|group_index| *group_index >= self.groups.len())
-        {
-            return Err(ServerError::Validation(format!(
-                "FA worker batch miss index {group_index} exceeds {} groups",
-                self.groups.len()
-            )));
-        }
-        Ok(FaWorkerBatch {
-            word_texts: self.word_texts,
-            groups: self.groups,
-            cache_keys: self.cache_keys,
-            authorization: self.authorization,
-            audio_path: self.audio_path,
-            worker_lang: self.worker_lang,
-            engine: self.engine,
-            gap_healing: self.gap_healing,
-        })
-    }
 }
 
 /// The only value that permits FA worker inference for cache misses.
@@ -109,13 +59,13 @@ impl<'a> UncheckedFaWorkerBatch<'a> {
 /// a required-cache miss has no route to [`FaWorkerBatch`].
 #[derive(Debug)]
 pub(crate) struct FaInferenceAuthorization<'a> {
-    miss_indices: &'a [usize],
+    misses: Vec<&'a DispatchUnit<'a>>,
 }
 
 /// Whether one cache partition needs and permits worker inference.
 #[derive(Debug)]
 pub(crate) enum FaInferencePlan<'a> {
-    /// Every group was satisfied by reusable or cached evidence.
+    /// Every request was satisfied by reusable or cached evidence.
     NothingToInfer,
     /// Cache misses exist and policy permits worker inference.
     Authorized(FaInferenceAuthorization<'a>),
@@ -123,46 +73,46 @@ pub(crate) enum FaInferencePlan<'a> {
 
 /// Convert cache misses into a worker-inference capability, or refuse when
 /// the job required complete reusable evidence.
-pub(crate) fn plan_fa_inference(
+pub(crate) fn plan_fa_inference<'a>(
     policy: CachePolicy,
-    miss_indices: &[usize],
-) -> Result<FaInferencePlan<'_>, ServerError> {
-    let Some((&first_miss, remaining_misses)) = miss_indices.split_first() else {
+    misses: Vec<&'a DispatchUnit<'a>>,
+) -> Result<FaInferencePlan<'a>, ServerError> {
+    let Some((first_miss, remaining_misses)) = misses.split_first() else {
         return Ok(FaInferencePlan::NothingToInfer);
     };
     match policy {
         CachePolicy::RequireCache => {
             return Err(ServerError::RequiredEvidenceUnavailable(
                 MissingRequiredEvidence::ForcedAlignment(MissingForcedAlignmentEvidence::new(
-                    first_miss,
-                    remaining_misses,
+                    first_miss.ordinal().index(),
+                    remaining_misses.iter().map(|unit| unit.ordinal().index()),
                 )),
             ));
         }
         CachePolicy::UseCache | CachePolicy::SkipCache => {}
     }
     Ok(FaInferencePlan::Authorized(FaInferenceAuthorization {
-        miss_indices,
+        misses,
     }))
 }
 
-/// Result of attempting worker inference for one FA group.
+/// Result of attempting worker inference for one FA request.
 ///
 /// Successful model evidence and an intentional unaligned fallback are
 /// distinct states. Only the former can cross the raw-evidence cache boundary.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum FaWorkerGroupResult {
+#[derive(Debug)]
+pub(crate) enum FaWorkerUnitResult<'a> {
     /// A successful worker response admitted against the request and parsed.
-    Evidence(Box<FaWorkerEvidenceResult>),
-    /// A group-local failure deliberately represented as unaligned words.
-    Unaligned(FaWorkerUnalignedResult),
+    Evidence(Box<FaWorkerEvidenceResult<'a>>),
+    /// A request-local failure deliberately represented as unaligned words.
+    Unaligned(FaWorkerUnalignedResult<'a>),
 }
 
 /// Timing projection and provenance issued together by the worker outcome.
 /// Callers cannot construct a projection with a fabricated evidence source.
-pub(crate) struct FaWorkerProjection {
-    /// Original group index in the file.
-    pub group_index: usize,
+pub(crate) struct FaWorkerProjection<'a> {
+    /// The request these timings answer.
+    pub unit: &'a DispatchUnit<'a>,
     /// One optional timing per requested word.
     pub timings: Vec<Option<WordTiming>>,
     /// Replayable direct evidence, when admitted by the worker boundary.
@@ -172,28 +122,28 @@ pub(crate) struct FaWorkerProjection {
     source: crate::types::traces::FaEvidenceSourceTrace,
 }
 
-impl FaWorkerProjection {
+impl FaWorkerProjection<'_> {
     /// Provenance of this projection, including the absence of worker evidence.
     pub fn source(&self) -> crate::types::traces::FaEvidenceSourceTrace {
         self.source
     }
 }
 
-impl FaWorkerGroupResult {
+impl<'a> FaWorkerUnitResult<'a> {
     /// Preserve the outcome distinction when materializing unaligned words.
-    pub fn into_projection(self) -> FaWorkerProjection {
+    pub fn into_projection(self) -> FaWorkerProjection<'a> {
         use crate::types::traces::FaEvidenceSourceTrace;
         match self {
             Self::Evidence(evidence) => FaWorkerProjection {
-                group_index: evidence.group_index,
+                unit: evidence.unit,
                 timings: evidence.timings,
                 raw_evidence: evidence.raw_evidence,
                 fallback_event: evidence.fallback_event,
                 source: FaEvidenceSourceTrace::Inference,
             },
             Self::Unaligned(unaligned) => FaWorkerProjection {
-                group_index: unaligned.group_index,
-                timings: vec![None; unaligned.word_count],
+                unit: unaligned.unit,
+                timings: vec![None; unaligned.unit.words().len()],
                 raw_evidence: None,
                 fallback_event: None,
                 source: FaEvidenceSourceTrace::Unaligned,
@@ -203,25 +153,24 @@ impl FaWorkerGroupResult {
 }
 
 /// Successful FA evidence paired inseparably with its parsed timing projection.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FaWorkerEvidenceResult {
-    /// Original group index inside the current file.
-    pub group_index: usize,
+#[derive(Debug)]
+pub(crate) struct FaWorkerEvidenceResult<'a> {
+    /// The request these timings answer.
+    pub unit: &'a DispatchUnit<'a>,
     /// Parsed timings in the established Rust FA timing domain.
     pub timings: Vec<Option<WordTiming>>,
     /// Immutable worker response admitted against engine and word cardinality.
     pub raw_evidence: Option<ReplayableFaRawEvidence>,
-    /// Fallback event metadata when this group had to retry with another engine.
+    /// Fallback event metadata when this request had to retry with another engine.
     pub fallback_event: Option<FaFallbackEventTrace>,
 }
 
-/// A group-local failure that is safe to retain as explicitly unaligned.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FaWorkerUnalignedResult {
-    /// Original group index inside the current file.
-    pub group_index: usize,
-    /// Exact number of unaligned words to materialize.
-    pub word_count: usize,
+/// A request-local failure that is safe to retain as explicitly unaligned:
+/// every one of the request's words, and no more, is left without timing.
+#[derive(Debug)]
+pub(crate) struct FaWorkerUnalignedResult<'a> {
+    /// The request left unaligned.
+    pub unit: &'a DispatchUnit<'a>,
 }
 
 /// Narrow transport adapter for FA worker inference.
@@ -241,41 +190,42 @@ impl<'a> FaWorkerTransport<'a> {
         Self::V2 { services }
     }
 
-    /// Infer timings for the requested FA miss groups.
-    pub(crate) async fn infer_groups(
+    /// Infer timings for the requested FA missed requests.
+    pub(crate) async fn infer_units<'b>(
         self,
-        batch: FaWorkerBatch<'_>,
-    ) -> Result<Vec<FaWorkerGroupResult>, ServerError> {
+        batch: FaWorkerBatch<'b>,
+    ) -> Result<Vec<FaWorkerUnitResult<'b>>, ServerError> {
         match self {
-            Self::V2 { services } => infer_groups_v2(services, batch).await,
+            Self::V2 { services } => infer_units_v2(services, batch).await,
         }
     }
 }
 
-/// Dispatch staged worker-protocol V2 requests for each FA miss group and
+/// Dispatch staged worker-protocol V2 requests for each missed FA request and
 /// parse successful results back into the established Rust timing domain.
-async fn infer_groups_v2(
+async fn infer_units_v2<'b>(
     services: super::FaServices<'_>,
-    batch: FaWorkerBatch<'_>,
-) -> Result<Vec<FaWorkerGroupResult>, ServerError> {
+    batch: FaWorkerBatch<'b>,
+) -> Result<Vec<FaWorkerUnitResult<'b>>, ServerError> {
     let request_namespace = NEXT_FA_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed);
     let artifacts = PreparedArtifactRuntimeV2::new("fa_v2").map_err(|error| {
         ServerError::Validation(format!("failed to create FA V2 artifact runtime: {error}"))
     })?;
 
-    let mut parsed_results = Vec::with_capacity(batch.authorization.miss_indices.len());
-    for group_index in batch.authorization.miss_indices.iter().copied() {
-        let group = &batch.groups[group_index];
+    let mut parsed_results = Vec::with_capacity(batch.authorization.misses.len());
+    for &unit in &batch.authorization.misses {
+        let ordinal = unit.ordinal();
+        // Grouping carries the admitted recording window through dispatch:
+        // the group's window, or this piece's.
+        let window = unit.window();
+        let group = unit.group();
 
-        // Grouping carries the admitted recording window through dispatch.
-        let window = group.window();
-
-        let response = match dispatch_group_request(
+        let response = match dispatch_unit_request(
             services,
             &artifacts,
             &batch,
             request_namespace,
-            group_index,
+            unit,
             batch.engine,
         )
         .await
@@ -288,17 +238,18 @@ async fn infer_groups_v2(
                 // Leave the group's words unaligned; the transcript is still
                 // useful without timing.
                 warn!(
-                    group = group_index,
+                    request = ordinal.index(),
+                    group = group.index(),
                     start_ms = segment.window.audio_start().get(),
                     end_ms = segment.window.end().get(),
                     window_ms = window.len().0,
                     recording_ms = window.recording().duration().get(),
                     decoded = %segment.reason,
                     path = %segment.path,
-                    "FA group window inside the recording decoded to no whole audio sample; \
+                    "FA request window inside the recording decoded to no whole audio sample; \
                      leaving words unaligned"
                 );
-                parsed_results.push(unaligned_group_result(group_index, group));
+                parsed_results.push(unaligned_unit_result(unit));
                 continue;
             }
             // Process exit proves that this request lost its worker, not why
@@ -307,33 +258,31 @@ async fn infer_groups_v2(
             // before later requests. Do not label an unknown exit as OOM.
             Err(ref e) if is_worker_process_crash(e) => {
                 warn!(
-                    group = group_index,
-                    start_ms = group.audio_start_ms(),
-                    end_ms = group.audio_end_ms(),
+                    request = ordinal.index(),
+                    group = group.index(),
+                    start_ms = window.audio_start().get(),
+                    end_ms = window.end().get(),
                     error = %e,
-                    "Worker process exited during FA group; leaving words unaligned"
+                    "Worker process exited during FA request; leaving words unaligned"
                 );
-                parsed_results.push(unaligned_group_result(group_index, group));
+                parsed_results.push(unaligned_unit_result(unit));
                 continue;
             }
             Err(other) => return Err(other),
         };
 
-        // Bind every fact that identifies this group before interpreting any
-        // response. Primary and fallback responses must travel through the
-        // same capability, so a later branch cannot accidentally pair a
-        // response with another group's key, window, or word cardinality.
-        let admission = FaGroupEvidenceAdmission {
+        // Bind every fact that identifies this request before interpreting
+        // any response. Primary and fallback responses must travel through
+        // the same capability, so a later branch cannot accidentally pair a
+        // response with another request's key, window, or word cardinality.
+        let admission = FaUnitEvidenceAdmission {
             requested_engine: batch.engine,
             cache_namespace: services.cache_namespace,
-            cache_key: &batch.cache_keys[group_index],
-            group_index,
-            group,
-            window: &window,
+            unit,
         };
 
         match admission.admit(&response, FaEvidenceRoute::Direct) {
-            Ok(parsed) => parsed_results.push(FaWorkerGroupResult::Evidence(Box::new(parsed))),
+            Ok(parsed) => parsed_results.push(FaWorkerUnitResult::Evidence(Box::new(parsed))),
             Err(error) => {
                 let Some(retry) = fa_group_retry(batch.engine, &error) else {
                     // Before propagating to the file level, check whether this is a
@@ -342,35 +291,37 @@ async fn infer_groups_v2(
                     // the correct recovery is a group-level skip, not a file abort.
                     if is_fa_runtime_failure(&error) {
                         warn!(
-                            group = group_index,
-                            start_ms = group.audio_start_ms(),
-                            end_ms = group.audio_end_ms(),
+                            request = ordinal.index(),
+                            group = group.index(),
+                            start_ms = window.audio_start().get(),
+                            end_ms = window.end().get(),
                             error = %error,
-                            "FA group failed with model RuntimeFailure (data-driven); \
+                            "FA request failed with model RuntimeFailure (data-driven); \
                              leaving words unaligned"
                         );
-                        parsed_results.push(unaligned_group_result(group_index, group));
+                        parsed_results.push(unaligned_unit_result(unit));
                         continue;
                     }
                     return Err(error);
                 };
                 warn!(
-                    group = group_index,
-                    start_ms = group.audio_start_ms(),
-                    end_ms = group.audio_end_ms(),
+                    request = ordinal.index(),
+                    group = group.index(),
+                    start_ms = window.audio_start().get(),
+                    end_ms = window.end().get(),
                     reason = retry.reason,
                     failed_engine = batch.engine.selection_name(),
                     retry_engine = retry.target.selection_name(),
-                    "FA engine hit a recoverable target constraint; retrying group on its \
+                    "FA engine hit a recoverable target constraint; retrying request on its \
                      fallback engine"
                 );
                 let fallback_namespace = NEXT_FA_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed);
-                let fallback_response = dispatch_group_request(
+                let fallback_response = dispatch_unit_request(
                     services,
                     &artifacts,
                     &batch,
                     fallback_namespace,
-                    group_index,
+                    unit,
                     retry.target,
                 )
                 .await?;
@@ -380,10 +331,9 @@ async fn infer_groups_v2(
                         reason: retry.reason,
                     },
                 ) {
-                    Ok(parsed) => parsed_results.push(FaWorkerGroupResult::Evidence(Box::new(
+                    Ok(parsed) => parsed_results.push(FaWorkerUnitResult::Evidence(Box::new(
                         parsed.with_fallback_event(build_fallback_event(
-                            group_index,
-                            group,
+                            unit,
                             batch.engine,
                             retry.target,
                             retry.reason,
@@ -395,14 +345,15 @@ async fn infer_groups_v2(
                     // utterances still have valid timing.
                     Err(ref error) if is_whisper_model_unavailable(error) => {
                         warn!(
-                            group = group_index,
-                            start_ms = group.audio_start_ms(),
-                            end_ms = group.audio_end_ms(),
+                            request = ordinal.index(),
+                            group = group.index(),
+                            start_ms = window.audio_start().get(),
+                            end_ms = window.end().get(),
                             retry_engine = retry.target.selection_name(),
                             "fallback FA engine unavailable (worker has no such model \
-                             loaded); leaving group words unaligned"
+                             loaded); leaving request words unaligned"
                         );
-                        parsed_results.push(unaligned_group_result(group_index, group));
+                        parsed_results.push(unaligned_unit_result(unit));
                     }
                     // The fallback itself hit a data-driven RuntimeFailure
                     // (e.g. the group is still too long for the fallback's own
@@ -410,15 +361,16 @@ async fn infer_groups_v2(
                     // unaligned rather than aborting the file.
                     Err(ref error) if is_fa_runtime_failure(error) => {
                         warn!(
-                            group = group_index,
-                            start_ms = group.audio_start_ms(),
-                            end_ms = group.audio_end_ms(),
+                            request = ordinal.index(),
+                            group = group.index(),
+                            start_ms = window.audio_start().get(),
+                            end_ms = window.end().get(),
                             error = %error,
                             retry_engine = retry.target.selection_name(),
                             "fallback FA engine also failed with model RuntimeFailure; \
-                             leaving group words unaligned"
+                             leaving request words unaligned"
                         );
-                        parsed_results.push(unaligned_group_result(group_index, group));
+                        parsed_results.push(unaligned_unit_result(unit));
                     }
                     Err(error) => return Err(error),
                 }
@@ -429,28 +381,26 @@ async fn infer_groups_v2(
     Ok(parsed_results)
 }
 
-/// Construct a group result with every word timing left unaligned (`None`).
+/// Construct a request result with every word timing left unaligned (`None`).
 ///
-/// All group-level skip paths (empty audio, model unavailability, data-driven
-/// RuntimeFailure) return this same shape so the orchestrator can continue to
-/// the next group without aborting the file.
-fn unaligned_group_result(group_index: usize, group: &FaGroup) -> FaWorkerGroupResult {
-    FaWorkerGroupResult::Unaligned(FaWorkerUnalignedResult {
-        group_index,
-        word_count: group.words.len(),
-    })
+/// All request-level skip paths (empty audio, model unavailability,
+/// data-driven RuntimeFailure) return this same shape so the orchestrator can
+/// continue to the next request without aborting the file. For an anchored
+/// group that leaves one piece untimed and its neighbours aligned.
+fn unaligned_unit_result<'a>(unit: &'a DispatchUnit<'a>) -> FaWorkerUnitResult<'a> {
+    FaWorkerUnitResult::Unaligned(FaWorkerUnalignedResult { unit })
 }
 
-async fn dispatch_group_request(
+async fn dispatch_unit_request(
     services: super::FaServices<'_>,
     artifacts: &PreparedArtifactRuntimeV2,
     batch: &FaWorkerBatch<'_>,
     request_namespace: u64,
-    group_index: usize,
+    unit: &DispatchUnit<'_>,
     engine: crate::types::engines::FaEngineName,
 ) -> Result<crate::types::worker_v2::ExecuteResponseV2, ServerError> {
-    let infer_item = build_fa_infer_item(batch, group_index);
-    let request_ids = build_fa_request_ids(request_namespace, group_index);
+    let infer_item = build_fa_infer_item(batch, unit);
+    let request_ids = build_fa_request_ids(request_namespace, unit.ordinal());
     let request = build_forced_alignment_request_v2(
         artifacts.store(),
         ForcedAlignmentBuildInputV2 {
@@ -470,7 +420,9 @@ async fn dispatch_group_request(
             ServerError::EmptyFaAudioSegment(segment)
         }
         other => ServerError::Validation(format!(
-            "failed to build worker protocol V2 FA request for group {group_index}: {other}"
+            "failed to build worker protocol V2 FA request {} (group {}): {other}",
+            unit.ordinal(),
+            unit.group()
         )),
     })?;
 
@@ -484,72 +436,72 @@ async fn dispatch_group_request(
 
 /// Lower one worker response into the FA timing domain.
 ///
-/// Takes the group's window RATHER THAN rebuilding it from the recording. The
-/// window is proved once, by the caller, before inference is dispatched; a
+/// Takes the unit's window RATHER THAN rebuilding it from the recording. The
+/// window is proved once, by grouping, before inference is dispatched; a
 /// second construction here would be the same check in a second place, and the
 /// failure would arrive after the expensive part had already been paid for.
-fn parse_group_response(
+/// Window-relative engine reports cross into file coordinates through THIS
+/// window, a piece's own for a piece, exactly as a single group's do.
+fn parse_unit_response(
     response: &crate::types::worker_v2::ExecuteResponseV2,
-    group_index: usize,
-    group: &FaGroup,
-    window: &FaWindow,
+    unit: &DispatchUnit<'_>,
     engine: &EngineId,
 ) -> Result<Vec<Option<WordTiming>>, ServerError> {
-    parse_forced_alignment_result_v2(response, &group.words, window, engine).map_err(|error| {
+    let window = unit.window();
+    parse_forced_alignment_result_v2(response, unit.words(), &window, engine).map_err(|error| {
         ServerError::Validation(format!(
-            "failed to parse worker protocol V2 FA response for group {group_index} ({}..{} ms): {error}",
-            group.audio_start_ms(),
-            group.audio_end_ms(),
+            "failed to parse worker protocol V2 FA response for request {} (group {}) ({}..{} ms): {error}",
+            unit.ordinal(),
+            unit.group(),
+            window.audio_start().get(),
+            window.end().get(),
         ))
     })
 }
 
-impl FaWorkerEvidenceResult {
+impl FaWorkerEvidenceResult<'_> {
     fn with_fallback_event(mut self, fallback_event: FaFallbackEventTrace) -> Self {
         self.fallback_event = Some(fallback_event);
         self
     }
 }
 
-/// Capability binding every current-request fact needed to admit one group's
-/// worker response.
+/// Capability binding every current-request fact needed to admit one
+/// request's worker response.
 ///
 /// Keeping these values together prevents the primary and fallback branches
-/// from independently reconstructing a six-value relationship by convention.
-struct FaGroupEvidenceAdmission<'a> {
+/// from independently reconstructing the relationship by convention. The
+/// unit carries the key, the window and the words, so they cannot belong to
+/// different requests.
+struct FaUnitEvidenceAdmission<'s, 'a> {
     requested_engine: crate::types::engines::FaEngineName,
-    cache_namespace: &'a crate::engine_reports::FaCacheNamespace,
-    cache_key: &'a crate::chat_ops::CacheKey,
-    group_index: usize,
-    group: &'a FaGroup,
-    window: &'a FaWindow,
+    cache_namespace: &'s crate::engine_reports::FaCacheNamespace,
+    unit: &'a DispatchUnit<'a>,
 }
 
-impl FaGroupEvidenceAdmission<'_> {
+impl<'a> FaUnitEvidenceAdmission<'_, 'a> {
     fn admit(
         &self,
         response: &crate::types::worker_v2::ExecuteResponseV2,
         route: FaEvidenceRoute<'_>,
-    ) -> Result<FaWorkerEvidenceResult, ServerError> {
+    ) -> Result<FaWorkerEvidenceResult<'a>, ServerError> {
         let raw_evidence = FaRawEvidence::admit_requested(
             response,
             self.requested_engine,
             self.cache_namespace,
-            ExpectedFaWords::new(self.group.words.len()),
-            self.cache_key,
+            ExpectedFaWords::new(self.unit.words().len()),
+            self.unit.cache_key(),
             route,
         )
         .map_err(|error| {
             ServerError::Validation(format!(
-                "failed to admit worker protocol V2 FA evidence for group {}: {error}",
-                self.group_index
+                "failed to admit worker protocol V2 FA evidence for request {}: {error}",
+                self.unit.ordinal()
             ))
         })?;
-        let timings = parse_group_response(
+        let timings = parse_unit_response(
             raw_evidence.response(),
-            self.group_index,
-            self.group,
-            self.window,
+            self.unit,
             &EngineId::new(raw_evidence.effective_engine().as_wire_name()),
         )?;
         let replayable_raw_evidence = match raw_evidence.into_replayable() {
@@ -557,13 +509,13 @@ impl FaGroupEvidenceAdmission<'_> {
             Err(super::raw_evidence::FaRawEvidenceError::UnversionedFallbackEvidence) => None,
             Err(error) => {
                 return Err(ServerError::Validation(format!(
-                    "failed to close FA evidence replay state for group {}: {error}",
-                    self.group_index
+                    "failed to close FA evidence replay state for request {}: {error}",
+                    self.unit.ordinal()
                 )));
             }
         };
         Ok(FaWorkerEvidenceResult {
-            group_index: self.group_index,
+            unit: self.unit,
             timings,
             raw_evidence: replayable_raw_evidence,
             fallback_event: None,
@@ -572,46 +524,42 @@ impl FaGroupEvidenceAdmission<'_> {
 }
 
 /// Reparse one admitted cached response without invoking a model worker.
-pub(super) fn replay_group_evidence(
+pub(super) fn replay_unit_evidence<'a>(
     raw_evidence: ReplayableFaRawEvidence,
-    group_index: usize,
-    group: &FaGroup,
-) -> Result<FaWorkerEvidenceResult, ServerError> {
+    unit: &'a DispatchUnit<'a>,
+) -> Result<FaWorkerEvidenceResult<'a>, ServerError> {
     let raw_evidence = raw_evidence.into_inner();
-    let window = group.window();
-    let timings = parse_group_response(
+    let timings = parse_unit_response(
         raw_evidence.response(),
-        group_index,
-        group,
-        &window,
+        unit,
         &EngineId::new(raw_evidence.effective_engine().as_wire_name()),
     )?;
     let fallback_event = raw_evidence.fallback_reason().map(|reason| {
         build_fallback_event(
-            group_index,
-            group,
+            unit,
             raw_evidence.requested_engine(),
             raw_evidence.effective_engine(),
             reason,
         )
     });
     Ok(FaWorkerEvidenceResult {
-        group_index,
+        unit,
         timings,
         raw_evidence: None,
         fallback_event,
     })
 }
 
+/// The fallback event for one request: its group, and the window the
+/// fallback engine was actually given (a piece's, for a piece).
 fn build_fallback_event(
-    group_index: usize,
-    group: &FaGroup,
+    unit: &DispatchUnit<'_>,
     from_engine: crate::types::engines::FaEngineName,
     to_engine: crate::types::engines::FaEngineName,
     reason: &str,
 ) -> FaFallbackEventTrace {
     FaFallbackEventTrace {
-        group_index,
+        group_index: unit.group().index(),
         from_engine: {
             use crate::types::engines::EngineBackend;
             from_engine.wire_name().to_string()
@@ -621,8 +569,8 @@ fn build_fallback_event(
             to_engine.wire_name().to_string()
         },
         reason: reason.to_string(),
-        audio_start_ms: DurationMs(group.audio_start_ms()),
-        audio_end_ms: DurationMs(group.audio_end_ms()),
+        audio_start_ms: DurationMs(unit.window().audio_start().get()),
+        audio_end_ms: DurationMs(unit.window().end().get()),
     }
 }
 
@@ -776,49 +724,47 @@ fn fa_group_retry(
     Some(FaGroupRetry { target, reason })
 }
 
-/// Build one production-domain `FaInferItem` from the transport-neutral batch
-/// view.
-fn build_fa_infer_item(batch: &FaWorkerBatch<'_>, group_index: usize) -> FaInferItem {
-    let group = &batch.groups[group_index];
+/// Build one production-domain `FaInferItem` for one request.
+fn build_fa_infer_item(batch: &FaWorkerBatch<'_>, unit: &DispatchUnit<'_>) -> FaInferItem {
+    let words = unit.words();
     FaInferItem {
-        words: batch.word_texts[group_index].clone(),
-        word_ids: group.words.iter().map(|word| word.stable_id()).collect(),
-        word_utterance_indices: group
-            .words
+        words: unit.texts(),
+        word_ids: words.iter().map(|word| word.stable_id()).collect(),
+        word_utterance_indices: words
             .iter()
             .map(|word| word.utterance_index.raw())
             .collect(),
-        word_utterance_word_indices: group
-            .words
+        word_utterance_word_indices: words
             .iter()
             .map(|word| word.utterance_word_index.raw())
             .collect(),
         audio_path: batch.audio_path.to_string_lossy().into_owned(),
-        // The group's own window, proof included: nothing is lowered to
+        // The unit's own window, proof included: nothing is lowered to
         // integers here for the request builder to rebuild.
-        window: group.window(),
+        window: unit.window(),
         gap_healing: batch.gap_healing,
     }
 }
 
 /// Build unique request and artifact ids for one FA V2 request.
 ///
-/// The request namespace is allocated once per `infer_groups_v2` call so two
+/// The request namespace is allocated once per `infer_units_v2` call so two
 /// concurrent files cannot collide on `fa-v2-request-0`, `fa-v2-request-1`,
 /// and so on while sharing the same GPU worker.
-fn build_fa_request_ids(request_namespace: u64, group_index: usize) -> PreparedFaRequestIdsV2 {
+fn build_fa_request_ids(request_namespace: u64, unit: UnitOrdinal) -> PreparedFaRequestIdsV2 {
+    let unit = unit.index();
     PreparedFaRequestIdsV2::new(
-        format!("fa-v2-request-{request_namespace}-{group_index}"),
-        format!("fa-v2-payload-{request_namespace}-{group_index}"),
-        format!("fa-v2-audio-{request_namespace}-{group_index}"),
+        format!("fa-v2-request-{request_namespace}-{unit}"),
+        format!("fa-v2-payload-{request_namespace}-{unit}"),
+        format!("fa-v2-audio-{request_namespace}-{unit}"),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::chat_ops::fa::coordinates::{FileMs, Recording};
-    use crate::chat_ops::fa::{FaWord, TimeSpan};
+    use crate::chat_ops::fa::{FaGroup, FaWord, TimeSpan};
     use crate::chat_ops::{UtteranceIdx, WordIdx};
+    use crate::fa::units::test_support::{anchored_group, plan_for};
 
     use super::*;
     use crate::api::DurationSeconds;
@@ -828,22 +774,54 @@ mod tests {
     };
     use crate::worker::error::WorkerError;
 
+    /// Build a small FA word for transport unit tests.
+    fn make_word(index: usize, text: &str) -> FaWord {
+        FaWord {
+            utterance_index: UtteranceIdx::new(0),
+            utterance_word_index: WordIdx::new(index),
+            text: text.into(),
+        }
+    }
+
+    /// One single group per window, for plans with several requests.
+    fn single_groups(windows: &[(u64, u64)]) -> Vec<FaGroup> {
+        windows
+            .iter()
+            .enumerate()
+            .map(|(utterance, &(start, end))| {
+                FaGroup::test_fixture(
+                    TimeSpan::new(start, end),
+                    vec![FaWord {
+                        utterance_index: UtteranceIdx::new(utterance),
+                        utterance_word_index: WordIdx::new(0),
+                        text: "hello".into(),
+                    }],
+                    vec![UtteranceIdx::new(utterance)],
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn worker_outcomes_serialize_distinct_evidence_provenance() {
         // A failed call and a successful response that aligned no words have
         // the same timing projection. The outcome, not those timings, owns
         // the distinction recorded in the evidence artifact.
+        let groups = vec![FaGroup::test_fixture(
+            TimeSpan::new(100, 900),
+            vec![make_word(0, "hello"), make_word(1, "world")],
+            vec![UtteranceIdx::new(0)],
+        )];
+        let plan = plan_for(&groups);
+        let unit = plan.units().next().expect("one request");
         let outcomes = [
             (
-                FaWorkerGroupResult::Unaligned(FaWorkerUnalignedResult {
-                    group_index: 7,
-                    word_count: 2,
-                }),
+                FaWorkerUnitResult::Unaligned(FaWorkerUnalignedResult { unit }),
                 "unaligned",
             ),
             (
-                FaWorkerGroupResult::Evidence(Box::new(FaWorkerEvidenceResult {
-                    group_index: 7,
+                FaWorkerUnitResult::Evidence(Box::new(FaWorkerEvidenceResult {
+                    unit,
                     timings: vec![None; 2],
                     raw_evidence: None,
                     fallback_event: None,
@@ -858,55 +836,39 @@ mod tests {
             let decoded: crate::types::traces::FaEvidenceSourceTrace =
                 serde_json::from_value(encoded).expect("read recorded source");
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
-            assert_eq!(projection.group_index, 7);
+            assert_eq!(projection.unit.ordinal(), unit.ordinal());
             assert_eq!(projection.timings, vec![None; 2]);
         }
     }
 
-    /// Build a small FA word for transport unit tests.
-    fn make_word(index: usize, text: &str) -> FaWord {
-        FaWord {
-            utterance_index: UtteranceIdx::new(0),
-            utterance_word_index: WordIdx::new(index),
-            text: text.into(),
-        }
-    }
-
-    /// A recording long enough to contain every window these tests build.
-    fn test_recording() -> Recording {
-        Recording::of_duration(crate::chat_ops::fa::coordinates::Ms(600_000)).expect("non-zero")
-    }
-
-    #[test]
-    fn builds_fa_infer_item_from_transport_neutral_batch() {
-        let word_texts = vec![vec!["hello".to_string(), "world".to_string()]];
-        let groups = vec![FaGroup::test_fixture(
-            TimeSpan::new(100, 900),
-            vec![make_word(0, "hello"), make_word(1, "world")],
-            vec![UtteranceIdx::new(0)],
-        )];
-        let misses = [0];
-        let authorization = match plan_fa_inference(CachePolicy::UseCache, &misses)
+    fn batch<'a>(misses: Vec<&'a DispatchUnit<'a>>) -> FaWorkerBatch<'a> {
+        let authorization = match plan_fa_inference(CachePolicy::UseCache, misses)
             .expect("ordinary cache misses may infer")
         {
             FaInferencePlan::Authorized(authorization) => authorization,
             FaInferencePlan::NothingToInfer => panic!("one miss must require inference"),
         };
-        let cache_keys = vec![crate::chat_ops::CacheKey::from_content("test-group")];
-        let batch = UncheckedFaWorkerBatch {
-            word_texts: &word_texts,
-            groups: &groups,
-            cache_keys: &cache_keys,
+        FaWorkerBatch {
             authorization,
             audio_path: Path::new("/tmp/input.wav"),
             worker_lang: WorkerLanguage::from(crate::api::LanguageCode3::eng()),
             engine: crate::types::engines::FaEngineName::Whisper,
             gap_healing: WordGapHealing::PreserveMeasured,
         }
-        .admit()
-        .expect("parallel batch inputs agree");
+    }
 
-        let item = build_fa_infer_item(&batch, 0);
+    #[test]
+    fn builds_fa_infer_item_from_one_request() {
+        let groups = vec![FaGroup::test_fixture(
+            TimeSpan::new(100, 900),
+            vec![make_word(0, "hello"), make_word(1, "world")],
+            vec![UtteranceIdx::new(0)],
+        )];
+        let plan = plan_for(&groups);
+        let unit = plan.units().next().expect("one request");
+        let batch = batch(vec![unit]);
+
+        let item = build_fa_infer_item(&batch, unit);
         assert_eq!(item.words, vec!["hello".to_string(), "world".to_string()]);
         assert_eq!(
             item.word_ids,
@@ -920,42 +882,28 @@ mod tests {
         assert_eq!(item.gap_healing, WordGapHealing::PreserveMeasured);
     }
 
+    /// A piece of an anchored group is requested with only its own words
+    /// and its own window: the request is the piece, not the utterance.
     #[test]
-    fn worker_batch_refuses_parallel_group_identity_drift() {
-        let groups = vec![FaGroup::test_fixture(
-            TimeSpan::new(100, 900),
-            vec![make_word(0, "hello")],
-            vec![UtteranceIdx::new(0)],
-        )];
-        let word_texts = Vec::new();
-        let cache_keys = vec![crate::chat_ops::CacheKey::from_content("test-group")];
-        let misses = [0];
-        let authorization = match plan_fa_inference(CachePolicy::UseCache, &misses)
-            .expect("ordinary cache misses may infer")
-        {
-            FaInferencePlan::Authorized(authorization) => authorization,
-            FaInferencePlan::NothingToInfer => panic!("one miss must require inference"),
-        };
+    fn an_anchored_piece_is_requested_with_its_own_words_and_window() {
+        let groups = vec![anchored_group()];
+        let plan = plan_for(&groups);
+        let piece = plan.units().nth(1).expect("three pieces");
+        let batch = batch(vec![piece]);
 
-        let error = UncheckedFaWorkerBatch {
-            word_texts: &word_texts,
-            groups: &groups,
-            cache_keys: &cache_keys,
-            authorization,
-            audio_path: Path::new("/tmp/input.wav"),
-            worker_lang: WorkerLanguage::from(crate::api::LanguageCode3::eng()),
-            engine: crate::types::engines::FaEngineName::Whisper,
-            gap_healing: WordGapHealing::PreserveMeasured,
-        }
-        .admit()
-        .expect_err("parallel group inputs must not drift");
-
-        assert!(error.to_string().contains("cardinality drift"));
+        let item = build_fa_infer_item(&batch, piece);
+        assert_eq!(item.words, vec!["w2".to_string(), "w3".to_string()]);
+        assert_eq!(item.word_utterance_word_indices, vec![2, 3]);
+        assert_eq!(item.window.audio_start().get(), 13_000);
+        assert_eq!(item.window.end().get(), 26_000);
     }
 
     #[test]
     fn required_cache_misses_never_produce_fa_inference_authorization() {
-        let error = plan_fa_inference(CachePolicy::RequireCache, &[1, 3])
+        let groups = single_groups(&[(0, 100), (100, 200), (200, 300), (300, 400)]);
+        let plan = plan_for(&groups);
+        let units: Vec<&DispatchUnit<'_>> = plan.units().collect();
+        let error = plan_fa_inference(CachePolicy::RequireCache, vec![units[1], units[3]])
             .expect_err("required evidence misses must refuse worker inference");
 
         let ServerError::RequiredEvidenceUnavailable(missing) = error else {
@@ -964,20 +912,20 @@ mod tests {
         let MissingRequiredEvidence::ForcedAlignment(missing) = missing else {
             panic!("expected forced-alignment evidence refusal");
         };
-        assert_eq!(missing.group_indices(), &[1, 3]);
+        assert_eq!(missing.request_indices(), &[1, 3]);
     }
 
     #[test]
     fn reusable_fa_evidence_needs_no_authorization_even_when_required() {
-        let plan = plan_fa_inference(CachePolicy::RequireCache, &[])
+        let plan = plan_fa_inference(CachePolicy::RequireCache, Vec::new())
             .expect("no misses satisfy required-cache policy");
 
         assert!(matches!(plan, FaInferencePlan::NothingToInfer));
     }
 
     #[test]
-    fn builds_namespaced_v2_request_ids_from_group_index() {
-        let ids = build_fa_request_ids(42, 7);
+    fn builds_namespaced_v2_request_ids_from_request_ordinal() {
+        let ids = build_fa_request_ids(42, UnitOrdinal::fixture(7));
         assert_eq!(&*ids.request_id, "fa-v2-request-42-7");
         assert_eq!(&*ids.payload_ref_id, "fa-v2-payload-42-7");
         assert_eq!(&*ids.audio_ref_id, "fa-v2-audio-42-7");
@@ -985,8 +933,8 @@ mod tests {
 
     #[test]
     fn namespaces_v2_request_ids_across_concurrent_files() {
-        let first = build_fa_request_ids(1, 0);
-        let second = build_fa_request_ids(2, 0);
+        let first = build_fa_request_ids(1, UnitOrdinal::fixture(0));
+        let second = build_fa_request_ids(2, UnitOrdinal::fixture(0));
 
         assert_ne!(first.request_id, second.request_id);
         assert_ne!(first.payload_ref_id, second.payload_ref_id);
@@ -994,12 +942,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_group_response_reports_parser_failure_with_group_context() {
-        let group = FaGroup::test_fixture(
-            TimeSpan::new(100, 900),
-            vec![make_word(0, "hello")],
-            vec![UtteranceIdx::new(0)],
-        );
+    fn parse_unit_response_reports_parser_failure_with_request_context() {
+        let groups = single_groups(&[(100, 900)]);
+        let plan = plan_for(&groups);
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("req-fa-v2-bad"),
             TaskResultV2::TranslationResult(TranslationResultV2 {
@@ -1008,20 +953,14 @@ mod tests {
             DurationSeconds(0.01),
         );
 
-        let recording = test_recording();
-        let window = FaWindow::within(
-            &recording,
-            FileMs::new(group.audio_start_ms()),
-            FileMs::new(group.audio_end_ms()),
-        )
-        .expect("test group lies inside the test recording");
-        let error = parse_group_response(&response, 13, &group, &window, &EngineId::new("test-fa"))
+        let unit = plan.units().next().expect("one request");
+        let error = parse_unit_response(&response, unit, &EngineId::new("test-fa"))
             .expect_err("non-FA payload should fail immediately");
 
         assert!(
             error
                 .to_string()
-                .contains("failed to parse worker protocol V2 FA response for group 13")
+                .contains("failed to parse worker protocol V2 FA response for request 0 (group 0)")
         );
         assert!(error.to_string().contains("translation data"));
     }
@@ -1168,19 +1107,19 @@ mod tests {
     ///   Wave2Vec FA hit recoverable target constraint; retrying group with Whisper FA
     ///   FA error (raw): ModelUnavailable: no whisper FA host loaded for worker protocol V2
     ///
-    /// Root cause: `infer_groups_v2` dispatches the Whisper fallback, but when
+    /// Root cause: `infer_units_v2` dispatches the Whisper fallback, but when
     /// the worker returns `ModelUnavailable` (because `whisper_runner = None`),
-    /// `parse_group_response` wraps the error into a `ServerError::Validation`
+    /// `parse_unit_response` wraps the error into a `ServerError::Validation`
     /// that looks identical to a fatal data error.  The `?` on the fallback call
     /// propagates it as a **file-level** failure instead of leaving the group
     /// unaligned the way empty audio segments are handled.
     ///
-    /// Fix: implement `is_whisper_model_unavailable` so `infer_groups_v2` can
+    /// Fix: implement `is_whisper_model_unavailable` so `infer_units_v2` can
     /// detect the capability gap and leave the group with `None` timings.
     #[test]
     fn whisper_fallback_model_unavailable_is_detectable_as_capability_gap_not_data_error() {
         // This is the exact error produced in production:
-        // parse_group_response wraps the ModelUnavailable worker response into
+        // parse_unit_response wraps the ModelUnavailable worker response into
         // a ServerError::Validation with this message.
         let model_unavailable = ServerError::Validation(
             "failed to parse worker protocol V2 FA response for group 24 (379515..381395 ms): \
@@ -1191,7 +1130,7 @@ mod tests {
 
         // The test asserts that is_whisper_model_unavailable can distinguish
         // this worker-capability error from an ordinary data-quality error.
-        // Without this predicate, infer_groups_v2 has no way to leave the
+        // Without this predicate, infer_units_v2 has no way to leave the
         // group unaligned instead of killing the file.
         //
         // This assertion is currently RED: is_whisper_model_unavailable always
@@ -1199,7 +1138,7 @@ mod tests {
         assert!(
             is_whisper_model_unavailable(&model_unavailable),
             "ModelUnavailable from Whisper fallback should be detectable \
-             so infer_groups_v2 can leave the group unaligned"
+             so infer_units_v2 can leave the group unaligned"
         );
 
         // A plain data-quality error must NOT be mistaken for a capability gap.
@@ -1293,7 +1232,7 @@ mod tests {
     }
 
     /// Worker process crashes (SIGKILL, C-extension SIGSEGV) must be detectable
-    /// as a group-local signal so `infer_groups_v2` can leave the crashing group
+    /// as a group-local signal so `infer_units_v2` can leave the crashing group
     /// unaligned and continue processing remaining groups rather than aborting
     /// the entire file.
     ///
@@ -1341,25 +1280,49 @@ mod tests {
 
     #[test]
     fn build_fallback_event_captures_group_and_engine_metadata() {
-        let group = FaGroup::test_fixture(
+        let groups = vec![FaGroup::test_fixture(
             TimeSpan::new(175_765, 176_365),
             vec![make_word(0, "hello")],
             vec![UtteranceIdx::new(0)],
-        );
+        )];
+        let plan = plan_for(&groups);
 
         let event = build_fallback_event(
-            13,
-            &group,
+            plan.units().next().expect("one request"),
             crate::types::engines::FaEngineName::Wave2Vec,
             crate::types::engines::FaEngineName::Whisper,
             "targets length is too long for CTC",
         );
 
-        assert_eq!(event.group_index, 13);
+        assert_eq!(event.group_index, 0);
         assert_eq!(event.from_engine, "wav2vec_fa");
         assert_eq!(event.to_engine, "whisper_fa");
         assert_eq!(event.reason, "targets length is too long for CTC");
         assert_eq!(event.audio_start_ms.0, 175_765);
         assert_eq!(event.audio_end_ms.0, 176_365);
+    }
+
+    /// A fallback on one piece reports the piece's window, which is the
+    /// audio the fallback engine was actually given, under its group.
+    #[test]
+    fn a_piece_fallback_reports_the_piece_window() {
+        let groups = vec![
+            FaGroup::test_fixture(
+                TimeSpan::new(0, 900),
+                vec![make_word(0, "hello")],
+                vec![UtteranceIdx::new(0)],
+            ),
+            anchored_group(),
+        ];
+        let plan = plan_for(&groups);
+        let event = build_fallback_event(
+            plan.units().nth(3).expect("one request and three pieces"),
+            crate::types::engines::FaEngineName::Wave2Vec,
+            crate::types::engines::FaEngineName::Whisper,
+            "targets length is too long for CTC",
+        );
+        assert_eq!(event.group_index, 1);
+        assert_eq!(event.audio_start_ms.0, 26_000);
+        assert_eq!(event.audio_end_ms.0, 40_000);
     }
 }

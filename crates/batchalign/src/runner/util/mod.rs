@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn required_evidence_refusal_is_actionable_and_not_a_system_error() {
         let error = ServerError::RequiredEvidenceUnavailable(
-            MissingRequiredEvidence::ForcedAlignment(MissingForcedAlignmentEvidence::new(1, &[3])),
+            MissingRequiredEvidence::ForcedAlignment(MissingForcedAlignmentEvidence::new(1, [3])),
         );
         let category = classify_server_error(&error);
         assert_eq!(category, FailureCategory::EvidenceUnavailable);
@@ -333,7 +333,7 @@ mod tests {
             &format!("Alignment failed: {error}"),
         );
         assert!(message.contains("--require-media-cache"));
-        assert!(message.contains("groups [1, 3]"));
+        assert!(message.contains("requests [1, 3]"));
         assert!(!message.contains("internal error"));
     }
 

@@ -6,6 +6,8 @@
 
 use batchalign_transform::decisions::{DecisionRecord, LineIdx};
 
+use super::anchors::AnchorIndex;
+
 /// Result summary from UTR injection.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UtrResult {
@@ -20,6 +22,16 @@ pub struct UtrResult {
     /// Provenance records are not part of result equality or JSON evidence.
     #[serde(skip)]
     pub(super) decisions: Vec<DecisionRecord>,
+    /// Word anchors this pass observed: transcript words matched exactly (or
+    /// case-insensitively) to a timed single-word ASR token, which forced
+    /// alignment may cut an over-budget utterance at.
+    ///
+    /// Derived from `alignment` and the token stream that produced it, in the
+    /// one function that holds both (`run_global_utr`), so the plan's JSON is
+    /// already its replayable form; like `decisions`, it is excluded from
+    /// equality and serialization.
+    #[serde(skip)]
+    pub(super) anchors: AnchorIndex,
 }
 
 impl PartialEq for UtrResult {
@@ -42,6 +54,9 @@ impl UtrResult {
             unmatched: 0,
             alignment: UtrAlignmentEvidence::NotRunNoUntimed,
             decisions: Vec::new(),
+            // Nothing was matched, so nothing was anchored: forced alignment
+            // then groups exactly as it does without recovery.
+            anchors: AnchorIndex::not_observed(),
         }
     }
 
@@ -79,6 +94,13 @@ impl UtrResult {
         &self.decisions
     }
 
+    /// Take the word anchors this pass observed, for forced-alignment
+    /// grouping, leaving the result's counts and decisions to be read.
+    /// The result then reports no observation.
+    pub fn take_anchors(&mut self) -> AnchorIndex {
+        std::mem::replace(&mut self.anchors, AnchorIndex::not_observed())
+    }
+
     /// Remove the obsolete pass-1 decision for a pass-2 recovered utterance.
     pub(super) fn discard_recovered_unmatched_decision(&mut self, line_idx: LineIdx) {
         self.decisions
@@ -93,6 +115,7 @@ impl UtrResult {
             unmatched,
             alignment,
             decisions,
+            anchors,
         } = self;
         let alignment = match alignment {
             UtrAlignmentEvidence::Global { plan } => UtrAlignmentEvidence::TwoPass {
@@ -108,6 +131,11 @@ impl UtrResult {
             unmatched,
             alignment,
             decisions,
+            // Anchors come from the global pass only. Pass 2 does match the
+            // excluded overlap utterances' words against the stream, within
+            // local windows, but only to recover their bullets; those local
+            // matches are not read for anchors.
+            anchors,
         }
     }
 }
@@ -132,12 +160,34 @@ impl UtrUtteranceOrdinal {
     pub fn index(self) -> usize {
         self.0
     }
+
+    /// THE conversion into forced alignment's utterance space.
+    ///
+    /// Both count `Line::Utterance` entries in document order, so the value
+    /// carries over unchanged; what this function adds is that the crossing
+    /// happens in one named place, never as a `.0` read beside a constructor.
+    pub(super) fn fa_utterance(self) -> talkbank_model::UtteranceIdx {
+        talkbank_model::UtteranceIdx::new(self.0)
+    }
 }
 
 /// Zero-based alignable-word ordinal within one CHAT utterance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(transparent)]
 pub(super) struct UtrWordOrdinal(pub(super) usize);
+
+impl UtrWordOrdinal {
+    /// THE conversion into forced alignment's word space.
+    ///
+    /// UTR and FA grouping both extract an utterance's words through
+    /// `collect_fa_words`, so a UTR word ordinal and an FA `WordIdx` address
+    /// the same alignable word. That shared extraction is the whole proof, and
+    /// this is the only place it is relied on: word anchors cross from UTR's
+    /// plan into FA grouping through here and nowhere else.
+    pub(super) fn fa_word(self) -> talkbank_model::WordIdx {
+        talkbank_model::WordIdx::new(self.0)
+    }
+}
 
 /// Zero-based token ordinal in the admitted ASR timing stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]

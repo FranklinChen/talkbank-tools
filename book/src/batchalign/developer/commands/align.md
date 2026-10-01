@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-24 00:10 EDT
+**Last updated:** 2026-09-30 22:58 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -367,6 +367,14 @@ rather than every group: the flush guard is skipped when the current group is
 empty, and one utterance whose own labels exceed 448 bytes is sent as its own
 group, unsplit (fail gracefully rather than drop silently).
 
+The time window is also the budget for ONE utterance. An utterance whose own
+window exceeds it is split at the words utterance timing recovery heard into
+pieces that each fit (one group, one request per piece), or refused as
+`anchor_gap` (anchors farther apart than the budget: needs review),
+`anchors_unusable` (recovery matched the utterance but gave no usable cut, with
+a closed cause) or `over_budget` (recovery has nothing to say about it). See [Forced Alignment: Over-budget
+utterances](../../reference/forced-alignment.md#over-budget-utterances-anchored-splitting).
+
 See [Forced Alignment: FA grouping strategy](../../reference/forced-alignment.md#fa-grouping-strategy)
 for the full rationale, flowchart, and edge cases.
 
@@ -436,7 +444,10 @@ fail-closed when requested and includes:
 
 - schema version, engine, and worker-advertised engine version;
 - group windows, words, and stable word IDs;
-- per-group source (`wor_reuse`, `cache`, or `inference`) and cache key;
+- each group's `span` (schema 6): `single`, with the request's source
+  (`wor_reuse`, `cache`, `raw_evidence_replay`, `inference`, or `unaligned`)
+  and cache key, or `anchored`, with one piece per request (window, first and
+  last word, source, cache key);
 - pre-injection valid timings, optional model score, and exhaustive origin
   chains for both boundaries;
 - the exact typed decision records retained independently of CHAT output;
@@ -446,19 +457,24 @@ fail-closed when requested and includes:
   at assembly time by `FaTimingDecisionTrace::dropped_word_timings`, so it
   cannot drift from them, and always written, empty when nothing was dropped;
 - `refused_window` on each `window_refused` decision (schema 5): a
-  `cause`-tagged object (`over_budget`, `empty`, `inverted`, `past_recording`)
-  carrying that cause's own bounds and figures, so a refused window is data
-  rather than prose in `reason`;
+  `cause`-tagged object (`over_budget`, `empty`, `inverted`, `past_recording`,
+  and from schema 6 `anchor_gap` and `anchors_unusable`) carrying that cause's own bounds and figures,
+  so a refused window is data rather than prose in `reason`;
+- `split_window` on each `window_split_at_anchors` decision (schema 6): the
+  utterance window, the budget and the piece count;
 - fallback events and post-validation violations.
 
-The indexed alignment algorithm temporarily needs separate vectors while
-cache hits and worker replies arrive out of order. Before `FaResult` can exist,
-`assemble_group_evidence` verifies that the group, source, cache-key, and
-pre-injection-timing populations have identical cardinality and consumes them
-into one `FaGroupEvidence` value per group. The result type stores only those
-paired values. `into_timeline_trace` may flatten them back into the established
-parallel JSON fields, but current BA3 code cannot construct a trace by pairing
-one group's timings with another group's provenance.
+Cache hits and worker replies arrive out of order and per REQUEST (dispatch
+unit; `fa/units.rs`), while injection consumes timings per GROUP. The plan
+holds each group's requests in the group's own shape, and the `UnitLedger`
+holds each group's resolution in the same shape: a `%wor`-reused group has no
+request slots, and every slot is paired with the unit it awaits, so there are
+no parallel vectors to keep the same length. `UnitLedger::assemble` is the one
+place resolutions become group timings, concatenated in word order, refusing a
+group with a missing request or a request that answered for the wrong number
+of words. Each `FaGroupEvidence` is built there from one group, its units'
+sources and keys, and the pre-injection snapshot of the same timings, so a
+trace cannot pair one group's timings with another's provenance.
 
 `DebugDumper::evidence_stem` preserves the plain basename for a bare filename.
 For a nested submitted identity it appends twelve hex characters from a BLAKE3

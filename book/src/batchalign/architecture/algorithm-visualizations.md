@@ -1,7 +1,7 @@
 # Algorithm Visualizations
 
 **Status:** Current
-**Last updated:** 2026-05-19 19:23 EDT
+**Last updated:** 2026-09-30 23:26 EDT
 
 The dashboard ships interactive visualizations for retokenization
 mapping and DP alignment (both static and live-from-job modes).
@@ -64,19 +64,23 @@ persist based on the job's `debug_traces` flag.
 
 ### FaResult
 
-Returned by `process_fa()` in `crates/batchalign/src/fa/`:
+Built by `run_fa_from_ast()` and `process_fa_incremental()` in
+`crates/batchalign/src/fa/` (`crates/batchalign/src/types/results.rs`):
 
 ```rust,ignore
-pub struct FaResult {
-    pub chat_text: String,
-    pub groups: Vec<FaGroupTrace>,
-    pub pre_injection_timings: Vec<Vec<Option<TimingTrace>>>,
-    pub gap_healing: WordGapHealing,
-    pub violations: Vec<ViolationTrace>,
+pub(crate) struct FaResult {
+    pub(crate) output: FaOutput,
+    pub(crate) group_evidence: Vec<FaGroupEvidence>, // FaGroupTrace (with its span) + pre-injection timings
+    pub(crate) engine: String,
+    pub(crate) cache_namespace: FaCacheNamespace,
+    pub(crate) decisions: Vec<FaDecisionTrace>,
+    pub(crate) timing_decisions: Vec<FaTimingDecisionTrace>,
+    pub(crate) gap_healing: WordGapHealing,
+    pub(crate) fallback_events: Vec<FaFallbackEventTrace>,
 }
 ```
 
-The dispatch layer extracts `chat_text` for file output.  When `debug_traces`
+The CHAT document leaves as the gated `PostValidated` proof, not as a field.  When `debug_traces`
 is enabled, it calls `into_timeline_trace()` to build a `FaTimelineTrace` and
 stores it via `TraceStore::upsert_file()`.
 

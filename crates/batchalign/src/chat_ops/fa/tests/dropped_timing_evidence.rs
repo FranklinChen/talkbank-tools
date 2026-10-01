@@ -43,7 +43,7 @@ fn timeline_trace_for(input: &str) -> FaTimelineTrace {
         &mut chat,
         FaDecisions {
             rescue: Vec::new(),
-            unplaceable: Vec::new(),
+            grouping: Vec::new(),
             finalized,
         },
     );

@@ -14,9 +14,9 @@ use batchalign_transform::media_timing::{
 use talkbank_model::ChatFile;
 
 use super::traces::{
-    AsrPipelineTrace, AsrTokenTrace, FaDecisionTrace, FaEvidenceSourceTrace, FaFallbackEventTrace,
-    FaGroupTrace, FaTimelineTrace, FaTimingDecisionTrace, RetokenizationTrace, TimedWordTrace,
-    TimingTrace, UtteranceTrace, WordTrace,
+    AsrPipelineTrace, AsrTokenTrace, FaDecisionTrace, FaFallbackEventTrace, FaGroupTrace,
+    FaTimelineTrace, FaTimingDecisionTrace, RetokenizationTrace, TimedWordTrace, TimingTrace,
+    UtteranceTrace, WordTrace,
 };
 use crate::api::DurationSeconds;
 
@@ -70,11 +70,13 @@ impl FaOutput {
 }
 
 /// One FA group inseparably paired with the evidence that produced its timing.
+///
+/// Each request's source and cache key live inside `group.span`, one per
+/// dispatch unit, so a group's evidence is one value rather than three
+/// parallel fields kept the same length by a cardinality check.
 #[derive(Debug)]
 pub(crate) struct FaGroupEvidence {
     pub(crate) group: FaGroupTrace,
-    pub(crate) source: FaEvidenceSourceTrace,
-    pub(crate) cache_key: String,
     pub(crate) pre_injection_timings: Vec<Option<TimingTrace>>,
 }
 
@@ -120,13 +122,9 @@ impl FaResult {
     /// also holding the evidence that they may be written.
     pub(crate) fn into_timeline_trace(self) -> FaTimelineTrace {
         let mut groups = Vec::with_capacity(self.group_evidence.len());
-        let mut evidence_sources = Vec::with_capacity(self.group_evidence.len());
-        let mut cache_keys = Vec::with_capacity(self.group_evidence.len());
         let mut pre_injection_timings = Vec::with_capacity(self.group_evidence.len());
         for evidence in self.group_evidence {
             groups.push(evidence.group);
-            evidence_sources.push(evidence.source);
-            cache_keys.push(evidence.cache_key);
             pre_injection_timings.push(evidence.pre_injection_timings);
         }
         FaTimelineTrace {
@@ -134,8 +132,6 @@ impl FaResult {
             engine: self.engine,
             engine_version: self.cache_namespace.name().to_string(),
             groups,
-            evidence_sources,
-            cache_keys,
             pre_injection_timings,
             post_injection_timings: Vec::new(), // TODO Phase 4
             decisions: self.decisions,

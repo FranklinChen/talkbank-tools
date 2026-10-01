@@ -10,17 +10,97 @@ use batchalign_transform::decisions::{
 use super::coordinates::{Clamped, FaWindow, FileMs, Ms, Recording, WindowFault};
 use super::extraction::collect_fa_words;
 use super::speech_rate::SpeechRate;
+use super::split::{AnchoredSplit, NonEmptyWords, OverBudgetWindow, Pieces};
+use super::utr::AnchorIndex;
 use super::{FaWord, TimeSpan};
 
-/// A group of utterances clustered for a single FA call.
+/// A group of utterances clustered for FA, and the audio it is aligned against.
+///
+/// A group is the unit of INJECTION: its timings are written back by walking
+/// its words with one cursor, utterance by utterance. How it is EXECUTED is
+/// its [`GroupSpan`]: one request over one window, or one request per piece of
+/// an anchored split. Either way the group's timings come back as one list in
+/// word order, so injection cannot tell the two apart.
+///
+/// Its only field is the span, and each span holds its own words and
+/// utterances: an anchored span's pieces own their words, so there is no
+/// second copy of the word list for the pieces to disagree with, and its
+/// single utterance is the split's own.
 #[derive(Debug)]
 pub struct FaGroup {
-    /// Audio window for this group.
-    audio_window: FaWindow,
-    /// Words in this group with positional indices.
-    pub words: Vec<FaWord>,
-    /// Utterance indices included in this group.
-    pub utterance_indices: Vec<UtteranceIdx>,
+    span: GroupSpan,
+}
+
+/// How a group's audio is presented to the aligner.
+///
+/// Only `Anchored` may exceed the engine budget, and only through pieces that
+/// each fit it; `Single` is always within budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupSpan {
+    /// One window, within budget, covering every word of the group.
+    Single(SingleSpan),
+    /// One over-budget utterance, aligned piece by piece at recovered word
+    /// anchors. Never merged with another utterance.
+    Anchored(AnchoredSplit),
+}
+
+/// One or more within-budget utterances aligned in one request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleSpan {
+    window: FaWindow,
+    words: Vec<FaWord>,
+    utterances: Vec<UtteranceIdx>,
+}
+
+/// One request's share of a group: the consecutive words it aligns and the
+/// window they are aligned against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GroupUnit<'g> {
+    /// The words, a contiguous slice of the group's words.
+    pub(crate) words: &'g [FaWord],
+    /// The window, within the engine budget.
+    pub(crate) window: FaWindow,
+}
+
+/// The requests one group is executed as, by shape: a single group's one
+/// request, or an anchored group's pieces. A shape rather than a list, so a
+/// consumer matches it and a single group's one request needs no allocation.
+pub(crate) enum GroupUnits<'g> {
+    /// A single group's one request over all its words.
+    Whole(GroupUnit<'g>),
+    /// An anchored group's pieces, in word order.
+    Pieces(Pieces<'g>),
+}
+
+/// A group's words in the order injection consumes timings, without
+/// allocating.
+pub enum GroupWords<'g> {
+    /// A single group's word list.
+    Single(std::slice::Iter<'g, FaWord>),
+    /// An anchored group's pieces' words, piece after piece.
+    Anchored {
+        /// The pieces not yet started.
+        pieces: Pieces<'g>,
+        /// The words left in the current piece.
+        current: std::slice::Iter<'g, FaWord>,
+    },
+}
+
+impl<'g> Iterator for GroupWords<'g> {
+    type Item = &'g FaWord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(words) => words.next(),
+            Self::Anchored { pieces, current } => loop {
+                if let Some(word) = current.next() {
+                    return Some(word);
+                }
+                let piece = pieces.next()?;
+                *current = piece.words().iter();
+            },
+        }
+    }
 }
 
 impl FaGroup {
@@ -35,30 +115,102 @@ impl FaGroup {
         // These downstream fixtures declare a recording ending at their window.
         let recording = Recording::of_duration(Ms(audio_span.end_ms)).expect("fixture recording");
         Self {
-            audio_window: FaWindow::within(
-                &recording,
-                FileMs::new(audio_span.start_ms),
-                FileMs::new(audio_span.end_ms),
-            )
-            .expect("fixture window"),
-            words,
-            utterance_indices,
+            span: GroupSpan::Single(SingleSpan {
+                window: FaWindow::within(
+                    &recording,
+                    FileMs::new(audio_span.start_ms),
+                    FileMs::new(audio_span.end_ms),
+                )
+                .expect("fixture window"),
+                words,
+                utterances: utterance_indices,
+            }),
         }
     }
 
-    /// The recording-bound window admitted by grouping, used by live and cached inference.
+    /// An anchored group for unit tests of dispatch and injection; the split
+    /// still comes from `AnchoredSplit::plan`, so its pieces are real.
+    #[cfg(test)]
+    pub(crate) fn anchored_test_fixture(split: AnchoredSplit) -> Self {
+        Self {
+            span: GroupSpan::Anchored(split),
+        }
+    }
+
+    /// The whole audio the group covers: its one window, or the utterance
+    /// window an anchored split partitions.
     pub(crate) fn window(&self) -> FaWindow {
-        self.audio_window
+        match &self.span {
+            GroupSpan::Single(single) => single.window,
+            GroupSpan::Anchored(split) => split.window(),
+        }
     }
 
-    /// Start of the audio window (ms).
+    /// How the group's audio is presented to the aligner.
+    pub fn span(&self) -> &GroupSpan {
+        &self.span
+    }
+
+    /// The group's words, in the order injection consumes timings.
+    pub fn words(&self) -> GroupWords<'_> {
+        match &self.span {
+            GroupSpan::Single(single) => GroupWords::Single(single.words.iter()),
+            GroupSpan::Anchored(split) => GroupWords::Anchored {
+                pieces: split.pieces(),
+                current: [].iter(),
+            },
+        }
+    }
+
+    /// How many words the group holds.
+    pub fn word_count(&self) -> usize {
+        match &self.span {
+            GroupSpan::Single(single) => single.words.len(),
+            GroupSpan::Anchored(split) => split.pieces().map(|piece| piece.words().len()).sum(),
+        }
+    }
+
+    /// The utterances the group covers, in file order: one for an anchored
+    /// group, by construction.
+    pub fn utterance_indices(&self) -> &[UtteranceIdx] {
+        match &self.span {
+            GroupSpan::Single(single) => &single.utterances,
+            GroupSpan::Anchored(split) => std::slice::from_ref(split.utterance()),
+        }
+    }
+
+    /// Whether every utterance of the group may take its timing from its
+    /// existing `%wor` tier: the one rule both FA paths reuse a group by.
+    pub fn is_reusable_from(&self, reusable_utterances: &std::collections::HashSet<usize>) -> bool {
+        let utterances = self.utterance_indices();
+        !utterances.is_empty()
+            && utterances
+                .iter()
+                .all(|utterance| reusable_utterances.contains(&utterance.raw()))
+    }
+
+    /// Start of the group's whole audio span (ms).
     pub fn audio_start_ms(&self) -> u64 {
-        self.audio_window.audio_start().get()
+        self.window().audio_start().get()
     }
 
-    /// End of the audio window (ms).
+    /// End of the group's whole audio span (ms).
     pub fn audio_end_ms(&self) -> u64 {
-        self.audio_window.end().get()
+        self.window().end().get()
+    }
+
+    /// The requests this group is executed as: one for a single group, one
+    /// per piece for an anchored one. The units' words concatenate to
+    /// [`FaGroup::words`], which is what lets per-unit timings be reassembled
+    /// into the group's.
+    pub(crate) fn units(&self) -> GroupUnits<'_> {
+        match &self.span {
+            GroupSpan::Single(single) => GroupUnits::Whole(GroupUnit {
+                words: &single.words,
+                window: single.window,
+            }),
+            GroupSpan::Anchored(split) => GroupUnits::Pieces(split.pieces()),
+        }
     }
 }
 
@@ -140,6 +292,12 @@ pub struct Estimates {
 /// window and its word list at a position nothing here can justify, so it is
 /// deliberately left to the engine to refuse.
 ///
+/// The one split grouping does make is for DURATION, not labels: an utterance
+/// whose window exceeds the engine budget is cut at words UTR heard (see
+/// `chat_ops::fa::split`), where the anchors are the justification. Its
+/// pieces carry fewer labels as a side effect, but a within-budget utterance
+/// over the label cap is still sent whole.
+///
 /// The unit is a BYTE. See [`LabelBytes`], which is the only way to produce a
 /// value that may be compared against this.
 pub const MAX_GROUP_LABEL_BYTES: usize = 448;
@@ -196,14 +354,17 @@ const TRAILING_GAP_EXTENSION_MS: u64 = 1500;
 
 /// What grouping produced.
 ///
-/// Refusals are durable evidence, not just log messages: no request was made
-/// for those utterances. They include physically unplaceable runs and windows
-/// requiring narrower evidence before this engine can safely align them.
+/// Its decisions are durable evidence, not just log messages. Most are
+/// refusals (no request was made for those utterances): physically
+/// unplaceable runs, and windows requiring narrower evidence than this
+/// engine can safely align. The rest record an over-budget utterance that
+/// WAS aligned, in pieces cut at its recovered word anchors.
 pub struct Grouping {
     /// Windows to send to the aligner.
     pub groups: Vec<FaGroup>,
-    /// Utterances left unaligned, one record each, for durable evidence.
-    pub refusals: Vec<DecisionRecord>,
+    /// One record per utterance grouping refused or split, for durable
+    /// evidence.
+    pub decisions: Vec<DecisionRecord>,
     /// How many estimated windows overshot the recording and were cut to it.
     ///
     /// Carried here rather than logged and dropped. It survived one function
@@ -217,14 +378,20 @@ pub struct Grouping {
 
 /// Group utterances from a ChatFile into FA segments.
 ///
-/// Every returned window fits `max_group_ms`, including trailing padding.
-/// A single utterance that cannot fit is refused with durable evidence; its
-/// supplied timing and words are preserved rather than clipped or fabricated.
+/// Every [`GroupSpan::Single`] window fits `max_group_ms`, including trailing
+/// padding. A single utterance that cannot fit is split at the word anchors
+/// UTR recovered for it when they allow every piece to fit (a
+/// [`GroupSpan::Anchored`] group, recorded as a `window_split_at_anchors`
+/// decision), and otherwise refused with durable evidence: `anchor_gap` when
+/// the anchors leave a stretch longer than the budget, `anchors_unusable`
+/// when recovery matched the utterance but gave no usable cut, `over_budget`
+/// when recovery has nothing to say about it. Its supplied timing and words
+/// are preserved rather than clipped or fabricated.
 ///
 /// Utterances with no timing bullet are placed by distributing the surrounding
 /// gap across them in proportion to word count, EXCEPT where the audio could not
 /// physically contain them: such a run is refused and reported in
-/// [`Grouping::refusals`] rather than handed to an aligner.
+/// [`Grouping::decisions`] rather than handed to an aligner.
 ///
 /// * `chat_file` - The parsed CHAT file whose utterances will be grouped.
 /// * `max_group_ms` - Maximum audio window duration (in milliseconds) per
@@ -234,10 +401,14 @@ pub struct Grouping {
 ///   when it was an `Option<u64>` a `None` made this function silently SKIP
 ///   every untimed utterance, so whether a word was ever aligned depended on
 ///   whether anyone had probed the media.
+/// * `anchors` - Word anchors from the UTR pass over this same document, or
+///   [`AnchorIndex::not_observed`] when none ran; with no anchors, no
+///   utterance is split and every over-budget one is refused `over_budget`.
 pub fn group_utterances(
     chat_file: &ChatFile,
     max_group_ms: u64,
     recording: &Recording,
+    anchors: &AnchorIndex,
 ) -> Grouping {
     let total_audio_ms = recording.duration().get();
     let Estimates {
@@ -254,8 +425,8 @@ pub fn group_utterances(
     }
 
     let mut groups = Vec::new();
-    let mut refusals = Vec::new();
-    let mut pending: Option<PendingGroup> = None;
+    let mut decisions = Vec::new();
+    let mut pending: Option<Pending> = None;
     let budget = Ms(max_group_ms);
     let mut extracted = Vec::new();
     let utterances = chat_file
@@ -272,7 +443,7 @@ pub fn group_utterances(
             None => match estimates[utt_idx] {
                 Placement::Placed(span) => span,
                 Placement::Unplaceable(rate) => {
-                    refusals.push(DecisionRecord::new_and_trace(
+                    decisions.push(DecisionRecord::new_and_trace(
                         line_idx,
                         utt.main.speaker.as_str().to_owned(),
                         DecisionStrategy::Fa(FaStrategy::UnplaceableRun),
@@ -284,54 +455,94 @@ pub fn group_utterances(
             },
         };
         collect_fa_words(&utt.main.content.content, &mut extracted);
-        if extracted.is_empty() {
+        let label_bytes = LabelBytes::total(extracted.iter());
+        let utterance = UtteranceIdx::new(utt_idx);
+        // An utterance with no alignable word makes no request.
+        let Some(words) = NonEmptyWords::from_vec(
+            extracted
+                .drain(..)
+                .enumerate()
+                .map(|(word_idx, text)| FaWord {
+                    utterance_index: utterance,
+                    utterance_word_index: WordIdx::new(word_idx),
+                    text,
+                })
+                .collect(),
+        ) else {
             continue;
-        }
+        };
         let window = match GroupWindow::admit(span, budget, recording) {
             Ok(window) => window,
             Err(refusal) => {
-                let refused = refusal.into_refused_window(span);
-                // Do not clip a long uncertain window or invent word positions.
-                // Preserve the supplied CHAT and record why no request was made.
+                // Neither outcome below joins a pending group: a refused
+                // utterance makes no request, and an anchored one is a group
+                // of its own (it is over budget by definition, so no
+                // neighbour could share its window). So the group before it
+                // is finished here, padded into the gap up to its start.
                 if let Some(previous) = pending.take() {
                     groups.push(previous.finish(span.start_ms));
                 }
-                refusals.push(DecisionRecord::new_and_trace(
+                let speaker = utt.main.speaker.as_str().to_owned();
+                let refused = match refusal {
+                    WindowRefusal::Oversized(over) => {
+                        match AnchoredSplit::plan(over, utterance, words, anchors.lookup(utterance))
+                        {
+                            Ok(split) => {
+                                let decision = split.decision();
+                                decisions.push(DecisionRecord::new_and_trace(
+                                    line_idx,
+                                    speaker,
+                                    DecisionStrategy::Fa(FaStrategy::WindowSplitAtAnchors(
+                                        decision,
+                                    )),
+                                    decision.to_string(),
+                                    false,
+                                ));
+                                // Held until the next utterance's start is
+                                // known, so its last piece can be padded.
+                                pending = Some(Pending::Anchored(split));
+                                continue;
+                            }
+                            Err(refusal) => refusal.into_refused_window(over),
+                        }
+                    }
+                    WindowRefusal::OutsideRecording(fault) => {
+                        fault_refusal(fault, FileMs::new(span.start_ms))
+                    }
+                };
+                // Do not clip a long uncertain window or invent word positions.
+                // Preserve the supplied CHAT and record why no request was made.
+                decisions.push(DecisionRecord::new_and_trace(
                     line_idx,
-                    utt.main.speaker.as_str().to_owned(),
+                    speaker,
                     DecisionStrategy::Fa(FaStrategy::WindowRefused(refused)),
                     refused.to_string(),
                     true,
                 ));
-                extracted.clear();
                 continue;
             }
         };
-        let label_bytes = LabelBytes::total(extracted.iter());
-        let words = extracted
-            .drain(..)
-            .enumerate()
-            .map(|(word_idx, text)| FaWord {
-                utterance_index: UtteranceIdx::new(utt_idx),
-                utterance_word_index: WordIdx::new(word_idx),
-                text,
-            })
-            .collect();
         let next = PendingGroup {
             window,
-            words,
-            utterance_indices: vec![UtteranceIdx::new(utt_idx)],
+            words: words.into_vec(),
+            utterances: vec![utterance],
             label_bytes,
         };
+        let next_start = next.window.window.audio_start().get();
         pending = Some(match pending.take() {
-            None => next,
-            Some(mut previous) => match previous.append(next) {
-                Ok(()) => previous,
+            None => Pending::Merging(next),
+            Some(Pending::Merging(mut previous)) => match previous.append(next) {
+                Ok(()) => Pending::Merging(previous),
                 Err(next) => {
-                    groups.push(previous.finish(next.window.window.audio_start().get()));
-                    next
+                    groups.push(previous.finish(next_start));
+                    Pending::Merging(next)
                 }
             },
+            // An anchored group is never merged with a neighbour.
+            Some(anchored @ Pending::Anchored(_)) => {
+                groups.push(anchored.finish(next_start));
+                Pending::Merging(next)
+            }
         });
     }
     if let Some(last) = pending {
@@ -339,7 +550,7 @@ pub fn group_utterances(
     }
     Grouping {
         groups,
-        refusals,
+        decisions,
         windows_clamped,
     }
 }
@@ -351,15 +562,13 @@ struct GroupWindow {
     end_limit: FileMs,
 }
 
-/// Why a window was refused admission. Carries no prose: the human reason is
-/// rendered once, from [`RefusedWindow`], so text and data cannot disagree.
+/// Why a window was not admitted as (part of) a single group.
 #[derive(Debug)]
 enum WindowRefusal {
     OutsideRecording(WindowFault),
-    /// Longer than the engine budget (the duration is `span` itself).
-    Oversized {
-        budget: Ms,
-    },
+    /// A real window inside the recording, longer than the engine budget:
+    /// what an anchored split partitions.
+    Oversized(OverBudgetWindow),
 }
 
 impl From<WindowFault> for WindowRefusal {
@@ -368,38 +577,23 @@ impl From<WindowFault> for WindowRefusal {
     }
 }
 
-impl WindowRefusal {
-    /// The one conversion from the typed refusal to its evidence form.
-    ///
-    /// Each variant takes its numbers from the refusal itself: an oversized
-    /// window IS `span` (that is what was measured against the budget), and
-    /// every `WindowFault` carries its own figures. Only `PastRecording` needs
-    /// `span` for its start, which the fault does not record. The match is
-    /// exhaustive so a new refusal cannot be recorded without a variant.
-    fn into_refused_window(self, span: TimeSpan) -> RefusedWindow {
-        match self {
-            Self::Oversized { budget } => RefusedWindow::OverBudget {
-                start_ms: span.start_ms,
-                end_ms: span.end_ms,
-                budget_ms: budget.0,
-            },
-            Self::OutsideRecording(WindowFault::Empty { at }) => {
-                RefusedWindow::Empty { at_ms: at.get() }
-            }
-            Self::OutsideRecording(WindowFault::Inverted { start, end }) => {
-                RefusedWindow::Inverted {
-                    start_ms: start.get(),
-                    end_ms: end.get(),
-                }
-            }
-            Self::OutsideRecording(WindowFault::PastRecording { end, exceeds_by }) => {
-                RefusedWindow::PastRecording {
-                    start_ms: span.start_ms,
-                    end_ms: end.get(),
-                    exceeds_by_ms: exceeds_by.0,
-                }
-            }
-        }
+/// The one conversion from a window fault to its evidence form.
+///
+/// Every `WindowFault` carries its own figures; only `PastRecording` needs the
+/// window's start, which the fault does not record. Exhaustive, so a new fault
+/// cannot be recorded without a variant.
+fn fault_refusal(fault: WindowFault, window_start: FileMs) -> RefusedWindow {
+    match fault {
+        WindowFault::Empty { at } => RefusedWindow::Empty { at_ms: at.get() },
+        WindowFault::Inverted { start, end } => RefusedWindow::Inverted {
+            start_ms: start.get(),
+            end_ms: end.get(),
+        },
+        WindowFault::PastRecording { end, exceeds_by } => RefusedWindow::PastRecording {
+            start_ms: window_start.get(),
+            end_ms: end.get(),
+            exceeds_by_ms: exceeds_by.0,
+        },
     }
 }
 
@@ -412,9 +606,8 @@ impl GroupWindow {
         )?;
         // Non-emptiness is already proven: `FaWindow::within` refused an empty
         // span above, through `WindowFault::Empty`.
-        let duration = window.len();
-        if duration.0 > budget.0 {
-            return Err(WindowRefusal::Oversized { budget });
+        if let Some(over) = OverBudgetWindow::exceeding(window, budget) {
+            return Err(WindowRefusal::Oversized(over));
         }
         Ok(Self {
             window,
@@ -435,12 +628,40 @@ impl GroupWindow {
     }
 }
 
-/// A nonempty group under construction, before bounded trailing padding.
-/// Its words, indices and window move together when a split is necessary.
+/// The group grouping has not finished yet: it waits for the next
+/// utterance's start, which its trailing padding is measured against.
+enum Pending {
+    /// Within-budget utterances, which the next one may still join.
+    Merging(PendingGroup),
+    /// An anchored group, which nothing joins; only its padding is pending.
+    Anchored(AnchoredSplit),
+}
+
+impl Pending {
+    /// Pad into the silence before `next_start` and close the group.
+    fn finish(self, next_start: u64) -> FaGroup {
+        match self {
+            Self::Merging(group) => group.finish(next_start),
+            Self::Anchored(mut split) => {
+                split.extend_into_trailing_gap(
+                    FileMs::new(next_start),
+                    Ms(TRAILING_GAP_EXTENSION_MS),
+                );
+                FaGroup {
+                    span: GroupSpan::Anchored(split),
+                }
+            }
+        }
+    }
+}
+
+/// A nonempty group of within-budget utterances under construction, before
+/// bounded trailing padding. Its words, utterances and window move together
+/// when a split is necessary.
 struct PendingGroup {
     window: GroupWindow,
     words: Vec<FaWord>,
-    utterance_indices: Vec<UtteranceIdx>,
+    utterances: Vec<UtteranceIdx>,
     label_bytes: LabelBytes,
 }
 
@@ -464,16 +685,18 @@ impl PendingGroup {
         self.window.window = self.window.window.extend_by(Ms(extension));
         self.label_bytes = self.label_bytes.saturating_add(next.label_bytes);
         self.words.append(&mut next.words);
-        self.utterance_indices.append(&mut next.utterance_indices);
+        self.utterances.append(&mut next.utterances);
         Ok(())
     }
 
     fn finish(mut self, next_start: u64) -> FaGroup {
         self.window.extend_into_trailing_gap(next_start);
         FaGroup {
-            audio_window: self.window.window,
-            words: self.words,
-            utterance_indices: self.utterance_indices,
+            span: GroupSpan::Single(SingleSpan {
+                window: self.window.window,
+                words: self.words,
+                utterances: self.utterances,
+            }),
         }
     }
 }

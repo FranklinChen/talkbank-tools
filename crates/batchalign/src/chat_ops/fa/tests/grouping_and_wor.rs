@@ -23,9 +23,15 @@ fn test_group_utterances_single_group() {
     // The recording is the one the fixture describes: its last bullet ends at
     // 10 s, so there is no trailing gap to extend into and the group ends
     // exactly there.
-    let groups = group_utterances(&chat, 20000, &test_recording(10_000)).groups;
+    let groups = group_utterances(
+        &chat,
+        20000,
+        &test_recording(10_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
     assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].words.len(), 5); // hello world I want cookie
+    assert_eq!(groups[0].word_count(), 5); // hello world I want cookie
     assert_eq!(groups[0].audio_start_ms(), 0);
     assert_eq!(groups[0].audio_end_ms(), 10000);
 }
@@ -51,9 +57,14 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
         .unwrap()
         .timing
         .start_ms;
-    let grouped = group_utterances(&chat, 15_000, &test_recording(4_000_000));
+    let grouped = group_utterances(
+        &chat,
+        15_000,
+        &test_recording(4_000_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
     assert_eq!(
-        grouped.refusals.len(),
+        grouped.decisions.len(),
         1,
         "oversized input needs durable refusal"
     );
@@ -64,23 +75,23 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
         budget_ms: 15_000,
     };
     assert_eq!(
-        grouped.refusals[0].strategy,
+        grouped.decisions[0].strategy,
         batchalign_transform::decisions::DecisionStrategy::Fa(
             batchalign_transform::decisions::FaStrategy::WindowRefused(expected)
         )
     );
-    assert_eq!(grouped.refusals[0].reason, expected.to_string());
+    assert_eq!(grouped.decisions[0].reason, expected.to_string());
     assert!(
-        !grouped.refusals[0].reason.contains("msms"),
+        !grouped.decisions[0].reason.contains("msms"),
         "unit must not be doubled: {}",
-        grouped.refusals[0].reason
+        grouped.decisions[0].reason
     );
     assert_eq!(grouped.groups.len(), 1);
     assert_eq!(
-        grouped.groups[0].utterance_indices,
+        grouped.groups[0].utterance_indices(),
         vec![UtteranceIdx::new(1)]
     );
-    assert_eq!(grouped.groups[0].words.len(), 3);
+    assert_eq!(grouped.groups[0].word_count(), 3);
     assert_eq!(
         get_test_utterance(&mut chat, 0)
             .main
@@ -100,11 +111,16 @@ fn group_window_budget_includes_trailing_padding() {
     let chat = parse_chat(include_str!(
         "../../../../../../test-fixtures/fa_two_timed_utterances.cha"
     ));
-    let grouped = group_utterances(&chat, 10_000, &test_recording(20_000));
+    let grouped = group_utterances(
+        &chat,
+        10_000,
+        &test_recording(20_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
     assert_eq!(grouped.groups.len(), 1);
     assert_eq!(grouped.groups[0].audio_start_ms(), 0);
     assert_eq!(grouped.groups[0].audio_end_ms(), 10_000);
-    assert_eq!(grouped.groups[0].words.len(), 5);
+    assert_eq!(grouped.groups[0].word_count(), 5);
 }
 
 #[test]
@@ -128,10 +144,15 @@ fn group_window_budget_preserves_the_extent_of_overlapping_utterances() {
         .unwrap()
         .timing
         .end_ms = 6_000;
-    let grouped = group_utterances(&chat, 10_000, &test_recording(10_000));
+    let grouped = group_utterances(
+        &chat,
+        10_000,
+        &test_recording(10_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
     assert_eq!(grouped.groups.len(), 1);
     assert_eq!(grouped.groups[0].audio_end_ms(), 10_000);
-    assert_eq!(grouped.groups[0].words.len(), 5);
+    assert_eq!(grouped.groups[0].word_count(), 5);
 }
 
 #[test]
@@ -190,20 +211,32 @@ fn test_wor_policy_retraced_spoken_tokens_match_between_fa_extraction_and_wor_ge
 fn test_group_utterances_backwards_bullets() {
     let input = include_str!("../../../../../../test-fixtures/fa_backwards_bullets.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(&chat, 20000, &test_recording(600_000)).groups;
+    let groups = group_utterances(
+        &chat,
+        20000,
+        &test_recording(600_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
     assert_eq!(groups.len(), 2);
-    assert_eq!(groups[0].words.len(), 1);
-    assert_eq!(groups[1].words.len(), 1);
+    assert_eq!(groups[0].word_count(), 1);
+    assert_eq!(groups[1].word_count(), 1);
 }
 
 #[test]
 fn test_group_utterances_splits_on_time() {
     let input = include_str!("../../../../../../test-fixtures/fa_split_on_time.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(&chat, 20000, &test_recording(600_000)).groups;
+    let groups = group_utterances(
+        &chat,
+        20000,
+        &test_recording(600_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
     assert_eq!(groups.len(), 2);
-    assert_eq!(groups[0].words.len(), 1);
-    assert_eq!(groups[1].words.len(), 1);
+    assert_eq!(groups[0].word_count(), 1);
+    assert_eq!(groups[1].word_count(), 1);
 }
 
 #[test]
@@ -249,7 +282,13 @@ fn test_group_utterances_splits_on_label_byte_cap() {
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|test|CHI|||||Child|||\n*CHI:\t{fifty_words} .\x15100_5000\x15\n*CHI:\t{fifty_words} .\x155000_10000\x15\n@End\n"
     );
     let chat = parse_chat(&chat_text);
-    let groups = group_utterances(&chat, 60_000, &test_recording(10_000)).groups;
+    let groups = group_utterances(
+        &chat,
+        60_000,
+        &test_recording(10_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
     assert_eq!(
         groups.len(),
         2,
@@ -260,7 +299,7 @@ fn test_group_utterances_splits_on_label_byte_cap() {
     // the unit the cap is measured in and the only one that bounds the
     // engine's token count from above.
     for (i, group) in groups.iter().enumerate() {
-        let bytes: usize = group.words.iter().map(|w| w.text.len()).sum();
+        let bytes: usize = group.words().map(|w| w.text.len()).sum();
         assert!(
             bytes <= MAX_GROUP_LABEL_BYTES,
             "group {i} has {bytes} label bytes, exceeds the {MAX_GROUP_LABEL_BYTES} cap"
@@ -294,10 +333,16 @@ fn test_group_utterances_splits_non_latin_conservatively_by_bytes() {
         "@UTF8\n@Begin\n@Languages:\thin\n@Participants:\tCHI Child\n@ID:\thin|test|CHI|||||Child|||\n*CHI:\t{thirty_words} .\x15100_5000\x15\n*CHI:\t{thirty_words} .\x155000_10000\x15\n@End\n"
     );
     let chat = parse_chat(&chat_text);
-    let groups = group_utterances(&chat, 60_000, &test_recording(10_000)).groups;
+    let groups = group_utterances(
+        &chat,
+        60_000,
+        &test_recording(10_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
     let chars: usize = groups
         .iter()
-        .flat_map(|group| group.words.iter())
+        .flat_map(|group| group.words())
         .map(|word| word.text.chars().count())
         .sum();
     assert_eq!(
@@ -312,7 +357,7 @@ fn test_group_utterances_splits_non_latin_conservatively_by_bytes() {
          a token limit"
     );
     for (i, group) in groups.iter().enumerate() {
-        let bytes: usize = group.words.iter().map(|word| word.text.len()).sum();
+        let bytes: usize = group.words().map(|word| word.text.len()).sum();
         assert!(
             bytes <= MAX_GROUP_LABEL_BYTES,
             "group {i} has {bytes} label bytes, over the {MAX_GROUP_LABEL_BYTES} cap"
@@ -338,13 +383,19 @@ fn test_group_utterances_does_not_split_one_oversized_utterance() {
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|test|CHI|||||Child|||\n*CHI:\t{hundred_words} .\x15100_5000\x15\n@End\n"
     );
     let chat = parse_chat(&chat_text);
-    let groups = group_utterances(&chat, 60_000, &test_recording(10_000)).groups;
+    let groups = group_utterances(
+        &chat,
+        60_000,
+        &test_recording(10_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
     assert_eq!(
         groups.len(),
         1,
         "one utterance is never split into two groups"
     );
-    let bytes: usize = groups[0].words.iter().map(|word| word.text.len()).sum();
+    let bytes: usize = groups[0].words().map(|word| word.text.len()).sum();
     assert!(
         bytes > MAX_GROUP_LABEL_BYTES,
         "the fixture must actually exceed the cap for this limit to be pinned, \
@@ -369,8 +420,14 @@ fn test_group_utterances_does_not_split_one_oversized_utterance() {
 fn test_group_utterances_estimates_untimed_rather_than_dropping_them() {
     let input = include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(&chat, 20000, &test_recording(10_000)).groups;
-    let grouped_words: usize = groups.iter().map(|g| g.words.len()).sum();
+    let groups = group_utterances(
+        &chat,
+        20000,
+        &test_recording(10_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
+    let grouped_words: usize = groups.iter().map(|g| g.word_count()).sum();
     assert_eq!(grouped_words, 2, "both 'hello' and 'world' reach FA");
 }
 
@@ -483,9 +540,15 @@ fn test_group_utterances_includes_untimed_with_interpolation() {
     let input =
         include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed_interleaved.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(&chat, 20000, &test_recording(50000)).groups;
+    let groups = group_utterances(
+        &chat,
+        20000,
+        &test_recording(50000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
 
     // All 6 utterances should be included (none skipped)
-    let total_utts: usize = groups.iter().map(|g| g.utterance_indices.len()).sum();
+    let total_utts: usize = groups.iter().map(|g| g.utterance_indices().len()).sum();
     assert_eq!(total_utts, 6);
 }

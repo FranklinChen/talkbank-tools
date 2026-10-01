@@ -132,6 +132,47 @@ pub enum FaStrategy {
     /// Carries the refused window itself, so the evidence file states its
     /// bounds and the cause as data rather than only as prose in `reason`.
     WindowRefused(RefusedWindow),
+    /// An utterance window longer than the engine budget was aligned in
+    /// pieces, each cut at the end of a word utterance timing recovery had
+    /// matched to a timed ASR token, and each within the budget.
+    ///
+    /// Not a review item: every cut point is an acoustic observation and the
+    /// aligner still measured every word inside its piece. It is recorded so a
+    /// reader of the evidence can tell which utterances were aligned in pieces
+    /// rather than in one request, and how many.
+    WindowSplitAtAnchors(SplitWindow),
+}
+
+/// An over-budget utterance window that was aligned as several pieces.
+///
+/// Plain `u64` milliseconds for the same reason as [`RefusedWindow`]: this
+/// crate cannot see batchalign's time newtypes and the wire form is numbers.
+/// The [`std::fmt::Display`] impl is the single source of the human reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitWindow {
+    /// Start of the utterance window, in file milliseconds.
+    pub start_ms: u64,
+    /// End of the utterance window, in file milliseconds.
+    pub end_ms: u64,
+    /// The engine budget every piece fits, in milliseconds.
+    pub budget_ms: u64,
+    /// How many pieces the window was aligned as; at least two, since one
+    /// piece would be the whole window and the whole window is over budget.
+    pub pieces: usize,
+}
+
+impl std::fmt::Display for SplitWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "audio window {}ms-{}ms ({}ms) exceeds alignment budget {}ms; aligned as {} pieces cut at recovered word anchors",
+            self.start_ms,
+            self.end_ms,
+            self.end_ms.saturating_sub(self.start_ms),
+            self.budget_ms,
+            self.pieces
+        )
+    }
 }
 
 /// An audio window the grouping stage refused to send to the aligner.
@@ -175,6 +216,80 @@ pub enum RefusedWindow {
         /// How far past the recording's end the window falls, in milliseconds.
         exceeds_by_ms: u64,
     },
+    /// Longer than the engine's budget, and the words utterance timing
+    /// recovery matched inside it leave a stretch longer than the budget with
+    /// no anchor to cut at.
+    ///
+    /// Distinct from [`Self::OverBudget`], which means there was no usable
+    /// anchor evidence at all. Here the evidence exists and is itself the
+    /// problem: consecutive matched words farther apart than any one request
+    /// may span almost always means the recovered placement, and so the
+    /// utterance's bullet, is wrong, not that someone paused that long
+    /// mid-utterance. It is the signal that needs review; the words are never
+    /// aligned across it.
+    AnchorGap {
+        /// Start of the utterance window, in file milliseconds.
+        start_ms: u64,
+        /// End of the utterance window, in file milliseconds.
+        end_ms: u64,
+        /// The budget no piece could stay within, in milliseconds.
+        budget_ms: u64,
+        /// Start of the widest uncrossable stretch: the window start or the
+        /// end of an anchored word.
+        gap_start_ms: u64,
+        /// End of that stretch: the end of the next anchored word, or the
+        /// window end.
+        gap_end_ms: u64,
+    },
+    /// Longer than the engine's budget, and utterance timing recovery DID
+    /// match this utterance, but its matches give no usable cut point; the
+    /// cause says why.
+    ///
+    /// Distinct from [`Self::OverBudget`], which means recovery has nothing to
+    /// say about this utterance (it did not run, had no tokens, or matched
+    /// none of its words). Here there is evidence and it could not be used,
+    /// which a reviewer may want to look at.
+    AnchorsUnusable {
+        /// Start of the utterance window, in file milliseconds.
+        start_ms: u64,
+        /// End of the utterance window, in file milliseconds.
+        end_ms: u64,
+        /// The budget the window exceeded, in milliseconds.
+        budget_ms: u64,
+        /// Why the matches could not be cut at.
+        cause: UnusableAnchors,
+    },
+}
+
+/// Why utterance timing recovery's matches for an over-budget utterance
+/// could not be used to split it. A closed set: a new reason is a new
+/// variant, with its own wire name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnusableAnchors {
+    /// Every match was fuzzy or to a multi-word token, so none says when a
+    /// word ended.
+    NoReliableAnchors,
+    /// The anchors were refused as a set: out of word order, overlapping in
+    /// time, inverted, or naming a token absent from the stream.
+    AnchorsRefused,
+    /// The anchors were read off a different word list than the utterance
+    /// grouping holds.
+    AnchorsDescribeOtherWords,
+    /// Every anchor lies on the last word or at or outside the window's
+    /// edges, so none can be a cut.
+    NoInteriorCut,
+}
+
+impl UnusableAnchors {
+    /// Stable wire and prose label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoReliableAnchors => "no_reliable_anchors",
+            Self::AnchorsRefused => "anchors_refused",
+            Self::AnchorsDescribeOtherWords => "anchors_describe_other_words",
+            Self::NoInteriorCut => "no_interior_cut",
+        }
+    }
 }
 
 impl std::fmt::Display for RefusedWindow {
@@ -206,6 +321,29 @@ impl std::fmt::Display for RefusedWindow {
                 f,
                 "audio window {start_ms}ms-{end_ms}ms ends {exceeds_by_ms}ms past the end of the recording"
             ),
+            Self::AnchorGap {
+                start_ms,
+                end_ms,
+                budget_ms,
+                gap_start_ms,
+                gap_end_ms,
+            } => write!(
+                f,
+                "audio window {start_ms}ms-{end_ms}ms ({}ms) exceeds alignment budget {budget_ms}ms, and its recovered word anchors leave {gap_start_ms}ms-{gap_end_ms}ms ({}ms) with no cut point; the utterance placement needs review",
+                end_ms.saturating_sub(start_ms),
+                gap_end_ms.saturating_sub(gap_start_ms)
+            ),
+            Self::AnchorsUnusable {
+                start_ms,
+                end_ms,
+                budget_ms,
+                cause,
+            } => write!(
+                f,
+                "audio window {start_ms}ms-{end_ms}ms ({}ms) exceeds alignment budget {budget_ms}ms, and its recovered word anchors cannot split it ({})",
+                end_ms.saturating_sub(start_ms),
+                cause.as_str()
+            ),
         }
     }
 }
@@ -221,6 +359,7 @@ impl FaStrategy {
             Self::TimingProvenance => "timing_provenance",
             Self::UnplaceableRun => "unplaceable_run",
             Self::WindowRefused(_) => "window_refused",
+            Self::WindowSplitAtAnchors(_) => "window_split_at_anchors",
             Self::WordsTimingDropped => "words_timing_dropped",
             Self::NarrowBulletRescued => "narrow_bullet_rescued",
             Self::WordsClampedToKeptBullet => "words_clamped_to_kept_bullet",
@@ -608,6 +747,59 @@ mod tests {
         assert_eq!(
             FaStrategy::WindowRefused(refused).as_str(),
             "window_refused"
+        );
+    }
+
+    /// The anchor-gap refusal names both the window and the stretch that
+    /// could not be crossed, so a reviewer can go straight to the gap.
+    #[test]
+    fn anchor_gap_prose_names_the_window_and_the_uncrossable_stretch() {
+        let refused = RefusedWindow::AnchorGap {
+            start_ms: 10_000,
+            end_ms: 400_000,
+            budget_ms: 15_000,
+            gap_start_ms: 12_500,
+            gap_end_ms: 380_000,
+        };
+        assert_eq!(
+            refused.to_string(),
+            "audio window 10000ms-400000ms (390000ms) exceeds alignment budget 15000ms, and its recovered word anchors leave 12500ms-380000ms (367500ms) with no cut point; the utterance placement needs review"
+        );
+        assert_eq!(
+            FaStrategy::WindowRefused(refused).as_str(),
+            "window_refused"
+        );
+    }
+
+    #[test]
+    fn unusable_anchors_prose_names_the_cause() {
+        let refused = RefusedWindow::AnchorsUnusable {
+            start_ms: 0,
+            end_ms: 20_000,
+            budget_ms: 15_000,
+            cause: UnusableAnchors::NoInteriorCut,
+        };
+        assert_eq!(
+            refused.to_string(),
+            "audio window 0ms-20000ms (20000ms) exceeds alignment budget 15000ms, and its recovered word anchors cannot split it (no_interior_cut)"
+        );
+    }
+
+    #[test]
+    fn split_window_prose_and_label() {
+        let split = SplitWindow {
+            start_ms: 1_000,
+            end_ms: 31_000,
+            budget_ms: 15_000,
+            pieces: 3,
+        };
+        assert_eq!(
+            split.to_string(),
+            "audio window 1000ms-31000ms (30000ms) exceeds alignment budget 15000ms; aligned as 3 pieces cut at recovered word anchors"
+        );
+        assert_eq!(
+            FaStrategy::WindowSplitAtAnchors(split).as_str(),
+            "window_split_at_anchors"
         );
     }
 

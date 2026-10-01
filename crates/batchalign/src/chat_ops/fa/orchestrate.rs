@@ -709,7 +709,7 @@ pub fn apply_fa_results_with_projection_policy(
     // Without stripping, both the old InternalBullet AND the new .bullet
     // are serialized, producing "two timestamps on the main line".
     for (group, _) in groups.iter().zip(responses.iter()) {
-        for &utt_idx in &group.utterance_indices {
+        for &utt_idx in group.utterance_indices() {
             if let Some(utt) = get_utterance_mut(chat_file, utt_idx) {
                 strip_internal_bullet_tokens(&mut utt.main.content.content);
             }
@@ -729,15 +729,16 @@ pub fn apply_fa_results_with_projection_policy(
     // Fusing the loops keeps that evidence a LOCAL. Passing it between two
     // loops needed a `HashMap<UtteranceIdx, InjectedTimings>` that was pure
     // indirection: the second loop walked `groups.flat_map(utterance_indices)`,
-    // exactly what the first walked, and `collect_final_timings` refuses unless
-    // `responses.len() == groups.len()`, so every lookup hit. On a
+    // exactly what the first walked, and the FA core's assembly
+    // (`fa::units::UnitLedger::assemble`) yields one timing list per group,
+    // so every lookup hit. On a
     // 15,000-utterance transcript that map held about 5.8 MB across 15,000
     // allocations, and it made a "this utterance has no evidence" case
     // reachable in the types that could not occur in practice.
     for (group, timings) in groups.iter().zip(responses.iter()) {
         let mut timing_offset: usize = 0;
 
-        for &utt_idx in &group.utterance_indices {
+        for &utt_idx in group.utterance_indices() {
             // Resolved before the mutable borrow. `utt_idx` is an utterance
             // ordinal and `DecisionRecord.line_idx` indexes lines; they never
             // coincide, because every CHAT file opens with headers. This used
@@ -2610,9 +2611,11 @@ pub(super) fn strip_utterance_timing(utt: &mut Utterance) -> StrippedTiming {
 pub struct FaDecisions {
     /// Bullets pre-expanded before grouping, where transcribe under-budgeted.
     pub rescue: Vec<batchalign_transform::decisions::DecisionRecord>,
-    /// Utterances grouping refused to place. These reach the transcript with no
-    /// timing at all, so a reviewer needs them more than any adjustment record.
-    pub unplaceable: Vec<batchalign_transform::decisions::DecisionRecord>,
+    /// Grouping's decisions: utterances it refused to place, which reach the
+    /// transcript with no timing at all, so a reviewer needs them more than
+    /// any adjustment record; and over-budget utterances it split at
+    /// recovered word anchors.
+    pub grouping: Vec<batchalign_transform::decisions::DecisionRecord>,
     /// Injection, optional repair, and monotonicity in the required order.
     pub finalized: FaFinalized,
 }
@@ -2651,12 +2654,12 @@ impl FaDecisions {
     /// obtain that state through [`finalize_without_injection`].
     pub fn without_injection(
         rescue: Vec<batchalign_transform::decisions::DecisionRecord>,
-        unplaceable: Vec<batchalign_transform::decisions::DecisionRecord>,
+        grouping: Vec<batchalign_transform::decisions::DecisionRecord>,
         finalized: FaFinalized,
     ) -> Self {
         Self {
             rescue,
-            unplaceable,
+            grouping,
             finalized,
         }
     }
@@ -2671,7 +2674,7 @@ impl FaDecisions {
     ) {
         let Self {
             rescue,
-            unplaceable,
+            grouping,
             finalized:
                 FaFinalized {
                     ordered:
@@ -2686,14 +2689,10 @@ impl FaDecisions {
         } = self;
         let (monotonicity, timing_effects) = monotonicity.into_parts();
         let mut records = Vec::with_capacity(
-            rescue.len()
-                + unplaceable.len()
-                + postprocess.len()
-                + monotonicity.len()
-                + repair.len(),
+            rescue.len() + grouping.len() + postprocess.len() + monotonicity.len() + repair.len(),
         );
         records.extend(rescue);
-        records.extend(unplaceable);
+        records.extend(grouping);
         records.extend(postprocess);
         records.extend(repair);
         records.extend(monotonicity);

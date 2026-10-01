@@ -179,7 +179,7 @@ pub struct UtteranceTrace {
 // ---------------------------------------------------------------------------
 
 /// Schema written by the current [`FaTimelineTrace`] producer.
-pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 6;
 
 /// Forced alignment trace: grouping, timing injection, and post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,7 +196,15 @@ pub struct FaTimelineTrace {
     /// per-word outcome projection. Version 5 adds `refused_window` to
     /// `window_refused` decisions: a `cause`-tagged object carrying that
     /// cause's own bounds and figures, so a refused window is data instead of
-    /// prose in `reason`.
+    /// prose in `reason`. Version 6 records how each group was EXECUTED: every
+    /// group carries a `span`, `single` (one request, with its evidence
+    /// source and cache key) or `anchored` (an over-budget utterance aligned
+    /// as several requests cut at recovered word anchors, each piece with its
+    /// window, first and last word, source and cache key). The top-level
+    /// `evidence_sources` and `cache_keys` arrays moved into those spans,
+    /// since an anchored group has one of each per piece; a
+    /// `window_split_at_anchors` decision carries `split_window`, and
+    /// `refused_window` gains the `anchor_gap` cause.
     #[serde(default)]
     pub evidence_schema_version: u32,
     /// Forced-alignment engine selected for this run.
@@ -207,14 +215,9 @@ pub struct FaTimelineTrace {
     /// cache rows and evidence envelopes are written and admitted under.
     #[serde(default)]
     pub engine_version: String,
-    /// Utterance groups for batched FA.
+    /// Utterance groups for batched FA, each with how it was executed and
+    /// where each request's evidence came from.
     pub groups: Vec<FaGroupTrace>,
-    /// How each group obtained its timing evidence.
-    #[serde(default)]
-    pub evidence_sources: Vec<FaEvidenceSourceTrace>,
-    /// Content-addressed FA cache key for each group.
-    #[serde(default)]
-    pub cache_keys: Vec<String>,
     /// Pre-injection timings per group, per word (None = untimed).
     pub pre_injection_timings: Vec<Vec<Option<TimingTrace>>>,
     /// Post-injection timings after post-processing fixes.
@@ -282,6 +285,41 @@ pub struct FaDecisionTrace {
     /// strategy, so no other strategy can carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_window: Option<RefusedWindowTrace>,
+    /// The split window, present exactly for `window_split_at_anchors`
+    /// decisions, populated the same way as `refused_window`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_window: Option<SplitWindowTrace>,
+}
+
+/// Wire form of [`batchalign_transform::decisions::SplitWindow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct SplitWindowTrace {
+    /// Start of the utterance window, in file milliseconds.
+    pub start_ms: u64,
+    /// End of the utterance window, in file milliseconds.
+    pub end_ms: u64,
+    /// The engine budget every piece fits, in milliseconds.
+    pub budget_ms: u64,
+    /// How many pieces the window was aligned as.
+    pub pieces: usize,
+}
+
+impl From<batchalign_transform::decisions::SplitWindow> for SplitWindowTrace {
+    fn from(split: batchalign_transform::decisions::SplitWindow) -> Self {
+        let batchalign_transform::decisions::SplitWindow {
+            start_ms,
+            end_ms,
+            budget_ms,
+            pieces,
+        } = split;
+        Self {
+            start_ms,
+            end_ms,
+            budget_ms,
+            pieces,
+        }
+    }
 }
 
 /// Wire form of [`batchalign_transform::decisions::RefusedWindow`]: one
@@ -320,6 +358,59 @@ pub enum RefusedWindowTrace {
         /// How far past the recording's end, in milliseconds.
         exceeds_by_ms: u64,
     },
+    /// Over budget, and the recovered word anchors leave a stretch longer
+    /// than the budget to cut across: the utterance's placement needs review.
+    AnchorGap {
+        /// Start of the window, in file milliseconds.
+        start_ms: u64,
+        /// End of the window, in file milliseconds.
+        end_ms: u64,
+        /// The budget exceeded, in milliseconds.
+        budget_ms: u64,
+        /// Start of the widest uncrossable stretch, in file milliseconds.
+        gap_start_ms: u64,
+        /// End of that stretch, in file milliseconds.
+        gap_end_ms: u64,
+    },
+    /// Over budget; recovery matched the utterance but gave no usable cut.
+    AnchorsUnusable {
+        /// Start of the window, in file milliseconds.
+        start_ms: u64,
+        /// End of the window, in file milliseconds.
+        end_ms: u64,
+        /// The budget exceeded, in milliseconds.
+        budget_ms: u64,
+        /// Why the matches could not be cut at. Not `cause`, which is this
+        /// object's own tag.
+        unusable: UnusableAnchorsTrace,
+    },
+}
+
+/// Wire form of [`batchalign_transform::decisions::UnusableAnchors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum UnusableAnchorsTrace {
+    /// Every match was fuzzy or to a multi-word token.
+    NoReliableAnchors,
+    /// The anchors were refused as a set.
+    AnchorsRefused,
+    /// The anchors describe a different word list.
+    AnchorsDescribeOtherWords,
+    /// No anchor can be a cut.
+    NoInteriorCut,
+}
+
+impl From<batchalign_transform::decisions::UnusableAnchors> for UnusableAnchorsTrace {
+    fn from(cause: batchalign_transform::decisions::UnusableAnchors) -> Self {
+        use batchalign_transform::decisions::UnusableAnchors;
+        match cause {
+            UnusableAnchors::NoReliableAnchors => Self::NoReliableAnchors,
+            UnusableAnchors::AnchorsRefused => Self::AnchorsRefused,
+            UnusableAnchors::AnchorsDescribeOtherWords => Self::AnchorsDescribeOtherWords,
+            UnusableAnchors::NoInteriorCut => Self::NoInteriorCut,
+        }
+    }
 }
 
 impl From<batchalign_transform::decisions::RefusedWindow> for RefusedWindowTrace {
@@ -346,6 +437,30 @@ impl From<batchalign_transform::decisions::RefusedWindow> for RefusedWindowTrace
                 end_ms,
                 exceeds_by_ms,
             },
+            RefusedWindow::AnchorGap {
+                start_ms,
+                end_ms,
+                budget_ms,
+                gap_start_ms,
+                gap_end_ms,
+            } => Self::AnchorGap {
+                start_ms,
+                end_ms,
+                budget_ms,
+                gap_start_ms,
+                gap_end_ms,
+            },
+            RefusedWindow::AnchorsUnusable {
+                start_ms,
+                end_ms,
+                budget_ms,
+                cause,
+            } => Self::AnchorsUnusable {
+                start_ms,
+                end_ms,
+                budget_ms,
+                unusable: cause.into(),
+            },
         }
     }
 }
@@ -353,8 +468,11 @@ impl From<batchalign_transform::decisions::RefusedWindow> for RefusedWindowTrace
 impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
     fn from(record: batchalign_transform::decisions::DecisionRecord) -> Self {
         use batchalign_transform::decisions::{DecisionStrategy, FaStrategy};
-        let refused_window = match record.strategy {
-            DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => Some(window.into()),
+        let (refused_window, split_window) = match record.strategy {
+            DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => (Some(window.into()), None),
+            DecisionStrategy::Fa(FaStrategy::WindowSplitAtAnchors(split)) => {
+                (None, Some(split.into()))
+            }
             // Every other FA strategy listed, not `Fa(_)`: a new one that
             // carries data must decide here whether the trace records it.
             DecisionStrategy::Fa(
@@ -374,7 +492,7 @@ impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
             | DecisionStrategy::Monotonicity(_)
             | DecisionStrategy::Morphosyntax(_)
             | DecisionStrategy::Coref(_)
-            | DecisionStrategy::Utseg(_) => None,
+            | DecisionStrategy::Utseg(_) => (None, None),
         };
         Self {
             line_idx: record.line_idx.raw(),
@@ -384,6 +502,7 @@ impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
             reason: record.reason,
             needs_review: record.needs_review,
             refused_window,
+            split_window,
         }
     }
 }
@@ -842,6 +961,51 @@ pub struct FaGroupTrace {
     /// Stable AST-derived identity corresponding one-to-one with `words`.
     #[serde(default)]
     pub word_ids: Vec<String>,
+    /// How the group was executed and where each request's evidence came
+    /// from (schema 6). Required: there is no honest value to give a group
+    /// written before it, whose evidence lived in the top-level arrays.
+    pub span: FaGroupSpanTrace,
+}
+
+/// How one group's audio was presented to the aligner, with the evidence of
+/// each request it took.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FaGroupSpanTrace {
+    /// One request over the group's whole window.
+    Single {
+        /// How the request's timing evidence was obtained.
+        source: FaEvidenceSourceTrace,
+        /// Content-addressed FA cache key of the request.
+        cache_key: String,
+    },
+    /// One over-budget utterance aligned as several requests, cut at the
+    /// ends of words utterance timing recovery heard.
+    Anchored {
+        /// The pieces in word and time order; they partition the group's
+        /// window and words.
+        pieces: Vec<FaPieceTrace>,
+    },
+}
+
+/// One piece of an anchored group: its request's window, words and evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct FaPieceTrace {
+    /// Start of the piece's window, in file milliseconds.
+    pub start_ms: u64,
+    /// End of the piece's window, in file milliseconds.
+    pub end_ms: u64,
+    /// The first word of the piece, as its index among the utterance's
+    /// alignable words.
+    pub first_word: usize,
+    /// The last word of the piece, likewise.
+    pub last_word: usize,
+    /// How the piece's timing evidence was obtained.
+    pub source: FaEvidenceSourceTrace,
+    /// Content-addressed FA cache key of the piece's request.
+    pub cache_key: String,
 }
 
 /// How one group's word timing evidence was obtained.
@@ -874,9 +1038,10 @@ pub struct FaFallbackEventTrace {
     pub to_engine: String,
     /// Human-readable reason why the fallback was triggered.
     pub reason: String,
-    /// Audio start time of the affected group in ms.
+    /// Start of the window the fallback engine was given, in ms: the group's
+    /// window, or the piece's for a piece of an anchored group.
     pub audio_start_ms: DurationMs,
-    /// Audio end time of the affected group in ms.
+    /// End of that window, in ms.
     pub audio_end_ms: DurationMs,
 }
 
@@ -1109,6 +1274,54 @@ mod tests {
             false,
         );
         let json = serde_json::to_value(FaDecisionTrace::from(other)).expect("serializes");
+        assert!(json.get("refused_window").is_none());
+        assert!(json.get("split_window").is_none());
+    }
+
+    /// Schema 6: an anchor-gap refusal states its uncrossable stretch as data,
+    /// and a split carries its piece count, each only on its own strategy.
+    #[test]
+    fn anchor_gap_and_split_decisions_are_serialized_as_data() {
+        use batchalign_transform::decisions::{
+            DecisionRecord, DecisionStrategy, FaStrategy, RefusedWindow, SplitWindow,
+        };
+        let gap = RefusedWindow::AnchorGap {
+            start_ms: 0,
+            end_ms: 305_800,
+            budget_ms: 15_000,
+            gap_start_ms: 5_800,
+            gap_end_ms: 300_800,
+        };
+        let record = DecisionRecord::new_and_trace(
+            6,
+            "PAR".to_owned(),
+            DecisionStrategy::Fa(FaStrategy::WindowRefused(gap)),
+            gap.to_string(),
+            true,
+        );
+        let json = serde_json::to_value(FaDecisionTrace::from(record)).expect("serializes");
+        assert_eq!(json["refused_window"]["cause"], "anchor_gap");
+        assert_eq!(json["refused_window"]["gap_start_ms"], 5_800);
+        assert_eq!(json["refused_window"]["gap_end_ms"], 300_800);
+        assert!(json.get("split_window").is_none());
+
+        let split = SplitWindow {
+            start_ms: 0,
+            end_ms: 33_800,
+            budget_ms: 15_000,
+            pieces: 3,
+        };
+        let record = DecisionRecord::new_and_trace(
+            6,
+            "PAR".to_owned(),
+            DecisionStrategy::Fa(FaStrategy::WindowSplitAtAnchors(split)),
+            split.to_string(),
+            false,
+        );
+        let json = serde_json::to_value(FaDecisionTrace::from(record)).expect("serializes");
+        assert_eq!(json["strategy"], "window_split_at_anchors");
+        assert_eq!(json["split_window"]["pieces"], 3);
+        assert_eq!(json["needs_review"], false);
         assert!(json.get("refused_window").is_none());
     }
 

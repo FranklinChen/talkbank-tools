@@ -20,6 +20,7 @@ mod postprocess;
 pub mod repair;
 mod rescue_narrow_bullets;
 pub mod speech_rate;
+mod split;
 pub mod timing;
 pub mod utr;
 
@@ -42,9 +43,10 @@ pub use self::alignment::parse_fa_response;
 pub use self::expand_for_fillers::expand_bullets_for_edge_fillers;
 pub use self::extraction::collect_fa_words;
 pub use self::grouping::{
-    Estimates, FaGroup, Grouping, MAX_GROUP_LABEL_BYTES, Placement, count_utterance_timing,
-    estimate_untimed_boundaries, group_utterances,
+    Estimates, FaGroup, GroupSpan, GroupWords, Grouping, MAX_GROUP_LABEL_BYTES, Placement,
+    SingleSpan, count_utterance_timing, estimate_untimed_boundaries, group_utterances,
 };
+pub(crate) use self::grouping::{GroupUnit, GroupUnits};
 pub use self::injection::inject_timings_for_utterance;
 pub use self::main_bullets::{
     BackwardGivenBullet, FaProjection, KeptBulletError, KeptBulletsHeld, MainBulletAuthority,
@@ -58,6 +60,7 @@ pub use self::orchestrate::{
     refresh_reusable_alignment, refresh_reusable_utterances, retain_decision_evidence,
     strip_timing_from_content, strip_wor_from_monotonicity_stripped_utterances,
 };
+pub use self::split::{AnchoredPiece, AnchoredSplit, Pieces};
 // `#[cfg(test)]` (2026-09-01 review, item 12): test-fixture conveniences with
 // no production caller; see their own doc comments in `orchestrate.rs`. The
 // derive-only entry points (`apply_fa_results`, `enforce_monotonicity*`)
@@ -79,8 +82,9 @@ pub use self::rescue_narrow_bullets::rescue_narrow_bullets;
 // does not reach CHAT serialization; `retain_decision_evidence` always strips
 // the two abandoned review tiers and returns typed evidence.
 pub use self::utr::{
-    CaMarkerPolicy, GlobalUtr, GroupingContext, TwoPassConfig, TwoPassOverlapUtr,
-    UtrFuzzyThreshold, UtrMatchMode, UtrOverlapDensityThreshold, UtrStrategy, find_untimed_windows,
+    AlignableWords, AnchorDisorder, AnchorIndex, AnchorLookup, CaMarkerPolicy, GlobalUtr,
+    GroupingContext, TwoPassConfig, TwoPassOverlapUtr, UtrFuzzyThreshold, UtrMatchMode,
+    UtrOverlapDensityThreshold, UtrStrategy, UtteranceAnchors, WordAnchor, find_untimed_windows,
     select_strategy, utr_asr_cache_key, utr_asr_segment_cache_key,
 };
 pub use batchalign_transform::decisions::ReviewLevel;
@@ -472,7 +476,7 @@ pub fn split_compound_filler(word: &talkbank_model::model::Word) -> Vec<String> 
 }
 
 /// A word extracted for forced alignment, with its position in the AST.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaWord {
     /// Index of the utterance in the file (among utterances only).
     pub utterance_index: UtteranceIdx,
@@ -863,8 +867,8 @@ impl DroppedWordTimings {
     }
 }
 
-/// One FA group, as the Rust request builder consumes it on its way to a
-/// Python worker.
+/// One FA request (a group, or one piece of an anchored group), as the Rust
+/// request builder consumes it on its way to a Python worker.
 ///
 /// Not a wire type, and deliberately neither `Serialize` nor `Deserialize`:
 /// the worker receives the prepared text payload and audio artifact this is

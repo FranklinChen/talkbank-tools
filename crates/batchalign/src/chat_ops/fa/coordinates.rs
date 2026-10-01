@@ -520,6 +520,19 @@ impl FaWindow {
         }
     }
 
+    /// Cut this window in two at an instant strictly inside it.
+    ///
+    /// Both halves lie inside this window, and so inside its recording, which
+    /// is why no second containment check is needed: the only question is
+    /// whether `at` leaves audio on both sides. When it does not, the window
+    /// comes back unchanged as the error, so a caller can simply not cut.
+    pub(crate) fn split_at(self, at: FileMs) -> Result<(Self, Self), Self> {
+        match self.start < at && at < self.end {
+            true => Ok((Self { end: at, ..self }, Self { start: at, ..self })),
+            false => Err(self),
+        }
+    }
+
     /// The window's length.
     pub const fn len(&self) -> Ms {
         self.end.since(self.start)
@@ -687,6 +700,27 @@ mod tests {
             Err(WindowFault::Inverted { .. })
         ));
         assert!(FaWindow::within(&rec, at, FileMs::new(4_001)).is_ok());
+    }
+
+    /// A split leaves audio on both sides or does not happen: the window
+    /// comes back unchanged for a cut at or outside its edges.
+    #[test]
+    fn a_window_splits_only_strictly_inside_itself() {
+        let rec = recording(10_000);
+        let window =
+            FaWindow::within(&rec, FileMs::new(2_000), FileMs::new(6_000)).expect("inside");
+        let (head, tail) = window.split_at(FileMs::new(3_000)).expect("interior");
+        assert_eq!(
+            (head.audio_start(), head.end()),
+            (FileMs::new(2_000), FileMs::new(3_000))
+        );
+        assert_eq!(
+            (tail.audio_start(), tail.end()),
+            (FileMs::new(3_000), FileMs::new(6_000))
+        );
+        for edge in [2_000, 6_000, 7_000] {
+            assert_eq!(window.split_at(FileMs::new(edge)), Err(window));
+        }
     }
 
     #[test]

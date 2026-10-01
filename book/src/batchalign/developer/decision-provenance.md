@@ -1,7 +1,7 @@
 # Decision Evidence
 
 **Status:** Current
-**Last updated:** 2026-09-02 20:07 EDT
+**Last updated:** 2026-09-30 22:57 EDT
 
 ## Current policy
 
@@ -72,7 +72,7 @@ stateDiagram-v2
     [*] --> NoInjectionProjection: reuse or empty groups
     FaApplied --> FaFinalized: optional repair, then typed monotonicity
     NoInjectionProjection --> FaFinalized: finalize_without_injection
-    FaFinalized --> FaDecisions: add rescue / refusal records
+    FaFinalized --> FaDecisions: add rescue / grouping records
     FaDecisions --> WrittenFaDecisions: retain_decision_evidence
     WrittenFaDecisions --> FaEvidence: into_evidence
     FaEvidence --> [*]: serialize debug evidence
@@ -85,8 +85,9 @@ stateDiagram-v2
    consumed into the FA evidence trace.
 
 With `--debug-dir`, the resulting `<stem>_fa_evidence.json` contains typed
-decision records alongside group windows, word identities, cache keys, source
-classification, raw/pre-injection timings, fallback events, and validation
+decision records alongside group windows, word identities, each group's `span`
+(how it was executed, with every request's cache key and source
+classification), raw/pre-injection timings, fallback events, and validation
 violations. The evidence file is the research and replay surface; CHAT is not.
 
 ### Discarded measurements: `dropped_word_timings`
@@ -118,11 +119,46 @@ A `window_refused` decision records that no alignment request was made for an
 utterance. From schema version 5 the decision also carries `refused_window`,
 an object tagged by `cause` that holds only the numbers that cause has:
 `over_budget` (`start_ms`, `end_ms`, `budget_ms`), `empty` (`at_ms`),
-`inverted` (`start_ms`, `end_ms`) and `past_recording` (`start_ms`, `end_ms`,
-`exceeds_by_ms`). In the domain it is the enum
-`batchalign_transform::decisions::RefusedWindow`, so a window cannot contradict
-its cause, and its `Display` is the only source of the prose `reason`. The
-field is absent on every other strategy.
+`inverted` (`start_ms`, `end_ms`), `past_recording` (`start_ms`, `end_ms`,
+`exceeds_by_ms`) and, from schema version 6, `anchor_gap` (`start_ms`,
+`end_ms`, `budget_ms`, `gap_start_ms`, `gap_end_ms`) and `anchors_unusable`
+(`start_ms`, `end_ms`, `budget_ms`, `unusable`). In the domain it is the
+enum `batchalign_transform::decisions::RefusedWindow`, so a window cannot
+contradict its cause, and its `Display` is the only source of the prose
+`reason`. The field is absent on every other strategy.
+
+For an utterance longer than the engine budget, the three causes partition
+what utterance timing recovery (UTR) said about it:
+
+- `over_budget`: nothing. UTR did not run, ran with no tokens, or matched none
+  of the utterance's words.
+- `anchors_unusable`: UTR matched the utterance, but its matches give no usable
+  cut. `unusable` names why, from a closed set: `no_reliable_anchors` (every
+  match fuzzy or to a multi-word token), `anchors_refused` (out of word order,
+  overlapping in time, inverted, or naming a token absent from the stream),
+  `anchors_describe_other_words`, or `no_interior_cut`.
+- `anchor_gap`: the anchors exist and are the problem: two neighbouring cut
+  points (or a window edge and its nearest cut) lie farther apart than the
+  budget, the signal that UTR placed the utterance across audio it does not
+  belong to. `gap_start_ms`/`gap_end_ms` locate the widest uncrossable
+  stretch.
+
+All three have `needs_review: true`.
+
+### Split windows: `split_window`
+
+An utterance longer than the budget whose anchors allow it is aligned in
+pieces cut at the ends of anchored words (see the forced-alignment reference,
+"Over-budget utterances"). That is recorded as a `window_split_at_anchors`
+decision with `needs_review: false` (every cut is an acoustic observation and
+the aligner measured every word) and, from schema version 6, a `split_window`
+object (`start_ms`, `end_ms`, `budget_ms`, `pieces`) from
+`batchalign_transform::decisions::SplitWindow`. The pieces themselves (each
+window, first and last word, evidence source and cache key) are on the group's
+`span` in `groups`, where a reader of the timings needs them.
+
+Grouping's decisions, refusals and splits alike, reach the evidence through
+the `grouping` field of `FaDecisions`.
 
 The full, incremental, complete-`%wor`, and grouping-empty paths all produce
 the same `FaFinalized` typestate. Optional repair is therefore always before

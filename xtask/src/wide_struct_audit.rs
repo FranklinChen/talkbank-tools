@@ -452,13 +452,14 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/types/traces.rs",
         struct_name: "FaTimelineTrace",
-        max_fields: 14,
+        max_fields: 12,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
         reason: "versioned forced-alignment evidence transport preserving independent grouping, \
                  cache, timing, decision, violation, and fallback facts for offline analysis; \
                  schema 4 adds the flat dropped_word_timings section derived from the decisions; \
-                 schema 5 adds refused_window to window_refused decisions",
+                 schema 5 adds refused_window to window_refused decisions; schema 6 moves each \
+                 request's evidence source and cache key into its group's span",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/worker/handle/config.rs",

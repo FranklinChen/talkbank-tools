@@ -70,23 +70,24 @@ impl RecordingDurationError {
 ///
 /// Construction requires a head index, so the error cannot represent the
 /// contradictory state "required evidence is unavailable, but nothing is
-/// missing." The remaining indices retain the pipeline's group order.
+/// missing." The remaining indices retain the pipeline's request order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingForcedAlignmentEvidence {
-    group_indices: Vec<usize>,
+    request_indices: Vec<usize>,
 }
 
 impl MissingForcedAlignmentEvidence {
-    pub(crate) fn new(first_group: usize, remaining_groups: &[usize]) -> Self {
-        let mut group_indices = Vec::with_capacity(remaining_groups.len() + 1);
-        group_indices.push(first_group);
-        group_indices.extend_from_slice(remaining_groups);
-        Self { group_indices }
+    /// The missed FA requests (dispatch units), first one separate so the
+    /// list cannot be empty. Requests, not groups: the cache is keyed per
+    /// request, and an anchored group is several requests.
+    pub(crate) fn new(first_request: usize, remaining: impl IntoIterator<Item = usize>) -> Self {
+        let request_indices = std::iter::once(first_request).chain(remaining).collect();
+        Self { request_indices }
     }
 
-    /// FA group ordinals whose evidence was absent from the reusable cache.
-    pub fn group_indices(&self) -> &[usize] {
-        &self.group_indices
+    /// FA request ordinals whose evidence was absent from the reusable cache.
+    pub fn request_indices(&self) -> &[usize] {
+        &self.request_indices
     }
 }
 
@@ -94,9 +95,9 @@ impl std::fmt::Display for MissingForcedAlignmentEvidence {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "required forced-alignment evidence is unavailable for groups {:?}; \
+            "required forced-alignment evidence is unavailable for requests {:?}; \
              --require-media-cache prevented new inference",
-            self.group_indices
+            self.request_indices
         )
     }
 }

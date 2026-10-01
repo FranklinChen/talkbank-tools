@@ -9,33 +9,25 @@
 //! keeps the incremental path and full-file path on the same migration path as
 //! the worker protocol evolves from V1 payloads to V2 prepared artifacts.
 
-use crate::api::DurationMs;
-use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::fa::{
-    BulletRepairPolicy, FaGroup, WordTiming, apply_fa_results_with_projection_policy, cache_key,
+    BulletRepairPolicy, FaGroup, WordTiming, apply_fa_results_with_projection_policy,
     collect_existing_fa_word_timings, expand_bullets_for_edge_fillers, group_utterances,
     refresh_existing_alignment_for_utterance, strip_wor_from_monotonicity_stripped_utterances,
 };
-use crate::chat_ops::{CacheKey, ChatFile, Line, Utterance};
+use crate::chat_ops::{ChatFile, Line, Utterance};
 use crate::error::ServerError;
 use crate::params::{AudioContext, FaParams};
-use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
+use crate::runner::util::ProgressSender;
 use crate::types::results::{FaOutput, FaResult};
-use crate::types::traces::{FaEvidenceSourceTrace, FaGroupTrace, TimingTrace};
 use batchalign_transform::diff::UtteranceDelta;
 use batchalign_transform::diff::preserve::{TierKind, copy_dependent_tiers};
 use batchalign_transform::parse::{is_dummy, is_no_align, parse_lenient};
 // `ValidityLevel` and `validate_to_level` are no longer named here: the level
 // FA admits at, and the level it gates output at, both live on `FaAdmission`.
-use tracing::{info, warn};
+use tracing::info;
 
-use super::transport::{
-    FaInferencePlan, FaWorkerTransport, UncheckedFaWorkerBatch, plan_fa_inference,
-};
-use super::{
-    AdmittedFaResult, FaAdmission, assemble_group_evidence, collect_evidence_sources,
-    collect_final_timings,
-};
+use super::units::{FaDispatchInputs, resolve_group_timings};
+use super::{AdmittedFaResult, FaAdmission};
 use crate::chat_ops::fa::Grouping;
 
 /// Process a CHAT file through forced alignment incrementally.
@@ -104,6 +96,7 @@ pub(crate) async fn process_fa_incremental(
         parse_errors,
         text: after_text,
         main_bullets,
+        anchors,
     } = after;
 
     if is_dummy(&chat_file) || is_no_align(&chat_file) {
@@ -145,11 +138,13 @@ pub(crate) async fn process_fa_incremental(
     // `Option<u64>` and invent its own behaviour when it was absent; there is
     // one recording and one answer.
     let recording = audio.recording().await?;
+    // The anchors describe the "after" document's words, which the reuse
+    // above copied `%wor` onto without changing a word.
     let Grouping {
         groups,
-        refusals: grouping_decisions,
+        decisions: grouping_decisions,
         windows_clamped,
-    } = group_utterances(&chat_file, fa_params.max_group_ms().0, &recording);
+    } = group_utterances(&chat_file, fa_params.max_group_ms().0, &recording, anchors);
     if groups.is_empty() {
         // Every utterance reused by `reuse_stable_wor_timing_from_before` is
         // folded in here so `%wor` (when requested) is written after
@@ -188,267 +183,40 @@ pub(crate) async fn process_fa_incremental(
         );
     }
 
-    // Determine which groups still need re-alignment after stable `%wor`
-    // regions from the "before" file were copied into the edited file.
-    let group_needs_realign: Vec<bool> = groups
+    // Groups whose every utterance was reused from the "before" file are
+    // resolved from `%wor`; everything else goes to cache or worker. Counted
+    // here only for the log line.
+    let reused_group_count = groups
         .iter()
-        .map(|group| {
-            group
-                .utterance_indices
-                .iter()
-                .any(|idx| !reusable_after_indices.contains(&idx.raw()))
-        })
-        .collect();
-    let realign_count = group_needs_realign
-        .iter()
-        .filter(|needs_realign| **needs_realign)
+        .filter(|group| group.is_reusable_from(&reusable_after_indices))
         .count();
-    let reused_group_count = group_needs_realign.len() - realign_count;
 
     info!(
         total_groups = groups.len(),
-        realign_groups = realign_count,
+        realign_groups = groups.len() - reused_group_count,
         reused_groups = reused_group_count,
+        anchored_utterances = anchors.anchored_utterances(),
         // Same fact the full path reports, in the same place, so the two runs
         // stay comparable line for line.
         windows_clamped,
         "Incremental FA: selective group re-alignment with stable %wor reuse"
     );
 
-    // Build cache keys and timing storage for all groups
-    let word_texts: Vec<Vec<String>> = groups
-        .iter()
-        .map(|g| g.words.iter().map(|w| w.text.clone()).collect())
-        .collect();
-
-    let cache_keys: Vec<CacheKey> = groups
-        .iter()
-        .zip(word_texts.iter())
-        .map(|(g, words)| {
-            cache_key(
-                words,
-                audio.audio_identity,
-                g.audio_start_ms(),
-                g.audio_end_ms(),
-                fa_params.gap_healing,
-                fa_params.engine,
-            )
-        })
-        .collect();
-
-    let mut all_timings: Vec<Option<Vec<Option<WordTiming>>>> = vec![None; groups.len()];
-    let mut evidence_sources: Vec<Option<FaEvidenceSourceTrace>> = vec![None; groups.len()];
-
-    // Reused groups already have current main-tier word timing in `chat_file`.
-    // Everything else still needs a cache lookup or worker call.
-    let key_strings: Vec<String> = cache_keys.iter().map(|k| k.as_str().to_string()).collect();
-    let cached = match fa_params.cache_policy {
-        crate::params::CachePolicy::SkipCache => std::collections::HashMap::new(),
-        crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
-            match services
-                .pipeline
-                .cache
-                .get_batch(&key_strings, FORCED_ALIGNMENT, services.cache_namespace)
-                .await
-            {
-                Ok(map) => map,
-                Err(e) => {
-                    warn!(error = %e, "FA cache batch lookup failed");
-                    std::collections::HashMap::new()
-                }
-            }
-        }
-    };
-    let cached_raw = match fa_params.cache_policy {
-        crate::params::CachePolicy::SkipCache => std::collections::HashMap::new(),
-        crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
-            match services
-                .pipeline
-                .cache
-                .get_batch(
-                    &key_strings,
-                    FORCED_ALIGNMENT_RAW_EVIDENCE,
-                    services.cache_namespace,
-                )
-                .await
-            {
-                Ok(map) => map,
-                Err(error) => {
-                    warn!(error = %error, "Raw FA evidence cache batch lookup failed");
-                    std::collections::HashMap::new()
-                }
-            }
-        }
-    };
-
-    // Populate reused groups and cache hits.
-    let mut miss_indices: Vec<usize> = Vec::new();
-    let mut fallback_events = Vec::new();
-    for (i, key) in cache_keys.iter().enumerate() {
-        if !group_needs_realign[i]
-            && let Some(timings) = collect_preserved_group_timings(&chat_file, &groups[i])
-        {
-            all_timings[i] = Some(timings);
-            evidence_sources[i] = Some(FaEvidenceSourceTrace::WorReuse);
-            continue;
-        }
-
-        let resolution = super::FaCacheGroupAdmission::new(
-            key,
-            fa_params.engine,
-            services.cache_namespace,
-            i,
-            &groups[i],
-        )
-        .resolve(cached_raw.get(key.as_str()), cached.get(key.as_str()));
-        for refusal in resolution.refusals {
-            warn!(
-                error = %refusal.error,
-                cache_layer = refusal.layer,
-                group = i,
-                "Cached FA evidence was refused"
-            );
-        }
-        match resolution.admitted {
-            super::AdmittedFaCacheGroup::RawEvidence(evidence) => {
-                let evidence = *evidence;
-                if let Some(event) = evidence.fallback_event {
-                    fallback_events.push(event);
-                }
-                all_timings[i] = Some(evidence.timings);
-                evidence_sources[i] = Some(FaEvidenceSourceTrace::RawEvidenceReplay);
-            }
-            super::AdmittedFaCacheGroup::DerivedTimings(timings) => {
-                all_timings[i] = Some(timings.into_timings());
-                evidence_sources[i] = Some(FaEvidenceSourceTrace::Cache);
-            }
-            super::AdmittedFaCacheGroup::Miss => miss_indices.push(i),
-        }
-    }
-
-    let reused_or_cached_groups = groups.len() - miss_indices.len();
-    if reused_or_cached_groups > 0 || !miss_indices.is_empty() {
-        info!(
-            reused_or_cached = reused_or_cached_groups,
-            misses = miss_indices.len(),
-            "FA incremental partition"
-        );
-    }
-
-    if let Some(tx) = progress {
-        let _ = tx.send(ProgressUpdate::new(
-            FileStage::Aligning,
-            Some(reused_or_cached_groups as i64),
-            Some(groups.len() as i64),
-        ));
-    }
-
-    let transport = FaWorkerTransport::production(services);
-
-    // Send miss groups through the shared FA worker transport adapter.
-    if let FaInferencePlan::Authorized(authorization) =
-        plan_fa_inference(fa_params.cache_policy, &miss_indices)?
-    {
-        // Every group already owns the recording-bound window admitted by
-        // grouping; live inference and cache replay consume that same proof.
-        let parsed_results = transport
-            .infer_groups(
-                UncheckedFaWorkerBatch {
-                    word_texts: &word_texts,
-                    groups: &groups,
-                    cache_keys: &cache_keys,
-                    authorization,
-                    audio_path: audio.audio_path,
-                    worker_lang: worker_lang.into(),
-                    engine: fa_params.engine,
-                    gap_healing: fa_params.gap_healing,
-                }
-                .admit()?,
-            )
-            .await?;
-
-        for (parsed_idx, parsed_result) in parsed_results.into_iter().enumerate() {
-            let projection = parsed_result.into_projection();
-            let miss_idx = projection.group_index;
-            evidence_sources[miss_idx] = Some(projection.source());
-            let timings = projection.timings;
-            let raw_evidence = projection.raw_evidence;
-            let fallback_event = projection.fallback_event;
-            if let Some(event) = fallback_event {
-                fallback_events.push(event);
-            }
-
-            if let Some(raw_evidence) = raw_evidence {
-                match super::AdmittedCachedFaTimings::encode_from_raw(
-                    timings.clone(),
-                    &raw_evidence,
-                ) {
-                    Ok(cache_data) => {
-                        if let Err(error) = services
-                            .pipeline
-                            .cache
-                            .put_batch(
-                                &[(cache_keys[miss_idx].as_str().to_string(), cache_data)],
-                                FORCED_ALIGNMENT,
-                                services.cache_namespace,
-                            )
-                            .await
-                        {
-                            warn!(error = %error, "Failed to cache derived FA evidence (non-fatal)");
-                        }
-                    }
-                    Err(error) => {
-                        warn!(error = %error, "Failed to encode derived FA evidence (non-fatal)");
-                    }
-                }
-                match serde_json::to_value(raw_evidence) {
-                    Ok(cache_data) => {
-                        if let Err(error) = services
-                            .pipeline
-                            .cache
-                            .put_batch(
-                                &[(cache_keys[miss_idx].as_str().to_string(), cache_data)],
-                                FORCED_ALIGNMENT_RAW_EVIDENCE,
-                                services.cache_namespace,
-                            )
-                            .await
-                        {
-                            warn!(error = %error, "Failed to cache raw FA evidence (non-fatal)");
-                        }
-                    }
-                    Err(error) => {
-                        warn!(error = %error, "Failed to serialize raw FA evidence (non-fatal)");
-                    }
-                }
-            }
-
-            all_timings[miss_idx] = Some(timings);
-
-            if let Some(tx) = progress {
-                let done = reused_or_cached_groups + parsed_idx + 1;
-                let _ = tx.send(ProgressUpdate::new(
-                    FileStage::Aligning,
-                    Some(done as i64),
-                    Some(groups.len() as i64),
-                ));
-            }
-        }
-    }
-
-    // Apply all results
-    let final_timings = collect_final_timings(all_timings, "incremental forced alignment")?;
-    let evidence_sources =
-        collect_evidence_sources(evidence_sources, "incremental forced alignment")?;
-
-    let pre_injection_timings: Vec<Vec<Option<TimingTrace>>> = final_timings
-        .iter()
-        .map(|group| {
-            group
-                .iter()
-                .map(|t| t.as_ref().map(TimingTrace::from_word_timing))
-                .collect()
-        })
-        .collect();
+    // The same resolution the full path runs.
+    let mut resolved = resolve_group_timings(FaDispatchInputs {
+        groups: &groups,
+        chat_file: &chat_file,
+        reusable_utterances: &reusable_after_indices,
+        audio,
+        worker_lang,
+        services,
+        fa_params,
+        progress,
+        context: "incremental forced alignment",
+    })
+    .await?;
+    let fallback_events = std::mem::take(&mut resolved.fallback_events);
+    let (final_timings, group_evidence) = resolved.into_parts();
 
     // Injection, optional repair, then monotonicity enforcement, as ONE typed
     // transition. The sequence used
@@ -491,7 +259,7 @@ pub(crate) async fn process_fa_incremental(
         &mut chat_file,
         crate::chat_ops::fa::FaDecisions {
             rescue: Vec::new(),
-            unplaceable: grouping_decisions,
+            grouping: grouping_decisions,
             finalized,
         },
     );
@@ -502,27 +270,6 @@ pub(crate) async fn process_fa_incremental(
     // Post-validation runs in `FaAdmission::finish`, below, at the level this
     // file was ADMITTED at, together with every other `Ok` return.
     let output = FaOutput::processed(chat_file)?;
-
-    let group_traces: Vec<FaGroupTrace> = groups
-        .iter()
-        .map(|g| FaGroupTrace {
-            audio_start_ms: DurationMs(g.audio_start_ms()),
-            audio_end_ms: DurationMs(g.audio_end_ms()),
-            utterance_indices: g.utterance_indices.iter().map(|idx| idx.raw()).collect(),
-            words: g.words.iter().map(|w| w.text.clone()).collect(),
-            word_ids: g.words.iter().map(|word| word.stable_id()).collect(),
-        })
-        .collect();
-
-    let group_evidence = assemble_group_evidence(
-        group_traces,
-        evidence_sources,
-        cache_keys
-            .iter()
-            .map(|key| key.as_str().to_owned())
-            .collect(),
-        pre_injection_timings,
-    )?;
 
     admission.finish(FaResult {
         output,
@@ -603,12 +350,12 @@ pub(super) fn collect_preserved_group_timings(
 ) -> Option<Vec<Option<WordTiming>>> {
     let mut timings = Vec::new();
 
-    for utt_idx in &group.utterance_indices {
+    for utt_idx in group.utterance_indices() {
         let utterance = get_utterance(chat_file, utt_idx.raw())?;
         timings.extend(collect_existing_fa_word_timings(utterance));
     }
 
-    if timings.len() != group.words.len() {
+    if timings.len() != group.word_count() {
         return None;
     }
 
@@ -757,11 +504,12 @@ mod tests {
                 crate::chat_ops::fa::coordinates::Ms(4_000),
             )
             .expect("test recording is non-empty"),
+            &crate::chat_ops::fa::AnchorIndex::not_observed(),
         )
         .groups;
         let timings = collect_preserved_group_timings(&after, &groups[0])
             .expect("group timings should exist");
-        assert_eq!(timings.len(), groups[0].words.len());
+        assert_eq!(timings.len(), groups[0].word_count());
         assert!(timings.iter().all(|timing| timing.is_some()));
     }
 

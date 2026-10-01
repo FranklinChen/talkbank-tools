@@ -24,6 +24,7 @@ use std::str::FromStr;
 
 use crate::chat_ops::fa::coordinates::Recording;
 use crate::chat_ops::fa::grouping::group_utterances;
+use crate::chat_ops::fa::utr::AnchorIndex;
 use batchalign_transform::dp_align::{self, MatchMode};
 
 use super::{
@@ -354,12 +355,25 @@ impl UtrStrategy for TwoPassOverlapUtr {
 
         // The group-count signal, when a recording to group against was
         // supplied; without one it falls through to the timed-utterance signal.
+        //
+        // No anchors, deliberately: the comparison is over how each
+        // strategy's BULLETS group, and it ignores anchored splits. With
+        // anchors an over-budget utterance would count as one group instead
+        // of none, so the counts could differ; but splits do not change the
+        // window width this signal is about, and only the chosen strategy's
+        // anchors will ever describe the document.
+        let no_anchors = AnchorIndex::not_observed();
         let group_counts = self.grouping_context.as_ref().map(|ctx| {
             (
-                group_utterances(&two_pass_file, ctx.max_group_ms, &ctx.recording)
-                    .groups
-                    .len(),
-                group_utterances(&global_file, ctx.max_group_ms, &ctx.recording)
+                group_utterances(
+                    &two_pass_file,
+                    ctx.max_group_ms,
+                    &ctx.recording,
+                    &no_anchors,
+                )
+                .groups
+                .len(),
+                group_utterances(&global_file, ctx.max_group_ms, &ctx.recording, &no_anchors)
                     .groups
                     .len(),
             )

@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-09-30 10:16 EDT
+**Last updated:** 2026-09-30 22:58 EDT
 
 ## Overview
 
@@ -445,20 +445,22 @@ chunk and runs the FA model (Whisper cross-attention DTW or Wave2Vec CTC
 alignment) to get precise word-level timestamps.
 
 The FA model returns timestamps **relative to the chunk start** (0-based). These
-must be converted to absolute timestamps by adding the group's `audio_start_ms`
-offset before injection into the AST.
+must be converted to absolute timestamps through the request's own window
+(`FaWindow::to_file`: the group's window, or one piece's window for an anchored
+group) before injection into the AST.
 
 #### FA grouping strategy
 
 Groups are formed by `group_utterances()` in
 `crates/batchalign/src/chat_ops/fa/grouping.rs`. Each group maps
-to one FA worker call.
+to one FA worker call, except an anchored group (below), which is one call per
+piece.
 Grouping is driven by two independent constraints, a group is flushed and a new
 one started when either is exceeded:
 
 | Constraint | Limit | Rationale |
 |------------|-------|-----------|
-| **Time window** (`max_group_ms`) | Per engine: the `max_group` field of the selected engine's row in `FA_ENGINES` | Caps audio segment length sent to the FA worker. Larger windows give the model more context but increase latency and memory, and the engines do not agree on the trade-off: the wav2vec family's CTC target length grows with the window, so it takes a narrower one than Whisper. `group_utterances()` is never told which engine will align its groups; the caller reads the window off the run's engine (`FaParams::max_group_ms()`, which is `FaEngineName::max_group_ms()`, which is that row). The numbers are deliberately not restated here: read the rows in `crates/batchalign/src/types/engines.rs`. |
+| **Time window** (`max_group_ms`) | Per engine: the `max_group` field of the selected engine's row in `FA_ENGINES` | Caps audio segment length sent to the FA worker. Larger windows give the model more context but increase latency and memory, and the engines do not agree on the trade-off: the wav2vec family's CTC target length grows with the window, so it takes a narrower one than Whisper. `group_utterances()` is never told which engine will align its groups; the caller reads the window off the run's engine (`FaParams::max_group_ms()`, which is `FaEngineName::max_group_ms()`, which is that row). The numbers are deliberately not restated here: read the rows in `crates/batchalign/src/types/engines.rs`. It is also the engine BUDGET for a single utterance: an utterance whose own window exceeds it is never sent whole. It is split at the words utterance timing recovery heard, into pieces that each fit (an anchored group, `window_split_at_anchors`), or refused (`window_refused` with cause `anchor_gap` when the anchors leave a stretch longer than the budget, `anchors_unusable` when recovery matched the utterance but gave no usable cut, `over_budget` when recovery has nothing to say about it). See "Over-budget utterances" below. |
 | **Label-byte cap** (`MAX_GROUP_LABEL_BYTES = 448`) | 448 UTF-8 bytes | Whisper's CTC forced-alignment backend (`ctc_loss` / `ctc_best_path`) has a maximum label sequence length of exactly 448 TOKENS; exceeding it produces a hard `ValueError: Labels' sequence length N cannot exceed the maximum allowed length of 448 tokens`. The cap is applied to EVERY engine's groups, not only Whisper's, because grouping is never told which engine will align them; the tightest engine's limit is therefore used for all. The unit is a UTF-8 BYTE, and that is a deliberately conservative proxy for the token limit: every token occupies at least one byte, so a byte count bounds the token count from above. A character count does not, and outside ASCII it is smaller, so counting characters would loosen the cap against the very limit it stands in for. |
 
 The label-byte limit exists because the time window alone is insufficient. Dense
@@ -522,17 +524,105 @@ Source: `crates/batchalign/src/chat_ops/fa/grouping.rs`,
 constant `MAX_GROUP_LABEL_BYTES` and the `LabelBytes` newtype that is the only
 way to produce a count comparable against it.
 
+#### Over-budget utterances: anchored splitting
+
+The engine budget (`max_group_ms`) limits one FA REQUEST: wav2vec runs one
+model forward pass over the whole window, so a single utterance longer than the
+budget cannot be aligned in one request. When the UTR pre-pass ran, it has
+usually already heard most of that utterance's words, and grouping cuts the
+utterance at those words.
+
+- **Anchors** (`chat_ops/fa/utr/anchors.rs`). A `WordAnchor` is a transcript
+  word UTR matched EXACTLY or CASE-INSENSITIVELY to an ASR token holding
+  exactly one word; its interval is that token's. Fuzzy matches and
+  multi-word tokens (provider segments) are not anchors: neither says when
+  this word ended. Anchors come from the global pass only. `AnchorIndex::from_plan`
+  is the only production constructor of an observed index, called in
+  `run_global_utr`, the one function holding both the plan and the token
+  stream. Each matched utterance is recorded as anchored, as having no
+  reliable match, or as refused with an `AnchorDisorder` (out of word order,
+  overlapping in time, inverted, or naming a token absent from the stream);
+  a disordered set is refused, never re-sorted. UTR's word ordinal converts to
+  FA's `WordIdx` in one function (`UtrWordOrdinal::fa_word`), which is sound
+  because both extract words with `collect_fa_words`. When no UTR pass with
+  tokens ran, the index is `not_observed`; a later pass without tokens (the
+  fallback UTR retry, say) never replaces an earlier pass's anchors.
+- **The split** (`chat_ops/fa/split.rs`, `AnchoredSplit::plan`). It accepts
+  only an `OverBudgetWindow`, which `GroupWindow::admit` mints exactly when the
+  window exceeds the budget, so every split has at least two pieces.
+  Candidate cuts are the END times of anchored words strictly inside the
+  utterance window, excluding the last word. If any stretch between
+  neighbouring cut points (or a window edge) is longer than the budget, the
+  utterance is refused as `anchor_gap`, naming the widest such stretch: on
+  real data that stretch is minutes long and means UTR placed the utterance
+  across audio it does not belong to, so it is recorded for review and never
+  aligned. Otherwise a greedy walk extends each piece to the furthest cut
+  that keeps it within budget. Each piece OWNS its words (`NonEmptyWords`,
+  split off the utterance's list) and its window (`FaWindow::split_at`), and
+  neither split can leave an empty side, so the pieces partition both by
+  construction.
+- **Execution** (`fa/units.rs`). The utterance stays ONE group, because
+  injection walks a group's words with one cursor and a group holding part of
+  an utterance would desynchronize it. The pieces are how the group is
+  EXECUTED: `DispatchPlan::build` lays out each group's requests in the
+  group's own shape (one `DispatchUnit`, or one per piece), each with its own
+  words, window and cache key. Cache lookup, worker dispatch, raw evidence and
+  engine fallback are per unit; the authorization to infer holds the missed
+  units themselves. `UnitLedger` holds each group's resolution in the same
+  shape (a `%wor`-reused group has no request slots at all), and
+  `UnitLedger::assemble` is the one place unit timings become group timings,
+  concatenated in word order. `%wor` reuse, injection and post-processing stay
+  per group and are unchanged. A single group is keyed by its own words and
+  window, so its cache entries stay reachable.
+- **Evidence.** The split is a `window_split_at_anchors` decision
+  (`needs_review: false`, with `split_window` carrying the piece count), and
+  the group's evidence `span` is `anchored`, listing each piece's window,
+  first and last word, evidence source and cache key (FA evidence schema 6).
+  Refusals are durable data: `over_budget` when recovery has nothing to say
+  about the utterance, `anchors_unusable` with a closed cause
+  (`no_reliable_anchors`, `anchors_refused`, `anchors_describe_other_words`,
+  `no_interior_cut`) when it matched the utterance but gave no usable cut, and
+  `anchor_gap` for the A4 signal.
+
+```mermaid
+flowchart TD
+    long["utterance window > max_group_ms\n(OverBudgetWindow)"]
+    lookup{"what did UTR\nobserve here?"}
+    cuts{"any interior cut?\n(anchored word end,\nnot the last word)"}
+    gap{"widest stretch between\ncut points > budget?"}
+    split["AnchoredSplit: greedy pieces,\neach within budget\n(window_split_at_anchors)"]
+    refuse_gap["refuse: anchor_gap\n(needs review)"]
+    refuse_unusable["refuse: anchors_unusable\n(cause)"]
+    refuse_over["refuse: over_budget"]
+    long --> lookup
+    lookup -->|"nothing (not run, no tokens,\nutterance unmatched)"| refuse_over
+    lookup -->|"only fuzzy / multi-word,\nrefused set, other words"| refuse_unusable
+    lookup -->|"admitted anchors"| cuts
+    cuts -->|"no"| refuse_unusable
+    cuts -->|"yes"| gap
+    gap -->|"yes"| refuse_gap
+    gap -->|"no"| split
+```
+
+An anchored group is never merged with a neighbour: grouping closes the
+pending group before it and holds the anchored group until the next
+utterance's start is known. Its last piece is then padded into the following
+silence as a single group's window is (half the gap, at most 1.5 s), but only
+as far as keeps that piece within the budget.
+
 ### Failure points, recovery, and what the user sees
 
-`align` has two distinct error scopes: **group-level** failures (affect one audio
-window; other groups continue) and **file-level** failures (abort the whole
-file).  The diagrams below show every fallback path.
+`align` has two distinct error scopes: **request-level** failures (affect one
+audio window, a group's or one piece of an anchored group's; other requests
+continue) and **file-level** failures (abort the whole file).  The diagrams
+below show every fallback path.
 
 #### Full fallback map
 
 The outermost loop is the file-level retry loop in
-`fa_pipeline.rs:process_one_fa_file()`.  The inner loop is the per-group
-dispatch in `fa/transport.rs:infer_groups_v2()`.  These two loops share one
+`fa_pipeline.rs:process_one_fa_file()`.  The inner loop is the per-request
+dispatch in `fa/transport.rs:infer_units_v2()`, reached through
+`fa/units.rs:resolve_group_timings()`.  These two loops share one
 entry arrow in the diagram: `run_fa_from_ast()` / `process_fa_incremental()`.
 
 ```mermaid
@@ -546,7 +636,7 @@ flowchart TD
     incremental{"--before PATH\nprovided?"}
     fa_full["run_fa_from_ast()\n(fa/mod.rs)"]
     fa_inc["process_fa_incremental()\n(fa/incremental.rs)"]
-    fa_groups["Group utterances\n+ per-group dispatch\n(fa/transport.rs)"]
+    fa_groups["Group utterances\n+ per-request dispatch\n(fa/units.rs, fa/transport.rs)"]
     fa_ok{"All groups\nresolved?"}
     finalize["FaFinalized\noptional bullet repair first"]
     mono["enforce_monotonicity_with_policy()\nstrip non-monotonic starts\nclamp ends per typed policy\n(chat_ops/fa/orchestrate.rs)"]
@@ -579,15 +669,17 @@ flowchart TD
 > `crates/batchalign/src/fa/mod.rs`, `crates/batchalign/src/fa/transport.rs`,
 > `crates/batchalign/src/chat_ops/fa/orchestrate.rs` (enforce_monotonicity, strip_e704_same_speaker_overlaps)
 
-#### Per-group fallback detail
+#### Per-request fallback detail
 
-Each FA group goes through its own dispatch in `infer_groups_v2()`.
-Group-level failures either resolve silently (leaving words unaligned) or
-propagate upward as a file-level failure.
+Each FA request (dispatch unit) goes through its own dispatch in
+`infer_units_v2()`. `%wor` reuse is decided first, for whole groups;
+everything after it is per request. Request-level failures either resolve
+silently (leaving that request's words unaligned) or propagate upward as a
+file-level failure.
 
 ```mermaid
 flowchart TD
-    group(["FA group\n(audio window + words)"])
+    group(["FA request\n(audio window + words)"])
     wor{"Reusable corroborated\n%wor timing?"}
     raw{"Raw FA evidence\nadmitted?"}
     replay["Replay raw response through\ncurrent Rust projection"]
@@ -597,10 +689,10 @@ flowchart TD
     required_fail["RequireCache failure\n(no dispatch authority)"]
     build["build_forced_alignment_request_v2()\n(worker/request_builder_v2.rs)"]
     empty{"EmptyAudioSegment?\n(0 PCM frames after ffmpeg)"}
-    skip_empty["WARN: group decoded no audio samples\nLeave words unaligned\n→ continue to next group"]
+    skip_empty["WARN: request decoded no audio samples\nLeave words unaligned\n→ continue to next request"]
     dispatch["dispatch_execute_v2()\n→ Python worker"]
-    parse{"parse_group_response()\nparse_forced_alignment_result_v2()"}
-    ok["Group timings resolved"]
+    parse{"parse_unit_response()\nparse_forced_alignment_result_v2()"}
+    ok["Request timings resolved"]
     err_kind{"Error kind?\n(is_fa_runtime_failure,\nfa_group_retry,\nis_whisper_model_unavailable)"}
     ctc["Wave2Vec CTC fallback\n(see diagram below)"]
     model_unavail["ModelUnavailable: \ncapability gap\nLeave words unaligned\n+ WARN in server log"]
@@ -629,12 +721,12 @@ flowchart TD
 #### Wave2Vec → Whisper CTC fallback
 
 When the FA engine is Wave2Vec and the worker returns one of three specific
-PyTorch CTC errors, `infer_groups_v2` retries **that single group** with Whisper
+PyTorch CTC errors, `infer_units_v2` retries **that single request** with Whisper
 FA.  No other error triggers this retry.
 
 ```mermaid
 flowchart TD
-    w2v["Wave2Vec worker response\n(parse_group_response fails)"]
+    w2v["Wave2Vec worker response\n(parse_unit_response fails)"]
     reason{"fa_group_retry()\n(fa/transport.rs)"}
 
     w2v --> reason
@@ -686,7 +778,7 @@ curl http://127.0.0.1:8001/jobs/JOB_ID/traces | python3 -m json.tool
 The Python worker loads **exactly one** FA model at startup, controlled by
 `engine_overrides["fa"]` in the worker bootstrap.  When Wave2Vec is the primary
 engine, `whisper_fa_model` in `_WorkerState` is `None`.  If Wave2Vec hits a CTC
-overflow and `infer_groups_v2` dispatches the Whisper fallback, the worker
+overflow and `infer_units_v2` dispatches the Whisper fallback, the worker
 returns `ExecuteOutcomeV2::Error { code: ModelUnavailable }`.
 
 `is_whisper_model_unavailable()` in `crates/batchalign/src/fa/transport.rs`
@@ -735,7 +827,7 @@ substring is inserted by `parse_forced_alignment_result_v2()` when formatting
 a `ProtocolErrorCodeV2::RuntimeFailure` response. It does not appear in
 `ModelUnavailable`, `Protocol`, or IPC parse errors.
 
-**Ordering in `infer_groups_v2()`:**
+**Ordering in `infer_units_v2()`:**
 
 1. `fa_group_retry()` is checked first, Wave2Vec CTC patterns still
    trigger the Whisper retry (which may produce timings). `is_fa_runtime_failure`
@@ -1576,7 +1668,7 @@ unknown.
 
 **Implementation:** `crates/batchalign/src/worker/artifacts_v2.rs`
 (`EmptyAudioSegment`), `request_builder_v2.rs` (build-error mapping), and
-`fa/transport.rs` (group skip in `infer_groups_v2`).
+`fa/transport.rs` (request skip in `infer_units_v2`).
 
 ### Whisper pipeline chunking
 

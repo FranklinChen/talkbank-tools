@@ -36,6 +36,7 @@ use talkbank_model::UtteranceIdx;
 use talkbank_model::model::{Line, UtteranceContent, WriteChat};
 use talkbank_parser::TreeSitterParser;
 
+mod anchored_split;
 mod bullet_rerun;
 mod dropped_timing_evidence;
 mod end_overlap_resolution;
@@ -253,7 +254,7 @@ pub(super) fn retained_evidence(
         chat,
         FaDecisions {
             rescue: Vec::new(),
-            unplaceable: Vec::new(),
+            grouping: Vec::new(),
             finalized,
         },
     )

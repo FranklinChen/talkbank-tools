@@ -1,7 +1,7 @@
 # Audio-Task Cache
 
 **Status:** Current
-**Last updated:** 2026-09-16 03:36 EDT
+**Last updated:** 2026-09-30 22:58 EDT
 
 Batchalign caches **audio-task results** (forced alignment, UTR ASR, raw Rev
 transcript evidence, dedicated transcribe speaker evidence, and media
@@ -404,8 +404,9 @@ version: `PipelineServices` carries only the worker pool and the cache.
 
 Forced alignment caches under `FaCacheNamespace`, exactly the string the FA
 worker reported, carried beside the shared services in `FaServices`. The same
-typed value travels through cache lookups and writes, cached-group admission
-(`FaCacheGroupAdmission`), raw evidence admission and replay
+typed value travels through cache lookups and writes, cached-request admission
+(`FaCacheUnitAdmission`, one per FA request: a group, or one piece of an
+anchored group), raw evidence admission and replay
 (`FaRawEvidence::admit_requested`, `ReplayableFaRawEvidence::decode`), derived
 timing admission, and the result (`FaResult::cache_namespace`), so none of
 them compares against a different string. UTR ASR caches under

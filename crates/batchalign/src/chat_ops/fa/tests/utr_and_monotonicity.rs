@@ -73,12 +73,18 @@ fn apply_fa_produces_no_double_bullets_after_utr() {
     utr::inject_utr_timing(&mut chat, &tokens);
 
     // Group and create synthetic FA timings
-    let groups = group_utterances(&chat, 30_000, &test_recording(10_000)).groups;
+    let groups = group_utterances(
+        &chat,
+        30_000,
+        &test_recording(10_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    )
+    .groups;
     let responses: Vec<Vec<Option<WordTiming>>> = groups
         .iter()
         .map(|g| {
             let word_count: usize = g
-                .utterance_indices
+                .utterance_indices()
                 .iter()
                 .map(|&idx| {
                     let mut count = 0;

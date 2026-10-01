@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-06 08:27 EDT
+**Last updated:** 2026-09-30 23:26 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -648,10 +648,14 @@ utterances extends its coverage without shrinking the earlier extent. When a
 new utterance cannot join, the pending group is finished before the new one
 starts. Utterances with no alignable words cannot alter a pending audio window.
 
-A single utterance with an oversized, empty, inverted or out-of-recording window
-receives a durable FA `window_refused` decision, which carries the refused
-window's bounds and a typed cause (evidence schema version 5). No request is dispatched for
-it. Grouping preserves the supplied words and timing rather than clipping an
+A single utterance with an empty, inverted or out-of-recording window receives a
+durable FA `window_refused` decision, which carries the refused window's bounds
+and a typed cause (evidence schema version 5). An oversized one is first offered
+for splitting at the words utterance timing recovery heard: when every piece
+fits the budget it becomes one anchored group, aligned as one request per piece
+(`window_split_at_anchors`, schema 6); otherwise it is refused as `anchor_gap`,
+`anchors_unusable` or `over_budget`. No request is dispatched for a refused
+utterance. Grouping preserves the supplied words and timing rather than clipping an
 uncertain long window or guessing finer word positions. Later pipeline timing
 repair remains a separate, recorded operation. Refusal means narrower timing
 evidence is required; it does not mean the source speech is invalid or that the
@@ -675,10 +679,11 @@ construction route from production callers.
 ## FA evidence after a group-local failure
 
 An attempted worker call is not itself timing evidence. Both full-file and
-incremental FA consume `FaWorkerGroupResult::into_projection()`, which issues
-the timing projection and its source together. A successful admitted response
-records `inference`; a deliberately skipped group records `unaligned` and
-materializes one missing timing per word. A successful response may also align
+incremental FA consume `FaWorkerUnitResult::into_projection()`, which issues
+the timing projection and its source together, per request (a group, or one
+piece of an anchored group). A successful admitted response records
+`inference`; a deliberately skipped request records `unaligned` and
+materializes one missing timing per word of that request. A successful response may also align
 zero words, so missing timings alone cannot determine provenance.
 
 This adds the `unaligned` evidence-source label to serialized FA artifacts.

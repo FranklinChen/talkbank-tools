@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-09-24 00:10 EDT
+**Last updated:** 2026-09-30 23:26 EDT
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -482,10 +482,23 @@ discarded. Schema version 5 adds a `refused_window` object to each
 `window_refused` decision, tagged by `cause` (`over_budget` with `start_ms`,
 `end_ms` and `budget_ms`; `empty` with `at_ms`; `inverted` with `start_ms` and
 `end_ms`; `past_recording` with `start_ms`, `end_ms` and `exceeds_by_ms`), so a
-refused window's length is data rather than prose in `reason`. All of them record the selected
-engine and build/model version,
-the cache key and evidence source for every group (`wor_reuse`, `cache`, or
-`inference`), stable word identifiers, pre-injection timings, Wave2Vec-family
+refused window's length is data rather than prose in `reason`. Schema version 6
+records how each group was executed: every entry of `groups` carries a `span`,
+`single` (one request, with its evidence source and cache key) or `anchored`
+(an utterance longer than the engine budget, aligned as several requests cut at
+words utterance timing recovery heard, each piece with its window, first and
+last word, source and cache key); the top-level `evidence_sources` and
+`cache_keys` arrays are gone. Such a split is a `window_split_at_anchors`
+decision with a `split_window` object (`start_ms`, `end_ms`, `budget_ms`,
+`pieces`), and `refused_window` gains two causes: `anchor_gap` (the recovered
+anchors leave a stretch longer than the budget, `gap_start_ms` to
+`gap_end_ms`; the utterance's placement needs review) and `anchors_unusable`
+(recovery matched the utterance but gave no usable cut; `unusable` is
+`no_reliable_anchors`, `anchors_refused`, `anchors_describe_other_words` or
+`no_interior_cut`). `over_budget` now means recovery had nothing to say about
+the utterance. All of them record the selected engine and build/model version,
+the cache key and evidence source for every request (`wor_reuse`, `cache`,
+`raw_evidence_replay`, `inference`, or `unaligned`), stable word identifiers, pre-injection timings, Wave2Vec-family
 model scores when available, complete start/end provenance chains, and every
 typed decision that later clamped or removed timing. Those decisions remain in
 the JSON while CHAT output contains no review-tier projection. A model
