@@ -17,6 +17,12 @@ examined for French:
 The seed case ``seed_040802_1620`` pins the specific absorbed-failure
 utterance from ``phon-eng-french-data/French/Paris/Antoine/040802.cha``
 line 1620.
+
+2026-10-01 (Stanza 1.15.0): isolated ``au`` now MWT-expands
+(``à``+``le``); isolated ``des`` no longer does and is read as the
+indefinite plural article (DET, lemma ``un``), which is the more likely
+reading of the bare word. Re-locked at 2 and 1. Final CHAT output is one
+``%mor`` item either way.
 """
 
 from __future__ import annotations
@@ -157,9 +163,9 @@ CASES: tuple[ProbeCase, ...] = (
     #    reassembly downstream collapses them back to 1-to-1 for
     #    CHAT output, but raw Stanza counts vary per token) ──
     ProbeCase("du_alone", ("du",), Phenomenon.NATIVE_MWT, 1),
-    ProbeCase("au_alone", ("au",), Phenomenon.NATIVE_MWT, 1),
+    ProbeCase("au_alone", ("au",), Phenomenon.NATIVE_MWT, 2),
     ProbeCase("aux_alone", ("aux",), Phenomenon.NATIVE_MWT, 2),
-    ProbeCase("des_alone", ("des",), Phenomenon.NATIVE_MWT, 2),
+    ProbeCase("des_alone", ("des",), Phenomenon.NATIVE_MWT, 1),
     ProbeCase(
         "du_in_context",
         ("j'ai", "pris", "du", "pain", "."),

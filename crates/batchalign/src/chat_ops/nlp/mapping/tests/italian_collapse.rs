@@ -288,3 +288,103 @@ fn test_italian_dammela_stays_correctly_merged() {
         items[0]
     );
 }
+
+/// Stanza 1.15's analysis of `per favore dammela`: the compound split, but as
+/// preposition `da` plus clitics hanging off `favore`. The curated imperative
+/// replaces the components, and the verb keeps the split word's attachment.
+#[test]
+fn test_italian_dammela_split_as_preposition_takes_the_curated_imperative() {
+    let sentence = UdSentence {
+        words: vec![
+            it_word(1, "per", "per", UniversalPos::Adp, 2, "case", None),
+            it_word(
+                2,
+                "favore",
+                "favore",
+                UniversalPos::Noun,
+                0,
+                "root",
+                Some("Gender=Masc|Number=Sing"),
+            ),
+            it_range(3, 5, "dammela"),
+            it_word(3, "da", "da", UniversalPos::Adp, 4, "case", None),
+            it_word(
+                4,
+                "me",
+                "me",
+                UniversalPos::Pron,
+                2,
+                "nmod",
+                Some("Clitic=Yes|Person=1|PronType=Prs"),
+            ),
+            it_word(
+                5,
+                "la",
+                "la",
+                UniversalPos::Pron,
+                2,
+                "expl",
+                Some("Clitic=Yes|Person=3|PronType=Prs"),
+            ),
+        ],
+    };
+    let (mors, _) = map_ud_sentence(&sentence, &it_ctx()).unwrap();
+    let items = chat_strings(&mors);
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert!(
+        items[2].starts_with("verb|dare-Fin-Imp-S2~"),
+        "the split compound must be the imperative of `dare`, got {:?}",
+        items[2]
+    );
+}
+
+/// Stanza 1.14's analysis of an isolated `dammela`: split, with `da` as a verb
+/// in the imperfect indicative. The curated imperative replaces those features.
+#[test]
+fn test_italian_dammela_split_with_indicative_features_takes_the_imperative() {
+    let sentence = UdSentence {
+        words: vec![
+            it_range(1, 3, "dammela"),
+            it_word(
+                1,
+                "da",
+                "dare",
+                UniversalPos::Verb,
+                0,
+                "root",
+                Some("Mood=Ind|Number=Sing|Person=2|Tense=Imp|VerbForm=Fin"),
+            ),
+            it_word(
+                2,
+                "me",
+                "me",
+                UniversalPos::Pron,
+                1,
+                "expl",
+                Some("Clitic=Yes|Person=1|PronType=Prs"),
+            ),
+            it_word(
+                3,
+                "la",
+                "la",
+                UniversalPos::Pron,
+                1,
+                "expl",
+                Some("Clitic=Yes|Person=3|PronType=Prs"),
+            ),
+        ],
+    };
+    let (mors, _) = map_ud_sentence(&sentence, &it_ctx()).unwrap();
+    let items = chat_strings(&mors);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].starts_with("verb|dare-Fin-Imp-S2~"),
+        "got {:?}",
+        items[0]
+    );
+    assert!(
+        !items[0].contains("Ind"),
+        "no indicative left, got {:?}",
+        items[0]
+    );
+}

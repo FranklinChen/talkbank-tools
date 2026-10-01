@@ -15,6 +15,7 @@ Each test isolates one question about the tokenization/MWT pipeline.
 
 import pytest
 
+from batchalign.tests._morphosyntax_batch_items import morphosyntax_item
 from batchalign.worker._pipeline_cache import static_pipelines
 
 # Stanza pipeline fixtures are provided by conftest.py in this directory.
@@ -170,14 +171,7 @@ class TestBatchInferRetokenize:
 
         req = BatchInferRequest(
             task="morphosyntax",
-            items=[
-                {
-                    "words": ["gonna", "eat", "cookies", "."],
-                    "terminator": ".",
-                    "special_forms": [[None, None]] * 4,
-                    "lang": "eng",
-                }
-            ],
+            items=[morphosyntax_item(["gonna", "eat", "cookies"])],
             lang="eng",
             retokenize=True,
             mwt={},
@@ -235,14 +229,7 @@ class TestWorkerPipelineRetokenize:
 
         req = BatchInferRequest(
             task="morphosyntax",
-            items=[
-                {
-                    "words": ["gonna", "eat", "cookies", "."],
-                    "terminator": ".",
-                    "special_forms": [[None, None]] * 4,
-                    "lang": "eng",
-                }
-            ],
+            items=[morphosyntax_item(["gonna", "eat", "cookies"])],
             lang="eng",
             retokenize=True,
             mwt={},
@@ -314,14 +301,7 @@ def _run_v2_morphosyntax(nlp, ctx, tmp_path, *, retokenize, request_id):
     host = TextExecutionHostV2(morphosyntax_runner=_runner)
 
     batch_payload = {
-        "items": [
-            {
-                "words": ["gonna", "eat", "cookies", "."],
-                "terminator": ".",
-                "special_forms": [[None, None]] * 4,
-                "lang": "eng",
-            }
-        ],
+        "items": [morphosyntax_item(["gonna", "eat", "cookies"])],
         "mwt": {},
     }
     artifact_path = tmp_path / f"morphosyntax_batch_{request_id}.json"

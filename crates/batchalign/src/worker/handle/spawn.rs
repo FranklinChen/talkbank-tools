@@ -15,6 +15,7 @@ use super::config::WorkerConfig;
 use super::protocol::TcpReadySignal;
 use crate::worker::error::WorkerError;
 use crate::worker::provider_credentials::HkAsrCredentialSources;
+use crate::worker::python::worker_command;
 use crate::worker::serving::WorkerServing;
 use crate::worker::target::task_name;
 use crate::worker::{WorkerBootstrapMode, WorkerProfile, WorkerTarget};
@@ -32,10 +33,8 @@ use crate::worker::{WorkerBootstrapMode, WorkerProfile, WorkerTarget};
 /// keys workers by that struct; missing a field there would silently let
 /// it share workers across configs that should be distinct.
 pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
-    let mut cmd = StdCommand::new(&config.python_path);
-    cmd.arg("-c")
-        .arg("import sys; sys.argv = ['batchalign-worker'] + sys.argv[1:]; from batchalign.worker import main; main()")
-        .stdin(Stdio::piped())
+    let mut cmd = worker_command(&config.python_path);
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -155,10 +154,8 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
     // Memory guard, same as WorkerHandle::spawn().
     let spawn_permit = crate::worker::memory_guard::acquire_spawn_permit(config).await?;
 
-    let mut cmd = StdCommand::new(&config.python_path);
-    cmd.arg("-c")
-        .arg("import sys; sys.argv = ['batchalign-worker'] + sys.argv[1:]; from batchalign.worker import main; main()")
-        .arg("--transport")
+    let mut cmd = worker_command(&config.python_path);
+    cmd.arg("--transport")
         .arg("tcp")
         .arg("--profile")
         .arg(config.profile.name())

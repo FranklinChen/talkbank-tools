@@ -12,6 +12,9 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -485,6 +488,30 @@ def _extract_token_timestamps(
 # ---------------------------------------------------------------------------
 # Routing torchaudio's decode entry point away from torchcodec
 # ---------------------------------------------------------------------------
+
+
+#: The start of pyannote's import-time notice when torchcodec is absent
+#: (`pyannote/audio/core/io.py`). Matched as a regex against the message start.
+_PYANNOTE_TORCHCODEC_NOTICE = r"\s*torchcodec is not installed correctly"
+
+
+@contextmanager
+def pyannote_import_without_torchcodec_notice() -> Iterator[None]:
+    """Import pyannote.audio without its warning that decoding "will fail".
+
+    pyannote warns at import time when torchcodec is missing. torchcodec is
+    excluded from Batchalign on purpose (the reasons are in `pyproject.toml`),
+    and Batchalign always hands pyannote in-memory `{"waveform",
+    "sample_rate"}` audio, the path that never decodes. So the notice is false
+    for us, and it lands in every worker log and test run that loads speaker
+    models. Only that one message is silenced, and only around the import;
+    every other warning still reaches the caller.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=_PYANNOTE_TORCHCODEC_NOTICE, category=UserWarning
+        )
+        yield
 
 
 class SoundfileBackendInstall(StrEnum):

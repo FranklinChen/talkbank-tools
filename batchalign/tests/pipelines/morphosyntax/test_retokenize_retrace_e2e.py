@@ -54,6 +54,11 @@ def test_morphotag_retokenize_with_retrace_succeeds() -> None:
                 str(input_path),
                 "-o",
                 str(output_dir),
+                # In process, as the sibling end-to-end tests run. Without it
+                # the CLI this test builds finds any local server, whose build
+                # stamp it never matches, and refuses: the test then passed
+                # only when no server happened to be running.
+                "--sequential",
             ],
             capture_output=True,
             text=True,

@@ -228,10 +228,10 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
 /// word Stanza received before any MWT expansion. Matching is
 /// case-insensitive.
 ///
-/// Returns `None` for any input not in the allowlist; the normal
-/// `assemble_mors` path then handles it. This is what keeps genuine
-/// verb+clitic compounds like `dammela`, `portalo`, `dammelo` on
-/// the correct `~`-merged path.
+/// Returns `None` for any input not in the allowlist. Genuine
+/// verb+clitic compounds (`portalo`) then keep Stanza's split on the
+/// `~`-merged path; the ones in `IT_COMPOUND_IMPERATIVES` (`dammela`)
+/// take the curated analysis instead (see `try_handle_italian_range_override`).
 fn check_italian_mis_split(range_parent_text: &str) -> Option<&'static MisSplitOverride> {
     // All allowlist `joined_text` entries are pure ASCII, so
     // `eq_ignore_ascii_case` is correct and zero-allocation.
@@ -290,6 +290,31 @@ pub fn try_handle_italian_range_override(
         return Ok(Some((mor, provenance)));
     }
 
+    // A known compound imperative that Stanza split: the curated analysis
+    // replaces Stanza's components however it split them. Stanza 1.14 split
+    // `dammela` as `da` VERB with imperfect-indicative features; 1.15, in
+    // context, as `da` ADP. Neither is the imperative the word is.
+    if let Some(over) = compound_imperative_for_surface(&ud.text) {
+        let UdId::Range(start, end) = ud.id else {
+            return Ok(None);
+        };
+        let (head, deprel) = range_attachment(components, start, end);
+        let mor = apply_compound_imperative_override(over, head, deprel, ctx)?;
+        let main_deprel = normalize_deprel(deprel, || format!("collapsed Range {:?}", ud.text))?;
+        let mut provenance: MorProvenance = smallvec![ChunkProvenance::collapsed_range(
+            (start..=end).collect(),
+            ChunkHead::from_ud_head(head),
+            main_deprel,
+        )];
+        for clitic in over.clitics {
+            let deprel = normalize_deprel(clitic.deprel, || {
+                format!("synthesized clitic {:?} in {:?}", clitic.text, over.surface)
+            })?;
+            provenance.push(ChunkProvenance::synthetic_post_clitic(deprel));
+        }
+        return Ok(Some((mor, provenance)));
+    }
+
     if let Some(rewrite) = check_italian_component_rewrite(&ud.text) {
         let rewritten = apply_component_rewrite(rewrite, components);
         return assemble_mors(&rewritten, ctx).map(Some);
@@ -300,28 +325,23 @@ pub fn try_handle_italian_range_override(
 
 // ─── Defect 8: mid-sentence compound imperative mis-classification ──
 //
-// Stanza-1.11.1 Italian mis-tags certain imperative+enclitic
-// compound words as ADJ with a vowel-normalized lemma when they
-// appear mid-sentence (e.g. `per favore dammela` → single UD word
-// `dammela` tagged ADJ with lemma `dammelo`). There is **no MWT
-// Range**: Stanza emits one word per input, unlike the standalone
-// case where Stanza correctly fires its MWT processor and produces
-// a 3-word verb+clitic decomposition. The injection pipeline
-// therefore can't rely on the same Range-branch hook used by
-// Defects 6 and 7; the fix fires on `UdId::Single` values that
-// match a surface-form allowlist of known compound imperatives.
+// Stanza mis-analyses known imperative+enclitic compounds, and the
+// shape of the mistake has changed across versions:
 //
-// Scope trade-off: this reconciler emits a **single-chunk** `Mor`
-// overriding the POS (`ADJ → VERB`) and lemma (`dammelo → dare`).
-// It does NOT decompose the compound into its main verb plus
-// clitic post-clitics; that would require producing a multi-
-// chunk Mor from one UdId::Single, which would invalidate the
-// chunk-index accounting used by `build_gra_and_validate`.
-// Consumers lose the clitic structure mid-sentence but gain the
-// correct POS and verb lemma, which is still a substantial
-// improvement over `adj|dammelo-S1`. Multi-chunk decomposition is
-// a future enhancement if the chunk accounting is extended to
-// support per-UD-word expansion counts.
+// - 1.11.1: mid-sentence `dammela` was ONE word, ADJ, lemma `dammelo`
+//   (no MWT Range), while the isolated word split correctly.
+// - 1.14.0: the word split into `da` VERB + `me` + `la`, but with
+//   imperfect-indicative features (`Mood=Ind|Tense=Imp`) and the feature
+//   name misspelled `Verbform`.
+// - 1.15.0 in context: the word split into `da` ADP + `me` + `la`.
+//
+// The curated table below is the analysis of each surface, whatever Stanza
+// did with it: `try_handle_italian_single_override` applies it to an
+// unsplit word tagged ADJ, NOUN or VERB, and `try_handle_italian_range_override`
+// to a split one, replacing the components. Either way the result is one
+// `Mor` of the imperative verb with its clitics stacked as post-clitics
+// (`verb|dare-Fin-Imp-S2~pron|me-...~pron|la-...`), and the verb keeps the
+// word's attachment to the rest of the clause.
 
 /// One post-clitic in a reconciled Italian compound imperative.
 ///
@@ -570,10 +590,26 @@ fn check_italian_compound_imperative(
     ) {
         return None;
     }
+    compound_imperative_for_surface(text)
+}
+
+/// The curated analysis of a known compound imperative, by surface alone.
+fn compound_imperative_for_surface(text: &str) -> Option<&'static CompoundImperativeOverride> {
     // All allowlist `surface` entries are pure ASCII.
     IT_COMPOUND_IMPERATIVES
         .iter()
         .find(|o| o.surface.eq_ignore_ascii_case(text))
+}
+
+/// Where a split word as a whole attaches in the sentence: the head and
+/// relation of its first component whose head lies outside the split, so the
+/// word's own internal arcs are not mistaken for its place in the clause.
+/// A split with no such component is the clause root.
+fn range_attachment(components: &[UdWord], start: usize, end: usize) -> (usize, &str) {
+    components
+        .iter()
+        .find(|c| c.head == 0 || !(start..=end).contains(&c.head))
+        .map_or((0, "root"), |c| (c.head, c.deprel.as_str()))
 }
 
 /// Apply a compound-imperative override by synthesizing the main

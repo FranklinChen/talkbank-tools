@@ -38,7 +38,6 @@ _HEBREW_FIXTURE = (
     "@ID:\theb|test|PAR|||||Adult|||\n"
     "*PAR:\tבבית גדול .\n"
     "*PAR:\tמהילד הזה .\n"
-    "*PAR:\tלאישה היפה .\n"
     "@End\n"
 )
 
@@ -47,8 +46,11 @@ _HEBREW_FIXTURE = (
 _HEBREW_MWT_SURFACES_PER_LINE: list[list[str]] = [
     ["בבית"],  # line 1: בבית splits as ב+בית
     ["מהילד", "הזה"],  # line 2: מהילד and הזה both split
-    ["לאישה"],  # line 3: לאישה splits as ל+אישה
 ]
+# `לאישה היפה` was a third line until Stanza 1.15.0 stopped splitting
+# `לאישה` (2026-10-01). That is Stanza's model, not this wiring, so it is
+# pinned as a strict xfail in test_stanza_he_el_et_mwt_splits.py; the two
+# lines above still prove BA3 keeps Hebrew MWT on.
 
 
 _GREEK_FIXTURE = (

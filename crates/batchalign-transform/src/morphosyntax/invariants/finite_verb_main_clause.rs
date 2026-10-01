@@ -1,24 +1,80 @@
 //! Finite-verb-requirement rescue for English copula-progressive constructions.
+//!
+//! Stanza reads `the sink's overflowing .` with `'s` as a possessive, leaving
+//! the clause without a finite verb. It has misparsed this in two shapes:
+//!
+//! - through 1.14, a noun phrase: `sink` is `nmod:poss` of the `-ing` word,
+//!   which is a NOUN carrying the NOUN lemma (`washing`, `barking`);
+//! - from 1.15 (UD 2.18), `sink` is the `nsubj` of the `-ing` word, which is a
+//!   VERB with `VerbForm=Ger` and a verbal lemma, while `'s` is still the
+//!   possessive `case` marker on `sink`.
+//!
+//! Both are rewritten to the same analysis: `'s` is the finite copula `be`, the
+//! `-ing` word the present participle heading the clause. The participle must
+//! carry a VERB lemma. In the gerund shape Stanza supplies one; in the noun
+//! shape the worker asks Stanza's lemmatizer for the word's verb reading and
+//! sends it in the UD MISC field as `VerbReadingLemma=...`
+//! (`batchalign/inference/_english_verb_reading.py`). Without a verb lemma
+//! there is no rescue: a VERB with a noun lemma (`verb|barking`) is a
+//! fabricated analysis, which is what this rule existed to prevent.
 
 use crate::morphosyntax::{
     DepRel, FINITE_COPULA_PRES_3SG, PRESENT_PARTICIPLE, UdId, UdPunctable, UdSentence, UdWord,
-    UniversalPos,
+    UniversalPos, has_key_value, ud_pair_value,
 };
+use verb_lemma::VerbLemma;
+
+/// The UD MISC key under which the worker sends an English `-ing` noun's
+/// lemma as a verb. Must match `VERB_READING_LEMMA_MISC_KEY` in
+/// `batchalign/inference/_english_verb_reading.py`.
+pub const VERB_READING_LEMMA_MISC_KEY: &str = "VerbReadingLemma";
 
 /// English-specific rewrite, in place. Returns the input untouched when no
 /// rescue applies.
 pub fn rescue_english_copula_progressive(mut sentence: UdSentence) -> UdSentence {
     if let Some(plan) = detect_rescue(&sentence) {
-        apply_rescue(&mut sentence, &plan);
+        apply_rescue(&mut sentence, plan);
     }
     sentence
 }
 
-#[derive(Debug, Clone, Copy)]
+mod verb_lemma {
+    /// The verb lemma the promoted `-ing` word will carry: a non-empty lemma
+    /// from Stanza's own verbal analysis. Its field is private to this module,
+    /// so [`VerbLemma::parse`] is the only way to make one and the rescue
+    /// cannot promote a word to VERB with a missing or placeholder lemma.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct VerbLemma(String);
+
+    impl VerbLemma {
+        /// Stanza writes `_` for a lemma it could not produce; that and the
+        /// empty string are not lemmas.
+        pub(super) fn parse(raw: &str) -> Option<Self> {
+            match raw {
+                "" | "_" => None,
+                lemma => Some(Self(lemma.to_string())),
+            }
+        }
+
+        pub(super) fn into_string(self) -> String {
+            self.0
+        }
+    }
+}
+
+/// An `-ing` word in one of the two misparse shapes, as one classification:
+/// its id, and its verb lemma when the analysis supplies one.
+struct IngHead {
+    id: usize,
+    verb_lemma: Option<VerbLemma>,
+}
+
+#[derive(Debug, Clone)]
 struct RescuePlan {
     part_id: usize,
     possessor_id: usize,
     verb_id: usize,
+    verb_lemma: VerbLemma,
     old_root_id: usize,
 }
 
@@ -44,19 +100,25 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
     if !matches!(possessor_upos, UniversalPos::Noun | UniversalPos::Propn) {
         return None;
     }
-    if possessor.dep_rel() != DepRel::NmodPoss {
-        return None;
-    }
 
-    let mut ing_candidates = sentence.words.iter().filter(|w| is_ing_noun(w));
-    let verb = ing_candidates.next()?;
-    if ing_candidates.next().is_some() {
+    let mut ing_heads = sentence.words.iter().filter_map(ing_head);
+    let IngHead {
+        id: verb_id,
+        verb_lemma,
+    } = ing_heads.next()?;
+    if ing_heads.next().is_some() {
         return None;
     }
-    let verb_id = match verb.id {
-        UdId::Single(n) => n,
+    // The two misparse shapes (module docs): a possessor of the noun phrase,
+    // or the subject of the gerund. Any other relation is not this defect.
+    match possessor.dep_rel() {
+        DepRel::NmodPoss => {}
+        DepRel::NSubj if possessor.head == verb_id => {}
         _ => return None,
-    };
+    }
+    // No verb lemma, no rescue: a VERB with a noun's lemma is the fabrication
+    // this rule exists to prevent.
+    let verb_lemma = verb_lemma?;
 
     let root = sentence
         .words
@@ -76,17 +138,21 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
         part_id,
         possessor_id,
         verb_id,
+        verb_lemma,
         old_root_id,
     })
 }
 
-fn apply_rescue(sentence: &mut UdSentence, plan: &RescuePlan) {
+fn apply_rescue(sentence: &mut UdSentence, plan: RescuePlan) {
     let RescuePlan {
         part_id,
         possessor_id,
         verb_id,
+        verb_lemma,
         old_root_id,
-    } = *plan;
+    } = plan;
+    // Moved into the one word it belongs to, the first time that word is met.
+    let mut verb_lemma = Some(verb_lemma.into_string());
 
     for word in &mut sentence.words {
         let id_n = match word.id {
@@ -106,6 +172,9 @@ fn apply_rescue(sentence: &mut UdSentence, plan: &RescuePlan) {
             word.head = verb_id;
         } else if id_n == verb_id {
             word.upos = UdPunctable::Value(UniversalPos::Verb);
+            if let Some(lemma) = verb_lemma.take() {
+                word.lemma = lemma;
+            }
             word.xpos = Some("VBG".to_string());
             word.feats = Some(PRESENT_PARTICIPLE.to_string());
             word.deprel = DepRel::Root.as_str().to_string();
@@ -131,8 +200,29 @@ fn is_possessive_part(word: &UdWord) -> bool {
         && word.dep_rel() == DepRel::Case
 }
 
-fn is_ing_noun(word: &UdWord) -> bool {
-    matches!(&word.upos, UdPunctable::Value(UniversalPos::Noun)) && ends_with_ing(&word.text)
+/// Classify a word as an `-ing` head of either misparse shape, once: a NOUN
+/// (verb lemma from the worker's `VerbReadingLemma`), or a gerund VERB (verb
+/// lemma from Stanza). Only single-id words can head the clause.
+fn ing_head(word: &UdWord) -> Option<IngHead> {
+    let UdId::Single(id) = word.id else {
+        return None;
+    };
+    if !ends_with_ing(&word.text) {
+        return None;
+    }
+    let verb_lemma = match &word.upos {
+        UdPunctable::Value(UniversalPos::Noun) => {
+            ud_pair_value(word.misc.as_deref(), VERB_READING_LEMMA_MISC_KEY)
+                .and_then(VerbLemma::parse)
+        }
+        UdPunctable::Value(UniversalPos::Verb)
+            if has_key_value(word.feats.as_deref(), "VerbForm", "Ger") =>
+        {
+            VerbLemma::parse(&word.lemma)
+        }
+        _ => return None,
+    };
+    Some(IngHead { id, verb_lemma })
 }
 
 fn ends_with_ing(text: &str) -> bool {
@@ -171,6 +261,12 @@ mod tests {
             deps: None,
             misc: None,
         }
+    }
+
+    /// `w` as the worker sends an English `-ing` noun: with its verb lemma.
+    fn with_verb_reading(mut w: UdWord, lemma: &str) -> UdWord {
+        w.misc = Some(format!("{VERB_READING_LEMMA_MISC_KEY}={lemma}"));
+        w
     }
 
     fn punct_word(id: UdId, text: &str, head: usize) -> UdWord {
@@ -243,14 +339,17 @@ mod tests {
                     3,
                     "case",
                 ),
-                word(
-                    UdId::Single(5),
-                    "overflowing",
+                with_verb_reading(
+                    word(
+                        UdId::Single(5),
+                        "overflowing",
+                        "overflow",
+                        UniversalPos::Noun,
+                        Some("Number=Sing"),
+                        0,
+                        "root",
+                    ),
                     "overflow",
-                    UniversalPos::Noun,
-                    Some("Number=Sing"),
-                    0,
-                    "root",
                 ),
                 punct_word(UdId::Single(6), ".", 5),
             ],
@@ -288,14 +387,17 @@ mod tests {
                     2,
                     "case",
                 ),
-                word(
-                    UdId::Single(4),
-                    "washing",
-                    "washing",
-                    UniversalPos::Noun,
-                    Some("Number=Sing"),
-                    5,
-                    "compound",
+                with_verb_reading(
+                    word(
+                        UdId::Single(4),
+                        "washing",
+                        "washing",
+                        UniversalPos::Noun,
+                        Some("Number=Sing"),
+                        5,
+                        "compound",
+                    ),
+                    "wash",
                 ),
                 word(
                     UdId::Single(5),
@@ -352,6 +454,8 @@ mod tests {
 
         let v = find_by_id(&out, 4);
         assert!(matches!(v.upos, UdPunctable::Value(UniversalPos::Verb)));
+        // Stanza's NOUN lemma was `washing`; the verb carries the verb reading.
+        assert_eq!(v.lemma, "wash");
         assert_eq!(v.deprel, "root");
         assert_eq!(v.head, 0);
         assert_eq!(v.feats.as_deref().unwrap(), "Tense=Pres|VerbForm=Part");
@@ -366,6 +470,64 @@ mod tests {
 
         let dot = find_by_id(&out, 6);
         assert_eq!(dot.head, 4);
+    }
+
+    /// Stanza 1.15's shape: the subject is `nsubj` of a gerund VERB whose
+    /// lemma is already verbal, and `'s` is still the possessive marker.
+    fn fixture_sink_gerund() -> UdSentence {
+        let mut s = fixture_sink();
+        for w in &mut s.words {
+            match w.id {
+                UdId::Single(3) => w.deprel = "nsubj".to_string(),
+                UdId::Single(5) => {
+                    w.upos = UdPunctable::Value(UniversalPos::Verb);
+                    w.feats = Some("VerbForm=Ger".to_string());
+                    w.misc = None;
+                }
+                _ => {}
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn gerund_shape_from_stanza_1_15_is_rescued() {
+        let out = rescue_english_copula_progressive(fixture_sink_gerund());
+        let s = find_by_id(&out, 4);
+        assert!(matches!(s.upos, UdPunctable::Value(UniversalPos::Aux)));
+        assert_eq!(s.lemma, "be");
+        let v = find_by_id(&out, 5);
+        assert!(matches!(v.upos, UdPunctable::Value(UniversalPos::Verb)));
+        assert_eq!(v.lemma, "overflow");
+        assert_eq!(v.feats.as_deref().unwrap(), "Tense=Pres|VerbForm=Part");
+        assert_eq!(find_by_id(&out, 3).deprel, "nsubj");
+    }
+
+    #[test]
+    fn gerund_shape_whose_subject_heads_elsewhere_is_left_alone() {
+        let mut s = fixture_sink_gerund();
+        for w in &mut s.words {
+            if w.id == UdId::Single(3) {
+                w.head = 2;
+            }
+        }
+        assert_unchanged(s);
+    }
+
+    #[test]
+    fn noun_shape_without_a_verb_reading_is_left_alone() {
+        let mut s = fixture_lady();
+        for w in &mut s.words {
+            w.misc = None;
+        }
+        assert_unchanged(s);
+    }
+
+    #[test]
+    fn a_placeholder_lemma_is_not_a_verb_lemma() {
+        assert_eq!(VerbLemma::parse("_"), None);
+        assert_eq!(VerbLemma::parse(""), None);
+        assert!(VerbLemma::parse("bark").is_some());
     }
 
     #[test]

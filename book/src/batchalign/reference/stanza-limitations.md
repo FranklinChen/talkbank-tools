@@ -1,8 +1,8 @@
 # Stanza Limitations: Observed Defects with Version Pinning
 
 **Status:** Reference (living document, update when Stanza behavior changes)
-**Last updated:** 2026-09-22 17:57 EDT
-**Current Stanza pin:** `stanza[transformers]>=1.14.0,<1.15` (see `pyproject.toml`)
+**Last updated:** 2026-10-01 07:10 EDT
+**Current Stanza pin:** `stanza[transformers]>=1.15.0,<1.16` (see `pyproject.toml`)
 **Current English MWT package:** `gum`
 
 > **2026-05-14, Stanza 1.12.0 upgrade:** every defect below was
@@ -43,6 +43,45 @@
 > individually rechecked defect. Dependency-parse repair is now enabled
 > by default; a typed-AST corpus review remains separate from the golden
 > suite and must not be replaced by a serialized-tier survey.
+
+> **2026-10-01, Stanza 1.15.0 upgrade** (models rebuilt on UD 2.18):
+> every golden failure was attributed by running the same BA3 code on
+> 1.14.0 and 1.15.0. Verdicts:
+>
+> - **Defect 12 (new): the Greek lemmatizer does not load.** Its
+>   contextual sub-model names a build-machine pretrain path; repaired
+>   in the loader.
+> - **Defect 1 changed shape.** `sink` is now `nsubj` of a gerund VERB
+>   (`VerbForm=Ger`) rather than `nmod:poss` of a NOUN; the rescue
+>   matches both. It also kept Stanza's NOUN lemma on the rescued verb
+>   (`verb|washing`, on 1.14.0 too); it now takes a verb lemma from
+>   Stanza's lemmatizer or does not rescue.
+> - **Defect 8 changed shape.** In context `dammela` is now split as
+>   preposition `da` plus clitics; the curated analysis now replaces any
+>   split of a listed surface, and the terminator no longer changes
+>   Stanza's reading.
+> - **Defect 5 residue: Hebrew `לאישה` is no longer split** (ADV,
+>   lemma `לאיש`); `בבית`, `מהילד`, `הזה` still are. Pinned as a strict
+>   xfail.
+> - **Isolated contractions now split** in Portuguese (`do`, `da`,
+>   `na`), Spanish and Catalan (`del`), German (`am`, `zur`, `beim`) and
+>   French (`au`); French `des` alone no longer does. The probes were
+>   re-locked; `%mor` is one item either way.
+> - **English `eg`/`ie`** (CHAT spellings of e.g./i.e.) read ADP/PROPN
+>   rather than NOUN/ADP: re-locked observations.
+> - **Cantonese:** `唔` is now ADV (correct); `佢` is PUNCT rather than
+>   PROPN. BA3 still takes Cantonese POS from PyCantonese.
+> - **Italian `Verbform`:** Stanza spells the feature name `Verbform`
+>   (1.14.0 and 1.15.0); the worker respells it, and BA3 no longer
+>   invents `Inf` for a verb without `VerbForm` (an inherited default
+>   that produced `dare-Inf-Ind-Imp-S2`).
+> - **Defects 2, 6, 7, 9, 10, 11 confirmed**, with no XPASS.
+>
+> On a ten-language corpus sample compared with `batchalign3
+> compare-runs morphotag`, most Stanza-side changes are features 1.14.0
+> left out and 1.15.0 supplies, such as Person on pronouns (French `lui`
+> `S1` to `S3`, German `du` `S1` to `S2`), PronType, Mood and `Art` on
+> articles.
 
 > **See also:**
 > [Stanza Defect Mitigation Map](../architecture/stanza-defect-mitigation-map.md)
@@ -85,7 +124,7 @@ observed behavior.
 
 ## Defect 1: Copula `'s` vs possessive `'s` disambiguation fails before nominal gerunds
 
-* **Stanza version:** 1.10.1, 1.11.1, 1.12.0, 1.12.1, and 1.13.0 (all confirmed; re-verified by `test_stanza_mwt_copula_observations.py` against 1.12.1 on 2026-05-28 and against 1.13.0 on 2026-06-19)
+* **Stanza version:** 1.10.1, 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0 and 1.15.0 (confirmed; 1.15.0 in a new shape, see below, on 2026-10-01)
 * **MWT package:** `gum`
 * **Construction:** `<noun>'s <word-ending-in-ing>` in a main clause.
 
@@ -178,6 +217,23 @@ Handles two sub-patterns:
   word is promoted to root, the former root is demoted to `obj`,
   subject and punctuation are reattached.
 
+**The 1.15.0 shape (2026-10-01).** Stanza 1.15.0 (UD 2.18) no longer
+reads the whole sentence as a noun phrase. `sink` becomes the `nsubj` of
+`overflowing`, which is now a VERB with `VerbForm=Ger`, while `'s` is
+still the possessive PART/`case` on `sink`. Still no finite verb. The
+rescue accepts the possessor as `nmod:poss` (the old shape) or as the
+`nsubj` of the `-ing` word (the new one), and an `-ing` word that is a
+NOUN or a gerund VERB.
+
+**The verb lemma.** Promoting a NOUN to VERB used to keep the NOUN's
+lemma, so `the lady's washing dishes` gave `verb|washing` (and
+`the dog's barking` `verb|barking`), on 1.14.0 as on 1.15.0. A verb
+lemma is now required: for a gerund VERB it is Stanza's own; for an
+`-ing` NOUN the worker asks Stanza's lemmatizer for the word's VERB
+reading (`batchalign/inference/_english_verb_reading.py`) and sends it
+in UD MISC as `VerbReadingLemma=wash`. Without one the sentence is not
+rescued: a verb with a noun's lemma is a fabricated analysis.
+
 Implementation: `crates/batchalign-transform/src/morphosyntax/invariants/finite_verb_main_clause.rs::rescue_english_copula_progressive`.
 Dispatcher: `crates/batchalign-transform/src/morphosyntax/invariants.rs::apply_grammatical_invariants`.
 Hook point: `crates/batchalign-transform/src/morphosyntax/injection.rs:276`
@@ -187,11 +243,14 @@ Hook point: `crates/batchalign-transform/src/morphosyntax/injection.rs:276`
 
 ### Tests
 
-**Rust unit tests** (14 tests, all GREEN):
+**Rust unit tests**:
 `crates/batchalign-transform/src/morphosyntax/invariants/finite_verb_main_clause.rs`
-`#[cfg(test)]` block, 2 positive rewrite tests (sink pattern A, lady
-pattern B), 10 negative no-op tests covering distinct precondition
-failure modes.
+`#[cfg(test)]` block: positive rewrites for the noun shape (sink pattern A,
+lady pattern B, which also checks the verb lemma `wash`) and the 1.15.0
+gerund shape; no-op tests for a gerund whose subject heads elsewhere, a noun
+with no verb reading, a copula before an adjective and existential `there`;
+and the `VerbLemma` and `-ing` predicates. The worker's verb-reading evidence
+is tested in `batchalign/tests/pipelines/morphosyntax/test_english_verb_reading.py`.
 
 **Python end-to-end tests** (new file, 2 tests, all GREEN):
 `batchalign/tests/pipelines/morphosyntax/test_preserve_mwt_end_to_end.py`
@@ -249,7 +308,7 @@ item; not scheduled.
 
 ## Defect 2: MWT hint tuples must be preserved through postprocessors (Stanza/Python interop gotcha)
 
-* **Stanza version:** 1.10.1, 1.11.1, 1.12.0, 1.12.1, and 1.13.0 (all confirmed; re-verified by `test_stanza_mwt_copula_observations.py` against 1.12.1 on 2026-05-28 and against 1.13.0 on 2026-06-19)
+* **Stanza version:** 1.10.1, 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0 and 1.15.0 (all confirmed; re-verified by `test_stanza_mwt_copula_observations.py`, most recently against 1.15.0 on 2026-10-01)
 * **Nature:** Not strictly a Stanza bug, a contract that the
   `tokenize_postprocessor` API places on callers but does not document
   prominently. Easy to violate in a wrapper that flattens tuples to strings.
@@ -547,6 +606,14 @@ Per-language behavior with this fix:
 
 ### Practical impact on linguistic output
 
+> **Stanza 1.15.0, Hebrew (2026-10-01):** MWT still fires for Hebrew, and
+> `בבית`, `מהילד` and `הזה` still split, but `לאישה` ("to the woman") no
+> longer does: it comes back whole as ADV with lemma `לאיש`. The model, not
+> BA3's processor selection, changed. Pinned as a strict `xfail` in
+> `test_stanza_he_el_et_mwt_splits.py`, so a fixed release shows as XPASS. A
+> ten-language corpus sample showed no Hebrew lemma, POS or feature changes
+> between 1.14.0 and 1.15.0, so the regression is narrow.
+
 **Swedish (was crashing, now runs without MWT).** Stanza never
 shipped a Swedish MWT model. Swedish orthography keeps most function
 words separate, so the loss of MWT mostly does not affect ``%mor``
@@ -675,7 +742,7 @@ per-word morphological features would be wrong, and the resulting
 <a id="stanza-it-verb-clitic-pos-split"></a>
 
 * **Stable slug:** ``stanza-it-verb-clitic-pos-split``
-* **Stanza version:** 1.11.1, 1.12.0, 1.12.1, and 1.13.0 (all confirmed; re-verified via MWT probe matrix `xfail` markers held on 2026-05-28 and again on 2026-06-19, zero XPASS)
+* **Stanza version:** 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0 and 1.15.0 (all confirmed; MWT probe matrix `xfail` markers held, zero XPASS, most recently on 2026-10-01 against 1.15.0)
 * **MWT package:** Italian default
 * **Failure class:** linguistic-content quality. Stage 3's MWT Range
   reassembly
@@ -905,7 +972,7 @@ evidence can extend it case-by-case.
 <a id="stanza-it-la-sentence-initial-split"></a>
 
 * **Stable slug:** ``stanza-it-la-sentence-initial-split``
-* **Stanza version:** 1.11.1, 1.12.0, 1.12.1, and 1.13.0 (all confirmed; re-verified via MWT probe matrix `xfail` markers held on 2026-05-28 and again on 2026-06-19, zero XPASS)
+* **Stanza version:** 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0 and 1.15.0 (all confirmed; MWT probe matrix `xfail` markers held, zero XPASS, most recently on 2026-10-01 against 1.15.0)
 * **MWT package:** Italian default
 * **Failure class:** linguistic-content quality. Stage 3's
   `assemble_mors` collapses the bogus 2-word expansion into a single
@@ -1023,7 +1090,7 @@ audit context.
 <a id="stanza-en-lexicon-unambiguous-category-lost-to-terminator"></a>
 
 * **Stable slug:** ``stanza-en-lexicon-unambiguous-category-lost-to-terminator``
-* **Stanza version:** 1.11.1 and 1.14.0 (both confirmed 2026-09-10 with
+* **Stanza version:** 1.11.1, 1.14.0 and 1.15.0 (`whoops .` still `whoop` NOUN `Number=Plur` on 1.15.0, 2026-10-01, while `doggy` in `where's the doggy ?` is now NOUN; earlier versions confirmed 2026-09-10 with
   `combined_charlm`; the `ewt` and `gum` POS packages show the same
   behaviour for `whoops` and differ only on `doggy`)
 * **MWT package:** `gum`
@@ -1141,7 +1208,7 @@ single model version is expected to make true.
 <a id="stanza-en-chat-contractions-not-expanded"></a>
 
 * **Stable slug:** ``stanza-en-chat-contractions-not-expanded``
-* **Stanza version:** 1.14.0 (confirmed 2026-09-10, `combined_charlm`,
+* **Stanza version:** 1.14.0 and 1.15.0 (`hafta` still one AUX token on 1.15.0, 2026-10-01; 1.14.0 confirmed 2026-09-10, `combined_charlm`,
   MWT `gum`)
 * **MWT package:** `gum`
 * **Failure class:** tokenization and linguistic content. One CHAT word
@@ -1232,7 +1299,7 @@ table's (lemma, category, tree).
 <a id="stanza-en-isolated-communicator-read-as-content-word"></a>
 
 * **Stable slug:** ``stanza-en-isolated-communicator-read-as-content-word``
-* **Stanza version:** 1.14.0 (confirmed 2026-09-10, `combined_charlm`)
+* **Stanza version:** 1.14.0 and 1.15.0 (`okay` and `right` still ADJ on 1.15.0, 2026-10-01; 1.14.0 confirmed 2026-09-10, `combined_charlm`)
 * **MWT package:** `gum`
 * **Failure class:** linguistic-content quality. The parse is fine; the
   category of one word is wrong, and the evidence that settles it is in
@@ -1332,7 +1399,7 @@ Stanza release offers.
 <a id="stanza-it-compound-imperative-mid-sentence-adj"></a>
 
 * **Stable slug:** ``stanza-it-compound-imperative-mid-sentence-adj``
-* **Stanza version:** 1.11.1, 1.12.0, 1.12.1, and 1.13.0 (all confirmed; re-verified via MWT probe matrix `xfail` markers held on 2026-05-28 and again on 2026-06-19, zero XPASS)
+* **Stanza version:** 1.11.1, 1.12.0, 1.12.1, 1.13.0, 1.14.0 and 1.15.0 (all confirmed; MWT probe matrix `xfail` markers held, zero XPASS, most recently on 2026-10-01 against 1.15.0)
 * **MWT package:** Italian default
 * **Failure class:** linguistic-content quality. Stanza tokenizes
   the compound correctly (one UD word) but mis-classifies its POS
@@ -1366,22 +1433,24 @@ Stanza UD output (mid-sentence): [
 ### BA3 mitigation (ACTIVE)
 
 `crates/batchalign-transform/src/morphosyntax/lang_it.rs` carries a second
-allowlist `IT_COMPOUND_IMPERATIVES` separate from the
-Defect-6/7 `IT_MIS_SPLIT_OVERRIDES`. Entries name the surface
-form, the correct verb lemma, and the correct feats. Current
-entries: `dammela → dare`, `dammelo → dare`. The reconciler fires
-inside `map_ud_sentence`'s `UdId::Single` branch, gated on
-`upos == ADJ` + text match against the allowlist.
+allowlist `IT_COMPOUND_IMPERATIVES` separate from the Defect-6/7
+`IT_MIS_SPLIT_OVERRIDES`. Each row names the surface form, the verb lemma, the
+imperative features and the enclitics (`dammela`: `dare`, 2sg imperative, `me`
+and `la`). The row is the analysis of that surface whatever Stanza did with it:
 
-**Scope**: the mitigation emits a **single-chunk** `Mor`
-(`verb|dare-Imp-S2`) rather than decomposing the compound into
-verb + clitic post-clitics. This is a scope trade-off, a multi-
-chunk emission from a single UdWord would require extending
-`build_gra_and_validate`'s chunk-counting logic (currently
-assumes `UdId::Single` → exactly one chunk). The single-chunk
-fix captures the correct POS and verb lemma, which is a
-substantial improvement over `adj|dammelo`. Multi-chunk
-decomposition is a future enhancement.
+- **Unsplit** (one UD word tagged ADJ, NOUN or VERB):
+  `try_handle_italian_single_override`.
+- **Split** (a Range, from 2026-10-01): `try_handle_italian_range_override`
+  replaces the components. Stanza 1.14.0 split `dammela` with `da` as a verb in
+  the imperfect indicative; 1.15.0 in context splits it with `da` as a
+  preposition and the clitics attached to `favore`.
+
+Either way the output is one `Mor` with the clitics stacked as post-clitics,
+`verb|dare-Fin-Imp-S2~pron|me-Prs-S1~pron|la-Prs-S3`, and the verb keeps the
+word's attachment to the clause (for a split, the first component whose head
+lies outside the split). Context words Stanza mis-tags around the compound are
+not repaired: 1.15.0 reads `per favore prendilo .` with `per` and `favore` as
+verbs, which no allowlist row can address.
 
 **Extension**: new compound imperatives observed in corpus data
 are added as one row to `IT_COMPOUND_IMPERATIVES` plus a
@@ -1394,6 +1463,12 @@ regression test in `morphosyntax/tests.rs`.
   - `test_italian_defect8_dammela_mid_sentence_becomes_verb`
   - `test_italian_defect8_dammelo_mid_sentence_becomes_verb`
   - `test_italian_defect8_genuine_adj_stays_adj` (control)
+- **Split-shape unit tests** in
+  `crates/batchalign/src/chat_ops/nlp/mapping/tests/italian_collapse.rs`:
+  - `test_italian_dammela_split_as_preposition_takes_the_curated_imperative`
+    (the 1.15.0 shape)
+  - `test_italian_dammela_split_with_indicative_features_takes_the_imperative`
+    (the 1.14.0 shape)
 - **Allowlist unit tests** in
   `crates/batchalign-transform/src/morphosyntax/lang_it.rs`.
 - **End-to-end golden** in
@@ -1406,12 +1481,12 @@ regression test in `morphosyntax/tests.rs`.
 
 ### Re-evaluation criteria
 
-If a Stanza upgrade produces a correct multi-chunk MWT expansion
-for mid-sentence compound imperatives (i.e., Stanza emits a Range
-for `dammela` wherever it appears), the Defect 8 allowlist entries
-become redundant. Remove them and let the Defect-6/7 Range branch
-handle the case uniformly. Tracked by the unit-test RED signal
-when the reconciler is disabled and Stanza is re-observed.
+A split alone does not make the allowlist redundant: 1.14.0 and 1.15.0 both
+split `dammela`, wrongly (imperfect-indicative `da`, then prepositional `da`).
+The rows become redundant only when Stanza's own analysis of each listed
+surface, unsplit and split, in isolation and in context, is the imperative
+with its clitics. Check that with the overrides disabled before removing any
+row.
 
 ---
 
@@ -1470,6 +1545,62 @@ covers the rest. `is_geminated_split` in `_italian_mwt.py` is defined, tested
 and uncalled against that decision.
 
 ---
+
+## Defect 12: Greek lemmatizer names a build-machine pretrain path
+
+<a id="stanza-el-lemma-pretrain-path"></a>
+
+* **Stable slug:** ``stanza-el-lemma-pretrain-path``
+* **Stanza version:** 1.15.0 (confirmed 2026-10-01, `el/lemma/gdt_nocharlm`)
+* **Failure class:** model packaging. Every Greek pipeline with a `lemma`
+  processor fails to load, so Greek morphotag and utterance segmentation
+  cannot run at all.
+
+### Symptom
+
+```text
+FileNotFoundError: Pretrained file /nlp/scr/<user>/stanza_resources/el/pretrain/conll17.pt
+does not exist, and no text/xz file was provided
+```
+
+### Cause
+
+The lemmatizer checkpoint carries a contextual sub-model (a lemma classifier)
+that needs a word-vector pretrain. Stanza supplies it through the pipeline
+option `lemma_pretrain_path`, filled from the lemma package's `pretrain`
+dependency in `resources.json`; when the option is absent the sub-model reads
+the path saved in the checkpoint at training time. The 1.15.0 catalog lists no
+dependency for this package, and the saved path is the training machine's. The
+file it names, `el/pretrain/conll17.pt`, is installed locally. A scan of all 28
+installed 1.15.0 lemmatizers found the defect in Greek only.
+
+### BA3 mitigation (ACTIVE)
+
+`batchalign/worker/_stanza_lemma_pretrain.py`. Before building a pipeline with
+a lemmatizer, the worker resolves the lemma model the pipeline will load
+(through Stanza's own `maintain_processor_list`, so a bundle such as Japanese
+`combined` resolves to `combined_nocharlm`), downloads it if absent, and reads
+its checkpoint. A stored pretrain path that exists is left to Stanza. A missing
+one is relocated: its `<lang>/pretrain/<file>` tail under our resources
+directory, which must exist, is passed as `lemma_pretrain_path`. Anything else
+stops loading with `StanzaLemmaPretrainError`; there is no fallback to another
+pretrain, because a contextual model given vectors it was not trained with
+would load and mislabel silently. Stanza's model-free `identity` lemmatizer
+(Thai, Vietnamese and five others) needs nothing. Applied to every lemma-bearing
+pipeline: morphotag, Mandarin retokenize and the utterance-segmentation config.
+
+### Tests
+
+- `batchalign/tests/test_stanza_lemma_pretrain.py`: fake checkpoints for the
+  usable, relocated and refused cases, and the identity lemmatizer.
+- Golden: `test_he_el_mwt_end_to_end.py` (Greek morphotag end to end) and the
+  Greek rows of the MWT probe matrix, which load the real model.
+
+### Re-evaluation criteria
+
+When a Stanza release lists the pretrain dependency or stores a relative path,
+`lemma_pretrain_options("el")` returns `{}` and the repair is inert; it can
+then be removed with this entry.
 
 ## Process for adding entries
 

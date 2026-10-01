@@ -49,35 +49,38 @@ class TestStanzaCantonesePos:
         )
 
     def test_cantonese_pronouns_misclassified(self) -> None:
-        """Stanza classifies Cantonese pronouns 佢/佢哋 as PROPN, not PRON.
+        """Stanza does not tag the Cantonese pronouns 佢/佢哋 as PRON.
 
         Mandarin uses 他/他們 for he/they. 佢/佢哋 are Cantonese-specific
-        and absent from the Mandarin training data.
+        and absent from the Mandarin training data. Through Stanza 1.14.0
+        both came back PROPN; 1.15.0 tags 佢 as PUNCT (re-locked
+        2026-10-01). The claim pinned is the misclassification, not which
+        wrong tag it lands on.
         """
         nlp = self._load_stanza()
 
         pos = self._get_pos_map(nlp, "佢 係 好 人")
-        assert pos["佢"] == "PROPN", (
-            f"Expected Stanza to misclassify 佢 as PROPN (not PRON), got {pos['佢']}. "
-            "If this changed, Stanza may have improved its Cantonese coverage."
+        assert pos["佢"] != "PRON", (
+            f"佢 was tagged PRON; Stanza may have improved its Cantonese coverage. "
+            f"Got {pos['佢']}."
         )
 
         pos2 = self._get_pos_map(nlp, "佢哋 好 鍾意 食 嘢")
-        assert pos2["佢哋"] == "PROPN", (
-            f"Expected Stanza to misclassify 佢哋 as PROPN, got {pos2['佢哋']}."
+        assert pos2["佢哋"] != "PRON", (
+            f"佢哋 was tagged PRON; Stanza may have improved. Got {pos2['佢哋']}."
         )
 
-    def test_cantonese_negation_misclassified(self) -> None:
-        """Stanza classifies Cantonese negation 唔 as VERB, not ADV.
+    def test_cantonese_negation_tagged_adv_since_stanza_1_15(self) -> None:
+        """Stanza 1.15.0 tags Cantonese negation 唔 as ADV, which is right.
 
-        Mandarin uses 不/没 for negation. 唔 is Cantonese-specific.
+        Mandarin uses 不/没 for negation; 唔 is Cantonese-specific. Through
+        1.14.0 Stanza tagged it VERB (this test then pinned the error). The
+        improvement was observed 2026-10-01; BA3 still takes Cantonese POS
+        from PyCantonese, so this records Stanza's state, not ours.
         """
         nlp = self._load_stanza()
         pos = self._get_pos_map(nlp, "你 知 唔 知道")
-        assert pos["唔"] != "ADV", (
-            f"唔 was correctly classified as ADV, Stanza may have improved. "
-            f"Got {pos['唔']}."
-        )
+        assert pos["唔"] == "ADV", f"唔 is no longer tagged ADV. Got {pos['唔']}."
 
     def test_cantonese_ye_misclassified(self) -> None:
         """Stanza classifies Cantonese 嘢 (thing/stuff) as PUNCT or PART, not NOUN.

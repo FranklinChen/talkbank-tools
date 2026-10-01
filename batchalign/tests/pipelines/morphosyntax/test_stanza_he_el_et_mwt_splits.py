@@ -41,13 +41,25 @@ if TYPE_CHECKING:
 # These are linguistically standard examples drawn from elementary
 # Hebrew morphology references; the splits Stanza produces match
 # the underlying lexical decomposition (prep + def + noun, etc.).
-_HEBREW_CASES: list[tuple[str, str, list[str]]] = [
+_HEBREW_CASES: list[tuple[str, str, list[str]] | pytest.ParameterSet] = [
     # "in the (big) house": בְּ "in" + הַ "the" (absorbed) + בית "house"
     ("בבית גדול", "בבית", ["ב", "בית"]),
     # "from the boy": מִ "from" + הַ "the" + יֶלֶד "boy"
     ("מהילד הזה", "מהילד", ["מ", "ה", "ילד"]),
     # "to the (beautiful) woman": לְ "to" + אישה "woman"
-    ("לאישה היפה", "לאישה", ["ל", "אישה"]),
+    pytest.param(
+        "לאישה היפה",
+        "לאישה",
+        ["ל", "אישה"],
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason=(
+                "Stanza 1.15.0 regression, observed 2026-10-01: the word is no "
+                "longer split and is tagged ADV with lemma לאיש. Split correctly "
+                "through 1.14.0. Strict, so a Stanza fix shows up as XPASS."
+            ),
+        ),
+    ),
     # "this": הַ "the" + זֶה "this"
     ("מהילד הזה", "הזה", ["ה", "זה"]),
 ]
@@ -121,12 +133,17 @@ def greek_pipeline() -> stanza.Pipeline:
     import stanza
     from stanza import DownloadMethod
 
+    from batchalign.worker._stanza_lemma_pretrain import lemma_pretrain_options
+
     return stanza.Pipeline(
         lang="el",
         processors="tokenize,pos,lemma,depparse,mwt",
         download_method=DownloadMethod.REUSE_RESOURCES,
         tokenize_no_ssplit=True,
         verbose=False,
+        # The production repair for Stanza 1.15's Greek lemmatizer, which
+        # names a build-machine pretrain path.
+        **lemma_pretrain_options("el"),
     )
 
 

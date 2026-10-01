@@ -67,13 +67,16 @@ CASES: tuple[DecisionProbeCase, ...] = (
                 ),
             ),
         ),
-        expected_outcome=DecisionOutcome.POST_STRICTLY_BETTER,
+        expected_outcome=DecisionOutcome.POST_NEUTRAL,
         rationale=(
-            "Without the terminator Stanza reads `dammela` as ADJ with lemma "
-            "`dammelo` and does not MWT-expand it at all; with it, the model "
-            "produces the correct `dare` + me + la. This is the mechanism "
-            "behind the mis-tagged head reported for this surface, and the "
-            "reason the worker must pass the terminator it is given."
+            "Through Stanza 1.14.0, without the terminator Stanza read "
+            "`dammela` as ADJ with lemma `dammelo` and did not MWT-expand it; "
+            "with it, the model produced `dare` + me + la, which is why the "
+            "worker passes the terminator it is given. Re-locked 2026-10-01: "
+            "1.15.0 reads it as ADJ either way, so the terminator no longer "
+            "helps here. The curated analysis in "
+            "`batchalign-transform/src/morphosyntax/lang_it.rs` covers the "
+            "word unsplit or split, so %mor does not depend on this."
         ),
         candidate_class=CandidateClass.SENTENCE_PERIOD,
     ),
@@ -89,12 +92,13 @@ CASES: tuple[DecisionProbeCase, ...] = (
                 gold=Gold(pre_upos=("VERB",), post_upos=("VERB",)),
             ),
         ),
-        expected_outcome=DecisionOutcome.POST_STRICTLY_BETTER,
+        expected_outcome=DecisionOutcome.POST_NEUTRAL,
         rationale=(
-            "The control for the force-split hypothesis. Presented already "
-            "split, the host `da` is still ADP without the terminator and "
-            "VERB `dare` with it, so the enclisis split is not what causes "
-            "the prepositional reading."
+            "The control for the force-split hypothesis. Through Stanza "
+            "1.14.0, presented already split, the host `da` was ADP without "
+            "the terminator and VERB `dare` with it, so the enclisis split was "
+            "not what caused the prepositional reading. Re-locked 2026-10-01: "
+            "1.15.0 reads `da` as ADP either way."
         ),
         candidate_class=CandidateClass.SENTENCE_PERIOD,
     ),

@@ -121,5 +121,5 @@ pub use types::{
 pub use ud_types::{
     DepRel, FINITE_COPULA_PRES_3SG, PRESENT_PARTICIPLE, UdId, UdPunctable, UdResponse, UdSentence,
     UdWord, UniversalPos, VerbForm, has_key_value, has_verb_form_fin, is_bogus_lemma,
-    sanitize_mor_text, validate_and_clean,
+    sanitize_mor_text, ud_pair_value, validate_and_clean,
 };

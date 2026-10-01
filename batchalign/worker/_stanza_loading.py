@@ -32,6 +32,7 @@ from batchalign.worker._stanza_capabilities import (
     StanzaCapabilityTable,
     get_cached_capability_table,
 )
+from batchalign.worker._stanza_lemma_pretrain import lemma_pretrain_options
 from batchalign.worker._types import _state
 
 L = logging.getLogger("batchalign.worker")
@@ -49,6 +50,11 @@ L = logging.getLogger("batchalign.worker")
 _STANZA_CHINESE_ALPHA2: frozenset[str] = frozenset(
     _ISO3_OVERRIDES[iso3] for iso3 in ("cmn", "zho", "yue")
 )
+
+# The one Stanza package Japanese is loaded with, for every processor. Named
+# once because the lemma pretrain repair must read the same lemma model the
+# pipeline loads.
+_JA_PACKAGE = "combined"
 
 # One process-wide creation of the pipeline cache, ordered by a lock because
 # two serving threads can reach a first load at the same time. The previous
@@ -299,45 +305,42 @@ def _build_stanza_models(lang: LanguageCode) -> None:
     # that wait via the progress channel so every UI shows it to the user.
     _emit_stanza_lang_download_event_if_missing(lang, alpha2)
 
+    # Options every branch shares. The lemma pretrain repair (see
+    # `_stanza_lemma_pretrain`) is in here, rather than repeated per branch,
+    # so a new branch cannot be written without it.
+    lemma_package = _JA_PACKAGE if alpha2 == "ja" else None
+    common = {
+        "lang": alpha2,
+        "processors": processors,
+        "download_method": DownloadMethod.REUSE_RESOURCES,
+        "tokenize_no_ssplit": True,
+        **lemma_pretrain_options(alpha2, lemma_package),
+    }
+
     # The Stanza pipeline shape varies by language because tokenization and MWT
     # support are not uniform across the supported languages.
     if alpha2 == "ja":
         nlp = stanza.Pipeline(
-            lang=alpha2,
-            processors=processors,
-            download_method=DownloadMethod.REUSE_RESOURCES,
-            tokenize_no_ssplit=True,
+            **common,
             tokenize_pretokenized=True,
             package={
-                "tokenize": "combined",
-                "pos": "combined",
-                "lemma": "combined",
-                "depparse": "combined",
+                "tokenize": _JA_PACKAGE,
+                "pos": _JA_PACKAGE,
+                "lemma": _JA_PACKAGE,
+                "depparse": _JA_PACKAGE,
             },
         )
     elif not has_mwt:
-        nlp = stanza.Pipeline(
-            lang=alpha2,
-            processors=processors,
-            download_method=DownloadMethod.REUSE_RESOURCES,
-            tokenize_no_ssplit=True,
-            tokenize_pretokenized=True,
-        )
+        nlp = stanza.Pipeline(**common, tokenize_pretokenized=True)
     elif alpha2 == "en":
         nlp = stanza.Pipeline(
-            lang=alpha2,
-            processors=processors,
-            download_method=DownloadMethod.REUSE_RESOURCES,
-            tokenize_no_ssplit=True,
+            **common,
             tokenize_postprocessor=make_tokenizer_postprocessor(ctx, alpha2),
             package={"mwt": "gum"},
         )
     else:
         nlp = stanza.Pipeline(
-            lang=alpha2,
-            processors=processors,
-            download_method=DownloadMethod.REUSE_RESOURCES,
-            tokenize_no_ssplit=True,
+            **common,
             tokenize_postprocessor=make_tokenizer_postprocessor(
                 ctx, alpha2, italian_policy
             ),
@@ -410,6 +413,7 @@ def _build_stanza_retokenize_model(
         download_method=DownloadMethod.REUSE_RESOURCES,
         tokenize_no_ssplit=True,
         tokenize_pretokenized=False,
+        **lemma_pretrain_options(alpha2),
     )
 
     pipeline_cache().install(retok_key, nlp, context=ctx)
@@ -767,6 +771,9 @@ def load_utseg_builder(lang: LanguageCode) -> None:
             configs[alpha2_code] = {
                 "processors": ",".join(sorted(processors)),
                 "tokenize_pretokenized": True,
+                # `lemma` is always requested above, so the lemmatizer's
+                # pretrain repair applies here as in morphotag.
+                **lemma_pretrain_options(alpha2_code),
             }
         return lang_alpha2, configs
 

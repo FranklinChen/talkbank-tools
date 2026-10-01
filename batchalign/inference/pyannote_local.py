@@ -150,8 +150,11 @@ def resolve_huggingface_hub_token(*, config_path: Path | None = None) -> str | N
 def _load_pipeline(config: dict[str, Any], *, token: str | None) -> object | None:
     """Keep the heavyweight Pyannote import behind the lazy model boundary."""
 
+    from batchalign.inference.audio import pyannote_import_without_torchcodec_notice
+
     try:
-        from pyannote.audio import Pipeline as PyannotePipeline
+        with pyannote_import_without_torchcodec_notice():
+            from pyannote.audio import Pipeline as PyannotePipeline
     except ImportError as exc:
         raise ImportError(
             "Speaker diarization requires pyannote.audio, which is not installed.\n"

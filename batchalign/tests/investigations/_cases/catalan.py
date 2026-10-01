@@ -21,6 +21,10 @@ free-tokenize variant is observation-only (no assertion) and
 serves as a Stanza-drift sentinel: if Stanza's native MWT behavior
 changes, the free-mode output will diff from the pinned value and
 the change surfaces for review.
+
+2026-10-01 (Stanza 1.15.0): isolated ``del`` now MWT-expands to
+``de``+``el``. Re-locked at 2. Final CHAT output is one ``%mor`` item
+either way.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ CASES: tuple[ProbeCase, ...] = (
     # ── Preposition + article natives (`al`, `del`, `pel`) ─────────
     # Under postprocessor: 1 UD word (Stanza MWT does not fire).
     ProbeCase("al_alone", ("al",), Phenomenon.NATIVE_MWT, expected_post_mwt_count=1),
-    ProbeCase("del_alone", ("del",), Phenomenon.NATIVE_MWT, expected_post_mwt_count=1),
+    ProbeCase("del_alone", ("del",), Phenomenon.NATIVE_MWT, expected_post_mwt_count=2),
     ProbeCase("pel_alone", ("pel",), Phenomenon.NATIVE_MWT, expected_post_mwt_count=1),
     # ── Article / pronoun apostrophe elision ───────────────────────
     # Free-tokenize WOULD split these 1-to-2; postprocessor keeps

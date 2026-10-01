@@ -36,6 +36,7 @@ def test_retokenize_retrace_utterance_returns_correct_count() -> None:
 
     from batchalign.inference._tokenizer_realign import TokenizerContext
     from batchalign.inference.morphosyntax import batch_infer_morphosyntax
+    from batchalign.tests._morphosyntax_batch_items import morphosyntax_item
     from batchalign.worker._types import BatchInferRequest, InferTask
 
     nlp = stanza.Pipeline(
@@ -50,7 +51,7 @@ def test_retokenize_retrace_utterance_returns_correct_count() -> None:
     req = BatchInferRequest(
         task=InferTask.MORPHOSYNTAX,
         lang="yue",
-        items=[{"words": words, "terminator": ".", "lang": "yue"}],
+        items=[morphosyntax_item(words, lang="yue")],
         retokenize=True,
     )
 

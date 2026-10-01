@@ -297,6 +297,15 @@ fn has_key_value_matches_exact_pairs() {
 }
 
 #[test]
+fn ud_pair_value_reads_one_key_among_several() {
+    let misc = Some("SpaceAfter=No|VerbReadingLemma=bark|Note=a=b");
+    assert_eq!(ud_pair_value(misc, "VerbReadingLemma"), Some("bark"));
+    assert_eq!(ud_pair_value(misc, "Note"), Some("a=b"));
+    assert_eq!(ud_pair_value(misc, "Verb"), None);
+    assert_eq!(ud_pair_value(None, "SpaceAfter"), None);
+}
+
+#[test]
 fn canonical_ud_feat_bundles_are_alphabetical() {
     for bundle in [FINITE_COPULA_PRES_3SG, PRESENT_PARTICIPLE] {
         let keys: Vec<&str> = bundle

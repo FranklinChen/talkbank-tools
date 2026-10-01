@@ -12,6 +12,11 @@ preposition+article and idiomatic contractions). Locked to
 observed counts as Stanza-drift sentinels. The BA2 ``ForceMwt``
 rule for ``d'água`` is thus retired with evidence: BA3 achieves
 the same single-UD-word outcome natively.
+
+2026-10-01 (Stanza 1.15.0): isolated ``do``, ``da`` and ``na`` now
+MWT-expand to 2 UD words (``de``+``o``, ``de``+``a``, ``em``+``a``).
+The second word comes back as PRON (lemma ``o`` / ``ela``) rather than the
+article. Re-locked at 2. Final CHAT output is one ``%mor`` item either way.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ CASES: tuple[ProbeCase, ...] = (
         expected_post_mwt_count=3,
     ),
     # ── Native MWT controls ──
-    ProbeCase("do_alone", ("do",), Phenomenon.NATIVE_MWT, 1),
-    ProbeCase("da_alone", ("da",), Phenomenon.NATIVE_MWT, 1),
-    ProbeCase("na_alone", ("na",), Phenomenon.NATIVE_MWT, 1),
+    ProbeCase("do_alone", ("do",), Phenomenon.NATIVE_MWT, 2),
+    ProbeCase("da_alone", ("da",), Phenomenon.NATIVE_MWT, 2),
+    ProbeCase("na_alone", ("na",), Phenomenon.NATIVE_MWT, 2),
 )

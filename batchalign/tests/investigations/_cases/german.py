@@ -11,6 +11,10 @@ sentinels. Stanza's German MWT coverage is per-token inconsistent:
 ``im`` and ``zum`` MWT-expand to 2 UD words. Both in-context cases
 expand. Downstream Rust-side Range reassembly collapses back to
 1-to-1 for CHAT output, so production parity is preserved.
+
+2026-10-01 (Stanza 1.15.0): isolated ``am``, ``zur`` and ``beim`` now
+MWT-expand (``an``+``dem``, ``zu``+``der``, ``bei``+``dem``). Re-locked
+at 2. Final CHAT output is one ``%mor`` item either way.
 """
 
 from __future__ import annotations
@@ -18,11 +22,11 @@ from __future__ import annotations
 from .._probe_types import Phenomenon, ProbeCase
 
 CASES: tuple[ProbeCase, ...] = (
-    ProbeCase("am_alone", ("am",), Phenomenon.NATIVE_MWT, 1),
+    ProbeCase("am_alone", ("am",), Phenomenon.NATIVE_MWT, 2),
     ProbeCase("im_alone", ("im",), Phenomenon.NATIVE_MWT, 2),
     ProbeCase("zum_alone", ("zum",), Phenomenon.NATIVE_MWT, 2),
-    ProbeCase("zur_alone", ("zur",), Phenomenon.NATIVE_MWT, 1),
-    ProbeCase("beim_alone", ("beim",), Phenomenon.NATIVE_MWT, 1),
+    ProbeCase("zur_alone", ("zur",), Phenomenon.NATIVE_MWT, 2),
+    ProbeCase("beim_alone", ("beim",), Phenomenon.NATIVE_MWT, 2),
     ProbeCase(
         "am_in_context",
         ("er", "geht", "am", "Morgen"),

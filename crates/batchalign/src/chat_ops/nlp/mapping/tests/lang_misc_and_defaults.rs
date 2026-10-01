@@ -81,8 +81,10 @@ fn test_italian_mwt_contraction_della() {
 }
 
 #[test]
-fn test_verb_default_verbform_inf() {
-    // ba2: VerbForm defaults to "Inf" when not present (ALL languages)
+fn a_verb_without_verbform_gets_no_invented_form() {
+    // Batchalign 2 wrote `Inf` onto every verb whose analysis lacked
+    // `VerbForm`, in every language; a form the tagger did not assign is not
+    // ours to invent, so none is written.
     for lang in ["fr", "de", "es", "it", "pt", "ja", "ko", "he"] {
         let ctx = MappingContext {
             lang: talkbank_model::model::LanguageCode::new(lang).expect("valid test language code"),
@@ -103,8 +105,8 @@ fn test_verb_default_verbform_inf() {
         let mut out = String::new();
         mor.write_chat(&mut out).unwrap();
         assert!(
-            out.contains("-Inf-"),
-            "VerbForm must default to Inf for lang={lang}, got: {out}"
+            !out.contains("Inf"),
+            "no VerbForm must yield no form suffix for lang={lang}, got: {out}"
         );
     }
 }

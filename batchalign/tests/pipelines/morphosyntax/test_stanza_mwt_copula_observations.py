@@ -490,20 +490,20 @@ class TestBatchInferPreservePayloadToRust:
         import threading
 
         from batchalign.inference.morphosyntax import batch_infer_morphosyntax
+        from batchalign.tests._morphosyntax_batch_items import (
+            chat_words_of,
+            first_raw_sentence,
+            morphosyntax_item,
+        )
         from batchalign.worker._types import BatchInferRequest
 
         nlp, ctx = english_pipeline_with_postprocessor
 
+        # The fixture's tokens end with the terminator, which Stanza is given
+        # as text; the batch item carries only the CHAT words.
         req = BatchInferRequest(
             task="morphosyntax",
-            items=[
-                {
-                    "words": words,
-                    "terminator": ".",
-                    "special_forms": [[None, None]] * len(words),
-                    "lang": "eng",
-                }
-            ],
+            items=[morphosyntax_item(chat_words_of(words))],
             lang="eng",
             retokenize=False,
             mwt={},
@@ -516,9 +516,7 @@ class TestBatchInferPreservePayloadToRust:
             free_threaded=False,
         )
 
-        result = response.results[0].result
-        raw_sentences = result.get("raw_sentences", [[]])
-        first_sent = raw_sentences[0]
+        first_sent = first_raw_sentence(response)
 
         # The Range entry whose surface matches the contracted token.
         contracted = f"{label}'s"

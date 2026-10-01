@@ -307,3 +307,34 @@ def test_valid_ud_relations_pass_through_untouched() -> None:
         assert _repaired_relation(deprel, "foo") == (deprel, None), (
             f"{deprel!r} must survive untouched, and report no repair"
         )
+
+
+def test_misspelled_feature_name_is_respelled_and_its_value_kept() -> None:
+    """Stanza's Italian `Verbform=Fin` must reach Rust as `VerbForm=Fin`."""
+    sentence = RepairedSentence(
+        [
+            {
+                "id": 1,
+                "text": "da",
+                "lemma": "dare",
+                "upos": "VERB",
+                "feats": "Mood=Ind|Number=Sing|Person=2|Tense=Imp|Verbform=Fin",
+                "head": 0,
+                "deprel": "root",
+            }
+        ]
+    )
+    assert (
+        sentence.words[0]["feats"]
+        == "Mood=Ind|Number=Sing|Person=2|Tense=Imp|VerbForm=Fin"
+    )
+    # A spelling repair is not a relation repair and is not reported as one.
+    assert sentence.repairs == ()
+
+
+def test_feature_names_already_in_ud_spelling_pass_through() -> None:
+    feats = "PronType=Int,Rel|Person=3"
+    sentence = RepairedSentence(
+        [{"id": 1, "text": "who", "feats": feats, "head": 0, "deprel": "root"}]
+    )
+    assert sentence.words[0]["feats"] == feats

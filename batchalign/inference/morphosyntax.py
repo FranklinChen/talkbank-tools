@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ValidationError, model_validator
 
 from batchalign.inference._domain_types import LanguageCode
+from batchalign.inference._english_verb_reading import annotate_verb_reading_lemmas
 from batchalign.worker._pipeline_cache import (
     LoadedPipeline,
     PipelineLookup,
@@ -333,6 +334,27 @@ UD_DEPREL_ALIASES: dict[str, str] = {
     "iob": "iobj",
 }
 
+# Known misspellings of UD feature NAMES observed from Stanza, mapped to the UD
+# name. Stanza's Italian model writes `Verbform=Fin` (lower-case f) on verbs
+# such as the `da` of `dammela` (verified against stanza 1.14.0 and 1.15.0,
+# 2026-10-01). Every consumer looks for `VerbForm`, so the verb read as having
+# no form at all. The value is untouched: only the name is respelled, so the
+# analysis Stanza made is the analysis that arrives.
+UD_FEATURE_NAME_ALIASES: dict[str, str] = {
+    "Verbform": "VerbForm",
+}
+
+
+def _canonical_feature_names(feats: str | None) -> str | None:
+    """``feats`` with every known misspelled feature name respelled."""
+    if not feats:
+        return feats
+    pairs = []
+    for pair in feats.split("|"):
+        name, sep, value = pair.partition("=")
+        pairs.append(UD_FEATURE_NAME_ALIASES.get(name, name) + sep + value)
+    return "|".join(pairs)
+
 
 class UdWord(BaseModel, extra="allow"):
     """A single UD word/token: mirrors Rust ``UdWord`` in types.rs.
@@ -611,6 +633,8 @@ class RepairedSentence:
                     validated.text,
                 )
                 validated.lemma = validated.text
+
+            validated.feats = _canonical_feature_names(validated.feats)
 
             relation, repair = _repaired_relation(validated.deprel, validated.text)
             if repair is not None:
@@ -1078,8 +1102,11 @@ def batch_infer_morphosyntax(
             with _maybe_lock():
                 with _realignment_applied(mode):
                     doc = entry.nlp(combined)
-
-            sents = doc.to_dict()
+                sents = doc.to_dict()
+                if lang_code == "eng":
+                    # Evidence for the Rust finite-verb rescue, computed by the
+                    # same pipeline under the same lock (see the module).
+                    annotate_verb_reading_lemmas(sents, entry.nlp)
 
             if len(sents) != len(indices):
                 # Stanza returned a different number of sentences than the

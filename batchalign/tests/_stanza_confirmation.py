@@ -89,5 +89,8 @@ CONFIRMED_STANZA_VERSIONS: frozenset[StanzaVersion] = frozenset(
         _v("1.12.1"),
         _v("1.13.0"),
         _v("1.14.0"),
+        # 2026-10-01: golden suite attributed on 1.14.0 vs 1.15.0 with the same
+        # BA3 code; see stanza-limitations.md, "Stanza 1.15.0 upgrade".
+        _v("1.15.0"),
     }
 )

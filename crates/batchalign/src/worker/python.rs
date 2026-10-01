@@ -7,7 +7,36 @@
 //! 4. Walk up from the binary looking for a `.venv` that has batchalign
 //! 5. `python3.13` on Unix-like systems, or `python` on Windows
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+
+/// The Python statement every worker process runs.
+const WORKER_ENTRY: &str = "import sys; sys.argv = ['batchalign-worker'] + sys.argv[1:]; from batchalign.worker import main; main()";
+
+/// `python -P`: an interpreter that does not put the current directory on
+/// `sys.path`.
+///
+/// Why: `python -c` prepends the working directory to `sys.path`, so a worker
+/// started by a server whose working directory is a source checkout imported
+/// `batchalign` from that checkout's working tree, uncommitted edits included,
+/// instead of the package installed beside the interpreter, while the build
+/// identity reported the installed build (observed 2026-10-01). `-P` (Python
+/// 3.11+; we require 3.13) removes that entry and nothing else, so an editable
+/// development install, which reaches its source through a `.pth` file, still
+/// works.
+pub(crate) fn isolated_python(python: impl AsRef<OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(python);
+    cmd.arg("-P");
+    cmd
+}
+
+/// The command that starts a worker: [`isolated_python`] running the worker
+/// entry point. Every route that starts a worker builds it here.
+pub(crate) fn worker_command(python: impl AsRef<OsStr>) -> std::process::Command {
+    let mut cmd = isolated_python(python);
+    cmd.arg("-c").arg(WORKER_ENTRY);
+    cmd
+}
 
 /// Runtime-owned inputs for resolving the worker Python executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +115,7 @@ fn venv_python_candidates(venv_dir: &Path) -> Vec<PathBuf> {
 
 /// Check whether a Python executable can import `batchalign.worker`.
 fn python_has_batchalign(python: &Path) -> bool {
-    std::process::Command::new(python)
+    isolated_python(python)
         .args(["-c", "import batchalign.worker"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -160,6 +189,40 @@ pub fn resolve_python_executable() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The real mechanism, on a real interpreter: a module sitting in the
+    /// working directory is importable by plain `python -c` and not by the
+    /// isolated command every worker is started with.
+    #[test]
+    fn isolated_python_does_not_import_from_the_working_directory() {
+        let cwd = tempfile::tempdir().expect("tmp");
+        let module = cwd.path().join("ba3_cwd_probe");
+        std::fs::create_dir(&module).expect("mkdir");
+        std::fs::write(module.join("__init__.py"), b"").expect("write");
+        let imports = |mut cmd: std::process::Command| {
+            cmd.args(["-c", "import ba3_cwd_probe"])
+                .current_dir(cwd.path())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("run python3")
+                .success()
+        };
+        assert!(
+            imports(std::process::Command::new("python3")),
+            "control: plain python -c imports from the working directory"
+        );
+        assert!(!imports(isolated_python("python3")));
+    }
+
+    #[test]
+    fn a_worker_command_is_isolated_and_runs_the_worker_entry() {
+        let cmd = worker_command("python3");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            [OsStr::new("-P"), OsStr::new("-c"), OsStr::new(WORKER_ENTRY)]
+        );
+    }
+
     use super::*;
 
     #[test]

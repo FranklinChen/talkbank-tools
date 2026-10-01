@@ -5,8 +5,6 @@
 //! for backgrounding and auto-restart. The CLI provides `start`, `list`, and
 //! `stop` subcommands for convenience.
 
-use std::process::Command;
-
 use crate::worker::python::resolve_python_executable;
 use crate::worker::registry::{self, RegistryEntry};
 use crate::worker::tcp_handle::{TcpWorkerHandle, TcpWorkerInfo};
@@ -50,7 +48,7 @@ fn start(
         .into());
     };
 
-    let mut cmd = Command::new(&python_path);
+    let mut cmd = crate::worker::python::worker_command(&python_path);
     // The daemon records this build in its registry entry; a server of a
     // different build refuses to adopt it rather than trust its engine
     // identities and wire contract.
@@ -58,9 +56,7 @@ fn start(
         crate::worker::registry::BUILD_IDENTITY_ENV,
         crate::build_hash(),
     );
-    cmd.arg("-c")
-        .arg("import sys; sys.argv = ['batchalign-worker'] + sys.argv[1:]; from batchalign.worker import main; main()")
-        .arg("--transport")
+    cmd.arg("--transport")
         .arg("tcp")
         .arg("--profile")
         .arg(&args.profile)

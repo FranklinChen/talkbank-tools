@@ -295,7 +295,8 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
 
     // --- Check 2: Worker module importable ---
     let start = Instant::now();
-    let import_check = Command::new(&python)
+    // Isolated as a real worker is, so this checks the import a worker does.
+    let import_check = crate::worker::python::isolated_python(&python)
         .args(["-c", "from batchalign.worker import main; print('ok')"])
         .output();
 

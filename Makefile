@@ -1,4 +1,4 @@
-.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-ml-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
+.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-ml-golden batchalign-test-python-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
 
 help:
 	@echo "talkbank-tools task index (batchalign3 workspace)"
@@ -119,6 +119,25 @@ batchalign-test-doc:
 batchalign-test-ml-golden:
 	@echo "==> ML golden suite (real engines; multi-GB models; needs credentials)"
 	cargo test -p batchalign --features ml-golden --test ml_golden -- --test-threads=1
+
+# The Python golden suite: real Stanza (and other NLP) models against
+# committed expectations (`pytest -m golden`, ~700 tests, about 90 s on a
+# machine with the models cached; downloads them otherwise).
+#
+# WHY THIS TARGET EXISTS. `pytest.ini` deselects `golden` by default and no
+# target or workflow selected it, so the suite ran only when someone
+# remembered. On 2026-10-01 it showed 19 failures that had been accumulating
+# since 2026-08-01: the worker began rejecting batch items whose words carry
+# the utterance terminator, and the golden tests that built items by hand were
+# never updated, because nothing ran them. This is the same gap
+# `batchalign-test-ml-golden` closed for the Rust ML suite.
+#
+# `--maxfail=1000000` is explicit because the test conftest makes interactive
+# runs stop at the first failure unless a limit is passed; a golden run must
+# report every failure, since each one has to be accounted for.
+batchalign-test-python-golden:
+	@echo "==> Python golden suite (real NLP models; pytest -m golden)"
+	uv run --no-sync pytest batchalign/tests -m golden -rfEX --maxfail=1000000
 
 batchalign-test-integration:
 	@echo "==> Running imported Batchalign CI hygiene..."

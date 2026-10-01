@@ -18,6 +18,10 @@ and on 1.13.0, so the change predates 1.13.0 (it landed with the
 1.12.1 Spanish updates). Zero production impact: final CHAT output
 is 1-to-1 either way. Re-locked ``del_alone`` at the new observed
 count (1).
+
+2026-10-01 (Stanza 1.15.0): isolated ``del`` MWT-expands again
+(``de``+``el``), reversing the 1.12.1 change re-locked above. Re-locked
+at 2. Final CHAT output is one ``%mor`` item either way.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from .._probe_types import Phenomenon, ProbeCase
 
 CASES: tuple[ProbeCase, ...] = (
     ProbeCase("al_alone", ("al",), Phenomenon.NATIVE_MWT, 1),
-    ProbeCase("del_alone", ("del",), Phenomenon.NATIVE_MWT, 1),
+    ProbeCase("del_alone", ("del",), Phenomenon.NATIVE_MWT, 2),
     ProbeCase(
         "al_in_context",
         ("voy", "al", "cine"),

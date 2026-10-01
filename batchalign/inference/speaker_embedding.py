@@ -165,11 +165,17 @@ def load_speaker_embedding_model() -> SpeakerEmbeddingModel:
         )
         token = resolve_huggingface_hub_token()
         checkpoint = _download_pinned_artifact(artifact, token=token)
+        from batchalign.inference.audio import (
+            pyannote_import_without_torchcodec_notice,
+        )
+
         try:
             import torch
-            from pyannote.audio.pipelines.speaker_verification import (
-                PretrainedSpeakerEmbedding,
-            )
+
+            with pyannote_import_without_torchcodec_notice():
+                from pyannote.audio.pipelines.speaker_verification import (
+                    PretrainedSpeakerEmbedding,
+                )
         except ImportError as exc:  # pragma: no cover - deploy-config error
             raise ImportError(
                 "Speaker identification requires pyannote.audio, which is not "

@@ -263,13 +263,13 @@ _TECHNICAL_CASES: tuple[DecisionProbeCase, ...] = (
             TokenMapping(
                 pre_token_indices=(1,),
                 post_token_indices=(1,),
-                gold=Gold(pre_upos=("ADV",), post_upos=("NOUN",)),
+                gold=Gold(pre_upos=("ADV",), post_upos=("ADP",)),
             ),
         ),
         rationale=(
-            "Stanza: pre ADV, post NOUN. Different-shaped gold per "
-            "side is legal under v2; each matches its own Stanza "
-            "observation." + _LOCK_Q_B
+            "Stanza: pre ADV, post ADP (NOUN through 1.14.0; re-locked "
+            "2026-10-01 for 1.15.0). Different-shaped gold per side is "
+            "legal under v2; each matches its own Stanza observation." + _LOCK_Q_B
         ),
         expected_outcome=DecisionOutcome.POST_NEUTRAL,
     ),
@@ -283,12 +283,13 @@ _TECHNICAL_CASES: tuple[DecisionProbeCase, ...] = (
             TokenMapping(
                 pre_token_indices=(2,),
                 post_token_indices=(2,),
-                gold=Gold(pre_upos=("ADV",), post_upos=("ADP",)),
+                gold=Gold(pre_upos=("ADV",), post_upos=("PROPN",)),
             ),
         ),
         rationale=(
-            "Stanza: pre ADV, post ADP. Same per-side pattern as "
-            "eg_inline; both match their respective golds." + _LOCK_Q_B
+            "Stanza: pre ADV, post PROPN (ADP through 1.14.0; re-locked "
+            "2026-10-01 for 1.15.0). Same per-side pattern as eg_inline; "
+            "both match their respective golds." + _LOCK_Q_B
         ),
         expected_outcome=DecisionOutcome.POST_NEUTRAL,
     ),

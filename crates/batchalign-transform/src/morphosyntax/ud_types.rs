@@ -274,13 +274,19 @@ impl VerbForm {
     }
 }
 
+/// The value of `key` in a UD `Key=Value|Key=Value` field (FEATS or MISC).
+/// Splits on the first `=` only, so a value may itself contain `=`.
+pub fn ud_pair_value<'a>(field: Option<&'a str>, key: &str) -> Option<&'a str> {
+    field?.split('|').find_map(|pair| {
+        pair.split_once('=')
+            .filter(|(k, _)| *k == key)
+            .map(|(_, v)| v)
+    })
+}
+
 /// Whether a feat string contains an exact `Key=Value` pair.
 pub fn has_key_value(feats: Option<&str>, key: &str, value: &str) -> bool {
-    let Some(s) = feats else {
-        return false;
-    };
-    let target = format!("{key}={value}");
-    s.split('|').any(|pair| pair == target)
+    ud_pair_value(feats, key) == Some(value)
 }
 
 /// Whether a feat string declares a finite verb form (`VerbForm=Fin`).

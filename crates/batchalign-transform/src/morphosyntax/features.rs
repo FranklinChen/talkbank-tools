@@ -87,11 +87,14 @@ pub(super) fn verb_features(
     }
 
     let mut suffixes = SmallVec::new();
-    let verb_form = feats
-        .get("VerbForm")
-        .cloned()
-        .unwrap_or_else(|| "Inf".to_string());
-    push_feature(&mut suffixes, &verb_form);
+    // The form Stanza gave, and none when it gave none. This used to default
+    // to `Inf`, inherited from Batchalign 2, which wrote an infinitive onto
+    // every verb whose analysis lacked the feature: the Italian imperative
+    // `da` of `dammela` became `dare-Inf-Ind-Imp-S2`, an infinitive in the
+    // indicative mood. A form the tagger did not assign is not ours to invent.
+    if let Some(verb_form) = feats.get("VerbForm") {
+        push_feature(&mut suffixes, verb_form);
+    }
     push_feat(&mut suffixes, feats, "Aspect");
     push_feat(&mut suffixes, feats, "Mood");
     push_feat(&mut suffixes, feats, "Tense");

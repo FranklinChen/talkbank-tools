@@ -238,6 +238,8 @@ def test_the_stanza_inference_lock_survives_a_reload(monkeypatch) -> None:
     fake_stanza.Pipeline = lambda *args, **kwargs: types.SimpleNamespace()
     fake_stanza.__version__ = "0.0-test"
     monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
+    # The lemma pretrain repair reads real model files; the load is faked.
+    monkeypatch.setattr(_stanza_loading, "lemma_pretrain_options", lambda *_: {})
 
     before = _stanza_loading._state.stanza_nlp_lock
     load_stanza_models("eng")
@@ -308,6 +310,8 @@ def test_two_threads_loading_one_retokenize_key_build_it_once(
     fake_stanza.DownloadMethod = types.SimpleNamespace(REUSE_RESOURCES=object())
     fake_stanza.Pipeline = _pipeline
     monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
+    # The lemma pretrain repair reads real model files; the build is faked.
+    monkeypatch.setattr(_stanza_loading, "lemma_pretrain_options", lambda *_: {})
 
     first = threading.Thread(target=load_stanza_retokenize_model, args=("zho",))
     second = threading.Thread(target=load_stanza_retokenize_model, args=("zho",))

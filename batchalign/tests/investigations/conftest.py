@@ -23,6 +23,7 @@ from batchalign.inference._tokenizer_realign import (
     TokenizerContext,
     make_tokenizer_postprocessor,
 )
+from batchalign.worker._stanza_lemma_pretrain import lemma_pretrain_options
 
 # Stanza is imported lazily inside the pipeline-builder helpers below.
 # Importing stanza at module scope costs ~1-2s on every pytest
@@ -79,6 +80,9 @@ def _pipeline_with_postprocessor(alpha2: str) -> tuple:
         tokenize_no_ssplit=True,
         tokenize_postprocessor=pp,
         verbose=False,
+        # The production repair for a lemmatizer naming a build-machine
+        # pretrain (Stanza 1.15 Greek); without it the probe cannot load.
+        **lemma_pretrain_options(alpha2),
     )
     return nlp, ctx
 
@@ -99,6 +103,7 @@ def _pipeline_free(alpha2: str):
         download_method=DownloadMethod.REUSE_RESOURCES,
         tokenize_no_ssplit=True,
         verbose=False,
+        **lemma_pretrain_options(alpha2),
     )
 
 

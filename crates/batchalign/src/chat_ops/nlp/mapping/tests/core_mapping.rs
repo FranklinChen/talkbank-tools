@@ -117,9 +117,9 @@ fn test_mwt_assembly_english_dont() {
     let mut out = String::new();
     mors[0].write_chat(&mut out).unwrap();
 
-    // AUX "do" gets verb suffixes (VerbForm=Inf default, Number=S)
-    // PART "not" gets no suffixes
-    assert_eq!(out, "aux|do-Inf-S~part|not");
+    // AUX "do" has no features here, so no form is written (none is
+    // invented); PART "not" gets no suffixes.
+    assert_eq!(out, "aux|do-S~part|not");
 }
 
 #[test]
@@ -253,8 +253,9 @@ fn test_feature_mapping_past_tense() {
     let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // Python: verb|walk-Inf-Past-S (VerbForm default "Inf", Tense "Past", Number default "S")
-    assert_eq!(out, "verb|walk-Inf-Past-S");
+    // No VerbForm in the analysis, so none is written (Batchalign 2 invented
+    // `Inf` here, an infinitive in the past tense).
+    assert_eq!(out, "verb|walk-Past-S");
 }
 
 #[test]

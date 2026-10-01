@@ -42,12 +42,16 @@ if TYPE_CHECKING:
 
 import pytest
 
+from batchalign.tests._morphosyntax_batch_items import (
+    first_raw_sentence,
+    morphosyntax_item,
+)
 from batchalign.worker._pipeline_cache import static_pipelines
 
 # Stanza pipeline fixtures are provided by conftest.py in this directory.
 
 
-# (label, sentence_text_for_stanza, word_list_for_CHAT, head_lemma)
+# (label, CHAT main-tier words without the terminator, head_lemma)
 #: ``head_lemma`` is the lemma of the noun/pronoun that precedes ``'s``.
 #
 # These mirror the ``COPULA_CONTRACTION_SENTENCES`` fixture in
@@ -55,10 +59,10 @@ from batchalign.worker._pipeline_cache import static_pipelines
 # this file needs: the Phase 0 file is the source of truth for expected
 # Stanza behavior.
 COPULA_CONTRACTION_SENTENCES = [
-    ("stool", ["the", "stool's", "going", "over", "."], "stool"),
-    ("he", ["and", "he's", "falling", "over", "."], "he"),
-    ("sink", ["and", "the", "sink's", "overflowing", "."], "sink"),
-    ("lady", ["the", "lady's", "washing", "dishes", "."], "lady"),
+    ("stool", ["the", "stool's", "going", "over"], "stool"),
+    ("he", ["and", "he's", "falling", "over"], "he"),
+    ("sink", ["and", "the", "sink's", "overflowing"], "sink"),
+    ("lady", ["the", "lady's", "washing", "dishes"], "lady"),
 ]
 
 
@@ -72,14 +76,7 @@ def _build_req(words: list[str]) -> BatchInferRequest:
 
     return BatchInferRequest(
         task="morphosyntax",
-        items=[
-            {
-                "words": words,
-                "terminator": ".",
-                "special_forms": [[None, None]] * len(words),
-                "lang": "eng",
-            }
-        ],
+        items=[morphosyntax_item(words)],
         lang="eng",
         retokenize=False,  # Preserve mode: the bug path
         mwt={},
@@ -87,10 +84,8 @@ def _build_req(words: list[str]) -> BatchInferRequest:
 
 
 def _first_sentence_raw(response) -> list[dict]:
-    """Pull ``raw_sentences[0]`` from a ``batch_infer_morphosyntax`` response."""
-    result = response.results[0].result
-    raw = result.get("raw_sentences", [[]])
-    return raw[0] if raw else []
+    """Pull ``raw_sentences[0]``, failing with the worker's error if it refused."""
+    return first_raw_sentence(response)
 
 
 def _find_contracted_chat_position(words: list[str], head_lemma: str) -> int:
@@ -240,8 +235,8 @@ class TestPreserveIPCClitcIsAUX:
     @pytest.mark.parametrize(
         "label,words,head_lemma",
         [
-            ("stool", ["the", "stool's", "going", "over", "."], "stool"),
-            ("he", ["and", "he's", "falling", "over", "."], "he"),
+            ("stool", ["the", "stool's", "going", "over"], "stool"),
+            ("he", ["and", "he's", "falling", "over"], "he"),
         ],
     )
     def test_clitic_component_has_aux_be(
