@@ -112,6 +112,18 @@ the two cannot disagree. It is always present, and empty when the run discarded
 nothing: an absent key and an empty one read identically to a consumer that does
 not know which schema version wrote the file.
 
+### Refused windows: `refused_window`
+
+A `window_refused` decision records that no alignment request was made for an
+utterance. From schema version 5 the decision also carries `refused_window`,
+an object tagged by `cause` that holds only the numbers that cause has:
+`over_budget` (`start_ms`, `end_ms`, `budget_ms`), `empty` (`at_ms`),
+`inverted` (`start_ms`, `end_ms`) and `past_recording` (`start_ms`, `end_ms`,
+`exceeds_by_ms`). In the domain it is the enum
+`batchalign_transform::decisions::RefusedWindow`, so a window cannot contradict
+its cause, and its `Display` is the only source of the prose `reason`. The
+field is absent on every other strategy.
+
 The full, incremental, complete-`%wor`, and grouping-empty paths all produce
 the same `FaFinalized` typestate. Optional repair is therefore always before
 the declared monotonicity policy, and a run with zero fresh inference groups

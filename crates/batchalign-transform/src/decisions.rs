@@ -128,7 +128,86 @@ pub enum FaStrategy {
     /// than a log line.
     UnplaceableRun,
     /// No request was made because the utterance window cannot fit the recording or engine budget.
-    WindowRefused,
+    ///
+    /// Carries the refused window itself, so the evidence file states its
+    /// bounds and the cause as data rather than only as prose in `reason`.
+    WindowRefused(RefusedWindow),
+}
+
+/// An audio window the grouping stage refused to send to the aligner.
+///
+/// One variant per cause, each holding only the numbers that exist for it, so
+/// a window cannot contradict its cause (an `Inverted` whose start precedes
+/// its end, an `Empty` with two different bounds). Plain `u64` milliseconds
+/// with a `_ms` suffix: this crate cannot see batchalign's `Ms`/`FileMs`
+/// newtypes, and the wire form is plain numbers. The [`std::fmt::Display`]
+/// impl is the single source of the human reason text, so the prose and the
+/// data cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedWindow {
+    /// Longer than the engine's alignment budget.
+    OverBudget {
+        /// Start of the window, in file milliseconds.
+        start_ms: u64,
+        /// End of the window, in file milliseconds.
+        end_ms: u64,
+        /// The budget the window exceeded, in milliseconds.
+        budget_ms: u64,
+    },
+    /// The window holds no audio (start equals end).
+    Empty {
+        /// The position at which the window starts and ends.
+        at_ms: u64,
+    },
+    /// The end precedes the start.
+    Inverted {
+        /// The proposed start.
+        start_ms: u64,
+        /// The proposed end, which precedes the start.
+        end_ms: u64,
+    },
+    /// The window ends past the end of the recording.
+    PastRecording {
+        /// Start of the window, in file milliseconds.
+        start_ms: u64,
+        /// End of the window, in file milliseconds.
+        end_ms: u64,
+        /// How far past the recording's end the window falls, in milliseconds.
+        exceeds_by_ms: u64,
+    },
+}
+
+impl std::fmt::Display for RefusedWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::OverBudget {
+                start_ms,
+                end_ms,
+                budget_ms,
+            } => write!(
+                f,
+                "audio window {start_ms}ms-{end_ms}ms ({}ms) exceeds alignment budget {budget_ms}ms; narrower evidence is required",
+                end_ms.saturating_sub(start_ms)
+            ),
+            Self::Empty { at_ms } => {
+                write!(f, "audio window at {at_ms}ms has no positive extent")
+            }
+            Self::Inverted { start_ms, end_ms } => {
+                write!(
+                    f,
+                    "audio window start {start_ms}ms is after its end {end_ms}ms"
+                )
+            }
+            Self::PastRecording {
+                start_ms,
+                end_ms,
+                exceeds_by_ms,
+            } => write!(
+                f,
+                "audio window {start_ms}ms-{end_ms}ms ends {exceeds_by_ms}ms past the end of the recording"
+            ),
+        }
+    }
 }
 
 impl FaStrategy {
@@ -141,7 +220,7 @@ impl FaStrategy {
             Self::TimingStripped => "timing_stripped",
             Self::TimingProvenance => "timing_provenance",
             Self::UnplaceableRun => "unplaceable_run",
-            Self::WindowRefused => "window_refused",
+            Self::WindowRefused(_) => "window_refused",
             Self::WordsTimingDropped => "words_timing_dropped",
             Self::NarrowBulletRescued => "narrow_bullet_rescued",
             Self::WordsClampedToKeptBullet => "words_clamped_to_kept_bullet",
@@ -512,6 +591,23 @@ mod tests {
         assert_eq!(
             d.evidence_summary(),
             "monotonicity:end_clamped_coverage_only overlap=1200ms prev_end=5000 next_start=3800"
+        );
+    }
+
+    #[test]
+    fn refused_window_prose_has_no_doubled_unit() {
+        let refused = RefusedWindow::OverBudget {
+            start_ms: 12_000,
+            end_ms: 38_520,
+            budget_ms: 15_000,
+        };
+        assert_eq!(
+            refused.to_string(),
+            "audio window 12000ms-38520ms (26520ms) exceeds alignment budget 15000ms; narrower evidence is required"
+        );
+        assert_eq!(
+            FaStrategy::WindowRefused(refused).as_str(),
+            "window_refused"
         );
     }
 

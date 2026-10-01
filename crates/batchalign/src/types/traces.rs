@@ -179,7 +179,7 @@ pub struct UtteranceTrace {
 // ---------------------------------------------------------------------------
 
 /// Schema written by the current [`FaTimelineTrace`] producer.
-pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 5;
 
 /// Forced alignment trace: grouping, timing injection, and post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,7 +193,10 @@ pub struct FaTimelineTrace {
     /// section, so a discarded measurement is readable without walking the
     /// tagged effect union and joining each drop back to its parent;
     /// `post_injection_timings` remains reserved for a later complete
-    /// per-word outcome projection.
+    /// per-word outcome projection. Version 5 adds `refused_window` to
+    /// `window_refused` decisions: a `cause`-tagged object carrying that
+    /// cause's own bounds and figures, so a refused window is data instead of
+    /// prose in `reason`.
     #[serde(default)]
     pub evidence_schema_version: u32,
     /// Forced-alignment engine selected for this run.
@@ -274,10 +277,105 @@ pub struct FaDecisionTrace {
     pub reason: String,
     /// Whether the decision requires human review.
     pub needs_review: bool,
+    /// The refused audio window, present exactly for `window_refused`
+    /// decisions. Populated only in `From<DecisionRecord>`, from the typed
+    /// strategy, so no other strategy can carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_window: Option<RefusedWindowTrace>,
+}
+
+/// Wire form of [`batchalign_transform::decisions::RefusedWindow`]: one
+/// variant per cause, tagged by `cause`, each carrying only its own numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "cause", rename_all = "snake_case")]
+pub enum RefusedWindowTrace {
+    /// Longer than the engine's alignment budget.
+    OverBudget {
+        /// Start of the window, in file milliseconds.
+        start_ms: u64,
+        /// End of the window, in file milliseconds.
+        end_ms: u64,
+        /// The budget exceeded, in milliseconds.
+        budget_ms: u64,
+    },
+    /// The window holds no audio.
+    Empty {
+        /// The position at which the window starts and ends.
+        at_ms: u64,
+    },
+    /// The end precedes the start.
+    Inverted {
+        /// The proposed start.
+        start_ms: u64,
+        /// The proposed end, which precedes the start.
+        end_ms: u64,
+    },
+    /// The window ends past the end of the recording.
+    PastRecording {
+        /// Start of the window, in file milliseconds.
+        start_ms: u64,
+        /// End of the window, in file milliseconds.
+        end_ms: u64,
+        /// How far past the recording's end, in milliseconds.
+        exceeds_by_ms: u64,
+    },
+}
+
+impl From<batchalign_transform::decisions::RefusedWindow> for RefusedWindowTrace {
+    fn from(window: batchalign_transform::decisions::RefusedWindow) -> Self {
+        use batchalign_transform::decisions::RefusedWindow;
+        match window {
+            RefusedWindow::OverBudget {
+                start_ms,
+                end_ms,
+                budget_ms,
+            } => Self::OverBudget {
+                start_ms,
+                end_ms,
+                budget_ms,
+            },
+            RefusedWindow::Empty { at_ms } => Self::Empty { at_ms },
+            RefusedWindow::Inverted { start_ms, end_ms } => Self::Inverted { start_ms, end_ms },
+            RefusedWindow::PastRecording {
+                start_ms,
+                end_ms,
+                exceeds_by_ms,
+            } => Self::PastRecording {
+                start_ms,
+                end_ms,
+                exceeds_by_ms,
+            },
+        }
+    }
 }
 
 impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
     fn from(record: batchalign_transform::decisions::DecisionRecord) -> Self {
+        use batchalign_transform::decisions::{DecisionStrategy, FaStrategy};
+        let refused_window = match record.strategy {
+            DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => Some(window.into()),
+            // Every other FA strategy listed, not `Fa(_)`: a new one that
+            // carries data must decide here whether the trace records it.
+            DecisionStrategy::Fa(
+                FaStrategy::GapFilled
+                | FaStrategy::BoundaryAveraged
+                | FaStrategy::LisRemoval
+                | FaStrategy::TimingStripped
+                | FaStrategy::WordsTimingDropped
+                | FaStrategy::NarrowBulletRescued
+                | FaStrategy::KeptBulletWindowWidened
+                | FaStrategy::WordsClampedToKeptBullet
+                | FaStrategy::WordsUntimedForKeptAbsence
+                | FaStrategy::TimingProvenance
+                | FaStrategy::UnplaceableRun,
+            )
+            | DecisionStrategy::Utr(_)
+            | DecisionStrategy::Monotonicity(_)
+            | DecisionStrategy::Morphosyntax(_)
+            | DecisionStrategy::Coref(_)
+            | DecisionStrategy::Utseg(_) => None,
+        };
         Self {
             line_idx: record.line_idx.raw(),
             speaker: record.speaker,
@@ -285,6 +383,7 @@ impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
             strategy: record.strategy.strategy_name().to_owned(),
             reason: record.reason,
             needs_review: record.needs_review,
+            refused_window,
         }
     }
 }
@@ -977,6 +1076,41 @@ mod tests {
     use crate::chat_ops::fa::origin::EngineId;
     use crate::chat_ops::fa::{ModelAlignmentScore, WordTiming};
     use crate::time::{FileMs, Ms};
+
+    #[test]
+    fn refused_window_is_serialized_only_for_window_refused() {
+        use batchalign_transform::decisions::{
+            DecisionRecord, DecisionStrategy, FaStrategy, RefusedWindow,
+        };
+        let refused = RefusedWindow::OverBudget {
+            start_ms: 12_000,
+            end_ms: 38_520,
+            budget_ms: 15_000,
+        };
+        let record = DecisionRecord::new_and_trace(
+            3,
+            "CHI".to_owned(),
+            DecisionStrategy::Fa(FaStrategy::WindowRefused(refused)),
+            refused.to_string(),
+            true,
+        );
+        let json = serde_json::to_value(FaDecisionTrace::from(record)).expect("serializes");
+        assert_eq!(json["strategy"], "window_refused");
+        assert_eq!(json["refused_window"]["start_ms"], 12_000);
+        assert_eq!(json["refused_window"]["end_ms"], 38_520);
+        assert_eq!(json["refused_window"]["cause"], "over_budget");
+        assert_eq!(json["refused_window"]["budget_ms"], 15_000);
+
+        let other = DecisionRecord::new_and_trace(
+            4,
+            "CHI".to_owned(),
+            DecisionStrategy::Fa(FaStrategy::GapFilled),
+            "gap=500ms".to_owned(),
+            false,
+        );
+        let json = serde_json::to_value(FaDecisionTrace::from(other)).expect("serializes");
+        assert!(json.get("refused_window").is_none());
+    }
 
     #[test]
     fn timing_trace_preserves_score_and_complete_origin_chain() {

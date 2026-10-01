@@ -43,11 +43,37 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
         .unwrap()
         .timing
         .end_ms = 3_035_820;
+    let refused_start_ms = get_test_utterance(&mut chat, 0)
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .unwrap()
+        .timing
+        .start_ms;
     let grouped = group_utterances(&chat, 15_000, &test_recording(4_000_000));
     assert_eq!(
         grouped.refusals.len(),
         1,
         "oversized input needs durable refusal"
+    );
+    // The refusal states the window and cause as data, not only as prose.
+    let expected = batchalign_transform::decisions::RefusedWindow::OverBudget {
+        start_ms: refused_start_ms,
+        end_ms: 3_035_820,
+        budget_ms: 15_000,
+    };
+    assert_eq!(
+        grouped.refusals[0].strategy,
+        batchalign_transform::decisions::DecisionStrategy::Fa(
+            batchalign_transform::decisions::FaStrategy::WindowRefused(expected)
+        )
+    );
+    assert_eq!(grouped.refusals[0].reason, expected.to_string());
+    assert!(
+        !grouped.refusals[0].reason.contains("msms"),
+        "unit must not be doubled: {}",
+        grouped.refusals[0].reason
     );
     assert_eq!(grouped.groups.len(), 1);
     assert_eq!(

@@ -478,7 +478,11 @@ and the release after 0.4.4 schema version 4, which adds a flat `dropped_word_ti
 section listing every word timing the run measured and then discarded (with the
 speaker, utterance, tier, word position, measured span, and the bound it
 exceeded). That section is always present, and empty when nothing was
-discarded. All of them record the selected
+discarded. Schema version 5 adds a `refused_window` object to each
+`window_refused` decision, tagged by `cause` (`over_budget` with `start_ms`,
+`end_ms` and `budget_ms`; `empty` with `at_ms`; `inverted` with `start_ms` and
+`end_ms`; `past_recording` with `start_ms`, `end_ms` and `exceeds_by_ms`), so a
+refused window's length is data rather than prose in `reason`. All of them record the selected
 engine and build/model version,
 the cache key and evidence source for every group (`wor_reuse`, `cache`, or
 `inference`), stable word identifiers, pre-injection timings, Wave2Vec-family

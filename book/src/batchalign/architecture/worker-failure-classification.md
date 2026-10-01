@@ -649,7 +649,8 @@ new utterance cannot join, the pending group is finished before the new one
 starts. Utterances with no alignable words cannot alter a pending audio window.
 
 A single utterance with an oversized, empty, inverted or out-of-recording window
-receives a durable FA `window_refused` decision. No request is dispatched for
+receives a durable FA `window_refused` decision, which carries the refused
+window's bounds and a typed cause (evidence schema version 5). No request is dispatched for
 it. Grouping preserves the supplied words and timing rather than clipping an
 uncertain long window or guessing finer word positions. Later pipeline timing
 repair remains a separate, recorded operation. Refusal means narrower timing

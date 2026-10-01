@@ -457,7 +457,8 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         disposition: WideStructDisposition::TransportRecord,
         reason: "versioned forced-alignment evidence transport preserving independent grouping, \
                  cache, timing, decision, violation, and fallback facts for offline analysis; \
-                 schema 4 adds the flat dropped_word_timings section derived from the decisions",
+                 schema 4 adds the flat dropped_word_timings section derived from the decisions; \
+                 schema 5 adds refused_window to window_refused decisions",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/worker/handle/config.rs",

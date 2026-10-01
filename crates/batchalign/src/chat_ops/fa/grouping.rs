@@ -3,7 +3,9 @@
 use talkbank_model::model::{ChatFile, Line};
 use talkbank_model::{UtteranceIdx, WordIdx};
 
-use batchalign_transform::decisions::{DecisionRecord, DecisionStrategy, FaStrategy};
+use batchalign_transform::decisions::{
+    DecisionRecord, DecisionStrategy, FaStrategy, RefusedWindow,
+};
 
 use super::coordinates::{Clamped, FaWindow, FileMs, Ms, Recording, WindowFault};
 use super::extraction::collect_fa_words;
@@ -287,7 +289,8 @@ pub fn group_utterances(
         }
         let window = match GroupWindow::admit(span, budget, recording) {
             Ok(window) => window,
-            Err(reason) => {
+            Err(refusal) => {
+                let refused = refusal.into_refused_window(span);
                 // Do not clip a long uncertain window or invent word positions.
                 // Preserve the supplied CHAT and record why no request was made.
                 if let Some(previous) = pending.take() {
@@ -296,8 +299,8 @@ pub fn group_utterances(
                 refusals.push(DecisionRecord::new_and_trace(
                     line_idx,
                     utt.main.speaker.as_str().to_owned(),
-                    DecisionStrategy::Fa(FaStrategy::WindowRefused),
-                    reason.to_string(),
+                    DecisionStrategy::Fa(FaStrategy::WindowRefused(refused)),
+                    refused.to_string(),
                     true,
                 ));
                 extracted.clear();
@@ -348,14 +351,56 @@ struct GroupWindow {
     end_limit: FileMs,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// Why a window was refused admission. Carries no prose: the human reason is
+/// rendered once, from [`RefusedWindow`], so text and data cannot disagree.
+#[derive(Debug)]
 enum WindowRefusal {
-    #[error(transparent)]
-    OutsideRecording(#[from] WindowFault),
-    #[error(
-        "audio window duration {duration} exceeds alignment budget {budget}; narrower evidence is required"
-    )]
-    Oversized { duration: Ms, budget: Ms },
+    OutsideRecording(WindowFault),
+    /// Longer than the engine budget (the duration is `span` itself).
+    Oversized {
+        budget: Ms,
+    },
+}
+
+impl From<WindowFault> for WindowRefusal {
+    fn from(fault: WindowFault) -> Self {
+        Self::OutsideRecording(fault)
+    }
+}
+
+impl WindowRefusal {
+    /// The one conversion from the typed refusal to its evidence form.
+    ///
+    /// Each variant takes its numbers from the refusal itself: an oversized
+    /// window IS `span` (that is what was measured against the budget), and
+    /// every `WindowFault` carries its own figures. Only `PastRecording` needs
+    /// `span` for its start, which the fault does not record. The match is
+    /// exhaustive so a new refusal cannot be recorded without a variant.
+    fn into_refused_window(self, span: TimeSpan) -> RefusedWindow {
+        match self {
+            Self::Oversized { budget } => RefusedWindow::OverBudget {
+                start_ms: span.start_ms,
+                end_ms: span.end_ms,
+                budget_ms: budget.0,
+            },
+            Self::OutsideRecording(WindowFault::Empty { at }) => {
+                RefusedWindow::Empty { at_ms: at.get() }
+            }
+            Self::OutsideRecording(WindowFault::Inverted { start, end }) => {
+                RefusedWindow::Inverted {
+                    start_ms: start.get(),
+                    end_ms: end.get(),
+                }
+            }
+            Self::OutsideRecording(WindowFault::PastRecording { end, exceeds_by }) => {
+                RefusedWindow::PastRecording {
+                    start_ms: span.start_ms,
+                    end_ms: end.get(),
+                    exceeds_by_ms: exceeds_by.0,
+                }
+            }
+        }
+    }
 }
 
 impl GroupWindow {
@@ -369,7 +414,7 @@ impl GroupWindow {
         // span above, through `WindowFault::Empty`.
         let duration = window.len();
         if duration.0 > budget.0 {
-            return Err(WindowRefusal::Oversized { duration, budget });
+            return Err(WindowRefusal::Oversized { budget });
         }
         Ok(Self {
             window,

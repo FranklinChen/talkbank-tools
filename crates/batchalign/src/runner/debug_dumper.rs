@@ -755,6 +755,7 @@ mod tests {
                 strategy: "timing_stripped".to_owned(),
                 reason: "non_monotonic start_ms=900 previous_start_ms=1000".to_owned(),
                 needs_review: true,
+                refused_window: None,
             }],
             timing_decisions: vec![FaTimingDecisionTrace::StartRegressionStripped {
                 line_idx: 7,

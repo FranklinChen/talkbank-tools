@@ -445,6 +445,10 @@ fail-closed when requested and includes:
   measured span, and the bound it exceeded). Derived from the timing decisions
   at assembly time by `FaTimingDecisionTrace::dropped_word_timings`, so it
   cannot drift from them, and always written, empty when nothing was dropped;
+- `refused_window` on each `window_refused` decision (schema 5): a
+  `cause`-tagged object (`over_budget`, `empty`, `inverted`, `past_recording`)
+  carrying that cause's own bounds and figures, so a refused window is data
+  rather than prose in `reason`;
 - fallback events and post-validation violations.
 
 The indexed alignment algorithm temporarily needs separate vectors while
