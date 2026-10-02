@@ -68,12 +68,15 @@ def _v(raw: str) -> StanzaVersion:
 
 
 BUMP_PROCEDURE = """Finishing a Stanza bump:
-  1. Run the golden suite: pytest batchalign/tests -m golden
-  2. Account for EVERY failure and every XPASS. A failure may predate the bump,
-     so establish that by running it on a confirmed version before blaming the
-     new one.
-  3. Update book/src/batchalign/architecture/stanza-defect-mitigation-map.md
-  4. Add the version to CONFIRMED_STANZA_VERSIONS."""
+  1. Run the Python golden suite: pytest batchalign/tests -m golden
+  2. Run the Rust ML golden morphotag suite (its snapshots, L2 included):
+     cargo test -p batchalign --features ml-golden --test ml_golden -- --test-threads=1 ml_golden::morphotag::golden
+  3. Account for EVERY failure, every XPASS and every changed snapshot line. A
+     failure may predate the bump, so establish that by running it on a
+     confirmed version before blaming the new one. Accept a snapshot only for
+     lines whose change is explained.
+  4. Update book/src/batchalign/architecture/stanza-defect-mitigation-map.md
+  5. Add the version to CONFIRMED_STANZA_VERSIONS."""
 
 # Versions the golden suite has been run against with its results adjudicated.
 #

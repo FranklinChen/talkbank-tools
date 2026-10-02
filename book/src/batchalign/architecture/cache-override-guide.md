@@ -1,7 +1,7 @@
 # Cache Policy Guide
 
 **Status:** Current
-**Last updated:** 2026-09-15 19:40 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 When fixing a bug or changing behavior, ask two questions: **does the run need
 fresh inference (`--override-media-cache`), or must it prove that reusable
@@ -134,20 +134,13 @@ whether to overwrite or union:
 applies automatically to cached FA results. Both behaviors are correct for their
 respective bullet types.
 
-## Self-Correcting Cache Purges
+## Validation Does Not Purge the Cache
 
-When post-serialization validation detects an invalid result, the server
-auto-deletes the cache entry that produced it and writes a bug report to
-`~/.batchalign3/bug-reports/`. This means:
-
-- **Helps when:** A cached value produces output that fails validation. Next run
-  re-infers and (if the underlying model is correct) produces valid output.
-- **Does NOT help when:** The cached value is *wrong but valid*, e.g., it
-  passes validation but contains incorrect timings. Validation can't catch
-  semantic correctness.
-- **Does NOT help when:** The post-processing is buggy, the cache entry will be
-  deleted, but re-inference produces the same cached value, which the same buggy
-  post-processing corrupts again. Fix the post-processing first.
+When post-serialization validation detects an invalid result, the file
+fails and no output is written, but the cache entries that produced it are
+not deleted: a rerun reuses them and fails the same way. Recompute with the
+command's cache override once the cause is fixed (if the post-processing is
+at fault, fix it first: re-inference alone would produce the same value).
 
 ## Deserialization Failure Policy
 

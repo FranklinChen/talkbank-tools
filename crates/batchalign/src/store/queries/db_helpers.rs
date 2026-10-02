@@ -1,46 +1,21 @@
 //! DB persistence helpers and WebSocket notification helpers.
 
-use crate::api::{FileStatusEntry, FileStatusKind, JobId, JobListItem, JobStatus, UnixTimestamp};
+use crate::api::{FileStatusEntry, JobId, JobListItem};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use tracing::{debug, warn};
 
 use super::super::JobStore;
 use crate::ws::WsEvent;
 
-/// Persisted job-level status update written through to SQLite.
-pub(crate) struct PersistedJobUpdate<'a> {
-    /// New durable job status.
-    pub status: JobStatus,
-    /// Optional job-level error message.
-    pub error: Option<&'a str>,
-    /// Terminal completion timestamp when present.
-    pub completed_at: Option<UnixTimestamp>,
-    /// Selected worker count for the run when present.
-    pub num_workers: Option<i32>,
-    /// Deferred retry deadline for queued jobs when present.
-    pub next_eligible_at: Option<UnixTimestamp>,
-}
-
 /// Persisted file-level status update written through to SQLite.
 pub(crate) struct PersistedFileUpdate<'a> {
     /// Filename within the parent job.
     pub filename: &'a str,
-    /// New durable file status.
-    pub status: FileStatusKind,
-    /// Optional human-readable error message.
-    pub error: Option<&'a str>,
-    /// Optional broad error category label.
-    pub error_category: Option<&'a str>,
-    /// Optional linked bug-report identifier.
-    pub bug_report_id: Option<&'a str>,
-    /// Optional result content type for successful output.
+    /// The file's phase after the transition; its whole column set is
+    /// written (see `FilePhase::columns`).
+    pub phase: &'a crate::store::FilePhase,
+    /// Result content type, for a file that finished with output.
     pub content_type: Option<&'a str>,
-    /// Optional durable start timestamp.
-    pub started_at: Option<UnixTimestamp>,
-    /// Optional durable finish timestamp.
-    pub finished_at: Option<UnixTimestamp>,
-    /// Optional durable retry deadline.
-    pub next_eligible_at: Option<UnixTimestamp>,
 }
 
 /// Attempt-start facts persisted for one file work unit.
@@ -49,8 +24,8 @@ pub(crate) struct AttemptStartRecord<'a> {
     pub filename: &'a str,
     /// Kind of work unit being attempted.
     pub work_unit_kind: WorkUnitKind,
-    /// Start timestamp for the attempt row.
-    pub started_at: UnixTimestamp,
+    /// When the attempt started, by the store's clock.
+    pub started_at: crate::store::EventTime,
 }
 
 /// Attempt-finish facts persisted for one file work unit.
@@ -63,8 +38,38 @@ pub(crate) struct AttemptFinishRecord<'a> {
     pub failure_category: Option<FailureCategory>,
     /// Retry/terminal disposition selected by the runner.
     pub disposition: RetryDisposition,
-    /// Finish timestamp for the attempt row.
-    pub finished_at: UnixTimestamp,
+    /// When the attempt finished, by the store's clock.
+    pub finished_at: crate::store::EventTime,
+}
+
+/// Which lease transition is being persisted, named in the warning when the
+/// write fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeaseWrite {
+    /// The local queue claimed the job.
+    #[cfg(test)]
+    Claim,
+    /// A runner took exclusive ownership.
+    RunnerClaim,
+    /// The heartbeat renewed the lease.
+    Renew,
+    /// The runner released its claim.
+    Release,
+    /// A restart cleared the lease.
+    Restart,
+}
+
+impl std::fmt::Display for LeaseWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            #[cfg(test)]
+            Self::Claim => "claim",
+            Self::RunnerClaim => "runner claim",
+            Self::Renew => "renew",
+            Self::Release => "release",
+            Self::Restart => "restart",
+        })
+    }
 }
 
 impl JobStore {
@@ -72,42 +77,42 @@ impl JobStore {
     // DB helper methods (safe no-ops when db is None)
     // -------------------------------------------------------------------
 
-    /// Persist one job-level status update to SQLite when the DB is enabled.
-    pub(crate) async fn db_update_job(&self, job_id: &JobId, update: PersistedJobUpdate<'_>) {
-        let status_str = update.status.to_string();
+    /// Persist a job's lease (or its absence) for one lease transition. The
+    /// one place the lease columns are written from the store.
+    pub(crate) async fn db_persist_lease(
+        &self,
+        job_id: &JobId,
+        lease: Option<&crate::scheduling::LeaseRecord>,
+        write: LeaseWrite,
+    ) {
         if let Some(db) = &self.db
-            && let Err(e) = db
-                .update_job_status(
-                    job_id,
-                    &status_str,
-                    update.error,
-                    update.completed_at.map(|ts| ts.0),
-                    update.num_workers,
-                    update.next_eligible_at.map(|ts| ts.0),
-                )
-                .await
+            && let Err(e) = db.update_job_lease(job_id, lease).await
         {
-            warn!(job_id = %job_id, error = %e, "DB update_job_status failed");
+            warn!(job_id = %job_id, error = %e, "DB update_job_lease failed on {write}");
+        }
+    }
+
+    /// Persist a job's status columns after a transition, as the job now IS
+    /// (`Job::status_columns`), never as the caller asked: a transition the
+    /// state machine declined leaves the row describing the status the job
+    /// actually holds. A no-op without a database or for an unknown job.
+    pub(crate) async fn db_persist_job_status(&self, job_id: &JobId) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let Some(columns) = self.registry.status_columns(job_id).await else {
+            return;
+        };
+        if let Err(e) = db.write_job_status(job_id, &columns).await {
+            warn!(job_id = %job_id, error = %e, "DB write_job_status failed");
         }
     }
 
     /// Persist one file-level status update to SQLite when the DB is enabled.
     pub(crate) async fn db_update_file(&self, job_id: &JobId, update: PersistedFileUpdate<'_>) {
-        let status_str = update.status.to_string();
         if let Some(db) = &self.db
             && let Err(e) = db
-                .update_file_status(
-                    job_id,
-                    update.filename,
-                    &status_str,
-                    update.error,
-                    update.error_category,
-                    update.bug_report_id,
-                    update.content_type,
-                    update.started_at.map(|ts| ts.0),
-                    update.finished_at.map(|ts| ts.0),
-                    update.next_eligible_at.map(|ts| ts.0),
-                )
+                .update_file_status(job_id, update.filename, update.phase, update.content_type)
                 .await
         {
             warn!(
@@ -130,7 +135,7 @@ impl JobStore {
                 job_id,
                 attempt.filename,
                 attempt.work_unit_kind,
-                attempt.started_at.0,
+                attempt.started_at.instant(),
                 None,
                 None,
             )
@@ -175,7 +180,7 @@ impl JobStore {
                     attempt.outcome,
                     attempt.failure_category,
                     attempt.disposition,
-                    attempt.finished_at.0,
+                    attempt.finished_at.instant(),
                 )
                 .await
         {

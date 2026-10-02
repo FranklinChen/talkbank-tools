@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ErrorGroup } from "../hooks/useFileFilters";
-import { ErrorCodeGroup } from "./ErrorCodeGroup";
+import { ErrorFileGroup } from "./ErrorFileGroup";
 
 const CATEGORY_COLORS: Record<string, string> = {
   input: "border-amber-200",
@@ -25,7 +25,7 @@ export function ErrorPanel({ errorGroups }: { errorGroups: ErrorGroup[] }) {
 
   if (errorGroups.length === 0) return null;
 
-  const totalErrors = errorGroups.reduce((sum, g) => sum + g.totalFiles, 0);
+  const totalErrors = errorGroups.reduce((sum, g) => sum + g.files.length, 0);
 
   return (
     <div className="bg-red-50/50 border border-red-100 rounded-lg overflow-hidden">
@@ -42,7 +42,7 @@ export function ErrorPanel({ errorGroups }: { errorGroups: ErrorGroup[] }) {
           {totalErrors} {totalErrors === 1 ? "error" : "errors"}
         </span>
         <span className="text-xs text-red-500">
-          {errorGroups.map((g) => `${g.categoryLabel} (${g.totalFiles})`).join(" \u00b7 ")}
+          {errorGroups.map((g) => `${g.categoryLabel} (${g.files.length})`).join(" \u00b7 ")}
         </span>
       </button>
 
@@ -62,14 +62,15 @@ export function ErrorPanel({ errorGroups }: { errorGroups: ErrorGroup[] }) {
                   {group.categoryLabel}
                 </span>
                 <span className="text-[10px] text-zinc-400">
-                  ({group.totalFiles} {group.totalFiles === 1 ? "file" : "files"})
+                  ({group.files.length} {group.files.length === 1 ? "file" : "files"})
                 </span>
               </div>
 
               {/* Validation bug banner */}
               {group.category === "validation" && (
                 <p className="text-[11px] text-rose-600 mb-2 italic">
-                  This is a pipeline bug, not your input. A diagnostic report has been filed automatically.
+                  This is a pipeline bug, not your input. The file's error below
+                  is the report; please pass it on.
                 </p>
               )}
 
@@ -85,10 +86,7 @@ export function ErrorPanel({ errorGroups }: { errorGroups: ErrorGroup[] }) {
                 </p>
               )}
 
-              {/* Error code groups */}
-              {group.codeGroups.map((cg) => (
-                <ErrorCodeGroup key={cg.code} group={cg} />
-              ))}
+              <ErrorFileGroup label={group.label} files={group.files} />
             </div>
           ))}
         </div>

@@ -21,9 +21,16 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias, assert_never
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    field_validator,
+)
 
 from batchalign.device import DevicePolicy
 from batchalign.inference._domain_types import (
@@ -251,12 +258,108 @@ class InferRequest(BaseModel):
     payload: WorkerJSONValue = Field(default_factory=dict)
 
 
-class InferResponse(BaseModel):
-    """Response body for infer operation."""
+FiniteNonNegativeFloat: TypeAlias = Annotated[FiniteFloat, Field(ge=0)]
+"""Finite floating-point value constrained to be non-negative: the one spelling
+of an elapsed time or a position in seconds, shared with ``_types_v2``."""
 
-    result: WorkerJSONValue | None = None
-    error: str | None = None
-    elapsed_s: float = 0.0
+
+def _item_clock() -> float:
+    """The clock an item's own work is timed by: ``time.monotonic``. Named so
+    a test can replace it for item timing alone, never for the process."""
+    return time.monotonic()
+
+
+class ItemProduced(BaseModel):
+    """One inference item's own successful result payload."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["produced"] = "produced"
+    result: WorkerJSONValue
+
+    @field_validator("result")
+    @classmethod
+    def _result_is_not_null(cls, value: WorkerJSONValue) -> WorkerJSONValue:
+        # A produced item with a null result is an item with no result, which
+        # the outcome union rules out; Rust refuses it too (`ItemPayload`).
+        if value is None:
+            raise ValueError("a produced item's result must not be null")
+        return value
+
+
+class ItemFailed(BaseModel):
+    """One inference item's own failure, reported against that item alone."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["failed"] = "failed"
+    error: str
+
+
+ItemOutcome: TypeAlias = Annotated[
+    ItemProduced | ItemFailed, Field(discriminator="kind")
+]
+"""What one item's work produced: a result or a failure, never both or neither.
+
+On the wire ``{"kind": "produced", "result": ...}`` or ``{"kind": "failed",
+"error": "..."}``, mirroring Rust ``batchalign_types::worker::ItemOutcome``.
+"""
+
+
+class InferResponse(BaseModel):
+    """Response body for infer operation, one per item of a batch.
+
+    ``outcome`` is the item's result or its failure, one of the two by type.
+    ``elapsed_s`` is REQUIRED and has no default: every construction says
+    whether this item's own work was timed (a non-negative number of seconds)
+    or never ran (``None``, written as ``null``, which Rust reads as
+    ``ItemElapsed::NotExecuted``). Build one through :meth:`timed` or
+    :meth:`unexecuted`, which make that choice by name.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    outcome: ItemOutcome
+    elapsed_s: FiniteNonNegativeFloat | None
+
+    @property
+    def result(self) -> WorkerJSONValue | None:
+        """The result payload, when the item produced one."""
+        match self.outcome:
+            case ItemProduced(result=result):
+                return result
+            case ItemFailed():
+                return None
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    @property
+    def error(self) -> str | None:
+        """The failure, when the item failed."""
+        match self.outcome:
+            case ItemFailed(error=error):
+                return error
+            case ItemProduced():
+                return None
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    @classmethod
+    def timed(cls, work: Callable[[], ItemOutcome]) -> InferResponse:
+        """Run ONE item's own work and report exactly that item's time.
+
+        Takes the work rather than a duration or a start instant, so a batch
+        total, or a clock read before some other item's work, has no
+        signature to travel through.
+        """
+        started_at = _item_clock()
+        outcome = work()
+        return cls(outcome=outcome, elapsed_s=_item_clock() - started_at)
+
+    @classmethod
+    def unexecuted(cls, outcome: ItemOutcome) -> InferResponse:
+        """An item no work ran for, so its elapsed time is absent, not zero."""
+        return cls(outcome=outcome, elapsed_s=None)
 
 
 class BatchInferRequest(BaseModel):
@@ -460,3 +563,10 @@ class _WorkerState:
 
 
 _state = _WorkerState()
+
+
+def sleep_test_delay() -> None:
+    """Sleep the test-echo delay (``--test-delay-ms``), standing in for model
+    work; the one place every test-echo path waits."""
+    if _state.test_delay_ms > 0:
+        time.sleep(_state.test_delay_ms / 1000.0)

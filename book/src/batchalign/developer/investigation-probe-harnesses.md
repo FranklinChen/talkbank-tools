@@ -1,7 +1,7 @@
 # Investigation Probe Harnesses
 
 **Status:** Current
-**Last updated:** 2026-05-19 22:52 EDT
+**Last updated:** 2026-10-01 17:34 EDT
 
 batchalign3 uses Stanza as an oracle for investigation tests,
 small, per-case probes that pin Stanza's current behavior so a
@@ -278,7 +278,7 @@ This means:
 
 For end-to-end production behavior, see the `%mor` integration
 tests under `crates/batchalign-transform/src/morphosyntax/tests.rs`
-and the ML golden tests under `batchalign/tests/golden/`. Those
+and the ML golden tests under `crates/batchalign/tests/ml_golden/`. Those
 exercise the full pipeline including reassembly.
 
 ## The probe-to-ship feedback loop

@@ -157,6 +157,22 @@ fn test_validate_mor_alignment_no_mor_tier() {
 
 // -----------------------------------------------------------------------
 // Cross-language roundtrip snapshot tests
+/// The texts a batch item sends the model.
+fn texts(item: &MorphosyntaxBatchItem) -> Vec<&str> {
+    item.words()
+        .iter()
+        .map(|word| word.text().as_str())
+        .collect()
+}
+
+/// A code-switched word's language resolution; `None` for any other role.
+fn code_switch(word: &BatchWord) -> Option<&talkbank_model::validation::LanguageResolution> {
+    match word.role() {
+        WordRole::CodeSwitched(resolution) => Some(resolution),
+        WordRole::Analysed | WordRole::SpecialForm(_) => None,
+    }
+}
+
 // -----------------------------------------------------------------------
 
 /// Verify MorphosyntaxBatchItem serializes to the JSON shape Python expects.
@@ -167,14 +183,13 @@ fn snapshot_morphosyntax_batch_item() {
         .iter()
         .map(|s| crate::parsed_word_text_cleaned(s))
         .collect();
-    let item = MorphosyntaxBatchItem {
-        words,
-        terminator: talkbank_model::Terminator::Period {
+    let item = MorphosyntaxBatchItem::new(
+        words.into_iter().map(BatchWord::analysed).collect(),
+        talkbank_model::Terminator::Period {
             span: talkbank_model::Span::DUMMY,
         },
-        special_forms: vec![(None, None), (None, None), (None, None)],
-        lang: talkbank_model::model::LanguageCode::new("eng").expect("valid test language code"),
-    };
+        talkbank_model::model::LanguageCode::new("eng").expect("valid test language code"),
+    );
     insta::assert_json_snapshot!("morphosyntax_batch_item", item);
 }
 
@@ -232,8 +247,17 @@ fn snapshot_ud_response_from_python() {
     assert_eq!(ud.sentences[0].words.len(), 3);
     assert_eq!(ud.sentences[0].words[2].lemma, "run");
 
-    // Re-serialize and snapshot to verify round-trip fidelity
-    insta::assert_json_snapshot!("ud_response_roundtrip", ud);
+    // FEATS is admitted as typed features, every value the analysis's.
+    let runs = &ud.sentences[0].words[2];
+    assert_eq!(
+        runs.features().to_string(),
+        "Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin"
+    );
+    assert!(
+        runs.features()
+            .iter()
+            .all(|(_, value)| value.source() == crate::chat_ops::nlp::FeatSource::Analysis)
+    );
 }
 
 /// Verify collect_payloads produces the expected shape for a simple CHAT.
@@ -256,7 +280,7 @@ fn snapshot_collected_payloads() {
     assert_eq!(items.len(), 1);
 
     // Snapshot just the batch item (the payload that crosses the wire)
-    let (_, _, ref batch_item, _) = items[0];
+    let batch_item = items[0].item();
     insta::assert_json_snapshot!("collected_payload_item", batch_item);
 }
 
@@ -287,7 +311,7 @@ fn collect_payloads_uses_file_language_not_batch_default_spa() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref batch_item, _) = items[0];
+    let batch_item = items[0].item();
 
     // The batch item's lang MUST be "spa" (from @Languages header),
     // NOT "eng" (the batch default).
@@ -314,7 +338,7 @@ fn collect_payloads_uses_file_language_not_batch_default_rus() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref batch_item, _) = items[0];
+    let batch_item = items[0].item();
 
     assert_eq!(
         batch_item.lang.as_str(),
@@ -339,7 +363,7 @@ fn collect_payloads_uses_file_language_not_batch_default_zho() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref batch_item, _) = items[0];
+    let batch_item = items[0].item();
 
     assert_eq!(
         batch_item.lang.as_str(),
@@ -364,7 +388,7 @@ fn collect_payloads_uses_file_language_not_batch_default_fra() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref batch_item, _) = items[0];
+    let batch_item = items[0].item();
 
     assert_eq!(
         batch_item.lang.as_str(),
@@ -390,7 +414,7 @@ fn collect_payloads_lang_correct_when_primary_matches_header() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref batch_item, _) = items[0];
+    let batch_item = items[0].item();
 
     assert_eq!(batch_item.lang.as_str(), "eng");
 }
@@ -414,7 +438,7 @@ fn collect_payloads_uses_first_declared_language_for_multilingual() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref batch_item, _) = items[0];
+    let batch_item = items[0].item();
 
     // Should use "spa" (first declared), not "eng" (batch default)
     assert_eq!(
@@ -459,17 +483,23 @@ fn test_inject_results_retokenize_cantonese_retrace() {
     assert!(!batch_items.is_empty(), "Should have batch items");
 
     // Print what was extracted
-    for (line_idx, utt_ord, item, words) in &batch_items {
+    for collected in &batch_items {
         eprintln!(
-            "Batch item: line={line_idx} utt={utt_ord} words={:?} item_words={:?}",
-            words.iter().map(|w| w.text.as_ref()).collect::<Vec<_>>(),
-            item.words,
+            "Batch item: line={} utt={} words={:?} item_words={:?}",
+            collected.line().raw(),
+            collected.utt_ordinal(),
+            collected
+                .words()
+                .iter()
+                .map(|w| w.text.as_ref())
+                .collect::<Vec<_>>(),
+            texts(collected.item()),
         );
     }
 
     // Build a matching UD response (one word per extracted word)
     let first_item = &batch_items[0];
-    let word_count = first_item.2.words.len();
+    let word_count = first_item.item().words().len();
     eprintln!("Word count from batch item: {word_count}");
 
     // Simulate what Python actually returns: _segment_cantonese reduces
@@ -488,7 +518,7 @@ fn test_inject_results_retokenize_cantonese_retrace() {
         .enumerate()
         .map(|(i, w)| {
             let (head, deprel) = if i == 0 { (0, "root") } else { (1, "dep") };
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(i + 1),
                 text: w.to_string(),
                 lemma: w.to_string(),
@@ -501,7 +531,7 @@ fn test_inject_results_retokenize_cantonese_retrace() {
                 deprel: deprel.into(),
                 deps: None,
                 misc: None,
-            }
+            })
         })
         .collect();
 
@@ -554,11 +584,11 @@ fn test_french_elision_in_quoted_context() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1, "Should have exactly 1 utterance payload");
-    let (_, _, item, extracted_words) = &items[0];
+    let (item, extracted_words) = (items[0].item(), items[0].words());
 
     // Print for debugging
-    println!("Extracted words: {:?}", item.words);
-    println!("Word count: {}", item.words.len());
+    println!("Extracted words: {:?}", texts(item));
+    println!("Word count: {}", item.words().len());
     println!(
         "Extracted word details: {:?}",
         extracted_words
@@ -571,7 +601,7 @@ fn test_french_elision_in_quoted_context() {
     // On, dit, pas, 'quoi, tu, veux', mais, 'qu', est-ce, que', on, dit, .
     // That's 13 words (including the terminator).
     // Stanza should NOT produce more MOR items than this.
-    let word_count = item.words.len();
+    let word_count = item.words().len();
     assert!(
         word_count > 0,
         "Should extract some words from French utterance"
@@ -599,41 +629,36 @@ fn collect_payloads_identifies_at_s_positions_single() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1, "should have 1 utterance");
-    let (_, _, ref item, _) = items[0];
+    let item = items[0].item();
 
     // "I went to the tienda@s:spa yesterday ."
     // Words: I, went, to, the, tienda, yesterday (6 words, terminator separate)
     assert!(
-        item.words.len() >= 6,
+        item.words().len() >= 6,
         "should have at least 6 words, got {}",
-        item.words.len()
+        item.words().len()
     );
 
     // Find the position of "tienda" and verify it has a language resolution
-    let tienda_idx = item
-        .words
+    let tienda_idx = texts(item)
         .iter()
-        .position(|w| w == "tienda")
+        .position(|w| *w == "tienda")
         .expect("should contain 'tienda'");
 
-    let (_, ref lang_res) = item.special_forms[tienda_idx];
-    assert!(
-        lang_res.is_some(),
-        "tienda should have a language resolution (it's @s:spa)"
-    );
-    let resolution = lang_res.as_ref().unwrap();
+    let resolution = code_switch(&item.words()[tienda_idx])
+        .expect("tienda should have a language resolution (it's @s:spa)");
     let langs = resolution.languages();
     assert_eq!(langs.len(), 1, "should resolve to exactly one language");
     assert_eq!(langs[0].as_str(), "spa", "should resolve to Spanish");
 
     // All other words should have None for language resolution
-    for (i, (_, lr)) in item.special_forms.iter().enumerate() {
+    for (i, word) in item.words().iter().enumerate() {
         if i != tienda_idx {
             assert!(
-                lr.is_none(),
+                code_switch(word).is_none(),
                 "word {} ('{}') should NOT have language resolution",
                 i,
-                item.words[i]
+                word.text()
             );
         }
     }
@@ -655,49 +680,39 @@ fn collect_payloads_identifies_contiguous_at_s_span() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref item, _) = items[0];
+    let item = items[0].item();
 
     // "we talked about los@s:spa niños@s:spa ."
-    let los_idx = item
-        .words
+    let los_idx = texts(item)
         .iter()
-        .position(|w| w == "los")
+        .position(|w| *w == "los")
         .expect("should have 'los'");
-    let ninos_idx = item
-        .words
+    let ninos_idx = texts(item)
         .iter()
-        .position(|w| w == "niños")
+        .position(|w| *w == "niños")
         .expect("should have 'niños'");
 
     // Both should have spa resolution
-    assert!(item.special_forms[los_idx].1.is_some());
-    assert!(item.special_forms[ninos_idx].1.is_some());
+    assert!(code_switch(&item.words()[los_idx]).is_some());
+    assert!(code_switch(&item.words()[ninos_idx]).is_some());
 
     // They should be contiguous
     assert_eq!(ninos_idx, los_idx + 1, "los and niños should be adjacent");
-
-    // Verify span grouping produces one span
-    let spans =
-        crate::chat_ops::morphosyntax_ops::l2::group_l2_spans(&item.special_forms, &item.words);
-    assert_eq!(spans.len(), 1, "contiguous same-lang should produce 1 span");
-    assert_eq!(spans[0].word_indices, vec![los_idx, ninos_idx]);
-    assert_eq!(spans[0].words, vec!["los", "niños"]);
 }
 
 /// Thin L2 acceptance: exercise the real order above the seam-local
 /// tests without invoking the worker/runtime layer:
 ///
 /// 1. collect primary payloads
-/// 2. extract deferred @s positions from the primary UD response
-/// 3. inject primary results (which writes `L2|xxx` placeholders)
+/// 2. inject primary results (which writes `L2|xxx` placeholders and defers
+///    the @s positions from the same analysis)
 /// 4. plan the secondary dispatch span from the mutated `ChatFile`
 /// 5. merge a synthetic secondary UD sentence for that span
 /// 6. splice the merged secondary morphology back into the host file
 #[test]
 fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
     use batchalign_transform::morphosyntax::l2::{
-        extract_l2_deferred_positions, merge_planned_secondary_span, plan_dispatch_spans,
-        splice_l2_into_chat,
+        merge_planned_secondary_span, plan_dispatch_spans, splice_l2_into_chat,
     };
     use batchalign_transform::morphosyntax::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
@@ -735,18 +750,6 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
         ]"#,
     );
 
-    let deferred =
-        extract_l2_deferred_positions(&batch_items, std::slice::from_ref(&primary_ud_response));
-    assert_eq!(
-        deferred.len(),
-        2,
-        "contiguous Spanish span should defer two positions"
-    );
-    assert_eq!(deferred[0].word_idx, 3);
-    assert_eq!(deferred[1].word_idx, 4);
-    assert_eq!(deferred[0].target_lang.as_str(), "spa");
-    assert_eq!(deferred[1].target_lang.as_str(), "spa");
-
     let empty_mwt = std::collections::BTreeMap::new();
     let injection = inject_results(
         &parser,
@@ -763,6 +766,16 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
         "primary L2-placeholder injection should not degrade the fixture: {:?}",
         injection.decisions
     );
+    let deferred = injection.l2.into_reported_positions();
+    assert_eq!(
+        deferred.len(),
+        2,
+        "contiguous Spanish span should defer two positions"
+    );
+    assert_eq!(deferred[0].word_idx().as_usize(), 3);
+    assert_eq!(deferred[1].word_idx().as_usize(), 4);
+    assert_eq!(deferred[0].target_lang().as_str(), "spa");
+    assert_eq!(deferred[1].target_lang().as_str(), "spa");
 
     let utterance = chat_file
         .lines
@@ -778,29 +791,32 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
     assert_eq!(mor_before.items()[4].main.pos.to_string(), "L2");
     assert_eq!(mor_before.items()[4].main.lemma.to_string(), "xxx");
 
-    let dispatch_plan = plan_dispatch_spans(&deferred);
+    let deferred_words = deferred.len();
+    let mut dispatch_plan = plan_dispatch_spans(deferred);
     assert_eq!(
         dispatch_plan.spans.len(),
         1,
         "contiguous span should plan as one secondary sentence"
     );
-    let span = &dispatch_plan.spans[0];
+    let span = dispatch_plan.spans.remove(0);
     assert_eq!(
-        span.words.iter().map(|w| w.as_str()).collect::<Vec<_>>(),
+        span.words().map(|w| w.as_str()).collect::<Vec<_>>(),
         vec!["los", "niños"]
     );
     assert!(
-        span.attachment.is_external_root(),
+        span.attachment().is_external_root(),
         "the noun in the secondary span must reattach to the host predicate"
     );
     assert_eq!(
-        span.attachment.external_root_deprel().map(|d| d.as_str()),
-        Some("obl")
+        span.attachment()
+            .external_root_deprel()
+            .map(|d| d.as_str().to_string()),
+        Some("obl".to_string())
     );
 
     let secondary_sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "los".to_string(),
                 lemma: "el".to_string(),
@@ -811,8 +827,8 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
                 deprel: "det".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "niños".to_string(),
                 lemma: "niño".to_string(),
@@ -823,23 +839,17 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
-    let merged_pairs = merge_planned_secondary_span(span, &deferred, &secondary_sentence)
-        .expect("secondary merge");
+    let merged = merge_planned_secondary_span(span, &secondary_sentence).expect("secondary merge");
     assert_eq!(
-        merged_pairs.len(),
-        2,
+        merged.mors().len(),
+        deferred_words,
         "secondary span should merge back into two positions"
     );
 
-    let mut merged_results = vec![None; deferred.len()];
-    for (global_idx, merged) in merged_pairs {
-        merged_results[global_idx] = Some(merged);
-    }
-
-    let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged_results);
+    let outcome = splice_l2_into_chat(&mut chat_file, vec![merged]);
     assert_eq!(outcome.spliced, 2);
     assert_eq!(outcome.fallback, 0);
     assert_eq!(outcome.gra_upgraded, 0);
@@ -913,7 +923,7 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
     .batch_items;
 
     assert_eq!(batch_items.len(), 1, "should have 1 utterance");
-    let word_count = batch_items[0].2.words.len();
+    let word_count = batch_items[0].item().words().len();
     // CHAT extracts main tier words (gonna, eat, cookies) + terminator is
     // stored separately in the batch item.
     assert!(
@@ -928,7 +938,7 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
         sentences: vec![UdSentence {
             words: vec![
                 // Range parent token for "gonna"
-                UdWord {
+                UdWord::from(UdWordAnalysis {
                     id: UdId::Range(1, 2),
                     text: "gonna".into(),
                     lemma: "".into(),
@@ -939,9 +949,9 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "dep".into(),
                     deps: None,
                     misc: None,
-                },
+                }),
                 // Component 1: "gon" (going)
-                UdWord {
+                UdWord::from(UdWordAnalysis {
                     id: UdId::Single(1),
                     text: "gon".into(),
                     lemma: "go".into(),
@@ -952,9 +962,9 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "advcl".into(),
                     deps: None,
                     misc: None,
-                },
+                }),
                 // Component 2: "na" (to)
-                UdWord {
+                UdWord::from(UdWordAnalysis {
                     id: UdId::Single(2),
                     text: "na".into(),
                     lemma: "to".into(),
@@ -965,9 +975,9 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "mark".into(),
                     deps: None,
                     misc: None,
-                },
+                }),
                 // Regular word: "eat"
-                UdWord {
+                UdWord::from(UdWordAnalysis {
                     id: UdId::Single(3),
                     text: "eat".into(),
                     lemma: "eat".into(),
@@ -978,9 +988,9 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "root".into(),
                     deps: None,
                     misc: None,
-                },
+                }),
                 // Regular word: "cookies"
-                UdWord {
+                UdWord::from(UdWordAnalysis {
                     id: UdId::Single(4),
                     text: "cookies".into(),
                     lemma: "cookie".into(),
@@ -991,9 +1001,9 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "obj".into(),
                     deps: None,
                     misc: None,
-                },
+                }),
                 // Punctuation: "."
-                UdWord {
+                UdWord::from(UdWordAnalysis {
                     id: UdId::Single(5),
                     text: ".".into(),
                     lemma: ".".into(),
@@ -1004,7 +1014,7 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "punct".into(),
                     deps: None,
                     misc: None,
-                },
+                }),
             ],
         }],
     };
@@ -1325,25 +1335,20 @@ fn collect_payloads_bare_at_s_shortcut_resolution() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref item, _) = items[0];
+    let item = items[0].item();
 
     // "ich möchte film@s studies@s machen ."
-    let film_idx = item
-        .words
+    let film_idx = texts(item)
         .iter()
-        .position(|w| w == "film")
+        .position(|w| *w == "film")
         .expect("should have 'film'");
-    let studies_idx = item
-        .words
+    let studies_idx = texts(item)
         .iter()
-        .position(|w| w == "studies")
+        .position(|w| *w == "studies")
         .expect("should have 'studies'");
 
     // Bare @s should resolve to "eng" (secondary language from @Languages: deu, eng)
-    let film_res = item.special_forms[film_idx]
-        .1
-        .as_ref()
-        .expect("film should have lang");
+    let film_res = code_switch(&item.words()[film_idx]).expect("film should have lang");
     let film_langs = film_res.languages();
     assert_eq!(
         film_langs[0].as_str(),
@@ -1351,18 +1356,8 @@ fn collect_payloads_bare_at_s_shortcut_resolution() {
         "bare @s should resolve to eng (secondary language)"
     );
 
-    let studies_res = item.special_forms[studies_idx]
-        .1
-        .as_ref()
-        .expect("studies should have lang");
+    let studies_res = code_switch(&item.words()[studies_idx]).expect("studies should have lang");
     assert_eq!(studies_res.languages()[0].as_str(), "eng");
-
-    // Span grouping should merge them (contiguous, same language)
-    let spans =
-        crate::chat_ops::morphosyntax_ops::l2::group_l2_spans(&item.special_forms, &item.words);
-    assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0].target_lang.as_str(), "eng");
-    assert_eq!(spans[0].words, vec!["film", "studies"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1828,7 +1823,7 @@ fn fmt_gra(rels: &[talkbank_model::model::GrammaticalRelation]) -> String {
 
 /// Family A, Test A1, single-word onomatopoeia utterance.
 ///
-/// Source pattern (from `still-have-error-2.log`):
+/// Source pattern (from a production run's validation log):
 ///     *CHI:  vau@o .
 ///     %mor:  on|vau .
 ///     %gra:  1|0|DEP 2|1|PUNCT          ← BUG
@@ -2002,7 +1997,7 @@ fn family_a_multi_word_all_at_si_keeps_root_deprel_at_head_zero() {
 
 /// Family A, Test A4, host-language modifier + `@o` as syntactic root.
 ///
-/// Source pattern (from `still-have-error-2.log`):
+/// Source pattern (from a production run's validation log):
 ///     *IRI:  the chingchangchongchong@o .
 ///     %mor:  det|the-Def-Art on|chingchangchongchong .
 ///     %gra:  1|2|DET 2|0|DEP 3|2|PUNCT          ← BUG
@@ -3167,7 +3162,7 @@ fn l2_fallback_no_l2_morphotag_flag_off_keeps_l2_xxx_for_supported_lang() {
 // ============================================================================
 // Synthesis-layer ROOT-deprel pin tests (2026-05-07)
 //
-// Failing data observed in `~/talkbank/still-have-error-11.txt`: 442 E722
+// Failing data observed in a production run's validation log: 442 E722
 // errors in 167 files; 100% of failing utterances carry a special-form
 // `@<letter>` marker (@u, @n, @o, @q, @l, @si, @k, @i) and a `%gra` of
 // shape `…|0|DEP …` instead of `…|0|ROOT …`. The synthesis path at
@@ -3276,7 +3271,7 @@ fn run_synthesis_root_invariant_check(form_marker: &str, surface: &str, expected
 
     // The structural pin: gra at index 1 must be head=0 with ROOT
     // (NOT head=0 with DEP, that's the production failure shape we
-    // see in `still-have-error-11.txt` for these forms).
+    // saw in that production log for these forms).
     let rel = gra
         .relations()
         .iter()
@@ -3293,7 +3288,7 @@ fn run_synthesis_root_invariant_check(form_marker: &str, surface: &str, expected
         rel.relation.eq_ignore_ascii_case("ROOT"),
         "[{form_marker}] gra index 1 deprel expected 'ROOT' (joint invariant: \
          head==0 ⟺ deprel==ROOT); got '{}' ({:?}). \
-         This is exactly the still-have-error-11.txt failure shape.",
+         This is exactly the production failure shape.",
         rel.relation,
         gra.relations()
     );
@@ -3950,4 +3945,197 @@ fn synthesis_at_n_non_root_position_uses_dep_deprel() {
         rel.relation,
         gra.relations()
     );
+}
+
+/// Injection writes only what the analysis assigned. The verb here has no
+/// features, so its `%mor` item is the bare `verb|go`: the `Inf` and `S` the
+/// renderer used to invent are gone. (The `@c` word, which Stanza analyzes as
+/// an object noun, is replaced by special-form synthesis as before.)
+#[test]
+fn injection_writes_no_invented_feature_values() {
+    use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
+    use talkbank_model::model::WriteChat;
+
+    let parser = TreeSitterParser::new().unwrap();
+    let chat = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n\
+                @ID:\teng|test|PAR|||||Participant|||\n*PAR:\tgo gumma@c .\n@End\n";
+    let (mut chat_file, _) = parse_lenient(&parser, chat);
+    let primary_lang =
+        talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
+    let langs = declared_languages(&chat_file, &primary_lang);
+    let batch_items = collect_payloads(
+        &chat_file,
+        &primary_lang,
+        &langs,
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
+    let ud = ud_response_from_words(
+        r#"[
+          {"id":1,"text":"go","lemma":"go","upos":"VERB","head":0,"deprel":"root"},
+          {"id":2,"text":"xbxxx","lemma":"xbxxx","upos":"NOUN","head":1,"deprel":"obj"},
+          {"id":3,"text":".","lemma":".","upos":"PUNCT","head":1,"deprel":"punct"}
+        ]"#,
+    );
+    inject_results(
+        &parser,
+        &mut chat_file,
+        batch_items,
+        vec![ud],
+        &primary_lang,
+        TokenizationMode::Preserve,
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("injection must succeed");
+
+    let written = chat_file.to_chat_string();
+    let mor = written
+        .lines()
+        .find(|line| line.starts_with("%mor:"))
+        .expect("a %mor tier was written");
+    let items: Vec<&str> = mor.trim_start_matches("%mor:").split_whitespace().collect();
+    assert_eq!(items.first(), Some(&"verb|go"), "{mor}");
+    assert!(!mor.contains("-Inf") && !mor.contains("-Acc"), "{mor}");
+}
+
+/// Inject one model response into `main` (an English utterance) in
+/// retokenize mode with `mwt` as the lexicon; the written file and the
+/// decisions.
+fn inject_retokenized(
+    main: &str,
+    ud_json: &str,
+    mwt: &MwtDict,
+) -> (
+    talkbank_model::ChatFile,
+    Vec<batchalign_transform::decisions::DecisionRecord>,
+) {
+    use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
+    let parser = TreeSitterParser::new().unwrap();
+    let chat = format!(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
+         @ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\t{main}\n@End\n"
+    );
+    let (mut chat_file, _errors) = parse_lenient(&parser, &chat);
+    let primary_lang = talkbank_model::model::LanguageCode::new("eng").expect("eng");
+    let langs = declared_languages(&chat_file, &primary_lang);
+    let batch_items = collect_payloads(
+        &chat_file,
+        &primary_lang,
+        &langs,
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
+    let injection = inject_results(
+        &parser,
+        &mut chat_file,
+        batch_items,
+        vec![ud_response_from_words(ud_json)],
+        &primary_lang,
+        TokenizationMode::StanzaRetokenize,
+        mwt,
+    )
+    .expect("the batch is admitted");
+    (chat_file, injection.decisions)
+}
+
+/// The utterance's main tier as written.
+fn main_tier(chat_file: &talkbank_model::ChatFile) -> String {
+    use talkbank_model::WriteChat;
+    chat_file
+        .to_chat_string()
+        .lines()
+        .find(|line| line.starts_with("*CHI:"))
+        .expect("the utterance")
+        .to_string()
+}
+
+/// `--retokenize` never writes a word of the contraction table into the main
+/// tier: `hafta`, which the model left whole and the English contraction
+/// rewrite expands to `have` + `to` for `%mor`, stays `hafta`. The model's
+/// tokens (three) and the analysis's items (four) then differ, which is a
+/// reported retokenization failure, not a rewritten transcript.
+#[test]
+fn retokenize_does_not_write_contraction_table_words_into_the_main_tier() {
+    let (chat_file, decisions) = inject_retokenized(
+        "I hafta go .",
+        r#"[
+          {"id":1,"text":"I","lemma":"I","upos":"PRON","feats":"Case=Nom|Number=Sing|Person=1|PronType=Prs","head":2,"deprel":"nsubj"},
+          {"id":2,"text":"hafta","lemma":"hafta","upos":"VERB","feats":"Mood=Ind|Tense=Pres|VerbForm=Fin","head":0,"deprel":"root"},
+          {"id":3,"text":"go","lemma":"go","upos":"VERB","feats":"VerbForm=Inf","head":2,"deprel":"xcomp"},
+          {"id":4,"text":".","lemma":".","upos":"PUNCT","head":2,"deprel":"punct"}
+        ]"#,
+        &MwtDict::new(),
+    );
+    assert_eq!(main_tier(&chat_file), "*CHI:\tI hafta go .");
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.strategy.strategy_name() == "retokenization_failed"),
+        "{decisions:?}"
+    );
+}
+
+/// A token the MWT lexicon expands keeps the utterance's terminator
+/// relation and numbers the expansion's relations: the main tier takes the
+/// lexicon's pieces, each piece an item, and `%gra` is a valid tree.
+#[test]
+fn retokenize_with_an_mwt_lexicon_expansion_injects_a_valid_gra() {
+    let mwt: MwtDict = [(
+        "cannot".to_string(),
+        vec!["can".to_string(), "not".to_string()],
+    )]
+    .into_iter()
+    .collect();
+    let (mut chat_file, decisions) = inject_retokenized(
+        "I cannot go .",
+        r#"[
+          {"id":1,"text":"I","lemma":"I","upos":"PRON","feats":"Case=Nom|Number=Sing|Person=1|PronType=Prs","head":3,"deprel":"nsubj"},
+          {"id":2,"text":"cannot","lemma":"cannot","upos":"AUX","feats":"VerbForm=Fin","head":3,"deprel":"aux"},
+          {"id":3,"text":"go","lemma":"go","upos":"VERB","feats":"VerbForm=Inf","head":0,"deprel":"root"},
+          {"id":4,"text":".","lemma":".","upos":"PUNCT","head":3,"deprel":"punct"}
+        ]"#,
+        &mwt,
+    );
+    use talkbank_model::WriteChat;
+    assert!(decisions.is_empty(), "{decisions:?}");
+    assert_eq!(main_tier(&chat_file), "*CHI:\tI can not go .");
+    let written = chat_file.to_chat_string();
+    let gra = written
+        .lines()
+        .find(|line| line.starts_with("%gra:"))
+        .expect("a %gra tier was written");
+    assert_eq!(gra, "%gra:\t1|4|NSUBJ 2|4|AUX 3|2|FIXED 4|0|ROOT 5|4|PUNCT");
+    validate_or_panic(&mut chat_file, "lexicon expansion");
+}
+
+/// `--retokenize` with a special form: the form was sent to the model as its
+/// placeholder, and its token is written back as the CHAT word, so the text
+/// mapping holds and the form's `%mor` (`chi|` for `@c`) lands on the form,
+/// not a neighbour.
+#[test]
+fn retokenize_places_a_special_form_on_its_own_word() {
+    use talkbank_model::WriteChat;
+    let (chat_file, decisions) = inject_retokenized(
+        "I don't like gumma@c .",
+        r#"[
+          {"id":1,"text":"I","lemma":"I","upos":"PRON","feats":"Case=Nom|Number=Sing|Person=1|PronType=Prs","head":4,"deprel":"nsubj"},
+          {"id":[2,3],"text":"don't","lemma":"","upos":"X","head":0,"deprel":""},
+          {"id":2,"text":"do","lemma":"do","upos":"AUX","feats":"Mood=Ind|Tense=Pres|VerbForm=Fin","head":4,"deprel":"aux"},
+          {"id":3,"text":"n't","lemma":"not","upos":"PART","feats":"Polarity=Neg","head":4,"deprel":"advmod"},
+          {"id":4,"text":"like","lemma":"like","upos":"VERB","feats":"Mood=Ind|Tense=Pres|VerbForm=Fin","head":0,"deprel":"root"},
+          {"id":5,"text":"xbxxx","lemma":"xbxxx","upos":"NOUN","feats":"Number=Sing","head":4,"deprel":"obj"},
+          {"id":6,"text":".","lemma":".","upos":"PUNCT","head":4,"deprel":"punct"}
+        ]"#,
+        &MwtDict::new(),
+    );
+    assert!(decisions.is_empty(), "{decisions:?}");
+    let written = chat_file.to_chat_string();
+    assert_eq!(main_tier(&chat_file), "*CHI:\tI do n't like gumma@c .");
+    let mor = written
+        .lines()
+        .find(|line| line.starts_with("%mor:"))
+        .expect("a %mor tier was written");
+    let items: Vec<&str> = mor.trim_start_matches("%mor:").split_whitespace().collect();
+    assert!(items[3].starts_with("verb|like"), "{mor}");
+    assert_eq!(items[4], "chi|gumma", "{mor}");
 }

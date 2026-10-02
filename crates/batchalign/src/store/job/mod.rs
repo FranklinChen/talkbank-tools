@@ -20,6 +20,7 @@ mod types;
 pub(crate) mod test_support;
 
 pub use conflict::*;
+pub(crate) use projections::{JobStatusColumns, Stop};
 pub use types::*;
 
 #[cfg(test)]
@@ -27,9 +28,10 @@ mod tests {
     use super::*;
     use crate::api::{
         ContentType, CorrelationId, DisplayPath, FileProgressStage, FileStatusKind, JobId,
-        JobStatus, LanguageSpec, NodeId, NumSpeakers, ReleasedCommand, UnixTimestamp,
+        JobStatus, LanguageSpec, MachineTime, NodeId, NumSpeakers, ReleasedCommand,
     };
     use crate::options::CommandOptions;
+    use crate::scheduling::LeaseRecord;
     use crate::store::{FileResultEntry, FileStatus};
     use std::collections::{BTreeMap, HashMap};
     use tokio_util::sync::CancellationToken;
@@ -63,8 +65,10 @@ mod tests {
                 debug_traces: false,
             },
             source: JobSourceContext {
-                submitted_by: "127.0.0.1".into(),
-                submitted_by_name: "localhost".into(),
+                submitter: Some(crate::store::Submitter::client(
+                    std::net::Ipv4Addr::LOCALHOST.into(),
+                    "localhost".into(),
+                )),
                 source_dir: "/corpus".into(),
             },
             filesystem: JobFilesystemConfig {
@@ -90,15 +94,11 @@ mod tests {
                 completed_files: 0,
             },
             schedule: JobScheduleState {
-                submitted_at: UnixTimestamp(100.0),
+                submitted_at: crate::unix_time(100.0),
                 completed_at: None,
                 next_eligible_at: None,
                 num_workers: None,
-                lease: JobLeaseState {
-                    leased_by_node: None,
-                    expires_at: None,
-                    heartbeat_at: None,
-                },
+                lease: None,
                 last_cancel: None,
             },
             runtime: JobRuntimeControl {
@@ -114,7 +114,11 @@ mod tests {
     #[test]
     fn pending_files_skip_terminal_entries() {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution.file_statuses.get_mut("a.cha").unwrap().status = FileStatusKind::Done;
+        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
+            crate::store::FilePhase::Done {
+                started_at: None,
+                finished_at: Some(crate::unix_time(5.0)),
+            };
 
         let pending = job.pending_files();
 
@@ -147,7 +151,7 @@ mod tests {
         let mut abandoned = sample_job("abandoned-job", &["020724a.mp3"]);
         abandoned.execution.status = JobStatus::Queued;
         abandoned.schedule.submitted_at =
-            crate::api::UnixTimestamp(crate::store::unix_now().0 - 3.0 * 3600.0);
+            MachineTime::now().minus(std::time::Duration::from_secs(3 * 3600));
         abandoned.runtime.runner_active = false;
 
         let incoming = sample_job("resubmit", &["020724a.mp3"]);
@@ -170,13 +174,18 @@ mod tests {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
         job.execution.status = JobStatus::Failed;
         job.execution.error = Some("failed".into());
-        job.execution.file_statuses.get_mut("a.cha").unwrap().status = FileStatusKind::Done;
+        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
+            crate::store::FilePhase::Done {
+                started_at: None,
+                finished_at: Some(crate::unix_time(5.0)),
+            };
         let retry_file = job.execution.file_statuses.get_mut("b.cha").unwrap();
-        retry_file.status = FileStatusKind::Error;
-        retry_file.error = Some("boom".into());
-        retry_file.started_at = Some(UnixTimestamp(10.0));
-        retry_file.finished_at = Some(UnixTimestamp(12.0));
-        retry_file.progress_stage = Some(FileProgressStage::Aligning);
+        retry_file.phase = crate::store::FilePhase::Error {
+            started_at: Some(crate::unix_time(10.0)),
+            finished_at: Some(crate::unix_time(12.0)),
+            failure: crate::store::FileFailure::of_failed_row(Some("boom".into()), None),
+        };
+        retry_file.progress.stage = Some(FileProgressStage::Aligning);
         job.execution.results.push(FileResultEntry {
             filename: DisplayPath::from("a.cha"),
             content_type: ContentType::Chat,
@@ -187,11 +196,16 @@ mod tests {
             content_type: ContentType::Chat,
             error: Some("boom".into()),
         });
-        job.schedule.completed_at = Some(UnixTimestamp(20.0));
-        job.schedule.next_eligible_at = Some(UnixTimestamp(25.0));
-        job.schedule.lease.leased_by_node = Some(NodeId::from("node-1"));
-        job.schedule.lease.expires_at = Some(UnixTimestamp(30.0));
-        job.schedule.lease.heartbeat_at = Some(UnixTimestamp(28.0));
+        job.schedule.completed_at = Some(crate::unix_time(20.0));
+        job.schedule.next_eligible_at = Some(crate::unix_time(25.0));
+        job.schedule.lease = Some(
+            LeaseRecord::new(
+                NodeId::from("node-1"),
+                crate::unix_time(28.0),
+                crate::unix_time(30.0),
+            )
+            .expect("an ordered fixture lease"),
+        );
         job.runtime.runner_active = true;
 
         job.prepare_for_restart();
@@ -201,16 +215,16 @@ mod tests {
         assert_eq!(job.execution.completed_files, 1);
         assert_eq!(job.execution.results.len(), 1);
         assert_eq!(
-            job.execution.file_statuses["a.cha"].status,
+            job.execution.file_statuses["a.cha"].status(),
             FileStatusKind::Done
         );
         assert_eq!(
-            job.execution.file_statuses["b.cha"].status,
+            job.execution.file_statuses["b.cha"].status(),
             FileStatusKind::Queued
         );
         assert!(job.schedule.completed_at.is_none());
         assert!(job.schedule.next_eligible_at.is_none());
-        assert!(job.schedule.lease.leased_by_node.is_none());
+        assert!(job.schedule.lease.is_none());
         // Restart must NOT pretend the old runner is gone: the claim is
         // released only by the runner itself, and the restarted runner
         // waits on it (begin_runner). What restart does do is move the
@@ -227,28 +241,48 @@ mod tests {
     fn reconcile_recovered_runtime_state_requeues_resumable_files() {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
         job.execution.status = JobStatus::Running;
-        job.execution.file_statuses.get_mut("a.cha").unwrap().status = FileStatusKind::Done;
+        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
+            crate::store::FilePhase::Done {
+                started_at: None,
+                finished_at: Some(crate::unix_time(5.0)),
+            };
         let resumable = job.execution.file_statuses.get_mut("b.cha").unwrap();
-        resumable.status = FileStatusKind::Interrupted;
-        resumable.started_at = Some(UnixTimestamp(10.0));
-        resumable.finished_at = Some(UnixTimestamp(11.0));
-        job.schedule.completed_at = Some(UnixTimestamp(20.0));
-        job.schedule.next_eligible_at = Some(UnixTimestamp(21.0));
-        job.schedule.lease.leased_by_node = Some(NodeId::from("node-1"));
-        job.schedule.lease.expires_at = Some(UnixTimestamp(30.0));
-        job.schedule.lease.heartbeat_at = Some(UnixTimestamp(28.0));
+        resumable.phase = crate::store::FilePhase::Interrupted {
+            started_at: Some(crate::unix_time(10.0)),
+            last_failure: None,
+        };
+        job.execution.error = Some("an earlier run failed".into());
+        job.schedule.completed_at = Some(crate::unix_time(20.0));
+        job.schedule.next_eligible_at = Some(crate::unix_time(21.0));
+        job.schedule.lease = Some(
+            LeaseRecord::new(
+                NodeId::from("node-1"),
+                crate::unix_time(28.0),
+                crate::unix_time(30.0),
+            )
+            .expect("an ordered fixture lease"),
+        );
 
         let disposition = job.reconcile_recovered_runtime_state();
 
         assert_eq!(disposition, RecoveryDisposition::Requeued);
         assert_eq!(job.execution.status, JobStatus::Queued);
         assert_eq!(
-            job.execution.file_statuses["b.cha"].status,
+            job.status_columns().error,
+            None,
+            "a requeued job carries no earlier error into its row"
+        );
+        assert_eq!(
+            job.execution.file_statuses["b.cha"].status(),
             FileStatusKind::Queued
         );
-        assert!(job.execution.file_statuses["b.cha"].started_at.is_none());
+        assert_eq!(
+            job.execution.file_statuses["b.cha"].phase,
+            crate::store::FilePhase::Queued,
+            "a requeued file keeps no times"
+        );
         assert!(job.schedule.completed_at.is_none());
-        assert!(job.schedule.lease.leased_by_node.is_none());
+        assert!(job.schedule.lease.is_none());
     }
 
     /// Recovery promotes all-terminal interrupted jobs to a lease-free final state.
@@ -256,15 +290,27 @@ mod tests {
     fn reconcile_recovered_runtime_state_promotes_terminal_jobs() {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
         job.execution.status = JobStatus::Interrupted;
-        job.execution.file_statuses.get_mut("a.cha").unwrap().status = FileStatusKind::Done;
+        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
+            crate::store::FilePhase::Done {
+                started_at: None,
+                finished_at: Some(crate::unix_time(5.0)),
+            };
         let failed = job.execution.file_statuses.get_mut("b.cha").unwrap();
-        failed.status = FileStatusKind::Error;
-        failed.error = Some("boom".into());
-        job.schedule.completed_at = Some(UnixTimestamp(20.0));
-        job.schedule.next_eligible_at = Some(UnixTimestamp(21.0));
-        job.schedule.lease.leased_by_node = Some(NodeId::from("node-1"));
-        job.schedule.lease.expires_at = Some(UnixTimestamp(30.0));
-        job.schedule.lease.heartbeat_at = Some(UnixTimestamp(28.0));
+        failed.phase = crate::store::FilePhase::Error {
+            started_at: None,
+            finished_at: None,
+            failure: crate::store::FileFailure::of_failed_row(Some("boom".into()), None),
+        };
+        job.schedule.completed_at = Some(crate::unix_time(20.0));
+        job.schedule.next_eligible_at = Some(crate::unix_time(21.0));
+        job.schedule.lease = Some(
+            LeaseRecord::new(
+                NodeId::from("node-1"),
+                crate::unix_time(28.0),
+                crate::unix_time(30.0),
+            )
+            .expect("an ordered fixture lease"),
+        );
 
         let disposition = job.reconcile_recovered_runtime_state();
 
@@ -272,8 +318,7 @@ mod tests {
         assert_eq!(job.execution.status, JobStatus::Completed);
         assert_eq!(job.execution.completed_files, 2);
         assert!(job.schedule.next_eligible_at.is_none());
-        assert!(job.schedule.lease.leased_by_node.is_none());
-        assert!(job.schedule.lease.expires_at.is_none());
+        assert!(job.schedule.lease.is_none());
     }
 
     /// Local queue claims and renewals stay on the job boundary.
@@ -282,46 +327,60 @@ mod tests {
         let mut job = sample_job("job-1", &["a.cha"]);
         let node_id = NodeId::from("node-a");
         let claimed = job
-            .claim_for_local_dispatch(&node_id, UnixTimestamp(10.0), 30.0)
+            .claim_for_local_dispatch(
+                &node_id,
+                crate::unix_time(10.0),
+                crate::config::LeaseTtl::from_secs(90).unwrap(),
+            )
             .expect("claim");
 
-        assert_eq!(claimed.leased_by_node, node_id);
-        assert_eq!(claimed.heartbeat_at, UnixTimestamp(10.0));
-        assert_eq!(claimed.expires_at, UnixTimestamp(40.0));
+        assert_eq!(claimed.leased_by_node(), &node_id);
+        assert_eq!(claimed.heartbeat_at(), crate::unix_time(10.0));
+        assert_eq!(claimed.expires_at(), crate::unix_time(100.0));
         assert!(job.runtime.runner_active);
 
         let renewed = job
-            .renew_local_dispatch_lease(&node_id, UnixTimestamp(20.0), 30.0)
+            .renew_local_dispatch_lease(
+                &node_id,
+                crate::unix_time(20.0),
+                crate::config::LeaseTtl::from_secs(90).unwrap(),
+            )
             .expect("renew");
-        assert_eq!(renewed.heartbeat_at, UnixTimestamp(20.0));
-        assert_eq!(renewed.expires_at, UnixTimestamp(50.0));
+        assert_eq!(renewed.heartbeat_at(), crate::unix_time(20.0));
+        assert_eq!(renewed.expires_at(), crate::unix_time(110.0));
 
         job.release_local_dispatch_claim();
         assert!(!job.runtime.runner_active);
-        assert!(job.schedule.lease.leased_by_node.is_none());
+        assert!(job.schedule.lease.is_none());
     }
 
     /// Jobs with live leases or deferrals do not report ready for dispatch.
     #[test]
     fn ready_for_local_dispatch_respects_leases_and_deferrals() {
         let mut job = sample_job("job-1", &["a.cha"]);
-        let now = UnixTimestamp(10.0);
+        let now = crate::unix_time(10.0);
         assert!(job.ready_for_local_dispatch(now));
 
-        job.schedule.next_eligible_at = Some(UnixTimestamp(20.0));
+        job.schedule.next_eligible_at = Some(crate::unix_time(20.0));
         assert!(!job.ready_for_local_dispatch(now));
         assert_eq!(
             job.next_local_dispatch_wake_at(now),
-            Some(UnixTimestamp(20.0))
+            Some(crate::unix_time(20.0))
         );
 
         job.schedule.next_eligible_at = None;
-        job.schedule.lease.leased_by_node = Some(NodeId::from("node-a"));
-        job.schedule.lease.expires_at = Some(UnixTimestamp(30.0));
+        job.schedule.lease = Some(
+            LeaseRecord::new(
+                NodeId::from("node-a"),
+                crate::unix_time(10.0),
+                crate::unix_time(30.0),
+            )
+            .expect("an ordered fixture lease"),
+        );
         assert!(!job.ready_for_local_dispatch(now));
         assert_eq!(
             job.next_local_dispatch_wake_at(now),
-            Some(UnixTimestamp(30.0))
+            Some(crate::unix_time(30.0))
         );
     }
 
@@ -329,16 +388,19 @@ mod tests {
     #[test]
     fn mark_file_done_updates_file_state() {
         let mut job = sample_job("job-1", &["a.cha"]);
-        job.execution.file_statuses.get_mut("a.cha").unwrap().error = Some("stale".into());
-        job.execution
-            .file_statuses
-            .get_mut("a.cha")
-            .unwrap()
-            .error_category = Some(crate::scheduling::FailureCategory::WorkerTimeout);
+        assert!(job.mark_file_retry_pending(
+            "a.cha",
+            &FileRetryRecord {
+                message: "stale".into(),
+                category: crate::scheduling::FailureCategory::WorkerTimeout,
+                finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
+                retry_at: crate::unix_time(11.5),
+            }
+        ));
 
         assert!(job.mark_file_done(
             "a.cha",
-            UnixTimestamp(12.0),
+            crate::unix_time(12.0),
             Some(CompletedFileOutput {
                 filename: DisplayPath::from("a.cha"),
                 content_type: ContentType::Chat,
@@ -346,20 +408,11 @@ mod tests {
             })
         ));
 
-        assert_eq!(
-            job.execution.file_statuses["a.cha"].status,
-            FileStatusKind::Done
-        );
-        assert_eq!(
-            job.execution.file_statuses["a.cha"].finished_at,
-            Some(UnixTimestamp(12.0))
-        );
-        assert!(job.execution.file_statuses["a.cha"].error.is_none());
-        assert!(
-            job.execution.file_statuses["a.cha"]
-                .error_category
-                .is_none()
-        );
+        let entry = job.execution.file_statuses["a.cha"].to_entry();
+        assert_eq!(entry.status, FileStatusKind::Done);
+        assert_eq!(entry.finished_at, Some(crate::unix_time(12.0)));
+        assert!(entry.error.is_none(), "the retry's error is gone");
+        assert!(entry.error_category.is_none());
         assert_eq!(job.execution.completed_files, 1);
         assert_eq!(job.execution.results.len(), 1);
     }
@@ -374,18 +427,21 @@ mod tests {
             &FileRetryRecord {
                 message: "retry".into(),
                 category: crate::scheduling::FailureCategory::WorkerTimeout,
-                finished_at: UnixTimestamp(11.0),
-                retry_at: UnixTimestamp(20.0),
+                finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
+                retry_at: crate::unix_time(20.0),
             }
         ));
 
-        let file_status = &job.execution.file_statuses["a.cha"];
-        assert_eq!(file_status.status, FileStatusKind::Processing);
-        assert_eq!(file_status.next_eligible_at, Some(UnixTimestamp(20.0)));
+        let entry = job.execution.file_statuses["a.cha"].to_entry();
+        assert_eq!(entry.status, FileStatusKind::Processing);
+        assert_eq!(entry.next_eligible_at, Some(crate::unix_time(20.0)));
         assert_eq!(
-            file_status.progress_stage,
+            entry.progress_stage,
             Some(FileProgressStage::RetryScheduled)
         );
+        // Still in flight: the failed attempt's end is not the file's finish.
+        assert_eq!(entry.finished_at, None);
+        assert_eq!(entry.duration_s, None);
     }
 
     /// Clearing retry state also clears stale retry errors before a new attempt.
@@ -397,16 +453,215 @@ mod tests {
             &FileRetryRecord {
                 message: "retry".into(),
                 category: crate::scheduling::FailureCategory::WorkerTimeout,
-                finished_at: UnixTimestamp(11.0),
-                retry_at: UnixTimestamp(20.0),
+                finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
+                retry_at: crate::unix_time(20.0),
             }
         ));
 
         assert!(job.clear_file_retry_state("a.cha"));
-        let file_status = &job.execution.file_statuses["a.cha"];
-        assert!(file_status.error.is_none());
-        assert!(file_status.error_category.is_none());
-        assert!(file_status.finished_at.is_none());
-        assert!(file_status.next_eligible_at.is_none());
+        let entry = job.execution.file_statuses["a.cha"].to_entry();
+        assert!(entry.error.is_none());
+        assert!(entry.error_category.is_none());
+        assert!(entry.finished_at.is_none());
+        assert!(entry.next_eligible_at.is_none());
+    }
+
+    /// A row image: the columns a phase owns, as `from_row` reads them.
+    fn row(
+        status: FileStatusKind,
+        error: Option<&str>,
+        started_at: Option<crate::api::MachineTime>,
+        finished_at: Option<crate::api::MachineTime>,
+        next_eligible_at: Option<crate::api::MachineTime>,
+    ) -> crate::store::FilePhaseColumns<'_> {
+        crate::store::FilePhaseColumns {
+            status,
+            error,
+            error_category: error.map(|_| crate::scheduling::FailureCategory::WorkerTimeout),
+            started_at,
+            finished_at,
+            next_eligible_at,
+        }
+    }
+
+    /// The database boundary rebuilds the one phase a row describes: a
+    /// processing row with a deadline is a pending retry whose failed-attempt
+    /// end is not a finish time, and an error column a phase cannot hold is
+    /// reported rather than kept.
+    #[test]
+    fn rows_become_the_phase_they_describe() {
+        use crate::store::FilePhase;
+        let t = crate::unix_time;
+
+        let (phase, dropped) = FilePhase::from_row(row(
+            FileStatusKind::Processing,
+            Some("timeout"),
+            Some(t(10.0)),
+            Some(t(11.0)),
+            Some(t(20.0)),
+        ));
+        assert_eq!(dropped, None);
+        assert_eq!(phase.kind(), FileStatusKind::Processing);
+        assert_eq!(phase.finished_at(), None);
+        assert_eq!(phase.next_eligible_at(), Some(t(20.0)));
+        assert_eq!(phase.last_activity_at(), Some(t(11.0)));
+
+        let (phase, dropped) = FilePhase::from_row(row(
+            FileStatusKind::Queued,
+            Some("timeout"),
+            Some(t(10.0)),
+            Some(t(11.0)),
+            None,
+        ));
+        assert_eq!(phase, FilePhase::Queued);
+        assert!(dropped.is_some(), "the stray error is reported");
+    }
+
+    /// `FilePhase::columns` and `FilePhase::from_row` are inverses: every
+    /// phase written as its column image reads back as itself, with nothing
+    /// reported dropped. Two functions that must agree, which no type pins.
+    #[test]
+    fn every_phase_roundtrips_through_its_columns() {
+        use crate::store::{FileFailure, FilePhase};
+        let failure = || {
+            FileFailure::recorded(
+                "timeout".into(),
+                crate::scheduling::FailureCategory::WorkerTimeout,
+            )
+        };
+        let t = crate::unix_time;
+        let phases = [
+            FilePhase::Queued,
+            FilePhase::Processing {
+                started_at: Some(t(1.0)),
+            },
+            FilePhase::RetryPending {
+                started_at: Some(t(1.0)),
+                failed_at: Some(t(2.0)),
+                retry_at: t(3.0),
+                failure: failure(),
+            },
+            FilePhase::Done {
+                started_at: Some(t(1.0)),
+                finished_at: Some(t(2.0)),
+            },
+            FilePhase::Error {
+                started_at: None,
+                finished_at: Some(t(2.0)),
+                failure: failure(),
+            },
+            FilePhase::Error {
+                started_at: None,
+                finished_at: None,
+                failure: FileFailure::of_failed_row(None, None),
+            },
+            FilePhase::Interrupted {
+                started_at: Some(t(1.0)),
+                last_failure: Some(failure()),
+            },
+            FilePhase::Interrupted {
+                started_at: None,
+                last_failure: None,
+            },
+        ];
+        for phase in phases {
+            let (back, dropped) = FilePhase::from_row(phase.columns());
+            assert_eq!(back, phase);
+            assert_eq!(dropped, None, "{phase:?} wrote a column it does not own");
+        }
+    }
+
+    /// A failure is never empty: stored columns holding neither a message nor
+    /// a category are no failure, so an interrupted file cannot carry a
+    /// failure that writes nothing and reads back as none.
+    #[test]
+    fn an_empty_failure_is_no_failure() {
+        use crate::store::FileFailure;
+        assert_eq!(FileFailure::from_columns(None, None), None);
+        let unrecorded = FileFailure::of_failed_row(None, None);
+        assert_eq!((unrecorded.message(), unrecorded.category()), (None, None));
+        let category_only =
+            FileFailure::from_columns(None, Some(crate::scheduling::FailureCategory::WorkerCrash))
+                .expect("a category alone is a failure");
+        assert_eq!(category_only.message(), None);
+    }
+
+    /// Interrupting moves only in-flight phases, keeping the start and the
+    /// failure a pending retry was retrying.
+    #[test]
+    fn interrupting_keeps_the_start_and_the_retried_failure() {
+        use crate::store::{FileFailure, FilePhase};
+        let t = crate::unix_time;
+        let failure = FileFailure::recorded(
+            "crash".into(),
+            crate::scheduling::FailureCategory::WorkerCrash,
+        );
+        let retry = FilePhase::RetryPending {
+            started_at: Some(t(1.0)),
+            failed_at: Some(t(2.0)),
+            retry_at: t(3.0),
+            failure: failure.clone(),
+        };
+        assert_eq!(
+            retry.interrupted(),
+            FilePhase::Interrupted {
+                started_at: Some(t(1.0)),
+                last_failure: Some(failure),
+            }
+        );
+        let done = FilePhase::Done {
+            started_at: Some(t(1.0)),
+            finished_at: Some(t(2.0)),
+        };
+        assert_eq!(done.clone().interrupted(), done);
+    }
+
+    /// Every phase reports the columns it cannot hold, by one rule.
+    #[test]
+    fn a_column_a_phase_does_not_own_is_reported_for_every_phase() {
+        use crate::store::FilePhase;
+        let t = crate::unix_time;
+
+        let (phase, dropped) = FilePhase::from_row(row(
+            FileStatusKind::Processing,
+            None,
+            Some(t(1.0)),
+            Some(t(2.0)),
+            None,
+        ));
+        assert_eq!(
+            phase,
+            FilePhase::Processing {
+                started_at: Some(t(1.0))
+            }
+        );
+        assert_eq!(
+            dropped.as_deref(),
+            Some("the processing row held finished_at, which was not kept")
+        );
+
+        let (_, dropped) = FilePhase::from_row(row(
+            FileStatusKind::Error,
+            None,
+            None,
+            Some(t(2.0)),
+            Some(t(3.0)),
+        ));
+        assert_eq!(
+            dropped.as_deref(),
+            Some("the error row held next_eligible_at, which was not kept")
+        );
+
+        let (_, dropped) = FilePhase::from_row(row(
+            FileStatusKind::Interrupted,
+            None,
+            Some(t(1.0)),
+            Some(t(2.0)),
+            Some(t(3.0)),
+        ));
+        assert_eq!(
+            dropped.as_deref(),
+            Some("the interrupted row held finished_at, next_eligible_at, which were not kept")
+        );
     }
 }

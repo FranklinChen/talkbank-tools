@@ -1,7 +1,7 @@
 # batchalign: HTTP Server, Job Store, and NLP Orchestration
 
 **Status:** Current
-**Last modified:** 2026-09-22 17:57 EDT
+**Last modified:** 2026-10-01 13:02 EDT
 
 ## Overview
 
@@ -69,7 +69,7 @@ story is in `book/src/batchalign/architecture/command-flowcharts.md`.
 
 Domain newtypes are defined in `batchalign-types` using `string_id!` and `numeric_id!`:
 - **`../batchalign-types/src/macros.rs`**: macro definitions (generates Deref, serde transparent, From, Borrow, etc.)
-- **`../batchalign-types/src/domain/`**: `JobId`, `CommandName`, `ReleasedCommand`, `LanguageCode3`, `LanguageSpec`, `DisplayPath`, `StampSafeText` (the one stamp-safe text type, wrapped by `ReportedEngineName`), `CorrelationId`, `NumSpeakers`, `UnixTimestamp`, `DurationMs`, `MemoryMb`, etc.
+- **`../batchalign-types/src/domain/`**: `JobId`, `CommandName`, `ReleasedCommand`, `LanguageCode3`, `LanguageSpec`, `DisplayPath`, `StampSafeText` (the one stamp-safe text type, wrapped by `ReportedEngineName`), `CorrelationId`, `NumSpeakers`, `DurationMs`, `MemoryMb`, etc.; `../batchalign-types/src/machine_time.rs`: `MachineTime`, every instant from the SQLite boundary to the wire (see the book's type-driven-design page)
 - **`../batchalign-types/src/scheduling.rs`**: `AttemptId`, `WorkUnitId`
 - **`types/params.rs`**: `CachePolicy`, `WorTierPolicy` enums; `MorphosyntaxParams`, `FaParams`, `AudioContext` structs
 - **`pipeline/mod.rs`**: `PipelineServices` (shared infrastructure refs: pool, cache; no engine identity, each stage names its own)

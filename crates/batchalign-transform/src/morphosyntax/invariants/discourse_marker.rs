@@ -101,7 +101,7 @@ pub fn mark_isolated_communicators(
         word.upos = UdPunctable::Value(UniversalPos::Intj);
         word.lemma = word.text.to_lowercase();
         word.xpos = Some("UH".to_string());
-        word.feats = None;
+        word.clear_features();
     }
     sentence
 }
@@ -109,7 +109,6 @@ pub fn mark_isolated_communicators(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::morphosyntax::UdWord;
     use crate::morphosyntax::evidence::WordIsolation;
     use crate::morphosyntax::invariants::test_support::{mor_texts, punct, word};
     use crate::morphosyntax::lexicon::{RawVerdicts, VerdictSource};
@@ -220,7 +219,7 @@ mod tests {
     #[test]
     fn without_the_pause_the_adjective_reading_stands() {
         let mors = mor_texts(&stanza_tag_okay(), evidence(false, 7));
-        assert_eq!(mors.last().map(String::as_str), Some("adj|okay-S1"));
+        assert_eq!(mors.last().map(String::as_str), Some("adj|okay"));
     }
 
     #[test]
@@ -229,8 +228,8 @@ mod tests {
         let okay = &out.words[6];
         assert_eq!(okay.upos, UdPunctable::Value(UniversalPos::Intj));
         assert_eq!(okay.lemma, "okay");
-        assert_eq!(okay.feats, None);
-        assert_eq!((okay.head, okay.deprel.as_str()), (1, "advmod"));
+        assert!(okay.features().is_empty());
+        assert_eq!((okay.head.conllu(), okay.deprel.as_str()), (1, "advmod"));
         assert_eq!(out.words[0], stanza_tag_okay().words[0]);
     }
 
@@ -261,7 +260,7 @@ mod tests {
     #[test]
     fn a_kept_separator_counts_as_a_payload_word() {
         // `that's the cat , right ?` with Stanza's `'s` expanded.
-        let mut parent = UdWord::synthetic("that's", "", UniversalPos::X, None, 0, "");
+        let mut parent = word(0, "that's", "", UniversalPos::X, None, 0, "");
         parent.id = UdId::Range(1, 2);
         let sentence = UdSentence {
             words: vec![

@@ -1,16 +1,16 @@
 //! Runner-owned job execution mutations on [`JobStore`].
 
-use crate::api::{JobId, JobStatus, UnixTimestamp};
+use crate::api::{JobId, JobStatus, MachineTime};
 
+use super::super::JobStore;
 use super::super::registry::JobCompletionSnapshot;
-use super::super::{JobStore, PersistedJobUpdate};
 
 impl JobStore {
     /// Re-queue a job after memory-gate rejection and persist the retry deadline.
     pub(crate) async fn requeue_job_after_memory_gate(
         &self,
         job_id: &JobId,
-        retry_at: UnixTimestamp,
+        retry_at: MachineTime,
     ) {
         let Some(job_update) = self
             .registry
@@ -21,17 +21,7 @@ impl JobStore {
         };
         self.notify_job_item(job_update);
 
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status: JobStatus::Queued,
-                error: None,
-                completed_at: None,
-                num_workers: None,
-                next_eligible_at: Some(retry_at),
-            },
-        )
-        .await;
+        self.db_persist_job_status(job_id).await;
     }
 
     /// Mark a job as running and clear any deferred retry deadline.
@@ -41,68 +31,38 @@ impl JobStore {
         };
         self.notify_job_item(job_update);
 
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status: JobStatus::Running,
-                error: None,
-                completed_at: None,
-                num_workers: None,
-                next_eligible_at: None,
-            },
-        )
-        .await;
+        self.db_persist_job_status(job_id).await;
     }
 
     /// Record the per-job worker count chosen for this run.
     pub(crate) async fn record_job_worker_count(&self, job_id: &JobId, num_workers: usize) {
-        // Persist the job's ACTUAL status, never `Running`.
-        //
-        // This runs one line after `mark_job_running` in `runner/execution.rs`,
-        // and that call now declines for a job cancelled while queued. Writing
-        // a hardcoded `Running` here re-opened the very registry/database
-        // desync the decline exists to prevent: registry `Cancelled`, database
-        // `running`. Recording a worker count is not a status transition and
-        // must not smuggle one into the shared update struct.
-        let Some(status) = self
+        // Recording a worker count is not a status transition; the row is
+        // written from the job as it is, whatever status that is.
+        if !self
             .registry
             .record_job_worker_count(job_id, num_workers)
             .await
-        else {
+        {
             return;
-        };
+        }
 
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status,
-                error: None,
-                completed_at: None,
-                num_workers: Some(num_workers as i32),
-                next_eligible_at: None,
-            },
-        )
-        .await;
+        self.db_persist_job_status(job_id).await;
     }
 
     /// Fail a job immediately with a job-level error message.
-    pub(crate) async fn fail_job(&self, job_id: &JobId, error: &str, completed_at: UnixTimestamp) {
+    pub(crate) async fn fail_job(
+        &self,
+        job_id: &JobId,
+        error: &str,
+        failed_at: crate::store::EventTime,
+    ) {
+        let completed_at = failed_at.instant();
         let Some(job_update) = self.registry.fail_job(job_id, error, completed_at).await else {
             return;
         };
         self.notify_job_item(job_update);
 
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status: JobStatus::Failed,
-                error: Some(error),
-                completed_at: Some(completed_at),
-                num_workers: None,
-                next_eligible_at: None,
-            },
-        )
-        .await;
+        self.db_persist_job_status(job_id).await;
     }
 
     /// Return the cancellation and aggregate file-outcome facts for one job.
@@ -126,36 +86,20 @@ impl JobStore {
         job_id: &JobId,
         expected_generation: crate::store::RunGeneration,
         final_status: JobStatus,
-        completed_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
     ) -> Option<String> {
-        let (job_update, applied) = self
+        let completed_at = finished_at.instant();
+        let job_update = self
             .registry
             .finalize_job(job_id, expected_generation, final_status, completed_at)
             .await?;
         let job_error = job_update.error.clone();
-        // Persist what the job IS, not what finalization asked for. `finalize`
-        // declines to move a job that already reached a terminal state, and
-        // writing `final_status` anyway put `completed` in SQLite for a job the
-        // registry knew was `Cancelled`. Startup recovery only revisits rows
-        // that are `Interrupted` or `Running`, so such a row is never
-        // reconciled and the job is permanently dead. Same lesson as
-        // `record_job_worker_count` above.
-        let persisted_status = job_update.status;
+        // The row is written from the job as it is: `finalize` declines to
+        // move a job that already reached a terminal state, and that job
+        // keeps its own status and completion time.
         self.notify_job_item(job_update);
 
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status: persisted_status,
-                error: job_error.as_deref(),
-                // A refused finalize keeps the timestamp the cancel or the
-                // shutdown already recorded.
-                completed_at: applied.then_some(completed_at),
-                num_workers: None,
-                next_eligible_at: None,
-            },
-        )
-        .await;
+        self.db_persist_job_status(job_id).await;
 
         job_error
     }
@@ -165,7 +109,7 @@ impl JobStore {
 mod tests {
     use tokio::sync::broadcast;
 
-    use crate::api::{FileStatusKind, JobId, JobStatus, ReleasedCommand, UnixTimestamp};
+    use crate::api::{JobId, JobStatus, ReleasedCommand};
     use crate::store::queries::tests::{make_job, test_config};
     use crate::ws::BROADCAST_CAPACITY;
 
@@ -175,7 +119,12 @@ mod tests {
     #[tokio::test]
     async fn requeue_job_after_memory_gate_sets_retry_deadline() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
         store
             .submit(make_job(
                 "job-1",
@@ -185,7 +134,7 @@ mod tests {
             .await
             .unwrap();
 
-        let retry_at = UnixTimestamp(321.0);
+        let retry_at = crate::unix_time(321.0);
         store
             .requeue_job_after_memory_gate(&JobId::from("job-1"), retry_at)
             .await;
@@ -199,13 +148,22 @@ mod tests {
     #[tokio::test]
     async fn finalize_job_recounts_terminal_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
         let mut job = make_job(
             "job-1",
             ReleasedCommand::Morphotag,
             vec!["a.cha".into(), "b.cha".into()],
         );
-        job.execution.file_statuses.get_mut("a.cha").unwrap().status = FileStatusKind::Done;
+        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
+            crate::store::FilePhase::Done {
+                started_at: None,
+                finished_at: Some(crate::unix_time(5.0)),
+            };
         store.submit(job).await.unwrap();
 
         store
@@ -213,7 +171,7 @@ mod tests {
                 &JobId::from("job-1"),
                 crate::store::RunGeneration::FIRST,
                 JobStatus::Completed,
-                UnixTimestamp(500.0),
+                crate::store::EventTime::fixed(crate::unix_time(500.0)),
             )
             .await;
 
@@ -243,7 +201,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(JobDB::open(Some(dir.path())).await.unwrap());
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), Some(db.clone()), tx);
+        let store = JobStore::new(
+            test_config(),
+            Some(db.clone()),
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job_id = JobId::from("job-fail");
         store
@@ -260,7 +223,7 @@ mod tests {
         let failure = FileFailureRecord {
             message: "worker bootstrap error: ensure_task failed: md5 mismatch".into(),
             category: FailureCategory::WorkerBootstrap,
-            finished_at: UnixTimestamp(400.0),
+            finished_at: crate::store::EventTime::fixed(crate::unix_time(400.0)),
         };
         store.mark_file_error(&job_id, "a.cha", &failure).await;
         store.mark_file_error(&job_id, "b.cha", &failure).await;
@@ -270,7 +233,7 @@ mod tests {
                 &job_id,
                 crate::store::RunGeneration::FIRST,
                 JobStatus::Failed,
-                UnixTimestamp(500.0),
+                crate::store::EventTime::fixed(crate::unix_time(500.0)),
             )
             .await;
 
@@ -299,7 +262,12 @@ mod tests {
         // (2) The `jobs.db` `error` column must persist it: a fresh store
         //     reloaded purely from the DB still sees the reason.
         let (tx2, _rx2) = broadcast::channel(BROADCAST_CAPACITY);
-        let store2 = JobStore::new(test_config(), Some(db.clone()), tx2);
+        let store2 = JobStore::new(
+            test_config(),
+            Some(db.clone()),
+            tx2,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
         store2.load_from_db().await.unwrap();
         let reloaded = store2.get(&job_id).await.expect("reloaded job present");
         let persisted = reloaded

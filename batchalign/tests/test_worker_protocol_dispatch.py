@@ -53,6 +53,7 @@ def test_dispatch_protocol_message_rejects_unknown_op() -> None:
     assert dispatch.payload == {
         "op": "error",
         "error": "unknown op: 'not-a-real-op'",
+        "kind": "invalid_request",
     }
 
 
@@ -64,6 +65,7 @@ def test_dispatch_protocol_message_requires_object_request() -> None:
     assert dispatch.payload == {
         "op": "error",
         "error": "request must be a JSON object",
+        "kind": "invalid_request",
     }
 
 
@@ -75,6 +77,7 @@ def test_dispatch_protocol_message_requires_mapping_request() -> None:
     assert dispatch.payload == {
         "op": "error",
         "error": "infer request must include mapping field 'request'",
+        "kind": "invalid_request",
     }
 
 
@@ -89,7 +92,23 @@ def test_dispatch_protocol_message_wraps_validation_errors() -> None:
 
     assert dispatch.should_shutdown is False
     assert dispatch.payload["op"] == "error"
+    assert dispatch.payload["kind"] == "invalid_request"
     assert str(dispatch.payload["error"]).startswith("invalid infer request:")
+
+
+def test_error_envelope_requires_a_known_kind() -> None:
+    """The one envelope builder refuses a kind the wire does not name."""
+    import batchalign_core
+
+    envelope = batchalign_core.error_envelope("boom", "bootstrap", "r-1")
+    assert envelope == {
+        "op": "error",
+        "error": "boom",
+        "kind": "bootstrap",
+        "request_id": "r-1",
+    }
+    with pytest.raises(ValueError, match="unknown worker error kind"):
+        batchalign_core.error_envelope("boom", "fatal")  # type: ignore[arg-type]
 
 
 def test_dispatch_protocol_message_handles_shutdown() -> None:

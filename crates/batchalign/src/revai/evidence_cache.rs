@@ -387,15 +387,8 @@ fn validate_evidence(evidence: &FetchedRevAsrEvidence) -> Result<(), RevAsrEvide
             )));
         }
         for (element_index, element) in monologue.elements.iter().enumerate() {
-            for (label, value) in [("start", element.ts), ("end", element.end_ts)] {
-                if let Some(value) = value
-                    && (!value.is_finite() || value < 0.0)
-                {
-                    return Err(RevAsrEvidenceCacheError::InvalidEvidence(format!(
-                        "monologue {monologue_index} element {element_index} has invalid {label}"
-                    )));
-                }
-            }
+            // Each bound is a valid position by type, admitted when the
+            // provider's JSON was read; only their order is left to check.
             if let (Some(start), Some(end)) = (element.ts, element.end_ts)
                 && end < start
             {
@@ -907,7 +900,7 @@ pub(crate) enum RevAsrEvidenceCacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::AsrLanguageRequest;
+    use crate::api::{AsrLanguageRequest, AudioPositionSeconds};
     use crate::cache::{CacheBackend, CacheStats};
 
     fn english() -> RevLanguage {
@@ -925,8 +918,8 @@ mod tests {
                 elements: vec![Element {
                     element_type: "text".to_owned(),
                     value: "hello".to_owned(),
-                    ts: Some(0.1),
-                    end_ts: Some(0.5),
+                    ts: Some(AudioPositionSeconds::try_from(0.1).expect("fixture position")),
+                    end_ts: Some(AudioPositionSeconds::try_from(0.5).expect("fixture position")),
                     confidence: Some(0.9),
                 }],
             }],
@@ -1654,7 +1647,8 @@ mod tests {
             .expect("cold");
         assert!(matches!(cold.source(), RevAsrEvidenceSource::Inferred(_)));
         let cold_evidence = cold.into_evidence();
-        let cold_response = crate::revai::rev_evidence_to_asr_response(&cold_evidence);
+        let cold_response = crate::revai::rev_evidence_to_asr_response(&cold_evidence)
+            .expect("an admissible fixture");
         drop(cache);
 
         let reopened = UtteranceCache::sqlite(Some(cache_dir))
@@ -1665,7 +1659,8 @@ mod tests {
             .expect("warm");
         assert_eq!(warm.source(), RevAsrEvidenceSource::Replayed);
         let warm_evidence = warm.into_evidence();
-        let warm_response = crate::revai::rev_evidence_to_asr_response(&warm_evidence);
+        let warm_response = crate::revai::rev_evidence_to_asr_response(&warm_evidence)
+            .expect("an admissible fixture");
         assert_eq!(
             serde_json::to_value(cold_response).expect("cold response JSON"),
             serde_json::to_value(warm_response).expect("warm response JSON")

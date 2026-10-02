@@ -1,7 +1,7 @@
 # Errors: Batchalign Runtime
 
 **Status:** Current
-**Last updated:** 2026-06-21 23:23 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 How Batchalign produces, propagates, and surfaces errors specific to
 the ML runtime: parse modes, ML/IPC failures, network errors,
@@ -124,7 +124,7 @@ from batchalign_core import (
 When `BatchalignBoundaryError::ChatValidation { entries, .. }` crosses
 the PyO3 boundary, the `From<BatchalignBoundaryError> for PyErr` impl
 constructs the Python exception with a populated `errors:
-list[ValidationErrorEntry]` and an optional `bug_report_id`. Code that
+list[ValidationErrorEntry]`. Code that
 catches the exception inspects `exc.errors[i].code`,
 `exc.errors[i].line`, etc. for programmatic access without parsing
 the message string.

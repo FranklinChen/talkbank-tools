@@ -72,9 +72,11 @@
 > - **Cantonese:** `唔` is now ADV (correct); `佢` is PUNCT rather than
 >   PROPN. BA3 still takes Cantonese POS from PyCantonese.
 > - **Italian `Verbform`:** Stanza spells the feature name `Verbform`
->   (1.14.0 and 1.15.0); the worker respells it, and BA3 no longer
->   invents `Inf` for a verb without `VerbForm` (an inherited default
->   that produced `dare-Inf-Ind-Imp-S2`).
+>   (1.14.0 and 1.15.0); the worker respells it, so `da` of `dammela` reads
+>   `Fin`, not the convention's invented `Inf` (`dare-Inf-Ind-Imp-S2`). The
+>   invented `Inf` itself stays until it is retired together with the CLAN
+>   DSS rules that match it (see "POS Mapping" in the morphosyntax
+>   reference).
 > - **Defects 2, 6, 7, 9, 10, 11 confirmed**, with no XPASS.
 >
 > On a ten-language corpus sample compared with `batchalign3
@@ -1238,9 +1240,9 @@ fixed.
 
 ```text
 *MOT:	you hafta put that one in .
-%mor:	pron|you-Prs-Nom-S2 aux|hafta-Fin-Ind-Pres-S2 verb|put-Inf-S ...   ← observed
+%mor:	pron|you-Prs-Nom-2 aux|hafta-Fin-Ind-Pres-S2 verb|put-Inf det|that-Dem-Sing noun|one adp|in .   ← observed
 %gra:	1|3|NSUBJ 2|3|AUX 3|0|ROOT ...
-%mor:	pron|you-Prs-Nom-S2 verb|have-Fin-Ind-Pres-S2~part|to verb|put-Inf-S ...   ← correct
+%mor:	pron|you-Prs-Nom-2 verb|have-Fin-Ind-Pres-S2~part|to verb|put-Inf det|that-Dem-Sing noun|one adp|in .   ← correct
 %gra:	1|2|NSUBJ 2|0|ROOT 3|4|MARK 4|2|XCOMP 5|6|DET 6|4|OBJ 7|4|COMPOUND-PRT 8|2|PUNCT
 ```
 

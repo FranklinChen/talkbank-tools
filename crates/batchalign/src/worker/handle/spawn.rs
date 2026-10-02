@@ -256,7 +256,7 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
     // the worker dies. `child.id()` is `None` only after `wait`/`kill`,
     // which haven't run yet.
     if let Some(child_pid) = child.id() {
-        spawn_permit.set_worker_pid(child_pid);
+        spawn_permit.set_worker_pid(crate::worker::WorkerPid(child_pid));
     }
     let _spawn_permit = spawn_permit;
 
@@ -268,7 +268,7 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
     let mut stderr_reader = tokio::io::BufReader::new(stderr);
 
     let ready = tokio::time::timeout(
-        std::time::Duration::from_secs(config.ready_timeout_s),
+        config.ready_timeout_s.duration(),
         read_tcp_ready_signal(&mut stderr_reader),
     )
     .await

@@ -14,11 +14,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
-import time
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Protocol
-
-from pydantic import ValidationError
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.inference.fa import (
@@ -26,10 +24,14 @@ from batchalign.inference.fa import (
     FaInferItem,
     Wave2VecIndexedResponse,
 )
+from batchalign.worker._batch import ItemWork, Unexecuted, answer_batch
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
 )
 
 from ._common import EngineOverrides
@@ -247,9 +249,10 @@ def infer_cantonese_fa(
     if resolved_host is None:
         return BatchInferResponse(
             results=[
-                InferResponse(
-                    error="Cantonese FA model not loaded, call load_cantonese_fa first",
-                    elapsed_s=0.0,
+                InferResponse.unexecuted(
+                    ItemFailed(
+                        error="Cantonese FA model not loaded, call load_cantonese_fa first"
+                    )
                 )
                 for _ in req.items
             ]
@@ -259,30 +262,11 @@ def infer_cantonese_fa(
     pc = resolved_host.romanizer
     lang = req.lang
 
-    t0 = time.monotonic()
     audio_cache: dict[str, ASRAudioFile] = {}
     lock = threading.Lock()
-    n = len(req.items)
-    results: list[InferResponse] = []
 
-    for item_idx, raw_item in enumerate(req.items):
-        # --- validate ---
-        try:
-            item = FaInferItem.model_validate(raw_item)
-        except ValidationError:
-            results.append(InferResponse(error="Invalid FaInferItem", elapsed_s=0.0))
-            continue
-
-        # --- empty words shortcut ---
-        if not item.words:
-            results.append(
-                InferResponse(
-                    result=Wave2VecIndexedResponse(indexed_timings=[]).model_dump(),
-                    elapsed_s=0.0,
-                )
-            )
-            continue
-
+    def _align(item_idx: int, item: FaInferItem) -> ItemOutcome:
+        """Align one item's words to its own audio window."""
         try:
             # --- load/cache audio ---
             if item.audio_path not in audio_cache:
@@ -314,13 +298,10 @@ def infer_cantonese_fa(
                     confidence=score,
                 )
 
-            results.append(
-                InferResponse(
-                    result=Wave2VecIndexedResponse(
-                        indexed_timings=indexed_timings
-                    ).model_dump(),
-                    elapsed_s=0.0,
-                )
+            return ItemProduced(
+                result=Wave2VecIndexedResponse(
+                    indexed_timings=indexed_timings
+                ).model_dump()
             )
 
         except (OSError, RuntimeError, ValueError) as error:
@@ -330,24 +311,19 @@ def infer_cantonese_fa(
                 error,
                 exc_info=True,
             )
-            results.append(
-                InferResponse(
-                    error=f"Cantonese FA inference failed: {error}",
-                    elapsed_s=0.0,
+            return ItemFailed(error=f"Cantonese FA inference failed: {error}")
+
+    def work_for(item_idx: int, item: FaInferItem) -> ItemWork:
+        # Nothing to align, so no time to report.
+        if not item.words:
+            return Unexecuted(
+                ItemProduced(
+                    result=Wave2VecIndexedResponse(indexed_timings=[]).model_dump()
                 )
             )
+        return partial(_align, item_idx, item)
 
-    elapsed = time.monotonic() - t0
-
-    # Record total elapsed on the first result
-    if results:
-        first = results[0]
-        results[0] = InferResponse(
-            result=first.result, error=first.error, elapsed_s=elapsed
-        )
-
-    L.info("batch_infer cantonese_fa: %d items, %.3fs", n, elapsed)
-    return BatchInferResponse(results=results)
+    return answer_batch("cantonese_fa", req.items, FaInferItem, work_for)
 
 
 __all__ = [

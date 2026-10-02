@@ -6,7 +6,7 @@ use crate::recipe_runner::materialize::MaterializedArtifactRole;
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage, set_file_progress};
 use crate::scheduling::FailureCategory;
-use crate::store::{PendingJobFile, RunnerJobSnapshot, unix_now};
+use crate::store::{PendingJobFile, RunnerJobSnapshot};
 use crate::text_batch::{TextBatchFileInput, TextBatchFileResults};
 
 pub(crate) struct LoadedTextInputs {
@@ -52,7 +52,6 @@ pub(crate) async fn load_text_inputs(
                     .fail(
                         &format!("Failed to read input: {error}"),
                         FailureCategory::InputMissing,
-                        unix_now(),
                     )
                     .await;
             }
@@ -108,11 +107,7 @@ pub(crate) async fn write_text_results(
                         // told their command's output was invalid.
                         Err(refused) => {
                             lifecycle
-                                .fail(
-                                    &refused.to_string(),
-                                    FailureCategory::Validation,
-                                    unix_now(),
-                                )
+                                .fail(&refused.to_string(), FailureCategory::Validation)
                                 .await;
                             continue;
                         }
@@ -139,7 +134,6 @@ pub(crate) async fn write_text_results(
                                 file_result.filename
                             ),
                             FailureCategory::Validation,
-                            unix_now(),
                         )
                         .await;
                     continue;
@@ -160,7 +154,7 @@ pub(crate) async fn write_text_results(
                     .await
                     {
                         lifecycle
-                            .fail(&error.to_string(), FailureCategory::System, unix_now())
+                            .fail(&error.to_string(), FailureCategory::System)
                             .await;
                         continue;
                     }
@@ -168,7 +162,6 @@ pub(crate) async fn write_text_results(
                         .complete_with_stamped_result(
                             artifact.display_path.clone(),
                             artifact.content_type,
-                            unix_now(),
                             stamp.clone(),
                         )
                         .await;
@@ -178,9 +171,7 @@ pub(crate) async fn write_text_results(
                 // The error states its own category. It used to be hardcoded
                 // `ProviderTerminal`, which reported a file refused on
                 // validity grounds as if a provider had given up on it.
-                lifecycle
-                    .fail(&error.to_string(), error.category(), unix_now())
-                    .await;
+                lifecycle.fail(&error.to_string(), error.category()).await;
             }
         }
     }

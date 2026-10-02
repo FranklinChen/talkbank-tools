@@ -4,7 +4,7 @@
 //! - Python caller: `batchalign/worker/_fa_v2.py::execute_forced_alignment_request_v2()`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
-use batchalign_types::api::{DurationMs, DurationSeconds};
+use batchalign_types::api::{AudioPositionSeconds, DurationMs};
 use batchalign_types::worker_v2::{
     ExecuteRequestV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2,
     IndexedWordTimingResultV2, IndexedWordTimingV2, TaskRequestV2, TaskResultV2,
@@ -64,16 +64,15 @@ fn parse_whisper_tokens(
 
     let mut normalized = Vec::with_capacity(tokens.len());
     for (text, time_s) in tokens {
-        if time_s < 0.0 {
-            return Err(ExecuteFailure::Runtime(
-                "invalid forced-alignment host output: Whisper token time_s must be >= 0"
-                    .to_owned(),
-            ));
-        }
-        normalized.push(WhisperTokenTimingV2 {
-            text,
-            time_s: DurationSeconds(time_s),
-        });
+        // The position type's admission is the whole check: it refuses a
+        // negative onset, and also the NaN and infinite ones the old `< 0.0`
+        // comparison let through.
+        let time_s = AudioPositionSeconds::try_from(time_s).map_err(|refused| {
+            ExecuteFailure::Runtime(format!(
+                "invalid forced-alignment host output: Whisper token time_s: {refused}"
+            ))
+        })?;
+        normalized.push(WhisperTokenTimingV2 { text, time_s });
     }
     Ok(WhisperTokenTimingResultV2 { tokens: normalized })
 }

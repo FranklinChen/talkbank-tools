@@ -9,11 +9,11 @@ use crate::revai::FetchedRevAsrEvidence;
 
 use crate::revai::{RevAiClient, SubmitOptions, Transcript, TranscriptResult};
 use batchalign_transform::asr_postprocess::{
-    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs, SpeakerIndex,
+    AdmittedInterval, AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, SpeakerIndex,
 };
 use tracing::info;
 
-use crate::api::{DurationSeconds, LanguageCode3, NumSpeakers};
+use crate::api::{LanguageCode3, NumSpeakers};
 use crate::error::ServerError;
 use crate::transcribe::{AsrResponse, AsrToken};
 
@@ -156,11 +156,49 @@ impl RevAsrEvidenceInference for RevAsrService {
 /// `AsrResponse.lang` is one code, so a code-switched transcript reports its
 /// primary language there. Transcribe reads a pair's languages from the
 /// request it admitted, never from this field.
-pub(crate) fn rev_evidence_to_asr_response(evidence: &CompletedRevAsrEvidence) -> AsrResponse {
-    transcript_to_asr_response(
-        evidence.transcript_evidence().transcript(),
+///
+/// A timed element whose two times are not an interval (inverted, or past the
+/// admissible range, as an epoch timestamp would be) refuses the response,
+/// naming the element: the policy every ASR route shares.
+pub(crate) fn rev_evidence_to_asr_response(
+    evidence: &CompletedRevAsrEvidence,
+) -> Result<AsrResponse, ServerError> {
+    let transcript = AdmittedRevTranscript::admit(evidence.transcript_evidence().transcript())?;
+    Ok(transcript_to_asr_response(
+        transcript,
         evidence.resolved_language().primary(),
-    )
+    ))
+}
+
+/// A Rev.AI transcript whose every element with both times has times that
+/// form an admitted interval. Built only by [`AdmittedRevTranscript::admit`],
+/// so the projections below cannot be handed a transcript nobody checked.
+#[derive(Clone, Copy)]
+struct AdmittedRevTranscript<'t>(&'t Transcript);
+
+impl<'t> AdmittedRevTranscript<'t> {
+    /// Admit every element's pair of times, or refuse naming the first that
+    /// is not an interval. An element with one time or none is the
+    /// provider's own report, kept for the transcript side to name.
+    fn admit(transcript: &'t Transcript) -> Result<Self, ServerError> {
+        for (monologue_index, monologue) in transcript.monologues.iter().enumerate() {
+            for (element_index, element) in monologue.elements.iter().enumerate() {
+                if let (Some(start), Some(end)) = (element.ts, element.end_ts) {
+                    AdmittedInterval::admit_positions(start, end).map_err(|refusal| {
+                        ServerError::AsrProvider {
+                            disposition: crate::error::AsrProviderDisposition::Terminal,
+                            message: format!(
+                                "invalid Rev.AI output at monologue {monologue_index} \
+                                 element {element_index} ({:?}): {refusal}",
+                                element.value
+                            ),
+                        }
+                    })?;
+                }
+            }
+        }
+        Ok(Self(transcript))
+    }
 }
 
 /// Submit the verified provider-media artifact and wait for its transcript.
@@ -256,7 +294,11 @@ fn an_english_spanish_pair_submits_the_multilingual_model_without_refused_option
     }
 }
 
-fn transcript_to_asr_response(transcript: &Transcript, lang: &LanguageCode3) -> AsrResponse {
+fn transcript_to_asr_response(
+    admitted: AdmittedRevTranscript<'_>,
+    lang: &LanguageCode3,
+) -> AsrResponse {
+    let AdmittedRevTranscript(transcript) = admitted;
     let mut tokens = Vec::new();
 
     for monologue in &transcript.monologues {
@@ -273,8 +315,8 @@ fn transcript_to_asr_response(transcript: &Transcript, lang: &LanguageCode3) -> 
 
             tokens.push(AsrToken {
                 text: text.to_string(),
-                start_s: element.ts.map(DurationSeconds),
-                end_s: element.end_ts.map(DurationSeconds),
+                start_s: element.ts,
+                end_s: element.end_ts,
                 speaker: Some(speaker.clone()),
                 confidence: element.confidence,
             });
@@ -284,12 +326,13 @@ fn transcript_to_asr_response(transcript: &Transcript, lang: &LanguageCode3) -> 
     AsrResponse {
         tokens,
         lang: lang.clone(),
-        source_monologues: Some(transcript_to_asr_output(transcript).monologues),
+        source_monologues: Some(transcript_to_asr_output(admitted).monologues),
         model: Some(crate::model_manifest::rev_loaded_identity()),
     }
 }
 
-fn transcript_to_asr_output(transcript: &Transcript) -> AsrOutput {
+fn transcript_to_asr_output(admitted: AdmittedRevTranscript<'_>) -> AsrOutput {
+    let AdmittedRevTranscript(transcript) = admitted;
     AsrOutput {
         monologues: transcript
             .monologues
@@ -306,8 +349,8 @@ fn transcript_to_asr_output(transcript: &Transcript) -> AsrOutput {
                         }
                         Some(AsrElement {
                             value: AsrRawText::new(text),
-                            ts: AsrTimestampSecs::from(element.ts),
-                            end_ts: AsrTimestampSecs::from(element.end_ts),
+                            ts: element.ts,
+                            end_ts: element.end_ts,
                             kind: if element.element_type == "text" {
                                 AsrElementKind::Text
                             } else {
@@ -327,6 +370,36 @@ mod tests {
     use crate::api::LanguageCode3;
     use crate::revai::Transcript;
 
+    /// A timed element whose times are not an interval refuses the transcript,
+    /// naming the element, as every other ASR route does; it used to reach the
+    /// transcript as tokens and be dropped untimed there.
+    #[test]
+    fn an_inverted_or_epoch_element_refuses_the_transcript() {
+        for times in [
+            r#""ts": 1.4, "end_ts": 1.0"#,
+            r#""ts": 1700000000.0, "end_ts": 1700000001.0"#,
+        ] {
+            let transcript: Transcript = serde_json::from_str(&format!(
+                r#"{{"monologues": [{{"speaker": 0, "elements": [
+                    {{"type": "text", "value": "hello", "ts": 0.5, "end_ts": 0.9}},
+                    {{"type": "text", "value": "world", {times}}}
+                ]}}]}}"#
+            ))
+            .expect("a transcript");
+            match AdmittedRevTranscript::admit(&transcript) {
+                Err(ServerError::AsrProvider {
+                    disposition: crate::error::AsrProviderDisposition::Terminal,
+                    message,
+                }) => assert!(
+                    message.contains("element 1") && message.contains("world"),
+                    "{message}"
+                ),
+                Err(other) => panic!("expected a terminal provider refusal, got {other:?}"),
+                Ok(_) => panic!("{times} is not an interval"),
+            }
+        }
+    }
+
     #[test]
     fn transcript_projection_keeps_flat_text_tokens_for_legacy_paths() {
         let transcript: Transcript = serde_json::from_str(
@@ -343,7 +416,10 @@ mod tests {
         )
         .unwrap();
 
-        let response = transcript_to_asr_response(&transcript, &LanguageCode3::eng());
+        let response = transcript_to_asr_response(
+            AdmittedRevTranscript::admit(&transcript).expect("an admissible fixture"),
+            &LanguageCode3::eng(),
+        );
         assert_eq!(response.lang, "eng");
         assert_eq!(response.tokens.len(), 2);
         assert_eq!(response.tokens[0].text, "hello");
@@ -377,7 +453,10 @@ mod tests {
         )
         .unwrap();
 
-        let response = transcript_to_asr_response(&transcript, &LanguageCode3::eng());
+        let response = transcript_to_asr_response(
+            AdmittedRevTranscript::admit(&transcript).expect("an admissible fixture"),
+            &LanguageCode3::eng(),
+        );
         let monologues = response
             .source_monologues
             .expect("Rev projection should preserve provider-shaped monologues");
@@ -387,8 +466,8 @@ mod tests {
         assert_eq!(monologues[0].elements.len(), 3);
         assert_eq!(monologues[0].elements[1].value, ",");
         assert_eq!(monologues[0].elements[1].kind, AsrElementKind::Punctuation);
-        assert_eq!(monologues[0].elements[1].ts, AsrTimestampSecs::Absent);
-        assert_eq!(monologues[0].elements[1].end_ts, AsrTimestampSecs::Absent);
+        assert_eq!(monologues[0].elements[1].ts, None);
+        assert_eq!(monologues[0].elements[1].end_ts, None);
         assert_eq!(monologues[1].speaker, SpeakerIndex(3));
         assert_eq!(monologues[1].elements.len(), 2);
         assert_eq!(monologues[1].elements[1].value, "?");

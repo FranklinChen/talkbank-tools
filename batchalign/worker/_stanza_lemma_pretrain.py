@@ -45,8 +45,6 @@ _PRETRAIN_ARG = "wordvec_pretrain_file"
 # The resources-directory layout a stored pretrain path must end in to be
 # relocatable: `<lang>/pretrain/<file>.pt`.
 _PRETRAIN_DIR = "pretrain"
-# The `stanza.Pipeline` option that supplies a contextual model's pretrain.
-_PIPELINE_OPTION = "lemma_pretrain_path"
 # Stanza's name for its model-free lemmatizer (the lemma is the word).
 _IDENTITY_LEMMATIZER = "identity"
 
@@ -109,23 +107,37 @@ def relocated_pretrain(model_file: Path, resources_dir: Path) -> Path | None:
         # trained on different pretrains cannot all be repaired with it.
         raise StanzaLemmaPretrainError(
             f"{model_file}: contextual lemma models need different pretrains "
-            f"{sorted(map(str, relocated))}; one {_PIPELINE_OPTION} cannot serve them"
+            f"{sorted(map(str, relocated))}; one lemma_pretrain_path cannot serve them"
         )
     return relocated.pop()
 
 
-@functools.cache
 def lemma_pretrain_options(
     alpha2: str, lemma_package: str | None = None
 ) -> dict[str, str]:
-    """``stanza.Pipeline`` options for ``alpha2``'s lemmatizer.
+    """``stanza.Pipeline`` keyword options for ``alpha2``'s lemmatizer.
+
+    A fresh dict on every call, for callers to spread (`**`): empty when Stanza
+    can read the stored paths itself, otherwise the one option that repairs
+    them. The option's name is spelled here and nowhere else.
+    """
+    path = resolve_lemma_pretrain(alpha2, lemma_package)
+    return {} if path is None else {"lemma_pretrain_path": str(path)}
+
+
+@functools.cache
+def resolve_lemma_pretrain(
+    alpha2: str, lemma_package: str | None = None
+) -> Path | None:
+    """The pretrain to pass for ``alpha2``'s lemmatizer, or ``None``.
 
     ``lemma_package`` is the package the pipeline requests for ``lemma``, or
     ``None`` for the language's default in Stanza's catalog. A language whose
-    catalog entry has no lemmatizer needs no option.
+    catalog entry has no lemmatizer, or uses the model-free identity one,
+    needs none.
 
-    Cached per process: the answer depends only on installed files, and the
-    utseg config builder asks on every request.
+    Cached per process (the result is immutable): it depends only on installed
+    files, and the utseg config builder asks on every request.
 
     Downloads the lemma model first when it is absent, because the repair has
     to read it before the pipeline that would otherwise download it is built.
@@ -142,11 +154,11 @@ def lemma_pretrain_options(
             catalog.get(alpha2, {}).get("default_processors", {}).get("lemma")
         )
         if lemma_package is None:
-            return {}
+            return None
     if lemma_package == _IDENTITY_LEMMATIZER:
         # Stanza's built-in lemmatizer for languages without a trained one
         # (Thai, Vietnamese): no checkpoint, so nothing to repair.
-        return {}
+        return None
     # A requested package may name a bundle (Japanese `combined` installs
     # `combined_nocharlm`); Stanza's own resolver says which model file the
     # pipeline will load, so this reads that file and no other.
@@ -175,5 +187,4 @@ def lemma_pretrain_options(
         raise StanzaLemmaPretrainError(
             f"Stanza did not install the {alpha2} lemmatizer at {model_file}"
         )
-    path = relocated_pretrain(model_file, resources_dir)
-    return {} if path is None else {_PIPELINE_OPTION: str(path)}
+    return relocated_pretrain(model_file, resources_dir)

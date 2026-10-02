@@ -1,7 +1,7 @@
 # morphotag: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-06 03:27 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 Implementation guide for the `morphotag` command. For user-facing
 documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.md).
@@ -341,27 +341,27 @@ sequenceDiagram
     participant Orch as Orchestrator<br/>(morphosyntax/batch.rs)
     participant Primary as Primary Stanza<br/>(e.g. deu)
     participant L2 as L2 extractor<br/>(l2/extract.rs)
-    participant Spans as Span grouper<br/>(l2/spans.rs)
+    participant Spans as Span planner<br/>(l2/plan.rs)
     participant Secondary as Secondary Stanza<br/>(e.g. eng)
     participant Merge as Merge algorithm<br/>(l2/merge.rs)
     participant Splice as Splice<br/>(l2/splice.rs)
 
     Orch->>Primary: Full utterance,<br/>L2 blanking deferred
     Primary-->>Orch: UD annotations for all words<br/>including @s words
-    Orch->>L2: extract_l2_deferred_positions()
-    L2-->>Orch: Vec&lt;L2DeferredPosition&gt;<br/>(@s words + primary UD)
-    Orch->>Spans: group_deferred_into_dispatch_spans()
-    Spans-->>Orch: Vec&lt;DispatchSpan&gt;<br/>(contiguous same-lang)
+    Orch->>L2: inject primary results
+    L2-->>Orch: InjectionResult::l2<br/>(positions + unaligned utterances)
+    Orch->>Spans: plan_dispatch_spans(positions)
+    Spans-->>Orch: Vec&lt;L2SpanPlan&gt;<br/>(contiguous same-lang, own their positions)
     loop For each target language
-        Orch->>Secondary: infer_batch(retokenize=true)<br/>per-span batch items
+        Orch->>Secondary: infer_batch(retokenize=true)<br/>one sentence per span
         Secondary-->>Orch: Vec&lt;UdResponse&gt;
-        loop For each @s word in span
-            Orch->>Merge: merge_primary_secondary_with_context(<br/>primary, secondary_mor,<br/>secondary_ud_sentence)
-            Note over Merge: Priority 0: compound:prt?<br/>Priority 1-6: constraint chain
-            Merge-->>Orch: MergedL2Morphology
+        loop For each span
+            Orch->>Merge: merge_planned_secondary_span(span, sentence)
+            Note over Merge: secondary owns category, lemma,<br/>features, in-span relations;<br/>external relation checked against<br/>the secondary root's category
+            Merge-->>Orch: MergedL2Span
         end
     end
-    Orch->>Splice: splice_l2_into_chat()
+    Orch->>Splice: splice_l2_into_chat(merged spans)
     Splice-->>Orch: SpliceOutcome<br/>(spliced / fallback / gra_upgraded)
 ```
 
@@ -369,20 +369,20 @@ sequenceDiagram
 
 | Module | Responsibility |
 |--------|----------------|
-| `extract.rs` | Walks primary UD response, picks out `@s`-word positions and their primary structural info (deprel, head, UPOS, dependents). |
-| `spans.rs` | Groups deferred positions into contiguous same-language spans for per-span Stanza dispatch. |
-| `merge.rs` | POS resolution priority chain including Priority 0 (`compound:prt` phrasal-verb recognition) and Priority 1-6 (constraint-based). |
-| `deprel.rs` | `UdDeprel` newtype, deprel→POS constraint mapping, deprel inference from resolved POS. |
-| `splice.rs` | Replaces `L2\|xxx` with the merged MOR + corrected GRA in the CHAT AST. |
+| `alignment.rs` | `UdAlignment`, the one CHAT-word to UD-word alignment per sentence, lookups by UD id, typed refusals. |
+| `extract.rs` | Aligns each primary sentence with a dispatchable `@s` word and records the primary's relation, head and dependents for each `@s` word; reports unaligned utterances. |
+| `plan.rs` | Groups deferred positions into contiguous same-language spans that own them, and decides each span's `L2Attachment`. |
+| `merge.rs` | Merges a span with its secondary analysis into a `MergedL2Span`: the secondary's items and in-span relations, PART for a phrasal particle, the external relation checked against the secondary root's category. |
+| `deprel.rs` | `UdDeprel` newtype, relation-to-category check, relation inference from a category. |
+| `splice.rs` | Replaces `L2\|xxx` with each merged span in the CHAT AST, validates, rolls back. |
 | `crates/batchalign/src/morphosyntax/batch.rs` | Thin adapter that submits the planned secondary spans to workers and hands the results back to the transform-layer seam. |
 
 **Dispatch wiring:** `crates/batchalign/src/morphosyntax/batch.rs::dispatch_secondary_l2`.
-The caller invariant is that `map_ud_sentence` produces one `Mor`
-per CHAT `@s` word (MWT Range tokens collapsed into clitics). When
-`sentence.words.len() == mors.len()` the caller threads a
-`SecondaryUdContext { sentence, word_position }` into the merge so
-Priority 0 can check `compound:prt` relations; otherwise it passes
-`None` and the merge falls back to the constraint chain alone.
+The secondary sentence is aligned to the span's words, so every span word
+gets its sentence context (and phrasal-particle recognition) whatever
+extra rows, such as the terminator, the sentence carries. A sentence that
+does not align or map is an `L2MergeError` for the span, logged, and its
+words stay `L2|xxx`.
 
 See [L2 Morphotag: Per-Word Code-Switching Analysis](../../reference/l2-morphotag.md)
 for the design rationale and merge algorithm details.

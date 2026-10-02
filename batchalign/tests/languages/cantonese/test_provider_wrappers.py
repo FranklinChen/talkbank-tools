@@ -200,13 +200,35 @@ def test_infer_funaudio_asr_surfaces_runtime_errors(monkeypatch) -> None:
     assert response.results[0].error == "boom"
 
 
+class _WorkClock:
+    """A monotonic clock that moves only while a provider call does its work,
+    so a test's elapsed time depends on the work, never on how many times
+    anything reads the clock."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def read(self) -> float:
+        return self.now
+
+    def spend(self, seconds: float, method):
+        """Wrap a recognizer method so calling it takes ``seconds``."""
+
+        def timed_call(*args, **kwargs):
+            self.now += seconds
+            return method(*args, **kwargs)
+
+        return timed_call
+
+
 def test_infer_funaudio_asr_returns_result_payload(monkeypatch) -> None:
-    monotonic_values = iter([0.0, 1.5])
-    monkeypatch.setattr(funaudio_asr, "_recognizer", _FakeFunRecognizer())
+    clock = _WorkClock()
+    recognizer = _FakeFunRecognizer()
     monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._funaudio_asr.time.monotonic",
-        lambda: next(monotonic_values),
+        recognizer, "transcribe", clock.spend(1.5, recognizer.transcribe)
     )
+    monkeypatch.setattr(funaudio_asr, "_recognizer", recognizer)
+    monkeypatch.setattr("batchalign.worker._types._item_clock", clock.read)
 
     response = funaudio_asr.infer_funaudio_asr(_valid_request())
 
@@ -290,12 +312,13 @@ def test_infer_tencent_asr_surfaces_runtime_errors(monkeypatch) -> None:
 
 
 def test_infer_tencent_asr_returns_result_payload(monkeypatch) -> None:
-    monotonic_values = iter([0.0, 2.0])
-    monkeypatch.setattr(tencent_asr, "_recognizer", _FakeTencentRecognizer())
+    clock = _WorkClock()
+    recognizer = _FakeTencentRecognizer()
     monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._tencent_asr.time.monotonic",
-        lambda: next(monotonic_values),
+        recognizer, "transcribe", clock.spend(2.0, recognizer.transcribe)
     )
+    monkeypatch.setattr(tencent_asr, "_recognizer", recognizer)
+    monkeypatch.setattr("batchalign.worker._types._item_clock", clock.read)
 
     response = tencent_asr.infer_tencent_asr(_valid_request())
 
@@ -336,10 +359,15 @@ def test_infer_aliyun_asr_v2_delegates_to_single_item_helper(monkeypatch) -> Non
 
 
 def test_infer_aliyun_asr_requires_load(monkeypatch) -> None:
+    """Not loaded, every item fails unexecuted, as at the other providers: the
+    batch is answered rather than raised whole."""
     monkeypatch.setattr(aliyun_asr, "_ak_id", "")
 
-    with pytest.raises(RuntimeError, match="load_aliyun_asr"):
-        aliyun_asr.infer_aliyun_asr(_valid_request())
+    response = aliyun_asr.infer_aliyun_asr(_valid_request())
+
+    assert response.results[0].error is not None
+    assert "load_aliyun_asr" in response.results[0].error
+    assert response.results[0].elapsed_s is None
 
 
 def test_infer_aliyun_asr_rejects_invalid_items(monkeypatch) -> None:
@@ -365,7 +393,8 @@ def test_infer_aliyun_asr_surfaces_runtime_errors(monkeypatch) -> None:
 
 
 def test_infer_aliyun_asr_returns_result_payload(monkeypatch) -> None:
-    monotonic_values = iter([0.0, 3.0])
+    # Batch start, the item's own start and end, batch end.
+    monotonic_values = iter([0.0, 0.0, 3.0, 3.0])
     expected = _valid_response()
     monkeypatch.setattr(aliyun_asr, "_ak_id", "loaded")
     monkeypatch.setattr(

@@ -80,13 +80,8 @@ fn start(
 
     // Serve the way a server on this host would route to this daemon once it
     // adopts it: the same host-resolved device policy, the same decision.
-    let (server_config, warnings) = crate::config::load_validated_config_from_layout(
-        &crate::config::RuntimeLayout::from_env(),
-        None,
-    )?;
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
+    let server_config =
+        crate::config::load_config_from_layout(&crate::config::RuntimeLayout::from_env(), None)?;
     let effective = crate::host_facts::EffectiveConfig::resolve_from_server_config(&server_config);
     if effective.force_cpu {
         cmd.arg("--force-cpu");
@@ -185,8 +180,7 @@ async fn check_worker_health(entry: &RegistryEntry) -> &'static str {
         lang,
         engine_overrides: entry.engine_overrides.clone(),
         pid: WorkerPid(entry.pid),
-        audio_task_timeout_s: 0,
-        analysis_task_timeout_s: 0,
+        task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
         // CLI-side health/stop probes use TcpWorkerHandle (one request at a
         // time), not SharedGpuTcpWorker: the dispatch semaphore is unused.
         gpu_thread_pool_size: 1,
@@ -256,8 +250,7 @@ async fn stop(args: &WorkerStopArgs) -> Result<(), CliError> {
             lang,
             engine_overrides: entry.engine_overrides.clone(),
             pid: WorkerPid(entry.pid),
-            audio_task_timeout_s: 0,
-            analysis_task_timeout_s: 0,
+            task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
             // Stop probes use TcpWorkerHandle (single-shot); the dispatch
             // semaphore is unused on this path.
             gpu_thread_pool_size: 1,
@@ -276,7 +269,12 @@ async fn stop(args: &WorkerStopArgs) -> Result<(), CliError> {
                     "Cannot reach {} worker ({}:{}, pid={}), removing stale entry",
                     entry.profile, entry.host, entry.port, entry.pid
                 );
-                let _ = registry::remove_stale_entry(&registry_path, entry.pid);
+                // Off the runtime: removal waits for the registry's lock.
+                let (path, pid) = (registry_path.clone(), entry.pid);
+                let _ = crate::blocking::spawn_in_span(move || {
+                    registry::remove_stale_entry(&path, pid)
+                })
+                .await;
             }
         }
     }

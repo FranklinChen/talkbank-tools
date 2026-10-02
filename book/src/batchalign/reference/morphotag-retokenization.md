@@ -1,7 +1,7 @@
 # Morphotag Retokenization
 
 **Status:** Current
-**Last updated:** 2026-05-20 20:25 EDT
+**Last updated:** 2026-10-01 20:57 EDT
 
 ## Purpose and audience
 
@@ -78,7 +78,7 @@ and `%mor` stay 1:1.
 - `%mor` emits a single clitic-joined item:
   `aux|do-Fin-Ind-Pres-S3~part|not`
 - Mapped by `map_ud_sentence()` in
-  `crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs` (line 77).
+  `crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs`.
 
 ### Retokenize mode (`--retokenize`)
 
@@ -87,11 +87,32 @@ each UD word is its own CHAT word, and each UD word gets its own MOR item.
 
 - Main tier rewritten: `*PAR: I do n't know .`
 - `%mor` emits two items: `pro:sub|I aux|do-Fin-Ind-Pres-S3 part|not v|know .`
-- Driven by `map_ud_sentence_expanded()` (same file, line 24) for the MOR
-  side, and by `retokenize_utterance()` in
-  `crates/batchalign-transform/src/retokenize.rs:195` for the main
-  tier rewrite (with `parse_helpers.rs` and `rebuild.rs` as siblings
-  under `crates/batchalign-transform/src/retokenize/`).
+- Driven by `map_ud_sentence_expanded()` (same file) for the MOR side,
+  and by `retokenize_utterance()` in
+  `crates/batchalign-transform/src/retokenize.rs` for the main tier
+  rewrite (with `parse_helpers.rs` and `rebuild.rs` as siblings under
+  `crates/batchalign-transform/src/retokenize/`).
+- The main tier is rebuilt from the model's own tokens: the words of the
+  analysis as the model returned it, before the grammatical invariants
+  rewrite it. A rewrite that adds items (the English contraction table
+  expanding a `hafta` the model left whole into `have` + `to`) leaves the
+  items and the tokens different in number, and the utterance is reported
+  as a retokenization failure and left as it was
+  (`SurfaceItems::pair` in `morphosyntax/injection.rs`): the main tier
+  never gains a word the transcriber did not write.
+- A special form was sent to the model as its placeholder (`xbxxx`), so its
+  token is written back as the CHAT word: the text mapping holds and the
+  rebuild keeps the word as written (`gumma@c`). When the model's tokens do
+  not stand one per CHAT word, an utterance with a special form is reported
+  instead. An utterance whose special-form or code-switched words would be
+  placed by a mapping spread by length (`MappingBasis::Length`, the texts
+  diverged) is reported too, since such a mapping can give a word its
+  neighbour's items. The rebuild and the placement read one mapping.
+- A token the `--lexicon` MWT lexicon names becomes the lexicon's pieces,
+  one item each (`SurfaceItems::expand`). The first piece keeps the
+  token's analysis and relation; each later piece repeats the analysis
+  and is attached to the first as `FIXED`. Every `%gra` index and head is
+  renumbered, the terminator's relation included.
 
 We chose this split because the two goals, "preserve the transcript" and
 "produce UD-shaped morphology", are legitimate for different downstream
@@ -121,8 +142,8 @@ flowchart TD
     MapMerge --> InjectP["inject_morphosyntax()\n(talkbank-transform/src/inject.rs)"]
     InjectP --> Serial["to_chat_string()\n(talkbank-transform/src/serialize.rs)"]
 
-    Mode -->|"StanzaRetokenize"| MapExp["map_ud_sentence_expanded()\n(talkbank-transform/src/morphosyntax/sentence_mapping.rs:24)"]
-    MapExp --> Retok["retokenize_utterance()\n(talkbank-transform/src/retokenize.rs:195)"]
+    Mode -->|"StanzaRetokenize"| MapExp["map_ud_sentence_expanded()\n(batchalign-transform/src/morphosyntax/sentence_mapping.rs)"]
+    MapExp --> Retok["retokenize_utterance()\n(batchalign-transform/src/retokenize.rs)"]
     Retok --> Rebuild["rebuild_content()\n(talkbank-transform/src/retokenize/rebuild.rs)"]
     Rebuild --> InjectR["(no separate inject step)"]
     InjectR --> Serial
@@ -212,9 +233,9 @@ flowchart LR
     Merge --> Assemble["assemble_mors()\n(crates/batchalign-transform/src/morphosyntax/mapping_helpers.rs)"]
     Assemble --> OneMor["One Mor per CHAT word\naux|do~part|not"]
 
-    Branch -->|"StanzaRetokenize"| Expand["map_ud_sentence_expanded()\n(crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs:24)"]
+    Branch -->|"StanzaRetokenize"| Expand["map_ud_sentence_expanded()\n(crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs)"]
     Expand --> PerComp["One Mor per UD component\n(skip Range parent)\naux|do + part|not"]
-    PerComp --> Rewrite["retokenize_utterance()\n(crates/batchalign-transform/src/retokenize.rs:195)\nrewrites main tier"]
+    PerComp --> Rewrite["retokenize_utterance()\n(crates/batchalign-transform/src/retokenize.rs)\nrewrites main tier"]
 
     OneMor --> Inject["inject_morphosyntax()\n(crates/batchalign-transform/src/inject.rs:119)"]
     Rewrite --> Inject
@@ -268,7 +289,7 @@ flowchart TD
         R_Worker --> R_Stanza["stanza.Pipeline\npretokenized or postprocessor"]
         R_Stanza --> R_Map{"TokenizationMode"}
         R_Map -->|"Preserve"| R_Merge["map_ud_sentence()\n(crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs:77)"]
-        R_Map -->|"StanzaRetokenize"| R_Exp["map_ud_sentence_expanded()\n(crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs:24)"]
+        R_Map -->|"StanzaRetokenize"| R_Exp["map_ud_sentence_expanded()\n(crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs)"]
         R_Exp --> R_Retok["retokenize_utterance()\n(crates/batchalign-transform/src/retokenize.rs)"]
         R_Merge --> R_Inject["inject_morphosyntax()\n(crates/batchalign-transform/src/inject.rs)"]
         R_Retok --> R_Inject
@@ -322,11 +343,12 @@ What BA3 got wrong that BA2 got right (or at least, did simply):
   after a main-tier rewrite will fail downstream `%wor` count checks. This
   is a deliberate invariant: the old `%wor` is stale.
 - **Phrasal-verb MWTs.** Cases like `wake@s up@s` produce
-  `verb|wake part|up` with `COMPOUND-PRT` GRA deprel via the L2
-  merge's Priority 0 check
-  (`crates/batchalign-transform/src/morphosyntax/l2/merge.rs::resolve_merged_pos_with_context`).
-  See [L2 Morphotag: Phrasal-verb recognition](l2-morphotag.md#phrasal-verb-recognition)
-  for the mechanism.
+  `verb|wake part|up` with `COMPOUND-PRT` GRA deprel: the L2 merge writes
+  a word the secondary attached `compound:prt` to a VERB as PART
+  (`crates/batchalign-transform/src/morphosyntax/l2/merge.rs`,
+  `SecondaryUdContext::is_phrasal_verb_particle`). See
+  [L2 Morphotag: Phrasal verbs](l2-morphotag.md#phrasal-verbs) for the
+  mechanism.
 - **Pretokenized-mode languages never run the postprocessor.** For
   non-MWT languages and Japanese, `tokenize_pretokenized=True` is used and
   `_tokenizer_realign.py` is not wired in. Any future MWT additions for

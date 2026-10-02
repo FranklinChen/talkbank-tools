@@ -55,8 +55,8 @@ impl SpeakerSegmentsDigest {
         hasher.update(&[0]);
         hasher.update(&(segments.len() as u64).to_le_bytes());
         for segment in segments {
-            hasher.update(&segment.start_ms.0.to_le_bytes());
-            hasher.update(&segment.end_ms.0.to_le_bytes());
+            hasher.update(&segment.interval.start_millis().to_le_bytes());
+            hasher.update(&segment.interval.end_millis().to_le_bytes());
             let speaker = segment.speaker.as_bytes();
             hasher.update(&(speaker.len() as u64).to_le_bytes());
             hasher.update(speaker);

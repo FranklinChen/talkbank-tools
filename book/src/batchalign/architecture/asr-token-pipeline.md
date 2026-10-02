@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-09-27 17:38 EDT
+**Last updated:** 2026-10-01 21:20 EDT
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -40,7 +40,7 @@ the same owning plan, with their existing segmentation policies.
 ```mermaid
 flowchart TD
     Provider["ASR Provider\n(Rev.AI, Whisper, Cantonese engines)"]
-    AE["AsrElement\n&bull; value: AsrRawText\n&bull; ts/end_ts: AsrTimestampSecs\n&bull; kind: AsrElementKind"]
+    AE["AsrElement\n&bull; value: AsrRawText\n&bull; ts/end_ts: Option&lt;AudioPositionSeconds&gt;\n&bull; kind: AsrElementKind"]
     EnTitlePeriod["strip_english_title_periods_on_elements()\n⚠ English transcribe rule\n(must precede Stage 3 split)"]
     Pre["prepare_words_pre_expansion()\nStages 1-3b, including\nCantonese normalization (2d)"]
     AW_pre["Vec&lt;AsrWord&gt;\n(digits still raw,\n% tokens already split)"]
@@ -186,10 +186,14 @@ wrong type refuses the file with a message naming the provider, the position
 (`segment 3 word 7`) and the fault.
 
 **One owner for rounding and range admission.**
-`AdmittedInterval` (`crates/batchalign-transform/src/asr_postprocess/timing.rs`)
-is the only way to turn provider numbers into milliseconds. Its fields are
-private and every constructor is fallible, so holding one is a proof that the
-value was rounded once, by it, and admitted:
+`AdmittedInterval` (`crates/batchalign-types/src/interval.rs`, re-exported by
+`batchalign-transform`'s `asr_postprocess::timing`) is the only way to turn
+provider numbers into milliseconds, and the one ordered-interval type of the
+workspace: the speaker diarization wire segment (`SpeakerSegmentV2`) carries
+one too. Its fields are private and every constructor is fallible,
+deserialization included (it is read `try_from` a raw pair through
+`admit_millis`), so holding one is a proof that the value was rounded once,
+by it, and admitted:
 
 - non-finite bounds are refused rather than saturated by an `as i64` cast;
 - negative bounds are refused;
@@ -211,6 +215,21 @@ correctly produces identical numbers.
 interval but is never a timed word, because it locates nothing. Deep inside the
 post-processing pipeline, which is a total transform with no error channel, an
 inadmissible pair becomes `RefusedByAdmission` rather than a fabricated number.
+
+**One policy for an inadmissible pair, on every route.** A provider element
+whose two times are not an interval (inverted, or past `MAX_MS`) refuses the
+response, naming the element: the Aliyun, Tencent and FunASR bridges refuse the
+file by provider and position, the generic worker bridge refuses the
+`execute_v2` response (`admit_element`), and Rev.AI refuses its transcript when
+it is projected (`AdmittedRevTranscript::admit`). An element with one time or
+none is the provider's own report and becomes untimed with that cause. On the
+worker wire an element carries its admitted timing once, as
+`AsrElementV2.timing`: `{"kind": "timed", "start_ms", "end_ms"}` (an
+`AdmittedInterval`) or `{"kind": "untimed", "cause"}` (an `UntimedCause`).
+UTR consumes ASR tokens as timing evidence rather than as a transcript, so it
+discards a token whose pair is refused and counts it (`SpanRejections`:
+`inverted`, or `inadmissible` for the range), as the Rev.AI timed-word
+projection for UTR skips one with a warning.
 
 **Speaker attribution is a tagged value, end to end.** `AsrMonologueV2.speaker`
 is `SpeakerAttributionV2`: either `{"kind": "attributed", "label": "..."}`
@@ -250,6 +269,16 @@ it separates nobody, never because a label was missing. The legacy admission in
 `_asr_response.json` evidence, both numeric) accepts a speaker number including
 zero and no longer reads a suffix out of labels with `rsplit('_')`, which used
 to merge distinct labels such as `A_0` and `B_0` onto one track.
+
+**Token bounds are positions.** Every ASR token bound, from the worker wire
+(`AsrElementV2`, `WhisperChunkSpanV2`), the in-process whisper.cpp segments
+and Rev.AI's `Element`, through `AsrToken`, is an `AudioPositionSeconds`: a
+point in the audio, finite and non-negative, admitted where the value is
+read. Lengths (elapsed and uptime readings) are `NonNegativeSeconds`, a
+different type with the same representation, so neither can be passed where
+the other belongs. What a single value cannot carry, that an end does not
+precede its start, is still checked by the consumer that needs it (the Rev
+evidence admission, legacy replay, `MonotoneChunkSpans`).
 
 **What crosses the boundary at all.** `py_to_json_value`
 (`crates/batchalign-pyo3/src/py_json_bridge.rs`) dispatches on EXACT Python
@@ -465,32 +494,44 @@ Verified against source: `strip_separator_words` in
 
 ```mermaid
 flowchart LR
-    Raw["AsrTimestampSecs\n(Observed(f64 seconds)\nor Absent)"]
+    Raw["Option&lt;AudioPositionSeconds&gt;\n(a proven position,\nor None when absent)"]
     Internal["Option i64\n(milliseconds)"]
     Output["Option u64\n(milliseconds)"]
     Bullet["Bullet\n(u64 ms)"]
 
-    Raw -->|"AdmittedInterval::admit_seconds()\nvia normalized_timing_range()"| Internal
+    Raw -->|"WordTiming::admit_positions_or_untimed()\nvia normalized_timing_range()"| Internal
     Internal -->|"as u64 cast\nin transcript_from_asr_utterances()"| Output
     Output -->|"build_word_utterance()"| Bullet
 ```
 
-`AsrTimestampSecs` is the provider's endpoint on `AsrElement`, and it has two
-variants rather than a raw number: `Observed(f64)` for an endpoint the provider
-reported, including a real zero, and `Absent` for one it never sent. It
-serializes untagged, so an observed endpoint is a number and an absent one is
-`null`, never a numeric sentinel, and an absent endpoint yields an untimed word
-instead of a word at time zero. The internal `AsrWord` timing (`Option i64`) is
-deliberately NOT wrapped, these are pipeline-internal values that never cross a
-module boundary.
+An `AsrElement`'s `ts` and `end_ts` are `Option<AudioPositionSeconds>`, the
+shared position type from `batchalign-types`: `Some` for an endpoint the
+provider reported, including a real zero, and `None` for one it never sent. On
+the wire an endpoint is a number and an absent one is `null` (or a missing
+key), never a numeric sentinel, and an absent endpoint yields an untimed word
+instead of a word at time zero. A negative or non-finite number is refused when
+the element is deserialized, the same way the `AsrToken` beside it in an
+`AsrResponse` refuses one, so it cannot reach the timing stage at all. The
+dashboard's `AsrTokenTrace` carries the same `Option<AudioPositionSeconds>`
+unconverted. The internal `AsrWord` timing (`Option i64`) is deliberately not
+wrapped: these are pipeline-internal values that never cross a module
+boundary.
 
-The seconds-to-milliseconds step is no longer done here. `normalized_timing_range`
+The seconds-to-milliseconds step is not done here. `normalized_timing_range`
 delegates to `AdmittedInterval`, the one owner described above, and records an
 inadmissible pair as an untimed word with a named cause instead of converting it.
-Absent, zero-width and inverted spans behave exactly as they did (the word
-carries no timing); what changed is that a negative bound with a later end used
-to reach a word as a negative millisecond time, and a value beyond `i64`
-saturated into a plausible one.
+Absent, zero-width and inverted spans leave the word with no timing. The bounds
+arrive as positions, so the admission step
+(`WordTiming::admit_positions_or_untimed`, through `WordTiming::from_positions`
+and `AdmittedInterval::admit_positions`) can refuse only the pair: an end before
+its start, or a bound beyond the admitted range. Positions are the only public
+seconds route into `AdmittedInterval`; raw `f64` seconds are admitted only
+inside the module. The way out is typed too: an HK provider projection element
+holds one `Option<AdmittedInterval>`, and writes its wire `ts` / `end_ts`
+(both present or both null) from `AdmittedInterval::as_positions`. A
+pyannoteAI diarization segment is admitted through
+`AdmittedInterval::admit_positions` too, so a bound beyond the media range is
+refused there rather than saturated into a millisecond count.
 
 ## Speaker Flow
 

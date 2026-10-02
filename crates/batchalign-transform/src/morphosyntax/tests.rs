@@ -277,45 +277,12 @@ fn verb_form_roundtrips() {
 }
 
 #[test]
-fn has_verb_form_fin_matches_expected_cases() {
-    assert!(has_verb_form_fin(Some(
-        "Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin"
-    )));
-    assert!(has_verb_form_fin(Some("VerbForm=Fin")));
-    assert!(!has_verb_form_fin(Some("Tense=Pres|VerbForm=Part")));
-    assert!(!has_verb_form_fin(None));
-}
-
-#[test]
-fn has_key_value_matches_exact_pairs() {
-    let feats = Some("Mood=Ind|Number=Sing|Person=3|VerbForm=Fin");
-    assert!(has_key_value(feats, "VerbForm", "Fin"));
-    assert!(has_key_value(feats, "Number", "Sing"));
-    assert!(has_key_value(feats, "Person", "3"));
-    assert!(!has_key_value(feats, "Tense", "Past"));
-    assert!(!has_key_value(None, "VerbForm", "Fin"));
-}
-
-#[test]
 fn ud_pair_value_reads_one_key_among_several() {
     let misc = Some("SpaceAfter=No|VerbReadingLemma=bark|Note=a=b");
     assert_eq!(ud_pair_value(misc, "VerbReadingLemma"), Some("bark"));
     assert_eq!(ud_pair_value(misc, "Note"), Some("a=b"));
     assert_eq!(ud_pair_value(misc, "Verb"), None);
     assert_eq!(ud_pair_value(None, "SpaceAfter"), None);
-}
-
-#[test]
-fn canonical_ud_feat_bundles_are_alphabetical() {
-    for bundle in [FINITE_COPULA_PRES_3SG, PRESENT_PARTICIPLE] {
-        let keys: Vec<&str> = bundle
-            .split('|')
-            .map(|pair| pair.split('=').next().expect("feature key"))
-            .collect();
-        let mut sorted = keys.clone();
-        sorted.sort();
-        assert_eq!(keys, sorted, "bundle {bundle:?} is not alphabetized");
-    }
 }
 
 #[test]
@@ -333,7 +300,7 @@ fn bogus_lemma_detection_matches_expected_cases() {
 
 #[test]
 fn validate_and_clean_fixes_pad_deprel_and_bogus_lemma() {
-    let mut word = UdWord {
+    let mut word = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "hello".to_string(),
         lemma: ".".to_string(),
@@ -344,7 +311,7 @@ fn validate_and_clean_fixes_pad_deprel_and_bogus_lemma() {
         deprel: "<pad>".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
     validate_and_clean(&mut word);
 
@@ -404,7 +371,7 @@ fn ca_arrow_terminator_must_normalize_to_period_in_morphotag_payload() {
         1,
         "expected one batch item for the single utterance"
     );
-    let (_, _, ref item, _) = items[0];
+    let item = items[0].item();
 
     assert!(
         matches!(item.terminator, talkbank_model::Terminator::Period { .. }),
@@ -439,23 +406,22 @@ fn collect_payloads_resolves_at_s_against_file_languages_not_batch_default() {
         collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
 
     assert_eq!(items.len(), 1);
-    let (_, _, ref item, _) = items[0];
+    let item = items[0].item();
     assert_eq!(
         item.lang.as_str(),
         "cat",
         "dispatch lang must come from file header"
     );
 
-    let dona_idx = item
-        .words
+    let dona = item
+        .words()
         .iter()
-        .position(|w| w.as_ref() == "dona")
+        .find(|w| w.text().as_ref() == "dona")
         .expect("payload must include the dona word");
 
-    let (_, ref resolved) = item.special_forms[dona_idx];
-    let resolved = resolved
-        .as_ref()
-        .expect("dona@s must produce a language resolution");
+    let WordRole::CodeSwitched(resolved) = dona.role() else {
+        panic!("dona@s must produce a language resolution");
+    };
     let resolved_langs: Vec<&str> = resolved.languages().iter().map(|c| c.as_str()).collect();
     assert_eq!(
         resolved_langs,
@@ -472,4 +438,156 @@ fn lang2_normalizes_common_codes() {
     assert_eq!(lang2("deu"), "de");
     assert_eq!(lang2("heb"), "he");
     assert_eq!(lang2("en"), "en");
+}
+
+/// Each batch word carries its own role, and the text the model receives
+/// follows from the role: a special form sends the placeholder, a
+/// code-switched word (even one with a form type) its own text.
+#[test]
+fn a_batch_word_carries_its_role_and_the_text_it_implies() {
+    let chat = parse_chat(&one_utterance_in(
+        "eng, spa",
+        "the gumma@c and camino@s:spa go .",
+    ));
+    let eng = LanguageCode::new("eng").expect("valid language code");
+    let spa = LanguageCode::new("spa").expect("valid language code");
+    let payloads = payload::collect_payloads(
+        &chat,
+        &eng,
+        &[eng.clone(), spa],
+        types::MultilingualPolicy::ProcessAll,
+    );
+    let item = payloads.batch_items[0].item();
+    let roles: Vec<(&str, &str)> = item
+        .words()
+        .iter()
+        .map(|word| {
+            let role = match word.role() {
+                WordRole::Analysed => "analysed",
+                WordRole::SpecialForm(_) => "special form",
+                WordRole::CodeSwitched(_) => "code-switched",
+            };
+            (word.text().as_str(), role)
+        })
+        .collect();
+    let placeholder = talkbank_model::ChatCleanedText::stanza_placeholder();
+    assert_eq!(
+        roles,
+        [
+            ("the", "analysed"),
+            (placeholder.as_str(), "special form"),
+            ("and", "analysed"),
+            ("camino", "code-switched"),
+            ("go", "analysed"),
+        ]
+    );
+    // On the wire, each word's role is a (form type, language) pair.
+    let wire = serde_json::to_value(item).expect("the item serializes");
+    assert_eq!(
+        wire["special_forms"],
+        serde_json::json!([
+            [null, null],
+            ["c", null],
+            [null, null],
+            [null, "spa"],
+            [null, null]
+        ])
+    );
+}
+
+/// Inject `primary` (fixture rows, see `l2::pipeline_tests::ud_sentence`)
+/// as the analysis of one utterance in preserve mode; the `%mor` and `%gra`
+/// lines written, and the injection's result.
+fn inject_one(
+    languages: &str,
+    main_tier: &str,
+    primary: &str,
+) -> (String, String, InjectionResult) {
+    use talkbank_model::WriteChat;
+    let mut chat = parse_chat(&one_utterance_in(languages, main_tier));
+    let codes: Vec<LanguageCode> = languages
+        .split(',')
+        .map(|code| LanguageCode::new(code.trim()).expect("fixture language code"))
+        .collect();
+    let payloads = payload::collect_payloads(
+        &chat,
+        &codes[0],
+        &codes,
+        types::MultilingualPolicy::ProcessAll,
+    );
+    let parser = TreeSitterParser::new().expect("parser");
+    let injection = inject_results(
+        &parser,
+        &mut chat,
+        payloads.batch_items,
+        vec![UdResponse {
+            sentences: vec![l2::pipeline_tests::ud_sentence(primary)],
+        }],
+        &codes[0],
+        TokenizationMode::Preserve,
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("injection");
+    let utt = first_utterance(&chat);
+    let mor = utt
+        .mor_tier()
+        .map(|t| t.to_chat_string())
+        .unwrap_or_default();
+    let gra = utt
+        .gra_tier()
+        .map(|t| t.to_chat_string())
+        .unwrap_or_default();
+    (mor, gra, injection)
+}
+
+/// A special form after a contraction is relabelled at its own chunk.
+///
+/// `it's` is one `%mor` item of two chunks, so the special form is item 1
+/// but chunk 3. The relabel used to pair items with relations by position,
+/// so it rewrote chunk 2, the clitic `'s`, from `COP` to `DEP`.
+#[test]
+fn a_special_form_after_a_contraction_is_relabelled_at_its_own_chunk() {
+    let (mor, gra, injection) = inject_one(
+        "eng",
+        "it's gumma@c .",
+        "1-2 it's _ X _ 0 dep
+         1 it it PRON Case=Nom|Number=Sing|Person=3|PronType=Prs 3 nsubj
+         2 's be AUX Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin 3 cop
+         3 xbxxx xbxxx NOUN Number=Sing 0 root",
+    );
+    assert!(injection.decisions.is_empty(), "{:?}", injection.decisions);
+    assert!(mor.contains("~aux|be"), "{mor}");
+    assert_eq!(gra, "%gra:\t1|3|NSUBJ 2|3|COP 3|0|ROOT 4|3|PUNCT");
+}
+
+/// The `@s` positions are read from the analysis the `%mor` mapping reads:
+/// after the grammatical invariants rewrote it.
+///
+/// Stanza 1.14 reads `hafta` as one AUX under `put`, the root; the
+/// contraction invariant expands it and raises `have` over `put`, which
+/// becomes its `xcomp`. The `%gra` says so, and the deferred position of
+/// `put@s` must too. Extraction used to read the raw analysis, so the
+/// position called `put` the utterance root while the `%gra` hung it under
+/// `have`.
+#[test]
+fn at_s_positions_read_the_analysis_the_mapping_reads() {
+    let (_, gra, injection) = inject_one(
+        "eng, spa",
+        "you hafta put@s:spa .",
+        "1 you you PRON Case=Nom|Person=2|PronType=Prs 3 nsubj
+         2 hafta hafta AUX Mood=Ind|Number=Sing|Person=2|Tense=Pres|VerbForm=Fin 3 aux
+         3 put put VERB VerbForm=Inf 0 root",
+    );
+    assert!(injection.decisions.is_empty(), "{:?}", injection.decisions);
+    assert_eq!(
+        gra,
+        "%gra:\t1|2|NSUBJ 2|0|ROOT 3|4|MARK 4|2|XCOMP 5|2|PUNCT"
+    );
+    let position = injection.l2.positions().first().expect("put@s is deferred");
+    assert_eq!(position.word_idx().as_usize(), 2);
+    assert_eq!(position.primary().deprel().base(), "xcomp");
+    assert_eq!(
+        position.primary().head(),
+        l2::HeadTarget::Word(talkbank_model::alignment::MorItemIndex::new(1))
+    );
 }

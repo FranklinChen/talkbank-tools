@@ -13,7 +13,7 @@
 
 #![allow(unused_imports, dead_code)]
 
-use crate::chat_ops::nlp::map_ud_word_to_mor;
+use crate::chat_ops::nlp::map_ud_word;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
 use talkbank_model::WriteChat;
@@ -34,7 +34,7 @@ pub(super) fn map_ud_sentence_to_mors(sentence: &UdSentence, ctx: &MappingContex
 }
 
 pub(super) fn it_range(start: usize, end: usize, text: &str) -> UdWord {
-    UdWord {
+    UdWord::from(UdWordAnalysis {
         id: UdId::Range(start, end),
         text: text.into(),
         lemma: "".into(),
@@ -45,7 +45,7 @@ pub(super) fn it_range(start: usize, end: usize, text: &str) -> UdWord {
         deprel: "dep".into(),
         deps: None,
         misc: None,
-    }
+    })
 }
 
 pub(super) fn it_word(
@@ -57,7 +57,7 @@ pub(super) fn it_word(
     deprel: &str,
     feats: Option<&str>,
 ) -> UdWord {
-    UdWord {
+    UdWord::from(UdWordAnalysis {
         id: UdId::Single(id),
         text: text.into(),
         lemma: lemma.into(),
@@ -68,7 +68,7 @@ pub(super) fn it_word(
         deprel: deprel.into(),
         deps: None,
         misc: None,
-    }
+    })
 }
 
 pub(super) fn it_ctx() -> MappingContext {

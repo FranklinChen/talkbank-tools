@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn period_strip_prevents_retokenize_mid_utterance_split() {
         use crate::asr_postprocess::{
-            AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
+            AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, observed,
             process_raw_asr,
         };
         let elements: Vec<AsrElement> = [
@@ -1087,8 +1087,8 @@ mod tests {
         .iter()
         .map(|(t, s, e, k)| AsrElement {
             value: AsrRawText::new(*t),
-            ts: AsrTimestampSecs::Observed(*s),
-            end_ts: AsrTimestampSecs::Observed(*e),
+            ts: observed(*s),
+            end_ts: observed(*e),
             kind: *k,
         })
         .collect();

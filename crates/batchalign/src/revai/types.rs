@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::api::AudioPositionSeconds;
+
 /// Status of a Rev.AI transcription job.
 ///
 /// Rev.AI jobs move in one direction:
@@ -48,12 +50,14 @@ pub struct Element {
     pub element_type: String,
     /// Element text as returned by Rev.AI.
     pub value: String,
-    /// Start time in seconds for timed tokens.
+    /// Start of a timed token, as a position in the audio. Admitted when the
+    /// provider's JSON is read, so a negative or non-finite time refuses the
+    /// transcript there rather than at each consumer.
     #[serde(default)]
-    pub ts: Option<f64>,
-    /// End time in seconds for timed tokens.
+    pub ts: Option<AudioPositionSeconds>,
+    /// End of a timed token, as a position in the audio; admitted as `ts` is.
     #[serde(default)]
-    pub end_ts: Option<f64>,
+    pub end_ts: Option<AudioPositionSeconds>,
     /// Optional confidence score emitted for text elements.
     #[serde(default)]
     pub confidence: Option<f64>,
@@ -288,4 +292,28 @@ pub struct TimedWord {
     pub start_ms: u64,
     /// Absolute end time in milliseconds.
     pub end_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The provider boundary is where a Rev.AI time becomes a position, so a
+    /// transcript naming a negative one is refused as it is read rather than
+    /// by each consumer afterwards.
+    #[test]
+    fn a_transcript_with_a_negative_element_time_is_refused_when_read() {
+        let negative = r#"{"monologues":[{"speaker":0,"elements":[
+            {"type":"text","value":"hello","ts":-0.1,"end_ts":0.4}]}]}"#;
+        assert!(serde_json::from_str::<Transcript>(negative).is_err());
+        let valid = r#"{"monologues":[{"speaker":0,"elements":[
+            {"type":"text","value":"hello","ts":0.1,"end_ts":0.4}]}]}"#;
+        let transcript: Transcript = serde_json::from_str(valid).expect("a valid transcript");
+        assert_eq!(
+            transcript.monologues[0].elements[0]
+                .ts
+                .map(AudioPositionSeconds::get),
+            Some(0.1)
+        );
+    }
 }

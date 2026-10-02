@@ -47,8 +47,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
-    SpeakerIndex, expand_number, prepare_asr_chunks,
+    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, SpeakerIndex, expand_number,
+    observed, prepare_asr_chunks,
 };
 
 /// Fixture location relative to the crate manifest directory.
@@ -102,8 +102,8 @@ impl BaselineRow {
                 speaker: SpeakerIndex(0),
                 elements: vec![AsrElement {
                     value: AsrRawText::new(input),
-                    ts: AsrTimestampSecs::Observed(0.0),
-                    end_ts: AsrTimestampSecs::Observed(1.0),
+                    ts: observed(0.0),
+                    end_ts: observed(1.0),
                     kind: AsrElementKind::Text,
                 }],
             }],

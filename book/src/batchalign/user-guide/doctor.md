@@ -1,14 +1,24 @@
 # Doctor
 
 **Status:** Current
-**Last updated:** 2026-05-11 11:30 EDT
+**Last updated:** 2026-10-01 14:58 EDT
 
 `batchalign3 doctor` is the diagnostic surface for a batchalign3
 deployment. It runs in two modes:
 
 - **Default**: runs the worker pipeline test (Python availability,
   Stanza imports, test-echo round-trip, morphotag pipeline,
-  available memory) and prints a host-facts summary.
+  available memory), checks that `server.yaml` reads, and prints a
+  host-facts summary. A `server.yaml` that exists but cannot be read
+  or parsed is a failed `server_config` check; the host-facts summary
+  then uses the defaults and says so. `--check` and `--explain` stop
+  with that error instead, since their whole answer depends on the
+  file. A missing `server.yaml` is not an error: it means the
+  defaults. A count written below its floor (`job_ttl_days: 0`) is a
+  parse error like any other, so doctor fails the check exactly where
+  the server would refuse to start; it is no longer quietly raised to
+  one. Each check's `duration_ms` is `null` for a reading that is not a
+  timed probe (memory, the config load), never a measured `0`.
 - **`--check`**: host-facts only. Skips the Python pipeline entirely
   for fast config-sanity verification.
 

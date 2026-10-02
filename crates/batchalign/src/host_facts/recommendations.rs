@@ -438,7 +438,6 @@ mod tests {
         CpuArch, DetectionWarning, GpuPresence, MpsExclusionReason, OperatingSystem,
     };
     use super::*;
-    use crate::api::UnixTimestamp;
 
     /// Synthesize a `HostFacts` for tests. Builder-style: callers tweak
     /// the fields they care about and accept the rest as defaults. The
@@ -456,7 +455,7 @@ mod tests {
             gpu,
             disk_free_mb_for_cache: Some(500_000),
             hostname: "test-host".to_owned(),
-            detection_timestamp: UnixTimestamp::from(1_700_000_000.0),
+            detection_timestamp: crate::unix_time(1_700_000_000.0),
             detection_warnings: Vec::<DetectionWarning>::new(),
         }
     }

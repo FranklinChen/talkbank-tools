@@ -200,6 +200,12 @@ pub enum CliError {
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
 
+    /// A daemon state file or server handshake exists but cannot be read, so
+    /// nothing was started or stopped over it: it may name a running server.
+    /// Exit code: [`EXIT_LOCAL_RUNTIME`](Self::EXIT_LOCAL_RUNTIME) (6).
+    #[error(transparent)]
+    UnreadableRecord(#[from] crate::cli::daemon::UnreadableRecord),
+
     /// An offline evaluation replay ran to completion and what it recomputed
     /// does not reproduce the retained artifact it was replayed against. The
     /// inputs were admitted and nothing failed: this is the comparison's
@@ -286,7 +292,9 @@ impl CliError {
             | Self::JobLost { .. }
             | Self::JobFailed { .. }
             | Self::Server(_) => Self::EXIT_SERVER,
-            Self::Database(_) | Self::Json(_) => Self::EXIT_LOCAL_RUNTIME,
+            Self::Database(_) | Self::Json(_) | Self::UnreadableRecord(_) => {
+                Self::EXIT_LOCAL_RUNTIME
+            }
             // Nothing failed: the replay ran and its answer was "this does not
             // reproduce". That is neither a usage error nor a broken machine.
             Self::ReplayDiffers(_) => Self::EXIT_GENERAL,

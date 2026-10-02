@@ -20,7 +20,7 @@ use crate::runner::util::{
     spawn_supervised_file_task, user_facing_error,
 };
 use crate::scheduling::{FailureCategory, RetryPolicy, WorkUnitKind};
-use crate::store::{PendingJobFile, RunnerJobSnapshot, unix_now};
+use crate::store::{PendingJobFile, RunnerJobSnapshot};
 use crate::transcribe::{
     SpeakerEvidenceRunParams, SpeakerEvidenceSource, resolve_speaker_evidence_for_audio,
 };
@@ -132,14 +132,9 @@ async fn process_one_media_analysis_file_v2(
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
-    let started_at = unix_now();
 
     lifecycle
-        .begin_first_attempt(
-            WorkUnitKind::FileInfer,
-            started_at,
-            FileStage::ResolvingAudio,
-        )
+        .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
         .await;
 
     let original_audio_path =
@@ -149,7 +144,7 @@ async fn process_one_media_analysis_file_v2(
     for attempt_number in 1..=retry_policy.max_attempts {
         if attempt_number > 1 {
             lifecycle
-                .restart_attempt(WorkUnitKind::FileInfer, unix_now(), FileStage::Processing)
+                .restart_attempt(WorkUnitKind::FileInfer, FileStage::Processing)
                 .await;
         } else {
             lifecycle.stage(FileStage::Processing).await;
@@ -168,40 +163,33 @@ async fn process_one_media_analysis_file_v2(
         {
             Ok((result_filename, output_text, output_type)) => {
                 lifecycle.stage(FileStage::Writing).await;
-                let finished_at = unix_now();
                 let result_display_path = result_filename.clone().into();
                 let target =
                     ChatOutputTarget::new(&job.filesystem, file_index, &result_display_path);
                 if let Err(error) = write_text_output_artifact(&target, &output_text).await {
                     let err_msg = format!("Failed to write output for {filename}: {error}");
-                    lifecycle
-                        .fail(&err_msg, FailureCategory::System, finished_at)
-                        .await;
+                    lifecycle.fail(&err_msg, FailureCategory::System).await;
                     return FileTaskOutcome::TerminalStateRecorded;
                 }
 
                 lifecycle
-                    .complete_with_result(result_filename.clone().into(), output_type, finished_at)
+                    .complete_with_result(result_filename.clone().into(), output_type)
                     .await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
             Err(DispatchFailure::RetryableWorker(error, category)) => {
-                let finished_at = unix_now();
                 let has_retry_budget = attempt_number < retry_policy.max_attempts;
                 if has_retry_budget && is_retryable_worker_failure(category) {
                     let retry_number = attempt_number;
                     let backoff_ms = retry_policy.backoff_for_retry(retry_number);
-                    let retry_at =
-                        crate::api::UnixTimestamp(finished_at.0 + (backoff_ms.0 as f64 / 1000.0));
                     lifecycle
-                        .retry(
-                            retry_at,
+                        .retry_after(
+                            backoff_ms.duration(),
                             category,
                             &format!("Worker error: {error}; retrying in {backoff_ms} ms"),
-                            finished_at,
                         )
                         .await;
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.0)).await;
+                    tokio::time::sleep(backoff_ms.duration()).await;
                     continue;
                 }
 
@@ -214,11 +202,10 @@ async fn process_one_media_analysis_file_v2(
                     "Media-analysis error (raw)"
                 );
                 let user_msg = user_facing_error(category, "Analysis", filename, &raw_msg);
-                lifecycle.fail(&user_msg, category, finished_at).await;
+                lifecycle.fail(&user_msg, category).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
             Err(DispatchFailure::Terminal(error, category)) => {
-                let finished_at = unix_now();
                 error!(
                     job_id = %job_id,
                     correlation_id = %correlation_id,
@@ -227,7 +214,7 @@ async fn process_one_media_analysis_file_v2(
                     "Media-analysis V2 dispatch failed"
                 );
                 let user_msg = user_facing_error(category, "Analysis", filename, &error);
-                lifecycle.fail(&user_msg, category, finished_at).await;
+                lifecycle.fail(&user_msg, category).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
         }

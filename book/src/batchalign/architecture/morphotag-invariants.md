@@ -1,7 +1,7 @@
 # Morphotag Reconciliation Invariants
 
 **Status:** Current
-**Last updated:** 2026-08-30 19:35 EDT
+**Last updated:** 2026-10-02 14:16 EDT
 
 This page documents the **1-to-1 invariant** that the morphotag pipeline
 relies on, the three stages that together make it hold deterministically,
@@ -9,6 +9,15 @@ the two legitimate modes that intentionally skip it, and the typed
 outcome model that replaces the old silent-skip pattern.
 
 ## The invariant
+
+The UD side has one admission owner, `UdTokens::walk`. Its iterator yields a
+producer-created `WalkedUdToken` view that retains the token and its selected
+external representative together. Mapping and language reconcilers consume
+that view rather than pairing independently selected components and heads.
+Italian collapse policy changes lexical analysis, not attachment ownership;
+malformed multiword tokens without an external representative are rejected
+by the walk, never promoted to a guessed root. The view borrows the existing
+walk and adds neither a second traversal nor copies of the sentence.
 
 For every CHAT utterance the pipeline visits:
 

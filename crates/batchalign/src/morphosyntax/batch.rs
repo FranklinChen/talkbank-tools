@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use super::identity::AppliedAnalyses;
 use super::worker::infer_batch;
-use crate::chat_ops::morphosyntax_ops::BatchItemWithPosition;
 use crate::chat_ops::morphosyntax_ops::l2;
 use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::pipeline::PipelineServices;
@@ -23,59 +22,69 @@ fn secondary_dispatch_supported(
 /// Dispatch @s words to secondary language workers and splice results back.
 ///
 /// This function:
-/// 1. Groups deferred positions into contiguous spans by target language
-/// 2. For each supported target language, builds a minimal `BatchItemWithPosition`
-///    and dispatches it to a secondary Stanza worker via `infer_batch`
-/// 3. Runs the structural merge algorithm (primary structural + secondary lexical)
-/// 4. Splices merged morphology back into the ChatFile, replacing L2|xxx
-/// 5. Falls back to L2|xxx for unsupported languages or dispatch failures
+/// 1. Plans contiguous spans by target language, consuming the positions
+/// 2. For each supported target language, builds one `MorphosyntaxBatchItem`
+///    per span and dispatches them to a secondary Stanza worker via
+///    `infer_batch`
+/// 3. Merges each span with its secondary analysis (the secondary owns the
+///    words' morphology, the primary the span's attachment)
+/// 4. Splices the merged spans into the ChatFile, replacing `L2|xxx`
+///
+/// Words of unsupported languages, failed dispatches and spans whose
+/// secondary analysis does not merge keep `L2|xxx`, each reported.
 ///
 /// Returns what the secondary workers reported about the analysis merged in,
 /// so a caller that stamps provenance names those models beside the
 /// primary-language ones and counts their repairs with the rest.
 pub(crate) async fn dispatch_secondary_l2(
     chat_file: &mut ChatFile,
-    deferred: &[l2::L2DeferredPosition],
+    deferred: Vec<l2::L2DeferredPosition>,
     services: PipelineServices<'_>,
     filename: &str,
 ) -> AppliedAnalyses {
-    use crate::chat_ops::morphosyntax_ops::MorphosyntaxBatchItem;
+    use crate::chat_ops::morphosyntax_ops::{BatchWord, MorphosyntaxBatchItem};
 
+    let deferred_words = deferred.len();
     let dispatch_plan = l2::plan_dispatch_spans(deferred);
+    let planned_spans = dispatch_plan.spans.len();
 
     // Group spans by target language for batched dispatch.
-    let mut by_lang: HashMap<LanguageCode, Vec<&l2::L2SpanPlan>> = HashMap::new();
-    for span in &dispatch_plan.spans {
+    let mut by_lang: HashMap<LanguageCode, Vec<l2::L2SpanPlan>> = HashMap::new();
+    for span in dispatch_plan.spans {
         by_lang
-            .entry(span.target_lang.clone())
+            .entry(span.target_lang().clone())
             .or_default()
             .push(span);
     }
 
     tracing::info!(
         filename = %filename,
-        deferred = deferred.len(),
-        spans = dispatch_plan.spans.len(),
+        deferred = deferred_words,
+        spans = planned_spans,
         languages = by_lang.len(),
         "L2 morphotag: dispatching @s words to secondary workers"
     );
 
-    let mut merged_results: Vec<Option<l2::MergedL2Morphology>> = vec![None; deferred.len()];
+    let mut merged: Vec<l2::MergedL2Span> = Vec::new();
     let mut applied = AppliedAnalyses::none();
 
-    for (target_lang, lang_spans) in &by_lang {
+    for (target_lang, lang_spans) in by_lang {
+        let total_words: usize = lang_spans.iter().map(l2::L2SpanPlan::len).sum();
         let lang3 = match crate::api::LanguageCode3::try_new(target_lang.as_ref()) {
             Ok(l) => l,
             Err(_) => {
-                tracing::warn!(lang = %target_lang, "L2 morphotag: invalid language code");
+                tracing::warn!(
+                    lang = %target_lang,
+                    words = total_words,
+                    "L2 morphotag: invalid language code; words stay L2|xxx"
+                );
                 continue;
             }
         };
 
-        let supported = secondary_dispatch_supported(services.pool.stanza_registry(), target_lang);
+        let supported = secondary_dispatch_supported(services.pool.stanza_registry(), &target_lang);
 
         if !supported {
-            let total_words: usize = lang_spans.iter().map(|s| s.words.len()).sum();
             tracing::info!(
                 lang = %lang3,
                 words = total_words,
@@ -85,25 +94,22 @@ pub(crate) async fn dispatch_secondary_l2(
             continue;
         }
 
-        // Each span becomes one BatchItemWithPosition (one Stanza "sentence").
-        let batch_items: Vec<BatchItemWithPosition> = lang_spans
+        // Each span becomes one item (one Stanza "sentence"). It names no
+        // utterance position: the span carries its own, and the merge pairs
+        // each response with its span.
+        let batch_items: Vec<MorphosyntaxBatchItem> = lang_spans
             .iter()
             .map(|span| {
-                let num_words = span.words.len();
-                (
-                    0, // line_idx placeholder
-                    0, // utt_ordinal placeholder
-                    MorphosyntaxBatchItem {
-                        words: span.words.clone(),
-                        // The span's own utterance terminator, not a period
-                        // for everything. Stanza treats sentence-final
-                        // punctuation as evidence, so a question dispatched
-                        // as a statement comes back parsed as one.
-                        terminator: span.terminator.clone(),
-                        special_forms: vec![(None, None); num_words],
-                        lang: target_lang.clone(),
-                    },
-                    Vec::new(), // no extracted words needed
+                // Every span word is the secondary model's to analyse.
+                let words = span.words().cloned().map(BatchWord::analysed).collect();
+                MorphosyntaxBatchItem::new(
+                    words,
+                    // The span's own utterance terminator, not a period for
+                    // everything. Stanza treats sentence-final punctuation as
+                    // evidence, so a question dispatched as a statement comes
+                    // back parsed as one.
+                    span.terminator().clone(),
+                    target_lang.clone(),
                 )
             })
             .collect();
@@ -129,44 +135,70 @@ pub(crate) async fn dispatch_secondary_l2(
         .await
         {
             Ok(responses) => {
-                for (span, admitted) in lang_spans.iter().copied().zip(responses.iter()) {
-                    if let Some(sentence) = admitted.response().sentences.first() {
-                        match l2::merge_planned_secondary_span(span, deferred, sentence) {
-                            Ok(merged_pairs) => {
-                                applied.record(admitted.source());
-                                for (global_idx, merged) in merged_pairs {
-                                    merged_results[global_idx] = Some(merged);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    lang = %lang3,
-                                    error = %e,
-                                    "L2 morphotag: planned secondary merge failed"
-                                );
-                            }
+                let spans = lang_spans.len();
+                if responses.len() != spans {
+                    tracing::warn!(
+                        lang = %lang3,
+                        spans,
+                        responses = responses.len(),
+                        "L2 morphotag: secondary worker answered a different number of \
+                         spans than were sent; unanswered spans stay L2|xxx"
+                    );
+                }
+                for (span, admitted) in lang_spans.into_iter().zip(responses.iter()) {
+                    let line_idx = span.line_idx();
+                    let words = span.len();
+                    let Some(sentence) = admitted.response().sentences.first() else {
+                        tracing::warn!(
+                            lang = %lang3,
+                            line_idx,
+                            words,
+                            "L2 morphotag: secondary worker returned no sentence; \
+                             words stay L2|xxx"
+                        );
+                        continue;
+                    };
+                    match l2::merge_planned_secondary_span(span, sentence) {
+                        Ok(span) => {
+                            applied.record(admitted.source());
+                            merged.push(span);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                lang = %lang3,
+                                line_idx,
+                                words,
+                                error = %e,
+                                "L2 morphotag: secondary merge failed; words stay L2|xxx"
+                            );
                         }
                     }
                 }
-                let total_words: usize = lang_spans.iter().map(|s| s.words.len()).sum();
                 tracing::info!(
                     lang = %lang3,
-                    spans = lang_spans.len(),
+                    spans,
                     words = total_words,
                     "L2 morphotag: secondary dispatch succeeded"
                 );
             }
             Err(e) => {
-                tracing::warn!(lang = %lang3, error = %e, "L2 morphotag: secondary dispatch failed");
+                tracing::warn!(
+                    lang = %lang3,
+                    words = total_words,
+                    error = %e,
+                    "L2 morphotag: secondary dispatch failed; words stay L2|xxx"
+                );
             }
         }
     }
 
-    let outcome = l2::splice_l2_into_chat(chat_file, deferred, &merged_results);
+    let merged_words: usize = merged.iter().map(|span| span.mors().len()).sum();
+    let outcome = l2::splice_l2_into_chat(chat_file, merged);
     tracing::info!(
         filename = %filename,
         spliced = outcome.spliced,
         fallback = outcome.fallback,
+        unmerged = deferred_words - merged_words,
         gra_upgraded = outcome.gra_upgraded,
         "L2 morphotag: splice complete"
     );

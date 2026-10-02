@@ -85,19 +85,6 @@ impl PosConstraint {
             Self::Unconstrained => true,
         }
     }
-
-    /// Return the most likely POS from the constraint set.
-    ///
-    /// For `Exact`, returns that POS. For `OneOf`, returns the first element
-    /// (ordered by frequency/likelihood in the mapping table). For
-    /// `Unconstrained`, returns `None`.
-    pub fn most_likely(&self) -> Option<UniversalPos> {
-        match self {
-            Self::Exact(p) => Some(*p),
-            Self::OneOf(set) => set.first().copied(),
-            Self::Unconstrained => None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +97,9 @@ impl PosConstraint {
 /// Dependencies annotation scheme. A word with deprel `advmod` must be an
 /// adverb in any language; a word with deprel `det` must be a determiner.
 ///
-/// The constraint sets are ordered by frequency/likelihood: for `OneOf`,
-/// the first element is the most common POS for that relation.
+/// The L2 merge uses it in one direction only: to notice that the primary's
+/// relation contradicts the category the secondary model assigned, so the
+/// relation is corrected. It never chooses a category.
 pub fn deprel_to_pos_constraint(deprel: &UdDeprel) -> PosConstraint {
     let base = deprel.base();
 
@@ -160,10 +148,8 @@ pub fn deprel_to_pos_constraint(deprel: &UdDeprel) -> PosConstraint {
             UniversalPos::Noun,
             UniversalPos::Adj,
         ]),
-        // `flat` is the parser's fallback for unknown/foreign words. Since
-        // the primary model has no lexical knowledge of @s words, any POS
-        // the secondary model returns is valid. Use Unconstrained to defer
-        // entirely to the secondary model.
+        // `flat` is the parser's fallback for unknown/foreign words: it says
+        // nothing about the category.
         "flat" => PosConstraint::Unconstrained,
         "conj" => PosConstraint::Unconstrained,
         "parataxis" => PosConstraint::Unconstrained,
@@ -171,68 +157,6 @@ pub fn deprel_to_pos_constraint(deprel: &UdDeprel) -> PosConstraint {
 
         // Unknown or language-specific deprels
         _ => PosConstraint::Unconstrained,
-    }
-}
-
-/// Refine a POS constraint using evidence from the word's dependents.
-///
-/// If a word has a `det` dependent, it must be a noun (definitively).
-/// If it has an `nsubj` dependent, it must be a verb or adjective.
-/// These constraints further narrow the set from `deprel_to_pos_constraint`.
-pub fn refine_with_dependents(
-    constraint: &PosConstraint,
-    dependent_deprels: &[UdDeprel],
-) -> PosConstraint {
-    let mut result = constraint.clone();
-    for dep in dependent_deprels {
-        let base = dep.base();
-        let narrowing: Option<Vec<UniversalPos>> = match base {
-            "det" => Some(vec![UniversalPos::Noun, UniversalPos::Propn]),
-            "nsubj" | "csubj" => Some(vec![UniversalPos::Verb, UniversalPos::Adj]),
-            "obj" | "iobj" => Some(vec![UniversalPos::Verb]),
-            "case" => Some(vec![
-                UniversalPos::Noun,
-                UniversalPos::Pron,
-                UniversalPos::Propn,
-            ]),
-            _ => None,
-        };
-        if let Some(narrow) = narrowing {
-            result = intersect_constraint(&result, &narrow);
-        }
-    }
-    result
-}
-
-/// Intersect a constraint with a set of allowed POS tags.
-fn intersect_constraint(constraint: &PosConstraint, allowed: &[UniversalPos]) -> PosConstraint {
-    match constraint {
-        PosConstraint::Exact(p) => {
-            if allowed.contains(p) {
-                PosConstraint::Exact(*p)
-            } else {
-                constraint.clone()
-            }
-        }
-        PosConstraint::OneOf(set) => {
-            let narrowed: Vec<UniversalPos> = set
-                .iter()
-                .filter(|p| allowed.contains(p))
-                .copied()
-                .collect();
-            match narrowed.len() {
-                0 => constraint.clone(),
-                1 => PosConstraint::Exact(narrowed[0]),
-                _ => PosConstraint::OneOf(narrowed),
-            }
-        }
-        PosConstraint::Unconstrained => {
-            if allowed.len() == 1 {
-                PosConstraint::Exact(allowed[0])
-            } else {
-                PosConstraint::OneOf(allowed.to_vec())
-            }
-        }
     }
 }
 

@@ -1,7 +1,7 @@
 # Rust Core (`batchalign_core`)
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:57 EDT
+**Last updated:** 2026-10-01 15:39 EDT
 
 For new contributors, start with:
 
@@ -33,7 +33,7 @@ bundles both the extension and the native binary.
 |-------|----------|---------|
 | `batchalign-pyo3` | `crates/batchalign-pyo3/` | Worker runtime, what Python imports as `batchalign_core`. Deps: `batchalign-types` + `talkbank-transform` |
 | `batchalign` | `crates/batchalign/` | The big Rust crate: CLI, axum server, dispatch, FA, morphosyntax, Rev.AI client, batchalign-specific CHAT extraction/injection in `chat_ops/`. NOT consumed by batchalign-pyo3. |
-| `batchalign-types` | `crates/batchalign-types/` | Shared domain types and worker IPC types (depended on by both `batchalign` and `batchalign-pyo3`) |
+| `batchalign-types` | `crates/batchalign-types/` | Shared domain types and worker IPC types (depended on by `batchalign`, `batchalign-pyo3` and `batchalign-transform`; the transform crate uses it for `AudioPositionSeconds` on ASR element times) |
 | `batchalign-transform` | `crates/batchalign-transform/` | Pipelines, CHAT↔JSON, morphosyntax, Cantonese normalization, tokenizer realignment, asr_postprocess: the shared CHAT-aware logic the pyo3 worker calls into |
 
 ## Module organization

@@ -255,12 +255,13 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
     # first position inflated that item by every other item's work and left
     # the rest at 0.0, where neither was distinguishable from an item that
     # genuinely took no measurable time. An item with no attributable work
-    # still reports 0.0, and means it.
+    # reports no time at all (None, null on the wire): until 2026-10-01 it
+    # reported 0.0, which reads as a measurement.
     assert response.results[0].elapsed_s == 0.5
     assert response.results[1].elapsed_s == 0.75
     assert response.results[2].elapsed_s == 0.75
-    assert response.results[3].elapsed_s == 0.0
-    assert response.results[4].elapsed_s == 0.0
+    assert response.results[3].elapsed_s is None
+    assert response.results[4].elapsed_s is None
 
 
 def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure(
@@ -322,9 +323,8 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
         == "Stanza pipeline raised for language fra: stanza exploded"
     )
     # The group raised before any per-item work ran, so no duration is
-    # attributable to this item. 0.0 is the honest report, where the batch's
-    # own second used to be stamped onto the first position.
-    assert response.results[0].elapsed_s == 0.0
+    # attributable to this item: it reports none, not a zero.
+    assert response.results[0].elapsed_s is None
 
 
 def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
@@ -405,11 +405,11 @@ def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
     assert survivor.error is None
     assert survivor.result == _analyzed(["hello", "world"], "eng")
     # Timing is scoped the same way the failure is: the survivor reports the
-    # work it did, and the failed group's items report 0.0 because none of
-    # their work ran.
+    # work it did, and the failed group's items report no duration because
+    # none of their work ran.
     assert survivor.elapsed_s == 0.5
-    assert response.results[0].elapsed_s == 0.0
-    assert response.results[2].elapsed_s == 0.0
+    assert response.results[0].elapsed_s is None
+    assert response.results[2].elapsed_s is None
 
 
 def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
@@ -620,7 +620,7 @@ def test_batch_infer_morphosyntax_returns_early_when_no_nonempty_items(
 
     # A wordless utterance is its own outcome and names no model.
     assert response.results[0].result == {"kind": "no_words"}
-    assert response.results[0].elapsed_s == 0.0
+    assert response.results[0].elapsed_s is None
     assert response.results[1].error == "Invalid batch item"
 
 

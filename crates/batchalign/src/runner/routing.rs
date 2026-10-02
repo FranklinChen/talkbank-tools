@@ -28,7 +28,7 @@ use crate::execution::{
     MorphotagRuntimeOptions, PooledWorkerGateway, dispatch_compare_job, dispatch_coref_job,
     dispatch_morphotag_job, dispatch_translate_job, dispatch_utseg_job,
 };
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::worker::pool::WorkerPool;
 
 use super::context::{DispatchHostContext, JobDispatchRequest, RunnerExecutionContext};
@@ -194,9 +194,7 @@ async fn fail_job(job: &RunnerJobSnapshot, host: &DispatchHostContext, message: 
         command = %job.dispatch.command,
         "{message}"
     );
-    host.sink()
-        .fail_job(&job.identity.job_id, &message, unix_now())
-        .await;
+    host.sink().fail_job(&job.identity.job_id, &message).await;
 }
 
 /// Run one batched-text command on the recipe-owned execution path.
@@ -359,14 +357,12 @@ pub(super) async fn fail_files_for_refused_plan(
         refusal = %message,
         "Command plan refused; failing this job's files"
     );
-    let refused_at = unix_now();
     for file in &job.pending_files {
         record_plan_refusal_for_file(
             host.sink().as_ref(),
             &job.identity.job_id,
             file.filename.as_ref(),
             &message,
-            refused_at,
         )
         .await;
     }
@@ -389,15 +385,9 @@ async fn record_plan_refusal_for_file(
     job_id: &crate::api::JobId,
     filename: &str,
     message: &str,
-    refused_at: crate::api::UnixTimestamp,
 ) {
     super::util::FileRunTracker::new(sink, job_id, filename)
-        .record_setup_failure(
-            refused_at,
-            message,
-            crate::scheduling::FailureCategory::Validation,
-            refused_at,
-        )
+        .record_setup_failure(message, crate::scheduling::FailureCategory::Validation)
         .await;
 }
 
@@ -547,7 +537,6 @@ mod tests {
             &JobId::from("job-refused"),
             "sample.cha",
             "command plan could not be built from job options",
-            crate::api::UnixTimestamp(1_700_000_000.0),
         )
         .await;
 

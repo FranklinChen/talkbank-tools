@@ -13,6 +13,7 @@ use talkbank_model::WriteChat;
 use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::{Line, SpeakerCode};
 
+use crate::decisions::LineIdx;
 use crate::extract::{self, ExtractedWord};
 use talkbank_model::GoverningMarkKind;
 
@@ -25,34 +26,184 @@ use super::types::MultilingualPolicy;
 // details and the post-Stanza synthesis recognition logic in
 // `morphosyntax/synthesis/`.
 
-/// Batch item for morphosyntax NLP processing.
-#[derive(Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+/// What one word of a batch item is to the morphosyntax pipeline.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WordRole {
+    /// The model analyses the word in the utterance's language.
+    Analysed,
+    /// A special form (`@c`, `@b`, ...): the model sees a placeholder, and
+    /// the word's `%mor` is synthesized from its form type.
+    SpecialForm(talkbank_model::model::FormType),
+    /// A code-switched word (its own `@s`, or inside an `[@s:...]` span):
+    /// `L2|xxx` from the primary pass, then the secondary model when its
+    /// language resolved. Takes precedence over a form type the word also
+    /// carries.
+    CodeSwitched(talkbank_model::validation::LanguageResolution),
+}
+
+impl WordRole {
+    /// The role of a word with this form type and governing language: a
+    /// code-switch wins over a form type.
+    pub fn of(
+        form_type: Option<talkbank_model::model::FormType>,
+        language: Option<talkbank_model::validation::LanguageResolution>,
+    ) -> Self {
+        match (language, form_type) {
+            (Some(language), _) => Self::CodeSwitched(language),
+            (None, Some(form_type)) => Self::SpecialForm(form_type),
+            (None, None) => Self::Analysed,
+        }
+    }
+}
+
+/// One word of a batch item: the text the model receives, and the word's
+/// role. [`BatchWord::new`] is the only constructor, and it sends a special
+/// form's placeholder rather than its text, so the two cannot disagree.
+#[derive(Debug, Clone)]
+pub struct BatchWord {
+    text: talkbank_model::ChatCleanedText,
+    role: WordRole,
+}
+
+impl BatchWord {
+    /// A word with its role. A special form is sent as
+    /// `ChatCleanedText::stanza_placeholder()`: the model sees the
+    /// placeholder, not the non-word, so the surrounding parse stays clean,
+    /// and injection replaces the placeholder's analysis with the form
+    /// type's `%mor`.
+    pub fn new(text: talkbank_model::ChatCleanedText, role: WordRole) -> Self {
+        let text = match role {
+            WordRole::SpecialForm(_) => talkbank_model::ChatCleanedText::stanza_placeholder(),
+            WordRole::Analysed | WordRole::CodeSwitched(_) => text,
+        };
+        Self { text, role }
+    }
+
+    /// A word the model analyses in the utterance's language.
+    pub fn analysed(text: talkbank_model::ChatCleanedText) -> Self {
+        Self::new(text, WordRole::Analysed)
+    }
+
+    /// The text the model receives.
+    pub fn text(&self) -> &talkbank_model::ChatCleanedText {
+        &self.text
+    }
+
+    /// The word's role.
+    pub fn role(&self) -> &WordRole {
+        &self.role
+    }
+}
+
+/// Batch item for morphosyntax NLP processing: one utterance's words, each
+/// with its role, its terminator and its language.
+#[derive(Clone)]
 pub struct MorphosyntaxBatchItem {
+    words: Vec<BatchWord>,
+    /// Utterance terminator. Serializes to its CHAT surface form (`.`, `?`,
+    /// `!`, etc.) over the IPC boundary.
+    pub terminator: talkbank_model::Terminator,
+    /// Language code for this utterance (ISO 639-3).
+    pub lang: talkbank_model::model::LanguageCode,
+}
+
+impl MorphosyntaxBatchItem {
+    /// An utterance's words, terminator and language.
+    pub fn new(
+        words: Vec<BatchWord>,
+        terminator: talkbank_model::Terminator,
+        lang: talkbank_model::model::LanguageCode,
+    ) -> Self {
+        Self {
+            words,
+            terminator,
+            lang,
+        }
+    }
+
+    /// The words, each with its role.
+    pub fn words(&self) -> &[BatchWord] {
+        &self.words
+    }
+}
+
+// The batch item as the worker receives it: the words' texts, and per word
+// its form type and resolved language (`special_forms`), which the worker does
+// not read. The JSON Schema `ipc-schema` publishes is this shape, under the
+// item's name and with the description below.
+/// Batch item for morphosyntax NLP processing.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[schemars(rename = "MorphosyntaxBatchItem")]
+struct MorphosyntaxBatchItemWire<'a> {
     /// Word texts for NLP processing. Each word is provenance-sealed
     /// `ChatCleanedText` derived from a parsed `Word` or `Separator`
     /// or, for non-`@s` special-form positions, the blessed
     /// `ChatCleanedText::stanza_placeholder()` constant.
     #[schemars(with = "Vec<String>")]
-    pub words: Vec<talkbank_model::ChatCleanedText>,
+    words: Vec<&'a talkbank_model::ChatCleanedText>,
     /// Utterance terminator. Typed; serializes to its CHAT surface form
     /// (`.`, `?`, `!`, etc.) over the IPC boundary so the Stanza worker
     /// continues to receive a plain string.
-    #[serde(
-        serialize_with = "serialize_terminator_as_chat_str",
-        deserialize_with = "deserialize_terminator_from_chat_str"
-    )]
+    #[serde(serialize_with = "serialize_terminator_ref_as_chat_str")]
     #[schemars(with = "String")]
-    pub terminator: talkbank_model::Terminator,
+    terminator: &'a talkbank_model::Terminator,
     /// Special form and language per word: (form_type, resolved_language).
-    #[serde(serialize_with = "serialize_special_forms")]
     #[schemars(with = "Vec<(Option<String>, Option<String>)>")]
-    pub special_forms: Vec<(
-        Option<talkbank_model::model::FormType>,
-        Option<talkbank_model::validation::LanguageResolution>,
-    )>,
+    special_forms: Vec<(Option<String>, Option<String>)>,
     /// Language code for this utterance (ISO 639-3).
     #[schemars(with = "String")]
-    pub lang: talkbank_model::model::LanguageCode,
+    lang: &'a talkbank_model::model::LanguageCode,
+}
+
+impl<'a> MorphosyntaxBatchItemWire<'a> {
+    fn of(item: &'a MorphosyntaxBatchItem) -> Self {
+        Self {
+            words: item.words.iter().map(BatchWord::text).collect(),
+            terminator: &item.terminator,
+            special_forms: item
+                .words
+                .iter()
+                .map(|word| wire_role(&word.role))
+                .collect(),
+            lang: &item.lang,
+        }
+    }
+}
+
+/// A word's role on the wire: its form type's CHAT text and its first
+/// resolved language.
+fn wire_role(role: &WordRole) -> (Option<String>, Option<String>) {
+    match role {
+        WordRole::Analysed => (None, None),
+        WordRole::SpecialForm(form_type) => {
+            let mut buf = String::new();
+            #[allow(clippy::expect_used)]
+            form_type
+                .write_chat(&mut buf)
+                .expect("writing CHAT to a String should be infallible");
+            (Some(buf), None)
+        }
+        WordRole::CodeSwitched(resolution) => (
+            None,
+            resolution.languages().first().map(|lc| lc.to_string()),
+        ),
+    }
+}
+
+impl serde::Serialize for MorphosyntaxBatchItem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        MorphosyntaxBatchItemWire::of(self).serialize(serializer)
+    }
+}
+
+impl schemars::JsonSchema for MorphosyntaxBatchItem {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        MorphosyntaxBatchItemWire::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        MorphosyntaxBatchItemWire::json_schema(generator)
+    }
 }
 
 /// The terminator to hand Stanza for `utt`.
@@ -84,50 +235,66 @@ pub(crate) fn stanza_input_terminator(
         })
 }
 
-fn serialize_terminator_as_chat_str<S: serde::Serializer>(
-    term: &talkbank_model::Terminator,
+fn serialize_terminator_ref_as_chat_str<S: serde::Serializer>(
+    terminator: &&talkbank_model::Terminator,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(&term.to_string())
+    serializer.serialize_str(&terminator.to_string())
 }
 
-fn deserialize_terminator_from_chat_str<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<talkbank_model::Terminator, D::Error> {
-    use serde::de::Error;
-    let s = <String as serde::Deserialize>::deserialize(deserializer)?;
-    talkbank_model::Terminator::try_from_chat_str(s.trim())
-        .ok_or_else(|| D::Error::custom(format!("unrecognized CHAT terminator string: {s:?}")))
-}
-
-fn serialize_special_forms<S: serde::Serializer>(
-    forms: &[(
-        Option<talkbank_model::model::FormType>,
-        Option<talkbank_model::validation::LanguageResolution>,
-    )],
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    use serde::ser::SerializeSeq;
-
-    let mut seq = serializer.serialize_seq(Some(forms.len()))?;
-    for (form_type, lang_res) in forms {
-        let ft_str: Option<String> = form_type.as_ref().map(|ft| {
-            let mut buf = String::new();
-            #[allow(clippy::expect_used)]
-            ft.write_chat(&mut buf)
-                .expect("writing CHAT to a String should be infallible");
-            buf
-        });
-        let lang_str: Option<String> = lang_res
-            .as_ref()
-            .and_then(|lr| lr.languages().first().map(|lc| lc.to_string()));
-        seq.serialize_element(&(ft_str, lang_str))?;
+/// A request sends its items, whoever holds them: a collected utterance
+/// (`CollectedUtterance`) or a bare item (a secondary-language span).
+impl AsRef<MorphosyntaxBatchItem> for MorphosyntaxBatchItem {
+    fn as_ref(&self) -> &MorphosyntaxBatchItem {
+        self
     }
-    seq.end()
 }
 
-/// A collected batch item with its position in the `ChatFile`, for injection.
-pub type BatchItemWithPosition = (usize, usize, MorphosyntaxBatchItem, Vec<ExtractedWord>);
+/// One utterance of a file collected for the worker: where it is, the item
+/// sent for it, and the words its analysis is injected into.
+///
+/// Built only by [`collect_payloads`], so its position names an utterance of
+/// the file it was collected from.
+#[derive(Clone)]
+pub struct CollectedUtterance {
+    line: LineIdx,
+    utt_ordinal: usize,
+    item: MorphosyntaxBatchItem,
+    words: Vec<ExtractedWord>,
+}
+
+impl CollectedUtterance {
+    /// The utterance's line in `ChatFile.lines`.
+    pub fn line(&self) -> LineIdx {
+        self.line
+    }
+
+    /// The utterance's 0-based ordinal among the file's utterances.
+    pub fn utt_ordinal(&self) -> usize {
+        self.utt_ordinal
+    }
+
+    /// The item sent to the worker.
+    pub fn item(&self) -> &MorphosyntaxBatchItem {
+        &self.item
+    }
+
+    /// The item alone, for a caller that sends it and injects nothing.
+    pub fn into_item(self) -> MorphosyntaxBatchItem {
+        self.item
+    }
+
+    /// The utterance's words, as extracted from its main tier.
+    pub fn words(&self) -> &[ExtractedWord] {
+        &self.words
+    }
+}
+
+impl AsRef<MorphosyntaxBatchItem> for CollectedUtterance {
+    fn as_ref(&self) -> &MorphosyntaxBatchItem {
+        &self.item
+    }
+}
 
 /// Validation warning for a single utterance.
 #[derive(Debug)]
@@ -153,7 +320,7 @@ impl std::fmt::Display for AlignmentWarning {
 /// Result of walking a `ChatFile` for morphotag payload collection.
 pub struct PayloadCollection {
     /// Utterances that will be sent to the NLP worker.
-    pub batch_items: Vec<BatchItemWithPosition>,
+    pub batch_items: Vec<CollectedUtterance>,
     /// Utterances that had zero Mor-alignable content.
     pub not_applicable: Vec<MorOutcome>,
     /// Total number of utterance lines in the file.
@@ -174,7 +341,7 @@ pub fn collect_payloads(
         .filter(|l| matches!(l, Line::Utterance(_)))
         .count();
 
-    let mut batch_items: Vec<BatchItemWithPosition> = Vec::new();
+    let mut batch_items: Vec<CollectedUtterance> = Vec::new();
     let mut not_applicable: Vec<MorOutcome> = Vec::new();
     let mut utt_idx = 0usize;
 
@@ -225,10 +392,7 @@ pub fn collect_payloads(
                 // which is the dona@s observed bug.
                 let tier_language = Some(&utterance_lang);
 
-                let special_forms: Vec<(
-                    Option<talkbank_model::model::FormType>,
-                    Option<talkbank_model::validation::LanguageResolution>,
-                )> = words
+                let batch_words: Vec<BatchWord> = words
                     .iter()
                     .map(|w| {
                         // The GOVERNING mark, which is the word's own `@s` if it
@@ -262,39 +426,19 @@ pub fn collect_payloads(
                             }
                         };
 
-                        (w.form_type.clone(), resolved_lang)
+                        BatchWord::new(
+                            w.text.clone(),
+                            WordRole::of(w.form_type.clone(), resolved_lang),
+                        )
                     })
                     .collect();
 
-                // Pre-Stanza placeholder substitution for special-form
-                // words (excluding `@s`, which the L2 secondary-dispatch
-                // path handles). Stanza sees the placeholder, not the
-                // non-word, so the surrounding parse stays clean. The
-                // synthesis pass in `inject_results` replaces the
-                // placeholder's analysis with form-type-derived MOR.
-                let word_texts: Vec<talkbank_model::ChatCleanedText> = words
-                    .iter()
-                    .zip(special_forms.iter())
-                    .map(|(w, (form_type, resolved_lang))| {
-                        if form_type.is_some() && resolved_lang.is_none() {
-                            talkbank_model::ChatCleanedText::stanza_placeholder()
-                        } else {
-                            w.text.clone()
-                        }
-                    })
-                    .collect();
-
-                batch_items.push((
-                    line_idx,
-                    utt_idx,
-                    MorphosyntaxBatchItem {
-                        words: word_texts,
-                        terminator: terminator_typed,
-                        special_forms,
-                        lang: utterance_lang,
-                    },
+                batch_items.push(CollectedUtterance {
+                    line: LineIdx::new(line_idx),
+                    utt_ordinal: utt_idx,
+                    item: MorphosyntaxBatchItem::new(batch_words, terminator_typed, utterance_lang),
                     words,
-                ));
+                });
             } else {
                 not_applicable.push(MorOutcome {
                     line_idx,

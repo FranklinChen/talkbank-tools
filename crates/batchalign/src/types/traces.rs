@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationMs, DurationSeconds};
+use crate::api::{AudioPositionSeconds, DurationMs};
 use crate::chat_ops::fa::origin::{ClampBound, Origin};
 
 // ---------------------------------------------------------------------------
@@ -136,10 +136,16 @@ pub struct AsrPipelineTrace {
 pub struct AsrTokenTrace {
     /// Token text.
     pub value: String,
-    /// Provider start time in seconds; null when no endpoint was supplied.
-    pub ts: Option<DurationSeconds>,
-    /// Provider end time in seconds; null when no endpoint was supplied.
-    pub end_ts: Option<DurationSeconds>,
+    /// Where the token starts in the recording; null when the provider
+    /// supplied no start.
+    ///
+    /// The stage-0 element's own type, carried through unconverted, so the
+    /// trace shows exactly what the pipeline held. It serializes as the
+    /// number or null this field has always written.
+    pub ts: Option<AudioPositionSeconds>,
+    /// Where the token ends in the recording; null when the provider supplied
+    /// no end.
+    pub end_ts: Option<AudioPositionSeconds>,
     /// Token type ("text", "punctuation", etc.).
     pub token_type: String,
 }

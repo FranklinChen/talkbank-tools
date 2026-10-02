@@ -92,7 +92,7 @@ impl WorkerPool {
         // profile/lang, skip spawning: the worker is already running.
         if self.serving(key.target).is_shared() {
             if matches!(key.target, WorkerTarget::Profile(_))
-                && self.gpu_tcp_workers.lock().await.contains_key(&key)
+                && self.live_gpu_tcp_worker(&key).await.is_some()
             {
                 info!(
                     command = %command,

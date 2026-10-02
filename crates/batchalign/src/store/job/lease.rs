@@ -7,7 +7,8 @@
 //! are used by the production server during runner teardown and heartbeat
 //! renewal.
 
-use crate::api::{NodeId, UnixTimestamp};
+use crate::api::{MachineTime, NodeId};
+use crate::config::LeaseTtl;
 use crate::scheduling::LeaseRecord;
 
 use super::Job;
@@ -15,45 +16,36 @@ use super::Job;
 impl Job {
     /// Clear the current queue lease metadata.
     pub(crate) fn clear_lease(&mut self) {
-        self.schedule.lease.leased_by_node = None;
-        self.schedule.lease.expires_at = None;
-        self.schedule.lease.heartbeat_at = None;
+        self.schedule.lease = None;
     }
 
     /// Return whether a live queue lease currently blocks local dispatch.
     ///
     /// Currently exercised only by the test-only local queue-claim path.
     #[cfg(test)]
-    pub(crate) fn lease_blocks_local_dispatch(&self, now: UnixTimestamp) -> bool {
-        self.schedule.lease.leased_by_node.is_some()
-            && self
-                .schedule
-                .lease
-                .expires_at
-                .is_some_and(|timestamp| timestamp.0 > now.0)
+    pub(crate) fn lease_blocks_local_dispatch(&self, now: MachineTime) -> bool {
+        self.schedule
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.is_held_at(now))
     }
 
     /// Return the earliest time when the job should be reconsidered for dispatch.
     ///
     /// Currently exercised only by the test-only local queue-claim path.
     #[cfg(test)]
-    pub(crate) fn next_local_dispatch_wake_at(&self, now: UnixTimestamp) -> Option<UnixTimestamp> {
+    pub(crate) fn next_local_dispatch_wake_at(&self, now: MachineTime) -> Option<MachineTime> {
         let mut wake_at = self
             .schedule
             .next_eligible_at
-            .filter(|timestamp| timestamp.0 > now.0);
-        if self.lease_blocks_local_dispatch(now) {
-            wake_at = match (wake_at, self.schedule.lease.expires_at) {
-                (Some(next_eligible_at), Some(lease_expires_at)) => {
-                    if next_eligible_at.0 < lease_expires_at.0 {
-                        Some(next_eligible_at)
-                    } else {
-                        Some(lease_expires_at)
-                    }
-                }
-                (None, Some(lease_expires_at)) => Some(lease_expires_at),
-                (some, None) => some,
-            };
+            .filter(|timestamp| *timestamp > now);
+        if let Some(lease) = &self.schedule.lease
+            && lease.is_held_at(now)
+        {
+            wake_at = Some(match wake_at {
+                Some(next_eligible_at) => next_eligible_at.min(lease.expires_at()),
+                None => lease.expires_at(),
+            });
         }
         wake_at
     }
@@ -62,7 +54,7 @@ impl Job {
     ///
     /// Currently exercised only by the test-only local queue-claim path.
     #[cfg(test)]
-    pub(crate) fn ready_for_local_dispatch(&self, now: UnixTimestamp) -> bool {
+    pub(crate) fn ready_for_local_dispatch(&self, now: MachineTime) -> bool {
         self.execution.status == crate::api::JobStatus::Queued
             && !self.runtime.runner_active
             && !self.lease_blocks_local_dispatch(now)
@@ -79,17 +71,15 @@ impl Job {
     pub(crate) fn claim_for_local_dispatch(
         &mut self,
         node_id: &NodeId,
-        now: UnixTimestamp,
-        lease_ttl_s: f64,
+        now: MachineTime,
+        lease_ttl: LeaseTtl,
     ) -> Option<LeaseRecord> {
         if !self.ready_for_local_dispatch(now) {
             return None;
         }
 
         self.runtime.runner_active = true;
-        self.schedule.lease.leased_by_node = Some(node_id.clone());
-        self.schedule.lease.heartbeat_at = Some(now);
-        self.schedule.lease.expires_at = Some(UnixTimestamp(now.0 + lease_ttl_s));
+        self.schedule.lease = Some(LeaseRecord::taken(node_id.clone(), now, lease_ttl));
         self.active_lease()
     }
 
@@ -103,27 +93,23 @@ impl Job {
     pub(crate) fn renew_local_dispatch_lease(
         &mut self,
         node_id: &NodeId,
-        now: UnixTimestamp,
-        lease_ttl_s: f64,
+        now: MachineTime,
+        lease_ttl: LeaseTtl,
     ) -> Option<LeaseRecord> {
-        if self.runtime.runner_active
-            && self.schedule.lease.leased_by_node.as_deref() == Some(node_id)
-            && !self.execution.status.is_terminal()
-        {
-            self.schedule.lease.heartbeat_at = Some(now);
-            self.schedule.lease.expires_at = Some(UnixTimestamp(now.0 + lease_ttl_s));
-            self.active_lease()
-        } else {
-            None
+        if !self.runtime.runner_active || self.execution.status.is_terminal() {
+            return None;
+        }
+        match &mut self.schedule.lease {
+            Some(lease) if lease.leased_by_node() == node_id => {
+                lease.renew(now, lease_ttl);
+                Some(lease.clone())
+            }
+            Some(_) | None => None,
         }
     }
 
-    /// Build a `LeaseRecord` from the job's current lease fields, if all are set.
+    /// The job's current lease, if a node holds one.
     pub(crate) fn active_lease(&self) -> Option<LeaseRecord> {
-        Some(LeaseRecord {
-            leased_by_node: self.schedule.lease.leased_by_node.clone()?,
-            heartbeat_at: self.schedule.lease.heartbeat_at?,
-            expires_at: self.schedule.lease.expires_at?,
-        })
+        self.schedule.lease.clone()
     }
 }

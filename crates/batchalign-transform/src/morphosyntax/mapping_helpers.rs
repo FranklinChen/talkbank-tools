@@ -1,13 +1,11 @@
 //! Helper functions for sentence-level UD-to-CHAT mapping.
 
+use super::mor_word::map_ud_mor_word;
 use crate::morphosyntax::{
-    ChunkHead, ChunkProvenance, MappingContext, MappingError, MorProvenance, UdId, UdWord,
-    is_clitic, map_ud_word_to_mor,
+    ChunkProvenance, MappedItem, MappingContext, MappingError, UdWord, is_clitic,
 };
-use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use talkbank_model::model::GrammaticalRelationType;
-use talkbank_model::model::dependent_tier::mor::Mor;
 
 /// Normalize a UD deprel to a validated CHAT `%gra` relation label.
 pub fn normalize_deprel(
@@ -41,56 +39,39 @@ pub fn normalize_deprel(
 
 /// Build chunk provenance for a regular UD word that produced one chunk.
 pub fn provenance_for_ud_word(ud: &UdWord) -> Result<ChunkProvenance, MappingError> {
-    let source_ud_ids = match ud.id {
-        UdId::Single(id) => smallvec![id],
-        UdId::Range(start, _end) => smallvec![start],
-        UdId::Decimal(_) => SmallVec::new(),
-    };
-    let head = ChunkHead::from_ud_head(ud.head);
     let deprel = normalize_deprel(&ud.deprel, || format!("word {:?}", ud.text))?;
-    Ok(ChunkProvenance {
-        source_ud_ids,
-        head,
-        deprel,
-    })
+    Ok(ChunkProvenance::of_word(ud, deprel))
 }
 
-/// Assemble multiple UD tokens into a single CHAT MOR with clitics, plus one
-/// `ChunkProvenance` per emitted chunk.
+/// One UD word mapped to a one-chunk `%mor` item with its provenance.
+pub(crate) fn map_ud_word_item(
+    ud: &UdWord,
+    ctx: &MappingContext,
+) -> Result<MappedItem, MappingError> {
+    Ok(MappedItem::word(
+        map_ud_mor_word(ud, ctx)?,
+        provenance_for_ud_word(ud)?,
+    ))
+}
+
+/// Assemble multiple UD tokens into a single CHAT MOR with clitics, each
+/// chunk with its provenance.
 pub fn assemble_mors(
     components: &[UdWord],
     ctx: &MappingContext,
-) -> Result<(Mor, MorProvenance), MappingError> {
-    if components.is_empty() {
-        return Err(MappingError::EmptyRangeComponents);
-    }
-
-    let mut main_idx = 0;
-    for (idx, comp) in components.iter().enumerate() {
-        if !is_clitic(&comp.text, ctx) {
-            main_idx = idx;
-            break;
-        }
-    }
-
-    let mut mor = map_ud_word_to_mor(&components[main_idx], ctx)?;
-    for comp in &components[..main_idx] {
-        let m = map_ud_word_to_mor(comp, ctx)?;
-        mor = mor.with_post_clitic(m.main);
-    }
-    for comp in &components[main_idx + 1..] {
-        let m = map_ud_word_to_mor(comp, ctx)?;
-        mor = mor.with_post_clitic(m.main);
-    }
-
-    let mut prov: MorProvenance = SmallVec::new();
-    prov.push(provenance_for_ud_word(&components[main_idx])?);
-    for comp in &components[..main_idx] {
-        prov.push(provenance_for_ud_word(comp)?);
-    }
-    for comp in &components[main_idx + 1..] {
-        prov.push(provenance_for_ud_word(comp)?);
-    }
-
-    Ok((mor, prov))
+) -> Result<MappedItem, MappingError> {
+    // The first component that is not a clitic is the main word; when every
+    // component is one, the first is.
+    let (main_idx, main) = components
+        .iter()
+        .enumerate()
+        .find(|(_, comp)| !is_clitic(&comp.text, ctx))
+        .or_else(|| components.first().map(|first| (0, first)))
+        .ok_or(MappingError::EmptyRangeComponents)?;
+    components[..main_idx]
+        .iter()
+        .chain(&components[main_idx + 1..])
+        .try_fold(map_ud_word_item(main, ctx)?, |item, comp| {
+            Ok(item.with_post_clitic(map_ud_mor_word(comp, ctx)?, provenance_for_ud_word(comp)?))
+        })
 }

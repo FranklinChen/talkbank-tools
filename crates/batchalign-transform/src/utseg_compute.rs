@@ -5,17 +5,63 @@
 
 use std::collections::HashSet;
 
-use crate::constituency::{parse_bracket_notation, parse_tree_indices};
+use crate::constituency::{ParseError, Tree, parse_bracket_notation, parse_tree_indices};
 
 /// 0-based phrase group identifier assigned during utterance segmentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PhraseId(usize);
 
-/// Compute word-to-utterance-group assignments from constituency tree strings.
-///
-/// Takes one or more tree bracket notation strings (one per Stanza sentence)
-/// and the total number of words. Returns a `Vec<usize>` parallel to the words,
-/// where each element is a 0-based group ID.
+/// A constituency parse an utterance can be segmented by: at least one tree,
+/// and every tree readable. Built only by [`ConstituencyParse::read`], so a
+/// parse that produced nothing, or a tree that does not read, is a failure
+/// of the item rather than a segmentation into one utterance.
+#[derive(Debug)]
+pub struct ConstituencyParse {
+    trees: Vec<Tree>,
+}
+
+/// Why a worker's constituency trees cannot segment an utterance.
+#[derive(Debug, thiserror::Error)]
+pub enum ConstituencyParseError {
+    /// The parser produced no tree.
+    #[error("the constituency parser produced no tree")]
+    NoTrees,
+    /// A tree does not read as bracket notation.
+    #[error("constituency tree {tree} does not read: {error}")]
+    Unreadable {
+        /// The tree's position among the item's trees.
+        tree: usize,
+        /// Why it does not read.
+        error: ParseError,
+    },
+}
+
+impl ConstituencyParse {
+    /// Read the trees (one per sentence the parser found).
+    pub fn read(trees: &[String]) -> Result<Self, ConstituencyParseError> {
+        if trees.is_empty() {
+            return Err(ConstituencyParseError::NoTrees);
+        }
+        let trees = trees
+            .iter()
+            .enumerate()
+            .map(|(tree, text)| {
+                parse_bracket_notation(text)
+                    .map_err(|error| ConstituencyParseError::Unreadable { tree, error })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self { trees })
+    }
+
+    /// Word-to-utterance-group assignments for `num_words` words.
+    pub fn assignments(&self, num_words: usize) -> Vec<usize> {
+        compute_assignments(&self.trees, num_words)
+    }
+}
+
+/// Compute word-to-utterance-group assignments from read constituency trees
+/// (one per sentence) and the total number of words. Returns a `Vec<usize>`
+/// parallel to the words, where each element is a 0-based group ID.
 ///
 /// Algorithm:
 /// 1. Parse tree, extract S-level phrase ranges via coordination detection
@@ -23,23 +69,16 @@ struct PhraseId(usize);
 /// 3. Assign words to phrase groups
 /// 4. Fill unassigned words (forward then backward)
 /// 5. Merge small groups (< 3 words) into neighbors
-pub fn compute_assignments(trees: &[String], num_words: usize) -> Vec<usize> {
+fn compute_assignments(trees: &[Tree], num_words: usize) -> Vec<usize> {
     if num_words <= 1 {
         return vec![0; num_words];
     }
 
-    // Parse all trees and extract phrase ranges
-    let mut phrase_ranges: Vec<Vec<usize>> = Vec::new();
-    for tree_str in trees {
-        match parse_bracket_notation(tree_str) {
-            Ok(tree) => {
-                phrase_ranges.extend(parse_tree_indices(&tree, 0));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to parse constituency tree, skipping");
-            }
-        }
-    }
+    // Extract phrase ranges from every tree.
+    let mut phrase_ranges: Vec<Vec<usize>> = trees
+        .iter()
+        .flat_map(|tree| parse_tree_indices(tree, 0))
+        .collect();
 
     // Sort by length (ascending)
     phrase_ranges.sort_by_key(|r| r.len());
@@ -168,37 +207,42 @@ pub fn compute_assignments(trees: &[String], num_words: usize) -> Vec<usize> {
     assignments
 }
 
-/// Compute assignments from a single tree, used by the utseg orchestrator.
-///
-/// Convenience wrapper that takes a single tree string.
-pub fn compute_assignments_single(tree_str: &str, num_words: usize) -> Vec<usize> {
-    compute_assignments(&[tree_str.to_string()], num_words)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The assignments of read trees.
+    fn assign(trees: &[&str], num_words: usize) -> Vec<usize> {
+        let trees: Vec<String> = trees.iter().map(|tree| (*tree).to_string()).collect();
+        ConstituencyParse::read(&trees)
+            .expect("the trees read")
+            .assignments(num_words)
+    }
+
     #[test]
     fn test_single_word() {
-        assert_eq!(compute_assignments(&[], 1), vec![0]);
-        assert_eq!(compute_assignments(&[], 0), Vec::<usize>::new());
+        assert_eq!(assign(&["(ROOT (NN cat))"], 1), vec![0]);
+        assert_eq!(assign(&["(ROOT (NN cat))"], 0), Vec::<usize>::new());
     }
 
     #[test]
     fn test_no_coordination() {
         // Simple tree with no coordination, all words in group 0
-        let tree = "(S (NP (DT the) (NN cat)) (VP (VBD sat)))".to_string();
-        assert_eq!(compute_assignments(&[tree], 3), vec![0, 0, 0]);
+        assert_eq!(
+            assign(&["(S (NP (DT the) (NN cat)) (VP (VBD sat)))"], 3),
+            vec![0, 0, 0]
+        );
     }
 
     #[test]
     fn test_coordination_split() {
         // "I eat and he runs", two coordinated S clauses
-        let tree =
-            "(ROOT (S (S (NP (PRP I)) (VP (VBP eat))) (CC and) (S (NP (PRP he)) (VP (VBZ runs)))))"
-                .to_string();
-        let assignments = compute_assignments(&[tree], 5);
+        let assignments = assign(
+            &[
+                "(ROOT (S (S (NP (PRP I)) (VP (VBP eat))) (CC and) (S (NP (PRP he)) (VP (VBZ runs)))))",
+            ],
+            5,
+        );
         // Should split into two groups: [I eat and] and [he runs]
         // The "and" is unassigned and gets filled forward or merged
         assert!(assignments[0] == assignments[1]); // I, eat in same group
@@ -208,14 +252,27 @@ mod tests {
     #[test]
     fn test_all_same_group_after_merge() {
         // Very short utterance: merging should collapse everything
-        let tree = "(ROOT (S (NP (PRP I)) (VP (VBP go))))".to_string();
-        let assignments = compute_assignments(&[tree], 2);
-        assert_eq!(assignments, vec![0, 0]);
+        assert_eq!(
+            assign(&["(ROOT (S (NP (PRP I)) (VP (VBP go))))"], 2),
+            vec![0, 0]
+        );
     }
 
+    /// No tree is a failure, not a segmentation into one utterance.
     #[test]
-    fn test_invalid_tree_falls_back() {
-        let assignments = compute_assignments(&["not a tree".to_string()], 3);
-        assert_eq!(assignments, vec![0, 0, 0]);
+    fn no_tree_is_a_failure() {
+        assert!(matches!(
+            ConstituencyParse::read(&[]),
+            Err(ConstituencyParseError::NoTrees)
+        ));
+    }
+
+    /// A tree that does not read is a failure, not a tree skipped.
+    #[test]
+    fn an_unreadable_tree_is_a_failure() {
+        assert!(matches!(
+            ConstituencyParse::read(&["(ROOT (NN cat))".into(), "not a tree".into()]),
+            Err(ConstituencyParseError::Unreadable { tree: 1, .. })
+        ));
     }
 }

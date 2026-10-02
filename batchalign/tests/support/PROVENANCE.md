@@ -45,6 +45,15 @@ automatically.
 | `jpn_clinical.cha` | jpn | `+/.` unfinished, Japanese script | Tests Japanese model routing |
 | `yue_timed.cha` | yue | `xxx` unintelligible, Cantonese script | Tests Cantonese model routing |
 
+Three constructed fixtures are invalid CHAT, and stay so: `eng_bilingual.cha`
+(`and [- spa]` mid-utterance), `eng_complex_tiers.cha` (a bare `0_1000`
+bullet, `@Options: multi` out of place) and `spa_clinical.cha` (`[=! ...]`
+before any word). The BA2 references in `golden/ba2_reference/` were
+generated from them as they are, and BA2 is not rerun, so a corrected
+fixture would be compared with the output of a different input. BA3 refuses
+them at pre-validation; `scripts/ba2-morphotag-divergence.sh` lists them in
+its `no-output.txt` with their first `chatter validate` error.
+
 ### Excerpted from corpus (via `prepare_corpus_media_fixture.py`)
 
 | Fixture | Source | Lines extracted | Language | Key features |

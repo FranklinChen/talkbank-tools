@@ -12,7 +12,7 @@ use crate::config::{RuntimeLayout, ServerConfig};
 use crate::debug_artifacts::JobDebugArtifacts;
 use crate::error::ServerError;
 use crate::runner::{DirectExecutionHost, run_direct_job};
-use crate::store::{JobDetail, JobStore};
+use crate::store::{JobDetail, JobStore, Submitter};
 use crate::submission::{SubmissionContext, materialize_submission_job};
 use crate::worker_setup::PreparedWorkers;
 use crate::ws::BROADCAST_CAPACITY;
@@ -34,7 +34,6 @@ pub struct DirectHost {
     store: Arc<JobStore>,
     runner: DirectExecutionHost,
     jobs_dir: PathBuf,
-    bug_reports_dir: PathBuf,
     capabilities: crate::capability::WorkerCapabilitySnapshot,
 }
 
@@ -56,17 +55,18 @@ impl DirectHost {
     ///
     /// The host owns an in-memory [`JobStore`] and runs jobs inline with no
     /// queue, HTTP transport, registry discovery, or daemon lifecycle layer.
+    /// `clock` is the one clock the store records with, created by the caller
+    /// where the program is composed.
     pub async fn new(
         config: ServerConfig,
         layout: RuntimeLayout,
         jobs_dir: Option<PathBuf>,
         cache_dir: Option<PathBuf>,
         workers: &PreparedWorkers,
+        clock: Arc<dyn crate::clock::Clock>,
     ) -> Result<Self, ServerError> {
         let jobs_dir = jobs_dir.unwrap_or_else(|| layout.jobs_dir());
-        let bug_reports_dir = layout.bug_reports_dir();
         tokio::fs::create_dir_all(&jobs_dir).await?;
-        tokio::fs::create_dir_all(&bug_reports_dir).await?;
 
         let cache = Arc::new(
             UtteranceCache::tiered(cache_dir, None)
@@ -78,14 +78,13 @@ impl DirectHost {
             engine,
         } = workers.resolve_execution_runtime(cache);
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = Arc::new(JobStore::new(config, None, tx));
+        let store = Arc::new(JobStore::new(config, None, tx, clock));
         let runner = DirectExecutionHost::new(store.clone(), engine);
 
         Ok(Self {
             store,
             runner,
             jobs_dir,
-            bug_reports_dir,
             capabilities,
         })
     }
@@ -106,8 +105,8 @@ impl DirectHost {
                 job_id: JobId::from(job_id.clone()),
                 correlation_id,
                 jobs_dir: self.jobs_dir.clone(),
-                submitted_by: "127.0.0.1".into(),
-                submitted_by_name: "direct-cli".into(),
+                submitter: Submitter::direct_cli(),
+                submitted_at: self.store.event_time(),
             },
         )
         .await?;
@@ -155,12 +154,7 @@ impl DirectHost {
         let trace_file = self
             .persist_debug_traces(job_id, detail.staging_dir.as_ref())
             .await?;
-        let artifacts = JobDebugArtifacts::from_job_detail(
-            job_id.clone(),
-            &detail,
-            &self.bug_reports_dir,
-            trace_file,
-        );
+        let artifacts = JobDebugArtifacts::from_job_detail(job_id.clone(), &detail, trace_file);
         self.persist_debug_artifacts(&artifacts).await?;
         Ok(artifacts)
     }
@@ -312,6 +306,7 @@ mod tests {
             None,
             Some(tempdir.path().join("cache")),
             &workers,
+            std::sync::Arc::new(crate::clock::SystemClock),
         )
         .await
         .expect("create direct host");
@@ -371,6 +366,7 @@ mod tests {
             None,
             Some(tempdir.path().join("cache")),
             &workers,
+            std::sync::Arc::new(crate::clock::SystemClock),
         )
         .await
         .expect("create direct host");
@@ -427,6 +423,7 @@ mod tests {
             None,
             Some(tempdir.path().join("cache")),
             &workers,
+            std::sync::Arc::new(crate::clock::SystemClock),
         )
         .await
         .expect("create direct host");
@@ -479,6 +476,7 @@ mod tests {
             None,
             Some(tempdir.path().join("cache")),
             &workers,
+            std::sync::Arc::new(crate::clock::SystemClock),
         )
         .await
         .expect("create direct host");

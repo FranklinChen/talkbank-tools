@@ -8,6 +8,7 @@ import { useFilteredJobs } from "../state";
 import { JobCard } from "./JobCard";
 import { EmptyState } from "./EmptyState";
 import type { JobListItem } from "../types";
+import { compareTimesNewestFirst } from "../utils";
 
 type SortKey = "newest" | "status" | "progress" | "duration";
 
@@ -29,24 +30,24 @@ const STATUS_ORDER: Record<string, number> = {
 function compareJobs(a: JobListItem, b: JobListItem, key: SortKey): number {
   switch (key) {
     case "newest":
-      return (b.submitted_at ?? "").localeCompare(a.submitted_at ?? "");
+      return compareTimesNewestFirst(a.submitted_at, b.submitted_at);
     case "status": {
       const sa = STATUS_ORDER[a.status] ?? 9;
       const sb = STATUS_ORDER[b.status] ?? 9;
       if (sa !== sb) return sa - sb;
-      return (b.submitted_at ?? "").localeCompare(a.submitted_at ?? "");
+      return compareTimesNewestFirst(a.submitted_at, b.submitted_at);
     }
     case "progress": {
       const pa = a.total_files > 0 ? a.completed_files / a.total_files : 0;
       const pb = b.total_files > 0 ? b.completed_files / b.total_files : 0;
       if (pa !== pb) return pa - pb; // least progress first
-      return (b.submitted_at ?? "").localeCompare(a.submitted_at ?? "");
+      return compareTimesNewestFirst(a.submitted_at, b.submitted_at);
     }
     case "duration": {
       const da = a.duration_s ?? 0;
       const db = b.duration_s ?? 0;
       if (da !== db) return db - da; // longest first
-      return (b.submitted_at ?? "").localeCompare(a.submitted_at ?? "");
+      return compareTimesNewestFirst(a.submitted_at, b.submitted_at);
     }
   }
 }

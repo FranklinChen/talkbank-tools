@@ -42,9 +42,7 @@ pub(crate) struct WorkerSubsystem {
 /// Filesystem roots owned by the server process.
 pub(crate) struct AppPaths {
     /// Root directory for per-job staging folders.
-    pub jobs_dir: String,
-    /// Directory containing serialized bug-report documents.
-    pub bug_reports_dir: String,
+    pub jobs_dir: PathBuf,
     /// On-disk dashboard SPA root when runtime assets override embedded files.
     pub dashboard_dir: Option<PathBuf>,
 }

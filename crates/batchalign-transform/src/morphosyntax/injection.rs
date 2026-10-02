@@ -1,13 +1,22 @@
 //! Result injection, clearing, and alignment validation.
 
-use talkbank_model::SpeakerCode;
-use talkbank_model::model::{LanguageCode, Line};
+use std::ops::Range;
 
+use talkbank_model::SpeakerCode;
+use talkbank_model::alignment::MorItemIndex;
+use talkbank_model::model::dependent_tier::GrammaticalRelation;
+use talkbank_model::model::dependent_tier::mor::{Mor, MorWord};
+use talkbank_model::model::{GrammaticalRelationType, LanguageCode, Line};
+
+use super::alignment::{UdAlignment, UdAlignmentError, UdTokens};
+use super::l2::{ItemPlacement, L2Extraction, RetokenizedItems};
 use super::responses::BoundMorphosyntaxResponses;
+use super::synthesis::synthesize_special_form_mor;
 use super::{
-    BatchItemWithPosition, MappingContext, MatchedMorphosyntaxResponses, MisalignmentClass,
-    MisalignmentDiagnostic, MorOutcome, MorOutcomeKind, MwtDict, TokenizationMode, UdId,
-    UdResponse, apply_grammatical_invariants, map_ud_sentence, map_ud_sentence_expanded,
+    BatchWord, CollectedUtterance, ItemLayout, MappedTokens, MappingContext, MappingError,
+    MatchedMorphosyntaxResponses, MisalignmentClass, MisalignmentDiagnostic, MorOutcome,
+    MorOutcomeKind, MwtDict, TokenizationMode, UdResponse, WordRole, apply_grammatical_invariants,
+    map_tokens,
 };
 use crate::decisions::{DecisionRecord, DecisionStrategy, MorphosyntaxStrategy};
 
@@ -61,13 +70,18 @@ fn enrich_diagnostic(
     diag
 }
 
-/// Result of morphosyntax injection: traces + provenance decisions.
+/// Result of morphosyntax injection: traces, provenance decisions, and the
+/// `@s` positions to dispatch to secondary models.
 #[derive(Debug, Clone)]
 pub struct InjectionResult {
     /// Per-utterance retokenization traces for debugging.
     pub retokenization_traces: Vec<RetokenizationInfo>,
     /// Decision records for utterances that were skipped or degraded.
     pub decisions: Vec<DecisionRecord>,
+    /// The `@s` positions of the injected utterances, read from the same
+    /// walk of the same (invariant-rewritten) analysis that was mapped to
+    /// `%mor`, and named in the item space injection wrote.
+    pub l2: L2Extraction,
 }
 
 /// Retokenization info collected during injection, for trace visualization.
@@ -89,104 +103,112 @@ pub struct RetokenizationInfo {
 // Result injection (from NLP callback)
 // ---------------------------------------------------------------------------
 
-/// If every word in the utterance is a special-form (FormType) or a
-/// code-switch (resolved language), synthesize the morphology
-/// directly from FormType and write a star-shaped %gra (first chunk
-/// = head=0/ROOT; rest depend on it; terminator = head=1/PUNCT).
-/// Returns `true` if synthesis was performed (caller should skip
-/// the Stanza-derived path); `false` if the utterance doesn't qualify.
+/// Deprel label written to `%gra` for non-analyzable special-form positions
+/// whose head is non-zero (the form-marker token is a dependent of some
+/// other chunk). UD `dep` = "no specific role applies." The head=0 case must
+/// keep `ROOT` instead: the joint invariant `(head == 0) ⟺ (deprel ==
+/// "ROOT")` is enforced by the validator (E722/E723).
+const DEP_RELATION_LABEL: &str = "DEP";
+/// Deprel label written when the form-marker token is the syntactic root of
+/// the utterance (head=0), as the joint root invariant requires.
+const ROOT_RELATION_LABEL: &str = "ROOT";
+/// Deprel label written for the terminator's relation in synthetic (no
+/// model) `%gra`.
+const PUNCT_RELATION_LABEL: &str = "PUNCT";
+
+/// Every word's `%mor` from its role, when no word is the model's to
+/// analyse: special forms from their form type, code-switched words as the
+/// `L2|xxx` placeholder the L2 splice fills. `None` for an utterance with a
+/// word the model analyses (or no words).
 ///
-/// Stanza's analysis is bypassed here because:
-/// - For all-placeholder input (`xbxxx .`), Stanza may return empty
-///   (no parseable sentence).
-/// - For all-placeholder input, Stanza may tokenize `xbxxx` into
-///   multiple sub-tokens (e.g. `xb`+`xxx`), producing a mor count
-///   that doesn't align with the utterance's word count, which trips
-///   `inject_morphosyntax`'s `word_count == mor_count` check and
-///   leaves the utterance untouched.
-/// - In all cases, the morphology of these words is fully determined
-///   by FormType; whatever Stanza says about them is irrelevant.
-fn synthesize_all_special_form_utterance(
-    chat_file: &mut talkbank_model::model::ChatFile,
-    line_idx: usize,
+/// The model's analysis is bypassed for such an utterance because, for
+/// all-placeholder input (`xbxxx .`), Stanza may return no sentence, or
+/// split `xbxxx` into `xb` + `xxx` so the item count no longer matches the
+/// word count; the morphology of these words is fully determined by their
+/// roles.
+fn synthesize_all_special_forms(
     item: &super::payload::MorphosyntaxBatchItem,
     words: &[crate::extract::ExtractedWord],
-    labels: &SyntheticGraLabels<'_>,
-    decisions: &mut Vec<DecisionRecord>,
-) -> bool {
-    use super::synthesis::synthesize_special_form_mor;
-    use talkbank_model::model::dependent_tier::GrammaticalRelation;
-    use talkbank_model::model::dependent_tier::mor::{Mor, MorWord};
-
-    let all_synthesizable = !item.special_forms.is_empty()
-        && item
-            .special_forms
-            .iter()
-            .all(|(form_type, resolved_lang)| form_type.is_some() || resolved_lang.is_some());
-    if !all_synthesizable {
-        return false;
-    }
-
-    let mut synth_mors: Vec<Mor> = Vec::with_capacity(item.special_forms.len());
-    for ((form_type, resolved_lang), word) in item.special_forms.iter().zip(words.iter()) {
-        // Code-switched first: an `@s` word can carry both a form_type and a
-        // resolved_lang in theory, and the L2 splice path (which fills in the
-        // placeholder later) wins by precedent.
-        let mor = if resolved_lang.is_some() {
-            Mor::new(MorWord::l2_placeholder())
-        } else if let Some(ft) = form_type {
-            synthesize_special_form_mor(ft, word.text.as_str())
-        } else {
-            // `all_synthesizable` above guarantees each special form has a
-            // form_type or a resolved_lang, so this arm is unreachable for real
-            // input. If that invariant is ever broken, bail safely (skip this
-            // utterance's synthesis) rather than panic.
-            return false;
-        };
-        synth_mors.push(mor);
-    }
-
-    let chunk_count: usize = synth_mors.iter().map(Mor::count_chunks).sum();
-    let mut synth_gras: Vec<GrammaticalRelation> = Vec::with_capacity(chunk_count + 1);
-    for chunk_idx in 1..=chunk_count {
-        let (head, label) = if chunk_idx == 1 {
-            (0_usize, labels.root)
-        } else {
-            (1_usize, labels.dep)
-        };
-        synth_gras.push(GrammaticalRelation::new(chunk_idx, head, label));
-    }
-    synth_gras.push(GrammaticalRelation::new(chunk_count + 1, 1, labels.punct));
-
-    let utt = match &mut chat_file.lines.as_mut_slice()[line_idx] {
-        Line::Utterance(u) => u,
-        _ => return false,
-    };
-    if let Err(diag) =
-        crate::inject::inject_morphosyntax(utt, synth_mors, item.terminator.clone(), synth_gras)
-    {
-        let enriched = enrich_diagnostic(diag, &[], RetokenizationContext::Preserve);
-        let outcome = MorOutcome {
-            line_idx,
-            speaker: SpeakerCode::new(utt.main.speaker.as_str()),
-            kind: MorOutcomeKind::MisalignmentBug(enriched),
-        };
-        if let Some(record) = outcome.to_decision_record() {
-            record.trace();
-            decisions.push(record);
-        }
-    }
-    true
+) -> Option<Vec<Mor>> {
+    let mors: Vec<Mor> = item
+        .words()
+        .iter()
+        .zip(words.iter())
+        .map(|(batch_word, word)| match batch_word.role() {
+            WordRole::CodeSwitched(_) => Some(Mor::new(MorWord::l2_placeholder())),
+            WordRole::SpecialForm(form_type) => {
+                Some(synthesize_special_form_mor(form_type, word.text.as_str()))
+            }
+            WordRole::Analysed => None,
+        })
+        .collect::<Option<_>>()?;
+    (!mors.is_empty()).then_some(mors)
 }
 
-/// The three `%gra` deprel labels [`synthesize_all_special_form_utterance`]
-/// writes into a synthesized utterance: the root relation (Stanza `head=0`), a
-/// dependent form-marker relation (`head!=0`), and the terminator's punct
-/// relation.
-struct SyntheticGraLabels<'a> {
-    root: &'a str,
-    dep: &'a str,
-    punct: &'a str,
+/// The star-shaped `%gra` of a synthesized utterance: the first chunk is the
+/// root, every other chunk depends on it, and the terminator on chunk 1.
+fn star_gras(mors: &[Mor]) -> Vec<GrammaticalRelation> {
+    let chunk_count: usize = mors.iter().map(Mor::count_chunks).sum();
+    let mut gras: Vec<GrammaticalRelation> = (1..=chunk_count)
+        .map(|chunk| match chunk {
+            1 => GrammaticalRelation::new(chunk, 0, ROOT_RELATION_LABEL),
+            _ => GrammaticalRelation::new(chunk, 1, DEP_RELATION_LABEL),
+        })
+        .collect();
+    gras.push(GrammaticalRelation::new(
+        chunk_count + 1,
+        1,
+        PUNCT_RELATION_LABEL,
+    ));
+    gras
+}
+
+/// Relabel the items of special-form and code-switched words, in place.
+///
+/// `items_of` gives, for each CHAT word, the `%mor` items it was written as;
+/// a word's relation is found at its items' own chunks (the chunk index of an
+/// item counts the chunks of every item before it), never by the item's
+/// position, which differs from its chunk after a contraction. A
+/// code-switched word's items become the `L2|xxx` placeholder (its chunks
+/// keep their relations for the L2 splice); a special form's item is
+/// synthesized from its form type, and its relation becomes `DEP`, or stays
+/// `ROOT` where the word is the root.
+fn relabel_special_forms<'w>(
+    mors: &mut [Mor],
+    gras: &mut [GrammaticalRelation],
+    words: impl Iterator<Item = (&'w BatchWord, &'w crate::extract::ExtractedWord, Vec<usize>)>,
+) {
+    // The chunk each item starts at, before any item is replaced.
+    let first_chunks: Vec<usize> = mors
+        .iter()
+        .scan(0, |chunks, mor| {
+            let first = *chunks;
+            *chunks += mor.count_chunks();
+            Some(first)
+        })
+        .collect();
+    for (batch_word, word, items) in words {
+        for item in items {
+            let (Some(mor), Some(&first_chunk)) = (mors.get_mut(item), first_chunks.get(item))
+            else {
+                continue;
+            };
+            match batch_word.role() {
+                WordRole::Analysed => {}
+                WordRole::CodeSwitched(_) => mor.main.reset_to_l2_placeholder(),
+                WordRole::SpecialForm(form_type) => {
+                    *mor = synthesize_special_form_mor(form_type, word.text.as_str());
+                    if let Some(gra) = gras.get_mut(first_chunk) {
+                        let label = match gra.head {
+                            0 => ROOT_RELATION_LABEL,
+                            _ => DEP_RELATION_LABEL,
+                        };
+                        gra.relation = GrammaticalRelationType::new(label);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Inject UD NLP results back into utterances.
@@ -202,7 +224,7 @@ struct SyntheticGraLabels<'a> {
 pub fn inject_results(
     parser: &talkbank_parser::TreeSitterParser,
     chat_file: &mut talkbank_model::model::ChatFile,
-    batch_items: Vec<BatchItemWithPosition>,
+    batch_items: Vec<CollectedUtterance>,
     responses: Vec<UdResponse>,
     _lang: &LanguageCode,
     tokenization_mode: TokenizationMode,
@@ -238,334 +260,594 @@ impl BoundMorphosyntaxResponses<'_> {
         tokenization_mode: TokenizationMode,
         mwt: &MwtDict,
     ) -> Result<InjectionResult, String> {
-        use talkbank_model::model::GrammaticalRelationType;
         let (chat_file, batch) = self.into_parts();
-
-        use super::synthesis::synthesize_special_form_mor;
-
-        /// Deprel label written to `%gra` for non-analyzable special-form
-        /// positions whose Stanza-side head is non-zero (i.e. the form-marker
-        /// token is a dependent of some other chunk). UD `dep` = "no specific
-        /// role applies." The head=0 case must keep `ROOT` instead, see the
-        /// joint invariant `(head == 0) ⟺ (deprel == "ROOT")` enforced by
-        /// the validator (E722/E723).
-        const DEP_RELATION_LABEL: &str = "DEP";
-        /// Deprel label written when the form-marker token is the syntactic
-        /// root of the utterance (Stanza returned `head=0`). Required by the
-        /// joint root invariant; the prior unconditional overwrite to DEP
-        /// produced 3,378 wild E722 occurrences across the corpus on
-        /// 2026-05-06.
-        const ROOT_RELATION_LABEL: &str = "ROOT";
-        /// Deprel label written for the terminator's relation in synthetic
-        /// (no-Stanza) gras. Same string CHAT validation expects for the
-        /// terminator's punct relation.
-        const PUNCT_RELATION_LABEL: &str = "PUNCT";
-
-        let mut retokenization_traces: Vec<RetokenizationInfo> = Vec::new();
-        let mut decisions: Vec<DecisionRecord> = Vec::new();
-
-        for (ud_resp, (line_idx, utt_ordinal, item, words)) in batch.into_pairs() {
-            // Pre-flight: utterances whose every word is a special-form
-            // or code-switch placeholder don't need Stanza. Stanza's
-            // analysis of `xbxxx`-only input is fundamentally untrustworthy
-            //: its English tokenizer may split `xbxxx` into `xb`+`xxx`,
-            // which then trips the count-mismatch check in
-            // `inject_morphosyntax` and leaves the utterance with no
-            // tiers (preserving any pre-existing buggy %gra). Per the
-            // 2026-05-07 reproducer in
-            // `synthesis_stanza_tokenizes_xbxxx_into_two_at_q_root_keeps_root_deprel`,
-            // the morphology is fully determined by FormType, synthesize
-            // it directly and skip the Stanza-derived path entirely.
-            if synthesize_all_special_form_utterance(
-                chat_file,
+        let mut result = InjectionResult {
+            retokenization_traces: Vec::new(),
+            decisions: Vec::new(),
+            l2: L2Extraction::default(),
+        };
+        for (ud_resp, collected) in batch.into_pairs() {
+            let line_idx = collected.line().raw();
+            let utt = match &mut chat_file.lines.as_mut_slice()[line_idx] {
+                Line::Utterance(u) => u,
+                _ => {
+                    return Err(format!(
+                        "Line at index {line_idx} is no longer an utterance"
+                    ));
+                }
+            };
+            UtteranceInjection {
+                parser,
+                utt,
                 line_idx,
-                &item,
-                &words,
-                &SyntheticGraLabels {
-                    root: ROOT_RELATION_LABEL,
-                    dep: DEP_RELATION_LABEL,
-                    punct: PUNCT_RELATION_LABEL,
-                },
-                &mut decisions,
-            ) {
-                continue;
+                utt_ordinal: collected.utt_ordinal(),
+                item: collected.item(),
+                words: collected.words(),
+                result: &mut result,
             }
+            .inject(ud_resp, tokenization_mode, mwt);
+        }
+        Ok(result)
+    }
+}
 
-            if let Some(ud_sentence) = ud_resp.sentences.first() {
-                let utt = match &mut chat_file.lines.as_mut_slice()[line_idx] {
-                    Line::Utterance(u) => u,
-                    _ => {
-                        return Err(format!(
-                            "Line at index {line_idx} is no longer an utterance"
-                        ));
-                    }
-                };
+/// One utterance's injection: its destination, its batch item and words,
+/// and where its outcomes go.
+struct UtteranceInjection<'a, 'u> {
+    parser: &'a talkbank_parser::TreeSitterParser,
+    utt: &'u mut talkbank_model::model::Utterance,
+    line_idx: usize,
+    utt_ordinal: usize,
+    item: &'a super::payload::MorphosyntaxBatchItem,
+    words: &'a [crate::extract::ExtractedWord],
+    result: &'a mut InjectionResult,
+}
 
-                let ctx = MappingContext {
-                    lang: item.lang.clone(),
-                };
-                // What the transcriber wrote that Stanza never saw: the
-                // pauses, aligned to the payload's words. Read only by a
-                // chain that uses it.
-                let evidence = || {
-                    super::evidence::UtteranceEvidence::from_utterance(
-                        &utt.main.content.content,
-                        &words,
-                    )
-                };
+impl UtteranceInjection<'_, '_> {
+    /// Inject one response: rewrite the analysis by the grammatical
+    /// invariants once, walk it once, map the walk, place the special forms
+    /// through the alignment, inject, and defer the `@s` words from the same
+    /// walk.
+    fn inject(self, ud_resp: UdResponse, mode: TokenizationMode, mwt: &MwtDict) {
+        let ctx = MappingContext {
+            lang: self.item.lang.clone(),
+        };
+        // Apply grammatical-invariant rewrites to correct known Stanza
+        // defects (e.g., English copula 's + progressive misanalyzed as
+        // possessive-gerund). The rewrite returns the input unchanged when
+        // no rule fires. See `crate::morphosyntax` for the current rule set
+        // and `book/src/batchalign/reference/stanza-limitations.md` for the
+        // versioned defect registry. This is the one analysis both the
+        // `%mor` mapping and the `@s` deferral read.
+        // The analysis as the model returned it, beside its rewrite: the
+        // retokenizing path rebuilds the main tier from the model's own
+        // tokens, never from words a rewrite added.
+        let analysed = ud_resp.sentences.first().map(|raw| {
+            // What the transcriber wrote that Stanza never saw: the pauses,
+            // aligned to the payload's words. Read only by a chain that
+            // uses it.
+            let content = &self.utt.main.content.content;
+            let words = self.words;
+            let rescued = apply_grammatical_invariants(raw, &ctx, || {
+                super::evidence::UtteranceEvidence::from_utterance(content, words)
+            });
+            (raw, rescued)
+        });
 
-                // Apply grammatical-invariant rewrites to correct known
-                // Stanza defects (e.g., English copula 's + progressive
-                // misanalyzed as possessive-gerund). The rewrite returns
-                // the input unchanged when no rule fires, so this is safe
-                // to call unconditionally. See
-                // `crate::morphosyntax` for the current rule set and
-                // `book/src/batchalign/reference/stanza-limitations.md` for the
-                // versioned defect registry.
-                let ud_sentence_rescued = apply_grammatical_invariants(ud_sentence, &ctx, evidence);
-
-                // Choose mapping strategy based on tokenization mode:
-                //
-                // - Preserve: merge Range token components into one clitic MOR
-                //   (verb|go~part|to) so MOR count == CHAT word count.
-                // - StanzaRetokenize: produce one MOR per component word so
-                //   MOR count == Stanza token count (after filtering Range parents).
-                //   The retokenize path rewrites the main tier with expanded tokens.
-                let (mut mors, mut gra_relations) = {
-                    let map_result = if tokenization_mode == TokenizationMode::StanzaRetokenize {
-                        map_ud_sentence_expanded(&ud_sentence_rescued, &ctx)
-                    } else {
-                        map_ud_sentence(&ud_sentence_rescued, &ctx)
-                    };
-                    match map_result {
-                        Ok(result) => result,
-                        Err(e) => {
-                            // Same policy as injection failures below: record and
-                            // continue. Stanza occasionally returns structurally
-                            // invalid UD (e.g., multiple heads=0) for specific
-                            // utterances; we log those loudly and proceed.
-                            decisions.push(DecisionRecord::new_and_trace(
-                                line_idx,
-                                utt.main.speaker.as_str().to_string(),
-                                DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
-                                format!("ud_to_chat_error={e}"),
-                                true,
-                            ));
-                            continue;
-                        }
-                    }
-                };
-
-                // Synthesize %mor and %gra for non-analyzable special-form
-                // positions; see `morphosyntax/synthesis/` for the policy
-                // table and the per-FormType scat assignments.
-                //
-                // The @s family (resolved_lang.is_some()) gets the L2|xxx
-                // placeholder; the L2 splice path overwrites it later.
-                //
-                // The four-way zip auto-truncates if lengths disagree;
-                // downstream `inject_morphosyntax` / `retokenize_utterance`
-                // emit a typed `MisalignmentBug` outcome in that case.
-                for (((mor, (form_type, resolved_lang)), word), gra) in mors
-                    .iter_mut()
-                    .zip(item.special_forms.iter())
-                    .zip(words.iter())
-                    .zip(gra_relations.iter_mut())
-                {
-                    if resolved_lang.is_some() {
-                        mor.main.reset_to_l2_placeholder();
-                        continue;
-                    }
-
-                    if let Some(ft) = form_type {
-                        *mor = synthesize_special_form_mor(ft, word.text.as_str());
-                        // Preserve the joint invariant `(head == 0) ⟺ (deprel
-                        // == "ROOT")`: when the form-marker token is the
-                        // utterance root (Stanza returned head=0), the deprel
-                        // must remain ROOT so the validator's E722 check
-                        // passes. For non-root positions the BA2-equivalent
-                        // convention is the generic UD `dep`.
-                        let label = if gra.head == 0 {
-                            ROOT_RELATION_LABEL
-                        } else {
-                            DEP_RELATION_LABEL
-                        };
-                        gra.relation = GrammaticalRelationType::new(label);
+        // Utterances whose every word is a special form or a code-switch
+        // do not need the model's analysis (see `synthesize_all_special_forms`).
+        if let Some(mors) = synthesize_all_special_forms(self.item, self.words) {
+            let gras = star_gras(&mors);
+            let item_count = mors.len();
+            match crate::inject::inject_morphosyntax(
+                self.utt,
+                mors,
+                self.item.terminator.clone(),
+                gras,
+            ) {
+                Err(diag) => self.misalignment(diag, &[], RetokenizationContext::Preserve),
+                Ok(()) => {
+                    // The `@s` words still take their primary structure from
+                    // the model's analysis, when there is one.
+                    if let Some((_, rescued)) = &analysed {
+                        let alignment = UdAlignment::<MorItemIndex>::new(rescued, item_count);
+                        self.result.l2.defer_utterance(
+                            self.line_idx,
+                            self.item,
+                            alignment.as_ref(),
+                            &ItemPlacement::PerChatWord,
+                        );
                     }
                 }
+            }
+            return;
+        }
 
-                if tokenization_mode == TokenizationMode::StanzaRetokenize {
-                    // Range parents would double-count alongside their components;
-                    // terminator-punct singles are supplied separately via the
-                    // typed `Terminator` and already excluded from
-                    // `mors`/`gra_relations` by `map_ud_sentence_expanded`.
-                    let mut tokens: Vec<String> = ud_sentence
-                        .words
-                        .iter()
-                        .filter(|w| {
-                            !matches!(&w.id, UdId::Range(_, _))
-                                && !crate::morphosyntax::is_terminator_punct(w)
-                        })
-                        .map(|w| {
-                            if w.text.contains(char::is_whitespace) {
-                                w.text.chars().filter(|c| !c.is_whitespace()).collect()
-                            } else {
-                                w.text.clone()
-                            }
-                        })
-                        .collect();
+        let Some((raw, rescued)) = analysed else {
+            // The model returned nothing for an utterance with words it
+            // must analyse: record it and leave the utterance untouched.
+            self.result.decisions.push(DecisionRecord::new_and_trace(
+                self.line_idx,
+                self.utt.main.speaker.as_str().to_string(),
+                DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::NlpNoSentences),
+                "stanza_returned_empty_response".into(),
+                true,
+            ));
+            return;
+        };
 
-                    // Apply MWT lexicon overrides: when a Stanza token matches an
-                    // MWT entry, splice in the expansion tokens (and duplicate the
-                    // corresponding Mor/GRA items so counts stay aligned).
-                    if !mwt.is_empty() {
-                        let mut expanded_tokens = Vec::with_capacity(tokens.len());
-                        let mut expanded_mors = Vec::with_capacity(mors.len());
-                        let mut expanded_gra = Vec::with_capacity(gra_relations.len());
-
-                        for (tok_idx, tok) in tokens.iter().enumerate() {
-                            let tok_lower = tok.to_lowercase();
-                            if let Some(expansion) =
-                                mwt.get(&tok_lower).or_else(|| mwt.get(tok.as_str()))
-                            {
-                                // Replace this token with the expansion tokens.
-                                expanded_tokens.extend(expansion.iter().cloned());
-
-                                // For the first expansion token, keep the original
-                                // Mor/GRA. For subsequent tokens, duplicate so the
-                                // alignment stays correct.
-                                if tok_idx < mors.len() {
-                                    expanded_mors.push(mors[tok_idx].clone());
-                                    for _ in 1..expansion.len() {
-                                        expanded_mors.push(mors[tok_idx].clone());
-                                    }
-                                }
-                                if tok_idx < gra_relations.len() {
-                                    expanded_gra.push(gra_relations[tok_idx].clone());
-                                    for _ in 1..expansion.len() {
-                                        expanded_gra.push(gra_relations[tok_idx].clone());
-                                    }
-                                }
-                            } else {
-                                expanded_tokens.push(tok.clone());
-                                if tok_idx < mors.len() {
-                                    expanded_mors.push(mors[tok_idx].clone());
-                                }
-                                if tok_idx < gra_relations.len() {
-                                    expanded_gra.push(gra_relations[tok_idx].clone());
-                                }
-                            }
-                        }
-
-                        tokens = expanded_tokens;
-                        mors = expanded_mors;
-                        gra_relations = expanded_gra;
+        // The one walk. A malformed analysis, or one that does not map, is
+        // recorded and the utterance left untouched: Stanza occasionally
+        // returns structurally invalid UD (e.g. multiple heads=0).
+        let layout = match mode {
+            // One item per CHAT word: a contraction's components join as
+            // clitics (`verb|go~part|to`).
+            TokenizationMode::Preserve => ItemLayout::PerToken,
+            // One item per model word: the main tier is rewritten to them.
+            TokenizationMode::StanzaRetokenize => ItemLayout::PerWord,
+        };
+        let walked = UdTokens::walk(&rescued)
+            .map_err(MappingError::from)
+            .and_then(|tokens| map_tokens(&tokens, &ctx, layout).map(|mapped| (tokens, mapped)));
+        let (tokens, mapped) = match walked {
+            Ok(walked) => walked,
+            Err(e) => {
+                self.result.decisions.push(DecisionRecord::new_and_trace(
+                    self.line_idx,
+                    self.utt.main.speaker.as_str().to_string(),
+                    DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
+                    format!("ud_to_chat_error={e}"),
+                    true,
+                ));
+                return;
+            }
+        };
+        match mode {
+            TokenizationMode::Preserve => {
+                let alignment = tokens.align::<MorItemIndex>(self.words.len());
+                self.inject_preserved(mapped, alignment)
+            }
+            TokenizationMode::StanzaRetokenize => {
+                let surface = match surface_tokens(raw, self.item, self.words) {
+                    Ok(surface) => surface,
+                    Err(SurfaceError::Walk(e)) => {
+                        self.result.decisions.push(DecisionRecord::new_and_trace(
+                            self.line_idx,
+                            self.utt.main.speaker.as_str().to_string(),
+                            DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
+                            format!("ud_to_chat_error={e}"),
+                            true,
+                        ));
+                        return;
                     }
-
-                    // Collect retokenization trace info before modifying the AST.
-                    {
-                        use crate::retokenize::{
-                            build_word_token_mapping, try_deterministic_word_token_mapping,
-                        };
-                        let mapping = build_word_token_mapping(&words, &tokens);
-                        let used_fallback =
-                            try_deterministic_word_token_mapping(&words, &tokens).is_none();
-                        retokenization_traces.push(RetokenizationInfo {
-                            utterance_ordinal: utt_ordinal,
-                            original_words: words
-                                .iter()
-                                .map(|w| w.text.as_str().to_string())
-                                .collect(),
-                            stanza_tokens: tokens.clone(),
-                            mapping: (0..words.len())
-                                .map(|i| mapping.tokens_for_word(i).to_vec())
-                                .collect(),
-                            used_fallback,
-                        });
-                    }
-
-                    if let Err(diag) = crate::retokenize::retokenize_utterance(
-                        parser,
-                        utt,
-                        &words,
-                        &tokens,
-                        mors,
-                        item.terminator.clone(),
-                        gra_relations,
-                    ) {
-                        // File-level absorption: convert the typed diagnostic
-                        // to a MorOutcome::MisalignmentBug, emit its
-                        // DecisionRecord, trace it, and continue. The diagnostic
-                        // is loud rather than silently absorbed.
-                        let enriched = enrich_diagnostic(
-                            diag,
+                    Err(SurfaceError::Unplaced(refused)) => {
+                        let tokens = refused.stanza_tokens_after_mapping.clone();
+                        self.misalignment(
+                            refused,
                             &tokens,
                             RetokenizationContext::StanzaRetokenize,
                         );
-                        let outcome = MorOutcome {
-                            line_idx,
-                            speaker: SpeakerCode::new(utt.main.speaker.as_str()),
-                            kind: MorOutcomeKind::MisalignmentBug(enriched),
-                        };
-                        if let Some(mut record) = outcome.to_decision_record() {
-                            // Retokenization-path failures share the
-                            // MisalignmentBug outcome class but have their
-                            // own stable strategy label in evidence.
-                            record.strategy = DecisionStrategy::Morphosyntax(
-                                MorphosyntaxStrategy::RetokenizationFailed,
-                            );
-                            record.trace();
-                            decisions.push(record);
-                        }
-                        continue;
+                        return;
                     }
-                } else if let Err(diag) = crate::inject::inject_morphosyntax(
-                    utt,
-                    mors,
-                    item.terminator.clone(),
-                    gra_relations,
-                ) {
-                    // Per-utterance injection failure: the 1-to-1 invariant
-                    // (CHAT alignable-word count == Mor count after mapping)
-                    // was violated. This is always a bug, the pipeline was
-                    // supposed to produce exactly as many Mors as there were
-                    // CHAT words, and did not. File-level absorption: log
-                    // loudly via DecisionRecord, continue with the next
-                    // utterance rather than killing the whole file. Every
-                    // mismatch produces a record, so a systemic regression
-                    // (e.g. 2026-04-17 comma-drop) is visible as a corpus-wide
-                    // warning spike instead of a silent quality drop.
-                    let enriched = enrich_diagnostic(diag, &[], RetokenizationContext::Preserve);
-                    let outcome = MorOutcome {
-                        line_idx,
-                        speaker: SpeakerCode::new(utt.main.speaker.as_str()),
-                        kind: MorOutcomeKind::MisalignmentBug(enriched),
-                    };
-                    if let Some(record) = outcome.to_decision_record() {
-                        record.trace();
-                        decisions.push(record);
-                    }
-                    continue;
-                }
-            } else if let Line::Utterance(utt) = &chat_file.lines[line_idx] {
-                // Stanza returned empty for an utterance that's NOT
-                // all-synthesizable (the all-synthesizable case was
-                // handled at the top of the iteration). This is a
-                // genuine "Stanza had nothing to say", record the
-                // decision and leave the utterance untouched.
-                decisions.push(DecisionRecord::new_and_trace(
-                    line_idx,
-                    utt.main.speaker.as_str().to_string(),
-                    DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::NlpNoSentences),
-                    "stanza_returned_empty_response".into(),
-                    true,
-                ));
+                };
+                let alignment = tokens.align::<MorItemIndex>(self.words.len());
+                self.inject_retokenized(surface, mapped, alignment, mwt)
             }
         }
+    }
 
-        Ok(InjectionResult {
-            retokenization_traces,
-            decisions,
+    /// Preserve mode: one item per CHAT word, so a word's item is its own
+    /// index once the walk aligns to the words.
+    fn inject_preserved(
+        self,
+        mapped: MappedTokens,
+        alignment: Result<UdAlignment<'_, MorItemIndex>, UdAlignmentError>,
+    ) {
+        let (mut mors, mut gras) = mapped.into_parts();
+        // Without an alignment the item count differs from the word count,
+        // and injection below reports the utterance; nothing can be placed.
+        if alignment.is_ok() {
+            relabel_special_forms(
+                &mut mors,
+                &mut gras,
+                self.item
+                    .words()
+                    .iter()
+                    .zip(self.words)
+                    .enumerate()
+                    .map(|(word, (batch_word, extracted))| (batch_word, extracted, vec![word])),
+            );
+        }
+        match crate::inject::inject_morphosyntax(self.utt, mors, self.item.terminator.clone(), gras)
+        {
+            // Per-utterance injection failure: the 1-to-1 invariant (CHAT
+            // alignable-word count == Mor count after mapping) was violated.
+            // This is always a bug; record it loudly and continue with the
+            // next utterance rather than killing the whole file, so a
+            // systemic regression is visible as a corpus-wide warning spike.
+            Err(diag) => self.misalignment(diag, &[], RetokenizationContext::Preserve),
+            Ok(()) => self.result.l2.defer_utterance(
+                self.line_idx,
+                self.item,
+                alignment.as_ref(),
+                &ItemPlacement::PerChatWord,
+            ),
+        }
+    }
+
+    /// Retokenize mode: the main tier is rebuilt from the model's tokens
+    /// (`surface`, read from the analysis as the model returned it), one item
+    /// per model word (after the MWT lexicon's expansion), and a CHAT word's
+    /// items are the tokens the text mapping gives it: the same mapping that
+    /// rebuilds the main tier.
+    fn inject_retokenized(
+        self,
+        surface: Vec<String>,
+        mapped: MappedTokens,
+        alignment: Result<UdAlignment<'_, MorItemIndex>, UdAlignmentError>,
+        mwt: &MwtDict,
+    ) {
+        use crate::retokenize::{MappingBasis, build_word_token_mapping};
+
+        let (mors, gras, token_items) = mapped.into_indexed();
+        let expanded = SurfaceItems::pair(surface, mors, gras, self.words)
+            .and_then(|paired| paired.expand(mwt));
+        let Expanded {
+            tokens,
+            mut mors,
+            mut gras,
+            expansion,
+        } = match expanded {
+            Ok(expanded) => expanded,
+            // The utterance is left as it was, and the failure reported.
+            Err(refused) => {
+                let tokens = refused.stanza_tokens_after_mapping.clone();
+                self.misalignment(refused, &tokens, RetokenizationContext::StanzaRetokenize);
+                return;
+            }
+        };
+
+        let by_text = build_word_token_mapping(self.words, &tokens);
+        // A special form's or code-switched word's items are found through
+        // the mapping, and a mapping spread by length can hand them another
+        // word's items (a `c|` analysis on the word before a special form).
+        // Such an utterance is reported, not placed by guesswork.
+        let places_words = self
+            .item
+            .words()
+            .iter()
+            .any(|word| !matches!(word.role(), WordRole::Analysed));
+        if places_words && by_text.basis() == MappingBasis::Length {
+            let refused = crate::inject::MisalignmentDiagnostic {
+                chat_words: self
+                    .words
+                    .iter()
+                    .map(|w| w.text.as_str().to_string())
+                    .collect(),
+                expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
+                    self.words.len(),
+                ),
+                actual: talkbank_model::alignment::helpers::MorItemCount::new(tokens.len()),
+                stanza_tokens_after_mapping: tokens,
+                suspected_class: crate::inject::MisalignmentClass::Unknown,
+            };
+            let tokens = refused.stanza_tokens_after_mapping.clone();
+            self.misalignment(refused, &tokens, RetokenizationContext::StanzaRetokenize);
+            return;
+        }
+        relabel_special_forms(
+            &mut mors,
+            &mut gras,
+            self.item.words().iter().zip(self.words).enumerate().map(
+                |(word, (batch_word, extracted))| {
+                    (
+                        batch_word,
+                        extracted,
+                        by_text.tokens_for_word(word).to_vec(),
+                    )
+                },
+            ),
+        );
+
+        // Collect retokenization trace info before modifying the AST.
+        self.result.retokenization_traces.push(RetokenizationInfo {
+            utterance_ordinal: self.utt_ordinal,
+            original_words: self
+                .words
+                .iter()
+                .map(|w| w.text.as_str().to_string())
+                .collect(),
+            stanza_tokens: tokens.clone(),
+            mapping: (0..self.words.len())
+                .map(|i| by_text.tokens_for_word(i).to_vec())
+                .collect(),
+            used_fallback: by_text.basis() == MappingBasis::Length,
+        });
+
+        match crate::retokenize::retokenize_utterance(
+            self.parser,
+            self.utt,
+            self.words,
+            &tokens,
+            &by_text,
+            mors,
+            self.item.terminator.clone(),
+            gras,
+        ) {
+            // File-level absorption: the typed diagnostic becomes a
+            // `MisalignmentBug` outcome with its own strategy label, loud
+            // rather than silently absorbed.
+            Err(diag) => self.misalignment(diag, &tokens, RetokenizationContext::StanzaRetokenize),
+            Ok(()) => {
+                let placement = ItemPlacement::Retokenized(RetokenizedItems {
+                    mapped: &token_items,
+                    expansion: &expansion,
+                    by_text: &by_text,
+                });
+                self.result.l2.defer_utterance(
+                    self.line_idx,
+                    self.item,
+                    alignment.as_ref(),
+                    &placement,
+                );
+            }
+        }
+    }
+
+    /// Record a misalignment the injector reported, with the caller's
+    /// context, as a `MisalignmentBug` outcome. Retokenization failures share
+    /// the outcome class but have their own stable strategy label.
+    fn misalignment(
+        self,
+        diag: crate::inject::MisalignmentDiagnostic,
+        tokens: &[String],
+        context: RetokenizationContext,
+    ) {
+        let strategy = match context {
+            RetokenizationContext::Preserve => None,
+            RetokenizationContext::StanzaRetokenize => {
+                Some(MorphosyntaxStrategy::RetokenizationFailed)
+            }
+        };
+        let outcome = MorOutcome {
+            line_idx: self.line_idx,
+            speaker: SpeakerCode::new(self.utt.main.speaker.as_str()),
+            kind: MorOutcomeKind::MisalignmentBug(enrich_diagnostic(diag, tokens, context)),
+        };
+        if let Some(mut record) = outcome.to_decision_record() {
+            if let Some(strategy) = strategy {
+                record.strategy = DecisionStrategy::Morphosyntax(strategy);
+            }
+            record.trace();
+            self.result.decisions.push(record);
+        }
+    }
+}
+
+/// Why a retokenized utterance has no surface tokens.
+enum SurfaceError {
+    /// The analysis as returned does not walk.
+    Walk(MappingError),
+    /// A special form cannot be written back: the model's tokens do not stand
+    /// one per CHAT word.
+    Unplaced(Refused),
+}
+
+/// The model's tokens of a retokenized utterance: its words as the model
+/// returned them, before any grammatical-invariant rewrite. Range rows and
+/// the terminator are not tokens (the terminator travels as the typed
+/// `Terminator`), exactly as in the walk the items were mapped from.
+///
+/// A special form was sent to the model as its placeholder, so its token is
+/// written back as the CHAT word: the text mapping then holds, and the
+/// rebuild keeps the word as written (`gumma@c`). That needs the model's
+/// tokens to stand one per CHAT word; when they do not, the utterance is
+/// refused.
+fn surface_tokens(
+    raw: &super::UdSentence,
+    item: &super::payload::MorphosyntaxBatchItem,
+    words: &[crate::extract::ExtractedWord],
+) -> Result<Vec<String>, SurfaceError> {
+    let tokens = UdTokens::walk(raw).map_err(|e| SurfaceError::Walk(MappingError::from(e)))?;
+    let per_token: Vec<Vec<String>> = tokens
+        .iter()
+        .map(|(_, token)| {
+            token
+                .words()
+                .iter()
+                .map(|word| word.text.chars().filter(|c| !c.is_whitespace()).collect())
+                .collect()
+        })
+        .collect();
+    let has_special_form = item
+        .words()
+        .iter()
+        .any(|word| matches!(word.role(), WordRole::SpecialForm(_)));
+    if !has_special_form {
+        return Ok(per_token.into_iter().flatten().collect());
+    }
+    if per_token.len() != words.len() {
+        let surface: Vec<String> = per_token.into_iter().flatten().collect();
+        return Err(SurfaceError::Unplaced(
+            crate::inject::MisalignmentDiagnostic {
+                chat_words: words.iter().map(|w| w.text.as_str().to_string()).collect(),
+                expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
+                    words.len(),
+                ),
+                actual: talkbank_model::alignment::helpers::MorItemCount::new(surface.len()),
+                stanza_tokens_after_mapping: surface,
+                suspected_class: crate::inject::MisalignmentClass::Unknown,
+            },
+        ));
+    }
+    Ok(per_token
+        .into_iter()
+        .zip(item.words())
+        .zip(words)
+        .flat_map(|((texts, batch_word), word)| match batch_word.role() {
+            WordRole::SpecialForm(_) => vec![word.text.as_str().to_string()],
+            WordRole::Analysed | WordRole::CodeSwitched(_) => texts,
+        })
+        .collect())
+}
+
+/// Deprel label of a later piece of an MWT lexicon expansion: the pieces
+/// share the token's one analysis, so a later piece is attached to the first
+/// as part of one fixed expression.
+const LEXICON_PIECE_RELATION_LABEL: &str = "FIXED";
+
+/// A retokenized utterance's items, each paired with the model token the
+/// main tier is rebuilt from, and its relations (one per chunk, in order,
+/// then the terminator's). Built only by [`SurfaceItems::pair`], which
+/// refuses an analysis whose item count differs from the model's token
+/// count: an item a rewrite added (the English contraction table's `have` +
+/// `to` for a `hafta` the model left whole) has no token of the model's to
+/// be written as, and the main tier never gains a word the transcriber did
+/// not write.
+struct SurfaceItems {
+    tokens: Vec<String>,
+    mors: Vec<Mor>,
+    gras: Vec<GrammaticalRelation>,
+}
+
+/// A refused retokenization: the diagnostic the utterance is reported with.
+type Refused = crate::inject::MisalignmentDiagnostic;
+
+impl SurfaceItems {
+    /// Pair each item with its token, or refuse.
+    fn pair(
+        tokens: Vec<String>,
+        mors: Vec<Mor>,
+        gras: Vec<GrammaticalRelation>,
+        words: &[crate::extract::ExtractedWord],
+    ) -> Result<Self, Refused> {
+        if tokens.len() == mors.len() {
+            return Ok(Self { tokens, mors, gras });
+        }
+        Err(crate::inject::MisalignmentDiagnostic {
+            chat_words: words.iter().map(|w| w.text.as_str().to_string()).collect(),
+            expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(tokens.len()),
+            actual: talkbank_model::alignment::helpers::MorItemCount::new(mors.len()),
+            stanza_tokens_after_mapping: tokens,
+            suspected_class: crate::inject::MisalignmentClass::Unknown,
         })
     }
+
+    /// Apply the MWT lexicon: a token the lexicon names becomes its pieces,
+    /// one item each. The first piece keeps the token's analysis and
+    /// relation; each later piece repeats the analysis and is attached to the
+    /// first (`FIXED`). Every chunk index and head is renumbered, the
+    /// terminator's relation included, so the relations stay one per chunk
+    /// and form the tree the analysis did.
+    fn expand(self, mwt: &MwtDict) -> Result<Expanded, Refused> {
+        let Self { tokens, mors, gras } = self;
+        let pieces: Vec<Vec<String>> = tokens
+            .into_iter()
+            .map(|token| {
+                match mwt
+                    .get(&token.to_lowercase())
+                    .or_else(|| mwt.get(token.as_str()))
+                {
+                    Some(expansion) if !expansion.is_empty() => expansion.clone(),
+                    // A token the lexicon does not name (or names with no
+                    // pieces) is its own one piece.
+                    Some(_) | None => vec![token],
+                }
+            })
+            .collect();
+        let chunks: Vec<usize> = mors.iter().map(Mor::count_chunks).collect();
+        let chunk_total: usize = chunks.iter().sum();
+        // The relations must be the mapper's: one per chunk, in order, then
+        // the terminator's. Anything else cannot be renumbered.
+        let in_order = gras.len() == chunk_total + 1
+            && gras.iter().enumerate().all(|(at, gra)| gra.index == at + 1);
+        if !in_order {
+            return Err(crate::inject::MisalignmentDiagnostic {
+                chat_words: Vec::new(),
+                stanza_tokens_after_mapping: pieces.into_iter().flatten().collect(),
+                expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
+                    chunk_total + 1,
+                ),
+                actual: talkbank_model::alignment::helpers::MorItemCount::new(gras.len()),
+                suspected_class: crate::inject::MisalignmentClass::MorGraCountMismatch,
+            });
+        }
+
+        // Per item: its first chunk before (1-based) and its first piece's
+        // first chunk after.
+        let mut old_first = Vec::with_capacity(chunks.len());
+        let mut new_first = Vec::with_capacity(chunks.len());
+        let (mut old_next, mut new_next) = (1usize, 1usize);
+        for (count, item_pieces) in chunks.iter().zip(&pieces) {
+            old_first.push(old_next);
+            new_first.push(new_next);
+            old_next += count;
+            new_next += count * item_pieces.len();
+        }
+        let (old_terminator, new_terminator) = (old_next, new_next);
+        let renumber = |chunk: usize| -> usize {
+            match chunk {
+                0 => 0,
+                c if c == old_terminator => new_terminator,
+                c => {
+                    // The item whose chunks hold `c`: the last one starting
+                    // at or before it.
+                    let item = old_first.partition_point(|&first| first <= c) - 1;
+                    new_first[item] + (c - old_first[item])
+                }
+            }
+        };
+
+        let mut out = Expanded {
+            tokens: Vec::with_capacity(new_terminator),
+            mors: Vec::with_capacity(new_terminator),
+            gras: Vec::with_capacity(new_terminator),
+            expansion: Vec::with_capacity(mors.len()),
+        };
+        let mut relations = gras.into_iter();
+        for (item, (mor, item_pieces)) in mors.into_iter().zip(pieces).enumerate() {
+            let start = out.mors.len();
+            let count = chunks[item];
+            for relation in relations.by_ref().take(count) {
+                out.gras.push(GrammaticalRelation::new(
+                    renumber(relation.index),
+                    renumber(relation.head),
+                    relation.relation.as_str(),
+                ));
+            }
+            for (piece_at, piece) in item_pieces.into_iter().enumerate() {
+                if piece_at > 0 {
+                    for offset in 0..count {
+                        out.gras.push(GrammaticalRelation::new(
+                            new_first[item] + piece_at * count + offset,
+                            new_first[item] + offset,
+                            LEXICON_PIECE_RELATION_LABEL,
+                        ));
+                    }
+                }
+                out.tokens.push(piece);
+                out.mors.push(mor.clone());
+            }
+            out.expansion.push(start..out.mors.len());
+        }
+        // The terminator's relation, the one left.
+        for relation in relations {
+            out.gras.push(GrammaticalRelation::new(
+                renumber(relation.index),
+                renumber(relation.head),
+                relation.relation.as_str(),
+            ));
+        }
+        Ok(out)
+    }
+}
+
+/// The items of a retokenized utterance after the MWT lexicon expanded its
+/// tokens, with where each mapped item went.
+struct Expanded {
+    tokens: Vec<String>,
+    mors: Vec<Mor>,
+    gras: Vec<GrammaticalRelation>,
+    /// Per mapped item, the items it became.
+    expansion: Vec<Range<usize>>,
 }

@@ -38,8 +38,6 @@ struct LocalJobInspection {
     staging_dir: PathBuf,
     debug_summary_file: Option<PathBuf>,
     trace_file: Option<PathBuf>,
-    bug_report_ids: Vec<String>,
-    bug_report_files: Vec<PathBuf>,
     persisted_summary: bool,
 }
 
@@ -113,7 +111,7 @@ pub(crate) fn format_cancellations(job_id: &JobId, records: &[CancellationRecord
     );
     for (idx, rec) in records.iter().enumerate() {
         let n = idx + 1;
-        let ts = format_unix_ts(rec.requested_at.0);
+        let ts = rec.requested_at.local_display();
         let host = rec.host.as_ref().map(|h| h.as_ref()).unwrap_or("(unknown)");
         let pid = rec
             .pid
@@ -141,20 +139,6 @@ pub(crate) fn format_cancellations(job_id: &JobId, records: &[CancellationRecord
         }
     }
     out
-}
-
-fn format_unix_ts(ts_seconds: f64) -> String {
-    use chrono::{DateTime, Local};
-    if !ts_seconds.is_finite() {
-        return format!("invalid-unix-timestamp({ts_seconds})");
-    }
-    DateTime::from_timestamp_millis((ts_seconds * 1000.0).round() as i64)
-        .map(|dt| {
-            DateTime::<Local>::from(dt)
-                .format("%Y-%m-%d %H:%M:%S %Z")
-                .to_string()
-        })
-        .unwrap_or_else(|| format!("invalid-unix-timestamp({ts_seconds})"))
 }
 
 async fn list_jobs(client: &BatchalignClient, server: &str, json: bool) -> Result<(), CliError> {
@@ -247,8 +231,6 @@ fn inspect_local_job(layout: &RuntimeLayout, job_id: &str) -> Result<LocalJobIns
             staging_dir: artifacts.staging_dir,
             debug_summary_file: Some(debug_summary_file),
             trace_file: artifacts.trace_file,
-            bug_report_ids: artifacts.bug_report_ids,
-            bug_report_files: artifacts.bug_report_files,
             persisted_summary: true,
         });
     }
@@ -259,8 +241,6 @@ fn inspect_local_job(layout: &RuntimeLayout, job_id: &str) -> Result<LocalJobIns
         staging_dir,
         debug_summary_file: None,
         trace_file,
-        bug_report_ids: Vec::new(),
-        bug_report_files: Vec::new(),
         persisted_summary: false,
     })
 }
@@ -299,12 +279,6 @@ fn print_local_job(inspection: &LocalJobInspection, json: bool) -> Result<(), Cl
     if let Some(ref trace_file) = inspection.trace_file {
         eprintln!("Traces:    {}", trace_file.display());
     }
-    for bug_report_id in &inspection.bug_report_ids {
-        eprintln!("Bug ID:    {bug_report_id}");
-    }
-    for bug_report_file in &inspection.bug_report_files {
-        eprintln!("Bug file:  {}", bug_report_file.display());
-    }
     eprintln!();
 
     Ok(())
@@ -314,9 +288,7 @@ fn print_local_job(inspection: &LocalJobInspection, json: bool) -> Result<(), Cl
 mod tests {
     use super::*;
 
-    use crate::api::{
-        CallerHost, CallerPid, CancelReason, CancelSource, DisplayPath, JobId, UnixTimestamp,
-    };
+    use crate::api::{CallerHost, CallerPid, CancelReason, CancelSource, DisplayPath, JobId};
 
     #[expect(
         clippy::too_many_arguments,
@@ -335,7 +307,7 @@ mod tests {
         CancellationRecord {
             id,
             job_id: JobId::from("test-job"),
-            requested_at: UnixTimestamp(ts),
+            requested_at: crate::unix_time(ts),
             source,
             host: host.map(|s| CallerHost::from(s.to_string())),
             pid: pid.map(CallerPid),
@@ -448,18 +420,13 @@ mod tests {
         let layout = RuntimeLayout::from_state_dir(tempdir.path().join("state"));
         let job_id = "job-local-summary";
         let staging_dir = layout.jobs_dir().join(job_id);
-        let bug_reports_dir = layout.bug_reports_dir();
         fs::create_dir_all(&staging_dir).expect("create staging dir");
-        fs::create_dir_all(&bug_reports_dir).expect("create bug reports dir");
 
         let trace_file = staging_dir.join(DEBUG_TRACES_FILENAME);
-        let bug_report_file = bug_reports_dir.join("bug-123.json");
         let artifacts = JobDebugArtifacts {
             job_id: JobId::from(job_id),
             staging_dir: staging_dir.clone(),
             trace_file: Some(trace_file.clone()),
-            bug_report_ids: vec!["bug-123".into()],
-            bug_report_files: vec![bug_report_file.clone()],
         };
         fs::write(
             staging_dir.join(DEBUG_ARTIFACTS_FILENAME),
@@ -481,8 +448,6 @@ mod tests {
             )
         );
         assert_eq!(inspection.trace_file, Some(trace_file));
-        assert_eq!(inspection.bug_report_ids, vec!["bug-123"]);
-        assert_eq!(inspection.bug_report_files, vec![bug_report_file]);
     }
 
     #[test]
@@ -501,33 +466,26 @@ mod tests {
         assert_eq!(inspection.staging_dir, staging_dir);
         assert_eq!(inspection.debug_summary_file, None);
         assert_eq!(inspection.trace_file, Some(trace_file));
-        assert!(inspection.bug_report_ids.is_empty());
-        assert!(inspection.bug_report_files.is_empty());
     }
 
     #[test]
-    fn local_job_json_includes_summary_mode_and_bug_reports() {
+    fn local_job_json_includes_summary_mode() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = RuntimeLayout::from_state_dir(tempdir.path().join("state"));
         let job_id = "job-local-json";
         let staging_dir = layout.jobs_dir().join(job_id);
-        let bug_reports_dir = layout.bug_reports_dir();
         fs::create_dir_all(&staging_dir).expect("create staging dir");
-        fs::create_dir_all(&bug_reports_dir).expect("create bug reports dir");
 
         let inspection = LocalJobInspection {
             job_id: job_id.into(),
             staging_dir: staging_dir.clone(),
             debug_summary_file: Some(staging_dir.join(DEBUG_ARTIFACTS_FILENAME)),
             trace_file: Some(staging_dir.join(DEBUG_TRACES_FILENAME)),
-            bug_report_ids: vec!["bug-123".into()],
-            bug_report_files: vec![bug_reports_dir.join("bug-123.json")],
             persisted_summary: true,
         };
 
         let value = serde_json::to_value(&inspection).expect("serialize inspection");
         assert_eq!(value["job_id"], job_id);
         assert_eq!(value["persisted_summary"], true);
-        assert_eq!(value["bug_report_ids"][0], "bug-123");
     }
 }

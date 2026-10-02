@@ -36,28 +36,16 @@ fn parse_speaker_result(
     expected_backend: SpeakerBackendV2,
 ) -> Result<SpeakerResultV2, ExecuteFailure> {
     let parsed: SpeakerResultV2 = parse_host_output(response, "speaker")?;
-    let segments = match (&parsed.evidence, expected_backend) {
-        (SpeakerInferenceEvidenceV2::PyannoteAi { .. }, SpeakerBackendV2::PyannoteAi) => None,
-        (SpeakerInferenceEvidenceV2::Pyannote { segments }, SpeakerBackendV2::Pyannote) => {
-            Some(segments)
-        }
-        (SpeakerInferenceEvidenceV2::Nemo { segments }, SpeakerBackendV2::Nemo) => Some(segments),
-        _ => {
-            return Err(ExecuteFailure::Runtime(format!(
-                "speaker host evidence does not match requested backend {expected_backend:?}"
-            )));
-        }
-    };
-    if segments.is_some_and(|segments| {
-        segments
-            .iter()
-            .any(|segment| segment.end_ms < segment.start_ms)
-    }) {
-        return Err(ExecuteFailure::Runtime(
-            "invalid speaker host output: Speaker segment end_ms must be >= start_ms".to_owned(),
-        ));
+    // Each segment's bounds are an `AdmittedInterval`, refused at parse when
+    // inverted, so only the evidence's backend is checked here.
+    match (&parsed.evidence, expected_backend) {
+        (SpeakerInferenceEvidenceV2::PyannoteAi { .. }, SpeakerBackendV2::PyannoteAi)
+        | (SpeakerInferenceEvidenceV2::Pyannote { .. }, SpeakerBackendV2::Pyannote)
+        | (SpeakerInferenceEvidenceV2::Nemo { .. }, SpeakerBackendV2::Nemo) => Ok(parsed),
+        _ => Err(ExecuteFailure::Runtime(format!(
+            "speaker host evidence does not match requested backend {expected_backend:?}"
+        ))),
     }
-    Ok(parsed)
 }
 
 fn run_opensmile(

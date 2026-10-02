@@ -1,7 +1,7 @@
 # Rust CLI and Server
 
 **Status:** Current
-**Last updated:** 2026-09-15 18:27 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 This page covers the Rust control plane that powers `batchalign3`: the CLI
 client, the HTTP server, and how to extend them.
@@ -169,7 +169,7 @@ HTTP routes, SSE, and WebSocket handlers should prefer `ServerBackend` over
 reaching through `AppState` to raw `JobStore`, queue, or runtime internals.
 
 One dependency-graph cleanup already landed here: the standalone binary's OTLP
-telemetry stack and update-check helper are now gated behind the
+telemetry stack is gated behind the
 `batchalign` crate's `binary-entry` feature. The PyO3 `cli_entry` path
 still shares `run_command()`, but it no longer drags those binary-only
 dependencies into the extension build.
@@ -247,7 +247,6 @@ What should be shared:
 
 - stable `job_id`
 - stable staging/artifact directory
-- bug-report identifiers / files
 - optional persisted trace artifact file
 
 What should remain mode-specific:
@@ -370,7 +369,8 @@ A checked-out TCP handle is a `TcpCheckout` (`worker/pool/dispatch.rs`), which
 owns the handle and its group slot together. When the exchange ends, the
 handle goes back to its group unless `WorkerError::worker_after_failure()`
 (`worker/error.rs`) answers `Retire`. Only `WorkerResponse`, `Bootstrap`,
-`MemoryGuard`, `NoWorker` and `PoolShuttingDown` leave the worker reusable;
+`RequestRefused`, `MemoryGuard`, `NoWorker` and `PoolShuttingDown` leave the
+worker reusable;
 every other error (a dead process, a protocol or I/O failure,
 `CapabilitiesRefused`, and the rest) retires the handle. Retiring drops the
 handle, which closes the connection, and releases the slot; a checkout dropped

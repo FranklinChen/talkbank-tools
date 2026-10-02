@@ -14,6 +14,7 @@ from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
+    ItemFailed,
     _state,
 )
 
@@ -22,9 +23,14 @@ def unsupported_batch_infer(message: str) -> BatchInferHandler:
     """Build a handler that reports one consistent bootstrap/runtime error."""
 
     def _handler(req: BatchInferRequest) -> BatchInferResponse:
-        """Return the same structured error for every batch item."""
+        """Return the same structured error for every batch item.
+
+        No engine is loaded, so no item runs and none has an elapsed time.
+        """
         return BatchInferResponse(
-            results=[InferResponse(error=message, elapsed_s=0.0) for _ in req.items]
+            results=[
+                InferResponse.unexecuted(ItemFailed(error=message)) for _ in req.items
+            ]
         )
 
     return _handler

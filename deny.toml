@@ -39,8 +39,8 @@ allow = [
     # enum-iterator-derive.
     "0BSD",
     # The Unlicense (public-domain-equivalent, OSI-approved); whisper-rs +
-    # whisper-rs-sys (the whisper_rs engine behind the non-default
-    # whisper-pilot feature).
+    # whisper-rs-sys (the whisper_rs engine behind the default
+    # whisper-rs-backend feature).
     "Unlicense",
 ]
 

@@ -1,7 +1,5 @@
 //! Ratatui rendering: layout, widgets, colors.
 
-use std::time::SystemTime;
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -372,13 +370,11 @@ fn render_file_line(
 
             // Per-file elapsed timer from started_at
             if let Some(started) = file.started_at {
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-                let elapsed = (now - started).max(0.0);
-                let e_mins = elapsed as u64 / 60;
-                let e_secs = elapsed as u64 % 60;
+                let elapsed = crate::api::MachineTime::now()
+                    .saturating_duration_since(started)
+                    .as_secs();
+                let e_mins = elapsed / 60;
+                let e_secs = elapsed % 60;
                 spans.push(Span::styled(
                     format!("  {e_mins}:{e_secs:02}"),
                     Style::default().fg(Color::DarkGray),
@@ -390,7 +386,7 @@ fn render_file_line(
         FileStatusKind::Done => {
             let dur = file
                 .duration_s
-                .map(|d| format!("{d:.1}s"))
+                .map(|d| format!("{:.1}s", d.get()))
                 .unwrap_or_default();
             let name_part = format!("  ✓ {}", file.name);
             let padding = w.saturating_sub(name_part.len() + dur.len());
@@ -401,11 +397,6 @@ fn render_file_line(
             ))
         }
         FileStatusKind::Error => {
-            let code = file
-                .error_codes
-                .first()
-                .map(|c| format!("  {c}"))
-                .unwrap_or_default();
             let msg = file
                 .error_msg
                 .as_deref()
@@ -416,7 +407,7 @@ fn render_file_line(
             } else {
                 msg.to_string()
             };
-            let text = format!("  ✗ {}{code}   {msg_short}", file.name);
+            let text = format!("  ✗ {}   {msg_short}", file.name);
             Line::from(Span::styled(
                 pad_or_truncate(&text, w),
                 Style::default().fg(Color::Red),
@@ -585,12 +576,7 @@ fn draw_errors(f: &mut Frame, state: &AppState, area: Rect) {
         .take(inner.height as usize)
         .map(|err| {
             let first_line = err.message.split('\n').next().unwrap_or("unknown");
-            let code_str = err
-                .code
-                .as_deref()
-                .map(|c| format!("[{c}] "))
-                .unwrap_or_default();
-            let text = format!("  ✗ {}: {code_str}{first_line}", err.filename);
+            let text = format!("  ✗ {}: {first_line}", err.filename);
             ListItem::new(Line::from(Span::styled(
                 text,
                 Style::default().fg(Color::Red),
@@ -657,7 +643,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::api::{MemoryMb, UnixTimestamp};
+    use crate::api::{MachineTime, MemoryMb};
 
     use super::*;
     use crate::cli::tui::app::AppState;
@@ -672,21 +658,19 @@ mod tests {
                 None
             },
             error_category: None,
-            error_codes: if status == FileStatusKind::Error {
-                Some(vec!["E4012".into()])
-            } else {
-                None
-            },
-            error_line: None,
-            bug_report_id: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: if status == FileStatusKind::Done {
-                Some(UnixTimestamp(0.0))
+                Some(crate::unix_time(0.0))
             } else {
                 None
             },
             finished_at: if status == FileStatusKind::Done {
-                Some(UnixTimestamp(1.2))
+                Some(crate::unix_time(1.2))
+            } else {
+                None
+            },
+            duration_s: if status == FileStatusKind::Done {
+                Some(crate::api::NonNegativeSeconds::try_from(1.2).unwrap())
             } else {
                 None
             },
@@ -741,7 +725,7 @@ mod tests {
     #[test]
     fn render_error_expanded() {
         let mut state = AppState::new(2, "morphotag");
-        state.add_error("test.cha", "something broke", None);
+        state.add_error("test.cha", "something broke");
         state.errors.expanded = true;
 
         let backend = TestBackend::new(80, 24);
@@ -886,11 +870,7 @@ mod tests {
         let mut state = AppState::new(1, "align");
         let mut entry = make_entry("eng/test.cha", FileStatusKind::Processing);
         // Set started_at to 60 seconds ago
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-        entry.started_at = Some(UnixTimestamp(now - 60.0));
+        entry.started_at = Some(MachineTime::now().minus(std::time::Duration::from_secs(60)));
         state.update_from_poll(0, &[entry]);
 
         let backend = TestBackend::new(100, 24);

@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 
 use batchalign_transform::asr_postprocess::{AsrWord, PreparedMonologueChunk, SpeakerIndex};
 
-/// One raw diarization segment to project onto timed ASR words.
+/// One raw diarization segment to project onto timed ASR words: its span
+/// as the admitted interval it was read as (ordered and in range), never
+/// lowered back to a pair of bare numbers.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SpeakerSegment {
-    /// Segment start in milliseconds.
-    pub start_ms: u64,
-    /// Segment end in milliseconds.
-    pub end_ms: u64,
+    /// The segment's span of the media.
+    pub interval: batchalign_types::interval::AdmittedInterval,
     /// Stable speaker label emitted by the model host.
     pub speaker: String,
 }
@@ -190,8 +190,8 @@ fn project_timed_word(
     let (word_start, word_end) = (word_start as u64, word_end as u64);
     let mut overlap_by_speaker = vec![0u64; label_coordinates.len()];
     for segment in segments {
-        let overlap_start = word_start.max(segment.start_ms);
-        let overlap_end = word_end.min(segment.end_ms);
+        let overlap_start = word_start.max(segment.interval.start_millis());
+        let overlap_end = word_end.min(segment.interval.end_millis());
         if overlap_end > overlap_start {
             // Construction invariant: coordinates were built from every
             // segment in this same slice.
@@ -213,10 +213,14 @@ fn project_timed_word(
             .iter()
             .enumerate()
             .min_by_key(|(position, segment)| {
-                let distance = if word_end <= segment.start_ms {
-                    segment.start_ms - word_end
+                let (start, end) = (
+                    segment.interval.start_millis(),
+                    segment.interval.end_millis(),
+                );
+                let distance = if word_end <= start {
+                    start - word_end
                 } else {
-                    word_start.saturating_sub(segment.end_ms)
+                    word_start.saturating_sub(end)
                 };
                 (distance, *position)
             })
@@ -252,13 +256,13 @@ mod tests {
         }];
         let segments = vec![
             SpeakerSegment {
-                start_ms: 0,
-                end_ms: 500,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(0, 500)
+                    .expect("an ordered fixture span"),
                 speaker: "A".into(),
             },
             SpeakerSegment {
-                start_ms: 500,
-                end_ms: 1_000,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(500, 1_000)
+                    .expect("an ordered fixture span"),
                 speaker: "B".into(),
             },
         ];
@@ -283,13 +287,13 @@ mod tests {
         }];
         let segments = vec![
             SpeakerSegment {
-                start_ms: 0,
-                end_ms: 500,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(0, 500)
+                    .expect("an ordered fixture span"),
                 speaker: "SPEAKER_01".into(),
             },
             SpeakerSegment {
-                start_ms: 500,
-                end_ms: 1_000,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(500, 1_000)
+                    .expect("an ordered fixture span"),
                 speaker: "SPEAKER_00".into(),
             },
         ];
@@ -310,8 +314,8 @@ mod tests {
             ],
         }];
         let segments = vec![SpeakerSegment {
-            start_ms: 0,
-            end_ms: 500,
+            interval: batchalign_types::interval::AdmittedInterval::admit_millis(0, 500)
+                .expect("an ordered fixture span"),
             speaker: "A".into(),
         }];
 
@@ -334,13 +338,13 @@ mod tests {
         }];
         let segments = vec![
             SpeakerSegment {
-                start_ms: 0,
-                end_ms: 200,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(0, 200)
+                    .expect("an ordered fixture span"),
                 speaker: "A".into(),
             },
             SpeakerSegment {
-                start_ms: 1_000,
-                end_ms: 1_200,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(1_000, 1_200)
+                    .expect("an ordered fixture span"),
                 speaker: "B".into(),
             },
         ];
@@ -368,13 +372,13 @@ mod tests {
         }];
         let segments = vec![
             SpeakerSegment {
-                start_ms: 0,
-                end_ms: 700,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(0, 700)
+                    .expect("an ordered fixture span"),
                 speaker: "A".into(),
             },
             SpeakerSegment {
-                start_ms: 600,
-                end_ms: 1_000,
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(600, 1_000)
+                    .expect("an ordered fixture span"),
                 speaker: "B".into(),
             },
         ];

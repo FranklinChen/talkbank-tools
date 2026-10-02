@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
-    DurationMs, DurationSeconds, LanguageCode3, NonNegativeSeconds, ReportedEngineName,
+    AudioPositionSeconds, DurationMs, LanguageCode3, NonNegativeSeconds, ReportedEngineName,
 };
 
 use super::asr_model::AsrModelIdentityV2;
@@ -12,6 +12,7 @@ use super::requests::{
     WorkerRequestIdV2,
 };
 use super::utseg_evidence::UtsegBoundaryModelEvidenceV2;
+use crate::interval::{AdmittedInterval, IntervalRefusal, UntimedCause};
 
 /// One ASR result built from raw Whisper chunks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
@@ -43,20 +44,65 @@ pub enum AsrElementKindV2 {
     Punctuation,
 }
 
-/// One raw ASR element inside a speaker monologue.
+/// When one ASR element happened, admitted once where the provider's numbers
+/// were read: on the wire `{"kind": "timed", "start_ms", "end_ms"}` or
+/// `{"kind": "untimed", "cause"}`.
 ///
-/// Each bound, when present, is a finite non-negative time by type; their
-/// order is checked where the element is admitted.
+/// One policy for every ASR route: a pair of bounds that is not an admissible
+/// interval (inverted, or past the admissible range, as an epoch timestamp
+/// would be) refuses the response the element came in, naming the element, as
+/// the provider bridges refuse it; an absent bound is the provider's own
+/// report and makes the element untimed with that cause.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AsrElementTimingV2 {
+    /// The provider timed the element, and the interval was admitted.
+    Timed {
+        /// The element's span of the media, in milliseconds.
+        #[serde(flatten)]
+        interval: AdmittedInterval,
+    },
+    /// The element has no interval, for this reason.
+    Untimed {
+        /// Why.
+        cause: UntimedCause,
+    },
+}
+
+impl AsrElementTimingV2 {
+    /// Admit a provider's optional bounds, in seconds; a pair that is not an
+    /// interval is refused.
+    pub fn admit_positions(
+        start: Option<AudioPositionSeconds>,
+        end: Option<AudioPositionSeconds>,
+    ) -> Result<Self, IntervalRefusal> {
+        let untimed = |cause| Self::Untimed { cause };
+        Ok(match (start, end) {
+            (Some(start), Some(end)) => Self::Timed {
+                interval: AdmittedInterval::admit_positions(start, end)?,
+            },
+            (Some(_), None) => untimed(UntimedCause::ProviderReportedNoEnd),
+            (None, Some(_)) => untimed(UntimedCause::ProviderReportedNoStart),
+            (None, None) => untimed(UntimedCause::ProviderReportedNoTiming),
+        })
+    }
+
+    /// The admitted interval, when the element is timed.
+    pub const fn interval(self) -> Option<AdmittedInterval> {
+        match self {
+            Self::Timed { interval } => Some(interval),
+            Self::Untimed { .. } => None,
+        }
+    }
+}
+
+/// One raw ASR element inside a speaker monologue.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct AsrElementV2 {
     /// Surface token or punctuation value.
     pub value: String,
-    /// Start timestamp in seconds when the provider exposes one.
-    #[serde(default)]
-    pub start_s: Option<NonNegativeSeconds>,
-    /// End timestamp in seconds when the provider exposes one.
-    #[serde(default)]
-    pub end_s: Option<NonNegativeSeconds>,
+    /// When the element happened, or why that is not known.
+    pub timing: AsrElementTimingV2,
     /// Stable element kind selected by the worker adapter.
     pub kind: AsrElementKindV2,
     /// Optional model/provider confidence score.
@@ -194,7 +240,7 @@ pub struct WhisperTokenTimingV2 {
     /// Surface token text returned by the FA runtime.
     pub text: String,
     /// Token onset timestamp in seconds.
-    pub time_s: DurationSeconds,
+    pub time_s: AudioPositionSeconds,
 }
 
 /// Forced-alignment token response returned before Rust token-to-word
@@ -465,21 +511,38 @@ pub struct MorphosyntaxResultV2 {
     pub items: Vec<MorphosyntaxItemResultV2>,
 }
 
-/// One utseg item result returned by Python.
+/// One utseg item result: what produced the item's segmentation and what it
+/// produced, or the item's failure. One variant per real state, so an item
+/// cannot hold both assignments and trees, evidence without assignments, an
+/// error beside a success, or nothing at all.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct UtsegItemResultV2 {
-    /// Direct word-group assignments when inference succeeded without raw trees.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignments: Option<Vec<usize>>,
-    /// Raw constituency trees when inference succeeded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trees: Option<Vec<String>>,
-    /// Provenance-bearing classifier evidence parallel to the request words.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boundary_model_evidence: Option<UtsegBoundaryModelEvidenceV2>,
-    /// Optional per-item runtime error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UtsegItemResultV2 {
+    /// The boundary model segmented the item, with its per-word evidence.
+    BoundaryModel {
+        /// Word-group assignments, one per request word.
+        assignments: Vec<usize>,
+        /// Provenance-bearing classifier evidence parallel to the request
+        /// words.
+        boundary_model_evidence: UtsegBoundaryModelEvidenceV2,
+    },
+    /// The worker assigned the item without a model (one word is one
+    /// utterance).
+    Unattributed {
+        /// Word-group assignments, one per request word.
+        assignments: Vec<usize>,
+    },
+    /// The Stanza constituency fallback parsed the item; the server computes
+    /// the assignments from the trees.
+    Constituency {
+        /// Raw constituency trees, one per sentence Stanza found.
+        trees: Vec<String>,
+    },
+    /// The worker failed on the item.
+    Failed {
+        /// The worker's diagnosis.
+        error: String,
+    },
 }
 
 /// Batched utterance-segmentation response payload.
@@ -496,13 +559,8 @@ validated_numeric!(
     /// integer from crossing the worker boundary as a status.
     pub HttpStatusCodeV2(u16 = "u16"), InvalidHttpStatusCode,
     |v| (100..=599).contains(&v), "an HTTP status code is 100 to 599",
-    {
-        "type": "integer",
-        "format": "uint16",
-        "minimum": 100,
-        "maximum": 599,
-        "description": "An HTTP status code as a provider answered it: 100 to 599."
-    } [Eq]
+    schema(integer, "uint16", minimum 100, maximum 599,
+        description "An HTTP status code as a provider answered it: 100 to 599.") [Eq]
 );
 
 impl HttpStatusCodeV2 {
@@ -624,13 +682,15 @@ pub struct CorefResultV2 {
 
 /// One raw speaker diarization segment returned by Python.
 ///
-/// Timing fields validated upstream by Python Pydantic models (see module docs).
+/// On the wire `{"start_ms", "end_ms", "speaker"}`; the two bounds are one
+/// [`AdmittedInterval`], admitted when the segment is read, so an inverted,
+/// negative or out-of-range segment is refused at the boundary and no
+/// consumer checks the order again.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SpeakerSegmentV2 {
-    /// Segment start in milliseconds.
-    pub start_ms: DurationMs,
-    /// Segment end in milliseconds.
-    pub end_ms: DurationMs,
+    /// The segment's span of the media, in milliseconds.
+    #[serde(flatten)]
+    pub interval: AdmittedInterval,
     /// Stable speaker label chosen by the model adapter.
     pub speaker: String,
 }
@@ -852,7 +912,14 @@ pub enum ExecuteOutcomeV2 {
 pub struct ExecuteResponseV2 {
     request_id: WorkerRequestIdV2,
     body: ExecuteResponseBodyV2,
-    elapsed_s: DurationSeconds,
+    /// How long the worker spent answering the request, as it measured it.
+    ///
+    /// Every response is a worker's: the wire field `elapsed_s` is required,
+    /// and the server never composes a response of its own. A reply that
+    /// cannot answer a waiting request (one the protocol refuses, or an
+    /// `op=error` line) becomes a `WorkerError` on both worker paths, not a
+    /// response, so no value here stands for a measurement nobody took.
+    elapsed: NonNegativeSeconds,
 }
 
 /// The validated interior: outcome and payload as one fact. Private, so the
@@ -891,7 +958,7 @@ struct ExecuteResponseWireV2 {
     #[serde(default)]
     result: Option<TaskResultV2>,
     /// Execution time in seconds.
-    elapsed_s: DurationSeconds,
+    elapsed_s: NonNegativeSeconds,
 }
 
 impl<'de> Deserialize<'de> for ExecuteResponseV2 {
@@ -926,7 +993,7 @@ impl<'de> Deserialize<'de> for ExecuteResponseV2 {
         Ok(Self {
             request_id: wire.request_id,
             body,
-            elapsed_s: wire.elapsed_s,
+            elapsed: wire.elapsed_s,
         })
     }
 }
@@ -936,7 +1003,7 @@ impl Serialize for ExecuteResponseV2 {
     /// borrowed outcome mirror below must serialize identically to
     /// [`ExecuteOutcomeV2`]; the byte-stable roundtrip test in this file is
     /// what holds that equivalence (the schema drift gate cannot: it never
-    /// observes Serialize).
+    /// observes Serialize). Total: every value has its wire form.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -969,7 +1036,7 @@ impl Serialize for ExecuteResponseV2 {
         state.serialize_field("request_id", &self.request_id)?;
         state.serialize_field("outcome", &outcome)?;
         state.serialize_field("result", &result)?;
-        state.serialize_field("elapsed_s", &self.elapsed_s)?;
+        state.serialize_field("elapsed_s", &self.elapsed)?;
         state.end()
     }
 }
@@ -1022,12 +1089,12 @@ impl ExecuteResponseV2 {
     pub fn success(
         request_id: WorkerRequestIdV2,
         result: TaskResultV2,
-        elapsed_s: DurationSeconds,
+        elapsed_s: NonNegativeSeconds,
     ) -> Self {
         Self {
             request_id,
             body: ExecuteResponseBodyV2::Success(Box::new(result)),
-            elapsed_s,
+            elapsed: elapsed_s,
         }
     }
 
@@ -1039,12 +1106,12 @@ impl ExecuteResponseV2 {
         request_id: WorkerRequestIdV2,
         code: ProtocolErrorCodeV2,
         message: String,
-        elapsed_s: DurationSeconds,
+        elapsed_s: NonNegativeSeconds,
     ) -> Self {
         Self {
             request_id,
             body: ExecuteResponseBodyV2::Failure { code, message },
-            elapsed_s,
+            elapsed: elapsed_s,
         }
     }
 
@@ -1054,10 +1121,10 @@ impl ExecuteResponseV2 {
         &self.request_id
     }
 
-    /// Execution time in seconds, as the worker measured it.
+    /// How long the worker spent answering, as it measured it.
     #[must_use]
-    pub fn elapsed_s(&self) -> DurationSeconds {
-        self.elapsed_s
+    pub fn elapsed(&self) -> NonNegativeSeconds {
+        self.elapsed
     }
 
     /// Read the outcome and payload together.

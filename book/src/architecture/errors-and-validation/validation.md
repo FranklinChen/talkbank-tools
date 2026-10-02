@@ -1,7 +1,7 @@
 # Validation
 
 **Status:** Current
-**Last updated:** 2026-06-21 23:23 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 CHAT validation runs at multiple points in the processing pipeline.
 All validation logic is in Rust: `talkbank-model::validation` owns
@@ -81,16 +81,13 @@ This distinction matters especially for `%gra`:
 - Newly generated `%gra` from batchalign3 is validated more strictly
   before writeback.
 
-## Bug Reports and Cache Purges
+## When Validation Fails
 
-When post-serialization validation fails:
-
-1. A structured bug report is written to
-   `~/.batchalign3/bug-reports/`.
-2. Cache entries that produced the invalid output are purged
-   (self-correcting cache).
-
-This prevents broken results from being served on future runs.
+When post-serialization validation fails, the file fails with the
+validation errors as its error, and no output is written for it. No report
+file is written and no cache entry is purged: the cache entries behind the
+output stay, so a rerun reuses them (use the command's cache override to
+recompute).
 
 ## Verification Gates (`make verify`)
 

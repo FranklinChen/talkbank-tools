@@ -1,7 +1,7 @@
 # Server Mode
 
 **Status:** Current
-**Last updated:** 2026-09-22 14:10 EDT
+**Last updated:** 2026-10-01 14:52 EDT
 
 Batchalign includes a built-in HTTP server managed by `batchalign3 serve ...`.
 Ordinary local processing commands can still run inline, but when
@@ -142,7 +142,36 @@ Important keys:
 - `memory_gate_mb`: host headroom reserve in MB (default: 2048)
 - `gpu_startup_mb` / `stanza_startup_mb` / `io_startup_mb`: per-profile startup reservation overrides
 - `worker_health_interval_s`: health check frequency in seconds (default: 30)
+- `worker_ready_timeout_s`: seconds a spawned worker has to become ready (default: 300)
+- `audio_task_timeout_s`: raise the transport ceiling for audio tasks, in
+  seconds. Leave it out for the built-in ceiling: ASR's scales with the audio
+  (an override can only raise it), forced alignment and speaker diarization
+  use 1800. `--timeout` sets the same value from the command line.
+- `analysis_task_timeout_s`: transport ceiling for OpenSMILE and AVQI, in
+  seconds (built-in: 120)
+- `ensure_task_timeout_s`: how long on-demand model loading may take, in
+  seconds (built-in: 120); raise it on slow networks
+- `worker_registry_path`: the pre-started worker registry file (built-in:
+  `workers.json` in the state directory)
 - `job_ttl_days`: auto-delete completed jobs after this many days (default: 7)
+
+Every timeout and interval above is a positive whole number of seconds. "Use
+the built-in value" is spelled by leaving the key out, never by writing `0`.
+Older files that wrote `0` (or `""` for `worker_registry_path`), which used to
+mean exactly that, still load: the timeout overrides and the registry path
+read it as absent, and `worker_health_interval_s` and `worker_ready_timeout_s`
+read it as their default. In code the overrides are `Option<PositiveSeconds>`
+and the two intervals are `PositiveSeconds`, so no consumer tests for a zero.
+`--timeout 0` on the command line is refused with that instruction.
+
+A count that must be positive and is written as `0` or below is refused, not
+corrected: `job_ttl_days`, `memory_gate_poll_s`, `max_concurrent_worker_startups`
+and `local_lease_ttl_s` stop the server, the CLI and `batchalign3 doctor` alike
+with an error naming the field (`job_ttl_days must be >= 1 (got 0); fix it in
+server.yaml, or leave it out for the default`). Until 2026-10-01 such a value
+was quietly raised to 1, with a warning only some loaders printed, so
+`doctor` could pass a file the server then ran differently. Every loader now
+reads the file the same way, through one function.
 
 OTLP tracing can be enabled by setting `BATCHALIGN_OTLP_ENDPOINT`
 (or `OTEL_EXPORTER_OTLP_ENDPOINT`) in the server environment.

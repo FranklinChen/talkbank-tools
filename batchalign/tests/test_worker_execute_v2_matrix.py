@@ -36,7 +36,12 @@ from batchalign.worker._execute_v2 import WorkerExecutionHostV2, execute_request
 from batchalign.worker._fa_v2 import ForcedAlignmentExecutionHostV2
 from batchalign.worker._speaker_v2 import SpeakerExecutionHostV2
 from batchalign.worker._text_v2 import TextExecutionHostV2
-from batchalign.worker._types import BatchInferResponse, InferResponse, WorkerJSONValue
+from batchalign.worker._types import (
+    BatchInferResponse,
+    InferResponse,
+    ItemProduced,
+    WorkerJSONValue,
+)
 from batchalign.worker._types_v2 import (
     ArtifactRefV2,
     AsrBackendV2,
@@ -697,13 +702,13 @@ def test_text_execute_v2_rejects_result_count_mismatch(
         ),
         pytest.param(
             "utseg",
-            {"trees": ["(ROOT hello)"]},
+            {"kind": "constituency", "trees": ["(ROOT hello)"]},
             UtsegResultV2,
             id="utseg",
         ),
         pytest.param(
             "utseg",
-            {"assignments": [0, 1]},
+            {"kind": "unattributed", "assignments": [0, 1]},
             UtsegResultV2,
             id="utseg-assignments",
         ),
@@ -751,54 +756,13 @@ def test_text_execute_v2_accepts_valid_result_shapes(
         host=WorkerExecutionHostV2(
             text=_text_host_with_results(
                 task_name,
-                [InferResponse(result=good_result, elapsed_s=0.0)],
+                [InferResponse.timed(lambda: ItemProduced(result=good_result))],
             ),
         ),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, expected_kind)
-
-
-@pytest.mark.parametrize(
-    ("task_name", "bad_result", "message_fragment"),
-    [
-        pytest.param(
-            "utseg",
-            {"trees": [1]},
-            "list[str]",
-            id="utseg-trees",
-        ),
-        pytest.param(
-            "utseg",
-            {"assignments": ["bad"]},
-            "list[usize]",
-            id="utseg-assignments",
-        ),
-    ],
-)
-def test_text_execute_v2_rejects_invalid_result_shapes(
-    tmp_path: Path,
-    task_name: TextTaskName,
-    bad_result: WorkerJSONValue,
-    message_fragment: str,
-) -> None:
-    """Text-task V2 execution should reject malformed per-item result shapes."""
-
-    request = _make_text_request(tmp_path, task_name)
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(
-            text=_text_host_with_results(
-                task_name,
-                [InferResponse(result=bad_result, elapsed_s=0.0)],
-            ),
-        ),
-    )
-
-    _assert_error_response(
-        response, ProtocolErrorCodeV2.RUNTIME_FAILURE, message_fragment
-    )
 
 
 _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
@@ -856,6 +820,18 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
             },
             id="morphosyntax-unknown-pipeline",
         ),
+        pytest.param("utseg", {"trees": ["(ROOT hello)"]}, id="utseg-untagged"),
+        pytest.param("utseg", {"kind": "constituency", "trees": [1]}, id="utseg-trees"),
+        pytest.param(
+            "utseg",
+            {"kind": "unattributed", "assignments": ["bad"]},
+            id="utseg-assignments",
+        ),
+        pytest.param(
+            "utseg",
+            {"kind": "boundary_model", "assignments": [0, 1]},
+            id="utseg-boundary-model-without-evidence",
+        ),
         pytest.param(
             "translate",
             {"kind": "translated", "raw_translation": ["hola"], "engine": "x"},
@@ -901,7 +877,7 @@ def test_text_execute_v2_fails_only_the_item_that_does_not_parse(
         host=WorkerExecutionHostV2(
             text=_text_host_with_results(
                 task_name,
-                [InferResponse(result=bad_item, elapsed_s=0.0)],
+                [InferResponse.timed(lambda: ItemProduced(result=bad_item))],
             ),
         ),
     )

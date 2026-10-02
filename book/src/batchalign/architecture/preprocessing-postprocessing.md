@@ -1,7 +1,7 @@
 # Preprocessing and Postprocessing for Model Inference
 
 **Status:** Current
-**Last updated:** 2026-05-19 20:22 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 All domain logic, text normalization, alignment, result injection, and error recovery, lives in Rust. Python workers are stateless ML inference endpoints. This chapter documents the preprocessing that prepares data for inference and the postprocessing that incorporates results back into the CHAT AST.
 
@@ -39,13 +39,18 @@ Rust: validate response → align with AST → inject results → serialize CHAT
 
 Two injection paths diverge based on `TokenizationMode`:
 
-- **Preserve** (default): `map_ud_sentence()` merges MWT Range tokens into clitic MOR items (1 MOR per CHAT word). `inject_morphosyntax()` adds %mor/%gra tiers without modifying the main tier.
-- **StanzaRetokenize** (`--retokenize`): `map_ud_sentence_expanded()` produces per-component MOR items. Range parent tokens are filtered from the token vector. `retokenize_utterance()` rewrites the main tier with Stanza's expanded tokens and injects per-component %mor/%gra.
+- **Preserve** (default): the mapper (`map_tokens`, one item per token) merges MWT Range tokens into clitic MOR items (1 MOR per CHAT word). `inject_morphosyntax()` adds %mor/%gra tiers without modifying the main tier.
+- **StanzaRetokenize** (`--retokenize`): the mapper (one item per word) produces per-component MOR items, and the tokens are the walked words. `retokenize_utterance()` rewrites the main tier with Stanza's expanded tokens and injects per-component %mor/%gra.
 
-Both paths share GRA generation via `build_gra_and_validate()`.
+Both paths map one walk of the sentence (`UdTokens::walk`) and share GRA
+generation via `build_gra_and_validate()`. Special forms and code-switched
+words are placed among the items through that walk: in preserve mode by
+the alignment of the walk to the CHAT words, in retokenize mode by the
+text mapping that rebuilds the main tier; a word's relation is found at its
+item's own chunk.
 
 Steps:
-1. **Range token filtering** (Retokenize only): exclude `UdId::Range` parent entries from the token vector, only component words appear.
+1. **Range rows and the terminator are not tokens**: the one walk of the rewritten sentence (`UdTokens::walk`, after step 2) skips them; in retokenize mode the tokens are the walked words.
 2. **Grammatical-invariant rewrites** (`apply_grammatical_invariants` at
    `talkbank-transform/morphosyntax/invariants.rs:14`,
    `talkbank-transform/morphosyntax/invariants/` for the per-rule modules):
@@ -62,7 +67,7 @@ Steps:
 3. **UD → CHAT mapping:** Convert Universal Dependencies POS/features to TalkBank %mor format (category mappings, stem extraction, feature translation).
 4. **MWT handling:** In Preserve mode, multi-word tokens produce one clitic MOR (`pron|it~aux|be`). In Retokenize mode, each component gets its own MOR.
 5. **%gra construction:** Build dependency graph with chunk-based indexing (GRA indices are %mor chunk positions, not surface word positions).
-6. **L2 splice** (default; opt out with `--no-l2-morphotag`): after primary injection, @s words with `L2|xxx` are routed to secondary Stanza models and spliced back with real morphology. L2 extracts its `l2_deferred` positions from the ORIGINAL `ud_responses` captured before `apply_grammatical_invariants` ran (`crates/batchalign/src/pipeline/morphosyntax.rs:352-356`, plus the L2 dispatch in `crates/batchalign/src/morphosyntax/batch.rs`), so the English rewrite cannot corrupt L2 position mapping.
+6. **L2 splice** (default; opt out with `--no-l2-morphotag`): after primary injection, @s words with `L2|xxx` are routed to secondary Stanza models and spliced back with real morphology. The positions come from injection (`InjectionResult::l2`), read from the same rewritten walk the `%mor` mapping reads, so a position cannot describe a different analysis from the `%gra` it is spliced into (see [L2 morphotag](../reference/l2-morphotag.md)).
 7. **Validation:** Check word count alignment, GRA cycle detection, chunk count consistency.
 8. **Injection:** Replace or add %mor and %gra dependent tiers on the utterance.
 

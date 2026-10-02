@@ -26,7 +26,12 @@ mod tests {
     #[tokio::test]
     async fn runner_snapshot_filters_terminal_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let mut job = make_job(
             "j1",
@@ -34,7 +39,10 @@ mod tests {
             vec!["a.cha".into(), "b.cha".into()],
         );
         if let Some(status) = job.execution.file_statuses.get_mut("a.cha") {
-            status.status = crate::api::FileStatusKind::Done;
+            status.phase = crate::store::FilePhase::Done {
+                started_at: None,
+                finished_at: Some(crate::unix_time(5.0)),
+            };
         }
         store.submit(job).await.unwrap();
 

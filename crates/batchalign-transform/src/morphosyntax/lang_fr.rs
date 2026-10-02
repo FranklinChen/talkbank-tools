@@ -1,17 +1,36 @@
 //! French-specific morphosyntax rules.
 
-/// French pronoun case: returns `"Nom"`, `"Acc"`, or `""` based on the
-/// surface word form.
-pub fn french_pronoun_case(text: &str) -> &'static str {
+/// The case our French pronoun table assigns a surface form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrenchPronounCase {
+    /// Nominative (`je`, `il`, ...).
+    Nom,
+    /// Accusative (`me`, `le`, ...).
+    Acc,
+}
+
+impl FrenchPronounCase {
+    /// The `%mor` suffix text.
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::Nom => "Nom",
+            Self::Acc => "Acc",
+        }
+    }
+}
+
+/// French pronoun case from the surface word form; `None` for a form the
+/// table does not list. (`lui` is listed as both and reads as nominative.)
+pub fn french_pronoun_case(text: &str) -> Option<FrenchPronounCase> {
     let clean = text.to_lowercase();
     let clean = clean.trim_matches('\'').trim();
 
     if PRON_NOM.contains(&clean) {
-        "Nom"
+        Some(FrenchPronounCase::Nom)
     } else if PRON_ACC.contains(&clean) {
-        "Acc"
+        Some(FrenchPronounCase::Acc)
     } else {
-        ""
+        None
     }
 }
 
@@ -194,28 +213,28 @@ mod tests {
 
     #[test]
     fn test_french_pronoun_case_nom() {
-        assert_eq!(french_pronoun_case("je"), "Nom");
-        assert_eq!(french_pronoun_case("il"), "Nom");
-        assert_eq!(french_pronoun_case("moi"), "Nom");
+        assert_eq!(french_pronoun_case("je"), Some(FrenchPronounCase::Nom));
+        assert_eq!(french_pronoun_case("il"), Some(FrenchPronounCase::Nom));
+        assert_eq!(french_pronoun_case("moi"), Some(FrenchPronounCase::Nom));
     }
 
     #[test]
     fn test_french_pronoun_case_acc() {
-        assert_eq!(french_pronoun_case("me"), "Acc");
-        assert_eq!(french_pronoun_case("le"), "Acc");
-        assert_eq!(french_pronoun_case("leur"), "Acc");
+        assert_eq!(french_pronoun_case("me"), Some(FrenchPronounCase::Acc));
+        assert_eq!(french_pronoun_case("le"), Some(FrenchPronounCase::Acc));
+        assert_eq!(french_pronoun_case("leur"), Some(FrenchPronounCase::Acc));
     }
 
     #[test]
     fn test_french_pronoun_case_unknown() {
-        assert_eq!(french_pronoun_case("nous"), "");
-        assert_eq!(french_pronoun_case("vous"), "");
+        assert_eq!(french_pronoun_case("nous"), None);
+        assert_eq!(french_pronoun_case("vous"), None);
     }
 
     #[test]
     fn test_french_pronoun_case_with_apostrophe() {
-        assert_eq!(french_pronoun_case("qu'"), "");
-        assert_eq!(french_pronoun_case("je'"), "Nom");
+        assert_eq!(french_pronoun_case("qu'"), None);
+        assert_eq!(french_pronoun_case("je'"), Some(FrenchPronounCase::Nom));
     }
 
     #[test]

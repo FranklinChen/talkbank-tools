@@ -10,13 +10,14 @@ use axum::Router;
 use tracing::{info, warn};
 
 use crate::cache::UtteranceCache;
+use crate::clock::{Clock, SystemClock};
 use crate::config::{RuntimeLayout, ServerConfig};
 use crate::db::JobDB;
 use crate::error;
 use crate::host_facts::HostFactsSource;
 use crate::media::MediaResolver;
 use crate::server_backend::{ServerBackendBootstrap, bootstrap_local_server_backend};
-use crate::server_handshake::{BoundPort, HandshakeSlot, ServerHandshake};
+use crate::server_handshake::{BoundPort, HandshakeSlot, Removal, ServerHandshake};
 use crate::state::{
     AppBuildInfo, AppControlPlane, AppEnvironment, AppPaths, AppState, WorkerSubsystem,
 };
@@ -27,6 +28,48 @@ use crate::worker_setup::{RegistryDiscovery, prepare_workers};
 // paths continue to compile during migration. New code should import from
 // `crate::worker_setup` directly.
 pub use crate::worker_setup::PreparedWorkers;
+
+/// Create the jobs directory, open the job database, and run startup
+/// recovery at `now`: jobs left running are marked interrupted, and jobs past
+/// their retention are deleted with their staging directories. Every failure
+/// is reported: a jobs directory that cannot be created stops startup, and a
+/// pruned job whose staging directory cannot be removed is logged with its
+/// path, never discarded.
+async fn open_jobs_and_recover(
+    config: &ServerConfig,
+    layout: &RuntimeLayout,
+    jobs_dir: Option<String>,
+    db_dir: Option<&std::path::Path>,
+    now: crate::api::MachineTime,
+) -> Result<(std::path::PathBuf, JobDB), error::ServerError> {
+    // Kept a path: converting the layout's path to a `String` with
+    // `to_string_lossy` could have altered a non-UTF-8 directory name.
+    let jobs_dir = match jobs_dir {
+        Some(jobs_dir) => std::path::PathBuf::from(jobs_dir),
+        None => layout.jobs_dir(),
+    };
+    tokio::fs::create_dir_all(&jobs_dir).await?;
+
+    // Opening includes the schema migration.
+    let db = JobDB::open_with_layout(layout, db_dir).await?;
+    let interrupted = db.recover_interrupted(now).await?;
+    if !interrupted.is_empty() {
+        info!(count = interrupted.len(), "Recovered interrupted jobs");
+    }
+    for pruned in db.prune_expired(config.job_ttl_days, now).await? {
+        match tokio::fs::remove_dir_all(pruned.staging_dir.as_path()).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                job_id = %pruned.job_id,
+                staging_dir = %pruned.staging_dir,
+                error = %error,
+                "Could not remove an expired job's staging directory"
+            ),
+        }
+    }
+    Ok((jobs_dir, db))
+}
 
 /// Create the application: open DB, recover state, build router.
 ///
@@ -42,9 +85,19 @@ pub async fn create_app(
     jobs_dir: Option<String>,
     db_dir: Option<std::path::PathBuf>,
     build_hash: Option<String>,
+    clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
     let layout = RuntimeLayout::from_env();
-    create_app_with_runtime(config, pool_config, layout, jobs_dir, db_dir, build_hash).await
+    create_app_with_runtime(
+        config,
+        pool_config,
+        layout,
+        jobs_dir,
+        db_dir,
+        build_hash,
+        clock,
+    )
+    .await
 }
 
 /// Create the application using an explicit runtime layout for state-owned
@@ -58,10 +111,22 @@ pub async fn create_app_with_runtime(
     jobs_dir: Option<String>,
     db_dir: Option<std::path::PathBuf>,
     build_hash: Option<String>,
+    clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
     let workers = prepare_workers(pool_config, RegistryDiscovery::Adopt).await?;
-    create_app_with_prepared_workers(config, layout, jobs_dir, db_dir, None, build_hash, workers)
-        .await
+    create_app_with_prepared_workers(
+        config,
+        layout,
+        AppStorageOverrides {
+            jobs_dir,
+            db_dir,
+            cache_dir: None,
+        },
+        build_hash,
+        workers,
+        clock,
+    )
+    .await
 }
 
 /// Create the application with test-echo workers and the lightweight
@@ -75,46 +140,62 @@ pub async fn create_test_app(
     jobs_dir: Option<String>,
     db_dir: Option<std::path::PathBuf>,
     build_hash: Option<String>,
+    clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
     let layout = RuntimeLayout::from_env();
     let workers = prepare_workers(pool_config, RegistryDiscovery::Adopt).await?;
     create_test_app_with_prepared_workers(
-        config, layout, jobs_dir, db_dir, None, build_hash, workers,
+        config,
+        layout,
+        AppStorageOverrides {
+            jobs_dir,
+            db_dir,
+            cache_dir: None,
+        },
+        build_hash,
+        workers,
+        clock,
     )
     .await
+}
+
+/// Named, independent directory overrides for one application's storage.
+///
+/// `None` retains the existing runtime-layout or platform-cache resolution.
+/// This is configuration, not proof that a directory exists or is writable;
+/// application construction performs the existing storage admission.
+#[derive(Debug, Default)]
+pub struct AppStorageOverrides {
+    /// Override the jobs directory resolved from configuration and layout.
+    pub jobs_dir: Option<String>,
+    /// Override the directory containing the job database.
+    pub db_dir: Option<std::path::PathBuf>,
+    /// Override the utterance-cache directory.
+    pub cache_dir: Option<std::path::PathBuf>,
 }
 
 /// Create the application with an already-prepared worker subsystem.
 ///
 /// This keeps the expensive worker pool hot across repeated app lifecycles
 /// while giving each app instance a fresh store, runtime supervisor, database,
-/// and filesystem layout. `cache_dir` lets tests pin the utterance cache under
+/// and filesystem layout. `storage.cache_dir` lets tests pin the utterance cache under
 /// that owned runtime root instead of falling back to the ambient platform
 /// cache directory.
 pub async fn create_app_with_prepared_workers(
     config: ServerConfig,
     layout: RuntimeLayout,
-    jobs_dir: Option<String>,
-    db_dir: Option<std::path::PathBuf>,
-    cache_dir: Option<std::path::PathBuf>,
+    storage: AppStorageOverrides,
     build_hash: Option<String>,
     workers: PreparedWorkers,
+    clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
-    let jobs_dir = jobs_dir.unwrap_or_else(|| layout.jobs_dir().to_string_lossy().into_owned());
-    let _ = tokio::fs::create_dir_all(&jobs_dir).await;
-
-    // Open database (includes schema migration)
-    let db = JobDB::open_with_layout(&layout, db_dir.as_deref()).await?;
-
-    // Recovery: mark interrupted, prune expired
-    let interrupted = db.recover_interrupted().await?;
-    if !interrupted.is_empty() {
-        info!(count = interrupted.len(), "Recovered interrupted jobs");
-    }
-    let expired_dirs = db.prune_expired(config.job_ttl_days.get()).await?;
-    for d in &expired_dirs {
-        let _ = tokio::fs::remove_dir_all(d).await;
-    }
+    let AppStorageOverrides {
+        jobs_dir,
+        db_dir,
+        cache_dir,
+    } = storage;
+    let (jobs_dir, db) =
+        open_jobs_and_recover(&config, &layout, jobs_dir, db_dir.as_deref(), clock.now()).await?;
 
     // Initialize utterance cache (SQLite, shared with Python workers)
     // Must be before auto-resume so spawn_job can access it.
@@ -130,7 +211,8 @@ pub async fn create_app_with_prepared_workers(
         config.clone(),
         db,
         execution_runtime.engine,
-        std::path::PathBuf::from(&jobs_dir),
+        jobs_dir.clone(),
+        clock,
     )
     .await?;
     if backend_bootstrap.loaded_jobs > 0 {
@@ -149,7 +231,6 @@ pub async fn create_app_with_prepared_workers(
         );
     }
 
-    let bug_reports_dir = layout.bug_reports_dir().to_string_lossy().into_owned();
     let dashboard_dir = crate::routes::dashboard::find_dashboard_dir_for(
         &layout,
         std::env::var("BATCHALIGN_DASHBOARD_DIR").ok().as_deref(),
@@ -165,7 +246,6 @@ pub async fn create_app_with_prepared_workers(
             media: MediaResolver::new(),
             paths: AppPaths {
                 jobs_dir,
-                bug_reports_dir,
                 dashboard_dir,
             },
         },
@@ -187,24 +267,18 @@ pub async fn create_app_with_prepared_workers(
 pub async fn create_test_app_with_prepared_workers(
     config: ServerConfig,
     layout: RuntimeLayout,
-    jobs_dir: Option<String>,
-    db_dir: Option<std::path::PathBuf>,
-    cache_dir: Option<std::path::PathBuf>,
+    storage: AppStorageOverrides,
     build_hash: Option<String>,
     workers: PreparedWorkers,
+    clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
-    let jobs_dir = jobs_dir.unwrap_or_else(|| layout.jobs_dir().to_string_lossy().into_owned());
-    let _ = tokio::fs::create_dir_all(&jobs_dir).await;
-
-    let db = JobDB::open_with_layout(&layout, db_dir.as_deref()).await?;
-    let interrupted = db.recover_interrupted().await?;
-    if !interrupted.is_empty() {
-        info!(count = interrupted.len(), "Recovered interrupted jobs");
-    }
-    let expired_dirs = db.prune_expired(config.job_ttl_days.get()).await?;
-    for d in &expired_dirs {
-        let _ = tokio::fs::remove_dir_all(d).await;
-    }
+    let AppStorageOverrides {
+        jobs_dir,
+        db_dir,
+        cache_dir,
+    } = storage;
+    let (jobs_dir, db) =
+        open_jobs_and_recover(&config, &layout, jobs_dir, db_dir.as_deref(), clock.now()).await?;
 
     let cache = Arc::new(
         UtteranceCache::tiered(cache_dir, None)
@@ -217,7 +291,8 @@ pub async fn create_test_app_with_prepared_workers(
         config.clone(),
         db,
         execution_runtime.engine,
-        std::path::PathBuf::from(&jobs_dir),
+        jobs_dir.clone(),
+        clock,
     )
     .await?;
 
@@ -230,7 +305,6 @@ pub async fn create_test_app_with_prepared_workers(
     let capabilities = execution_runtime.capability_snapshot;
     let pool = workers.pool().clone();
 
-    let bug_reports_dir = layout.bug_reports_dir().to_string_lossy().into_owned();
     let dashboard_dir = crate::routes::dashboard::find_dashboard_dir_for(
         &layout,
         std::env::var("BATCHALIGN_DASHBOARD_DIR").ok().as_deref(),
@@ -246,7 +320,6 @@ pub async fn create_test_app_with_prepared_workers(
             media: MediaResolver::new(),
             paths: AppPaths {
                 jobs_dir,
-                bug_reports_dir,
                 dashboard_dir,
             },
         },
@@ -320,9 +393,17 @@ pub async fn serve_with_runtime(
         )));
     }
 
-    let (router, state) =
-        create_app_with_runtime(config, pool_config, layout.clone(), None, None, build_hash)
-            .await?;
+    let (router, state) = create_app_with_runtime(
+        config,
+        pool_config,
+        layout.clone(),
+        None,
+        None,
+        build_hash,
+        // The server's one clock, created here where it is composed.
+        Arc::new(SystemClock),
+    )
+    .await?;
 
     let addr = format!("{host}:{}", port.bind_value());
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -345,12 +426,22 @@ pub async fn serve_with_runtime(
     //
     // Best-effort: if the write fails (e.g. read-only filesystem), log and
     // continue. The server still works; it just will not be auto-discovered.
-    if let Err(error) =
-        ServerHandshake::publish_listening(layout.state_dir(), slot, std::process::id(), bound_port)
+    // Off the runtime: publishing waits for the slot's file lock.
+    let state_dir = layout.state_dir().to_path_buf();
+    let published = match crate::blocking::spawn_in_span(move || {
+        ServerHandshake::publish_listening(&state_dir, slot, bound_port)
+    })
+    .await
+    .map_err(|error| crate::server_handshake::HandshakeError::Task(error.to_string()))
+    .and_then(|published| published)
     {
-        warn!(error = %error,
-            "Failed to publish server handshake; daemon auto-discovery may not work");
-    }
+        Ok(published) => Some(published),
+        Err(error) => {
+            warn!(error = %error,
+                "Failed to publish server handshake; daemon auto-discovery may not work");
+            None
+        }
+    };
 
     axum::serve(
         listener,
@@ -396,9 +487,23 @@ pub async fn serve_with_runtime(
     // 3. Shut down the worker pool (gracefully shuts down all workers)
     state.workers.pool.shutdown().await;
 
-    // 4. Remove the handshake so stale detection works on next startup.
-    if let Err(error) = ServerHandshake::remove(layout.state_dir(), slot) {
-        warn!(error = %error, "Failed to remove server handshake");
+    // 4. Retire our handshake so stale detection works on next startup. Only
+    // our own record is removed: a server that replaced this one keeps its.
+    if let Some(published) = published {
+        let retired = crate::blocking::spawn_in_span(move || published.retire())
+            .await
+            .map_err(|error| crate::server_handshake::HandshakeError::Task(error.to_string()))
+            .and_then(|retired| retired);
+        match retired {
+            Ok(Removal::Removed | Removal::Absent) => {}
+            Ok(Removal::NamesAnother { pid }) => {
+                info!(
+                    pid,
+                    "Server handshake now names another server; left in place"
+                );
+            }
+            Err(error) => warn!(error = %error, "Failed to remove server handshake"),
+        }
     }
     info!("Shutdown complete");
 

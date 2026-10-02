@@ -1,12 +1,11 @@
 //! Audio decode + 16 kHz resample for the native Whisper path.
 //! Cross-platform via symphonia 0.6 (codec) + rubato 4.0 (FFT resampler).
 //!
-//! Re-ported from the candle-0.10-era pilot to the current dependency line:
-//! symphonia 0.6 replaced the `AudioBufferRef` enum with `GenericAudioBufferRef`
-//! (and removed the `conv`/`sample`/`probe` top-level modules), and rubato 4.0's
-//! synchronous FFT resampler is now `Fft` driven through `audioadapter` buffer
-//! adapters. See `crates/batchalign-whisper-pilot/src/audio.rs` for the same
-//! rewrite at the standalone-binary layer.
+//! Re-ported from the candle-0.10-era Whisper pilot crate (since retired) to
+//! the current dependency line: symphonia 0.6 replaced the `AudioBufferRef`
+//! enum with `GenericAudioBufferRef` (and removed the `conv`/`sample`/`probe`
+//! top-level modules), and rubato 4.0's synchronous FFT resampler is now `Fft`
+//! driven through `audioadapter` buffer adapters.
 
 #![cfg(feature = "whisper-rs-backend")]
 

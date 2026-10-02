@@ -290,14 +290,25 @@ mod tests {
             FailureCategory::WorkerCrash
         );
         assert_eq!(
-            classify_worker_error(&WorkerError::ReadyTimeout { timeout_s: 30 }),
+            classify_worker_error(&WorkerError::ReadyTimeout {
+                timeout_s: crate::api::PositiveSeconds::literal::<30>()
+            }),
             FailureCategory::WorkerTimeout
         );
         assert_eq!(
-            classify_worker_error(&WorkerError::Protocol(
-                "timeout waiting for infer response".into()
-            )),
+            classify_worker_error(&WorkerError::Timeout {
+                waited_for: crate::worker::error::WorkerWait::Infer,
+                limit: crate::api::PositiveSeconds::literal::<120>(),
+            }),
             FailureCategory::WorkerTimeout
+        );
+        // A protocol message that merely mentions a timeout (worker text the
+        // reader quotes) is a protocol failure, never a retryable timeout.
+        assert_eq!(
+            classify_worker_error(&WorkerError::Protocol(
+                "failed to decode execute_v2 response: field timeout_s".into()
+            )),
+            FailureCategory::WorkerProtocol
         );
         assert_eq!(
             classify_worker_error(&WorkerError::Protocol("bad frame".into())),

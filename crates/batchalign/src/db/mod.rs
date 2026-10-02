@@ -14,11 +14,11 @@ mod schema;
 mod update;
 
 pub use insert::NewJobRecord;
-pub use query::CancellationRow;
+pub use query::{CancellationRow, StoredLeaseError};
+pub use recovery::PrunedJob;
 pub use schema::{AttemptRow, FileStatusRow, JobRow};
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -105,17 +105,11 @@ impl JobDB {
     }
 }
 
-fn unix_now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::UnixTimestamp;
+    use crate::api::MachineTime;
+    use crate::error::ServerError;
     use crate::options::{
         AlignOptions, CommandOptions, CommonOptions, FaEngineName, MorphotagOptions,
     };
@@ -159,7 +153,7 @@ mod tests {
             command: command.to_string(),
             lang: "eng".to_string(),
             num_speakers: 1,
-            status: "queued".to_string(),
+            status: crate::api::JobStatus::Queued,
             staging_dir: "/tmp/staging".to_string(),
             filenames,
             has_chat,
@@ -167,9 +161,11 @@ mod tests {
             media_mapping: String::new(),
             media_subdir: String::new(),
             source_dir: String::new(),
-            submitted_by: "127.0.0.1".to_string(),
-            submitted_by_name: "localhost".to_string(),
-            submitted_at: 1700000000.0,
+            submitter: Some(crate::store::Submitter::client(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                "localhost".into(),
+            )),
+            submitted_at: crate::unix_time(1700000000.0),
             paths_mode: false,
             source_paths: Vec::new(),
             output_paths: Vec::new(),
@@ -213,8 +209,12 @@ mod tests {
         assert_eq!(jobs[0].file_statuses[0].status, "queued");
     }
 
+    /// A job's status row is written whole: a failed job requeued without an
+    /// error is stored without the old one, and the worker count and times
+    /// are what the job holds, NULLs included.
     #[tokio::test]
-    async fn update_job_status() {
+    async fn write_job_status_replaces_every_status_column() {
+        use crate::store::JobStatusColumns;
         let (db, _dir) = test_db().await;
         let record = make_job_record(
             "job1",
@@ -223,15 +223,35 @@ mod tests {
             vec!["f.cha".into()],
             vec![true],
         );
-
         db.insert_job(&record).await.unwrap();
 
-        db.update_job_status("job1", "running", None, None, Some(4), None)
-            .await
-            .unwrap();
+        let failed = JobStatusColumns::for_test(
+            crate::api::JobStatus::Failed,
+            Some("worker crashed".into()),
+            Some(crate::unix_time(5.0)),
+            Some(4),
+            None,
+        );
+        db.write_job_status("job1", &failed).await.unwrap();
         let jobs = db.load_all_jobs().await.unwrap();
-        assert_eq!(jobs[0].status, "running");
+        assert_eq!(jobs[0].status, "failed");
+        assert_eq!(jobs[0].error.as_deref(), Some("worker crashed"));
         assert_eq!(jobs[0].num_workers, Some(4));
+
+        let requeued = JobStatusColumns::for_test(
+            crate::api::JobStatus::Queued,
+            None,
+            None,
+            None,
+            Some(crate::unix_time(9.0)),
+        );
+        db.write_job_status("job1", &requeued).await.unwrap();
+        let jobs = db.load_all_jobs().await.unwrap();
+        assert_eq!(jobs[0].status, "queued");
+        assert_eq!(jobs[0].error, None, "the old error must not survive");
+        assert_eq!(jobs[0].completed_at, None);
+        assert_eq!(jobs[0].num_workers, None);
+        assert_eq!(jobs[0].next_eligible_at, Some(crate::unix_time(9.0)));
     }
 
     #[tokio::test]
@@ -244,7 +264,7 @@ mod tests {
             vec!["a.cha".into()],
             vec![true],
         );
-        record.status = "running".to_string();
+        record.status = crate::api::JobStatus::Running;
         record.staging_dir = "/tmp".to_string();
 
         db.insert_job(&record).await.unwrap();
@@ -252,14 +272,11 @@ mod tests {
         db.update_file_status(
             "job1",
             "a.cha",
-            "done",
-            None,
-            None,
-            None,
+            &crate::store::FilePhase::Done {
+                started_at: Some(crate::unix_time(1700000001.0)),
+                finished_at: Some(crate::unix_time(1700000005.0)),
+            },
             Some("chat"),
-            Some(1700000001.0),
-            Some(1700000005.0),
-            None,
         )
         .await
         .unwrap();
@@ -267,6 +284,61 @@ mod tests {
         let jobs = db.load_all_jobs().await.unwrap();
         assert_eq!(jobs[0].file_statuses[0].status, "done");
         assert_eq!(jobs[0].file_statuses[0].content_type, "chat");
+    }
+
+    /// A file that failed and then succeeded is stored `done` with no error.
+    /// The writer used to `COALESCE` the error columns, so the old error
+    /// survived the success and every later load reported (and dropped) it.
+    /// Every column a phase does not own is now written NULL, and the row
+    /// reads back as exactly the phase that was written.
+    #[tokio::test]
+    async fn a_phase_write_clears_every_column_the_phase_does_not_own() {
+        use crate::store::{FileFailure, FilePhase};
+
+        let (db, _dir) = test_db().await;
+        let mut record = make_job_record(
+            "job1",
+            "align",
+            align_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        );
+        record.status = crate::api::JobStatus::Running;
+        db.insert_job(&record).await.unwrap();
+
+        let retry = FilePhase::RetryPending {
+            started_at: Some(crate::unix_time(1.0)),
+            failed_at: Some(crate::unix_time(2.0)),
+            retry_at: crate::unix_time(3.0),
+            failure: FileFailure::recorded("worker crashed".into(), FailureCategory::WorkerCrash),
+        };
+        db.update_file_status("job1", "a.cha", &retry, None)
+            .await
+            .unwrap();
+        let done = FilePhase::Done {
+            started_at: Some(crate::unix_time(4.0)),
+            finished_at: Some(crate::unix_time(5.0)),
+        };
+        db.update_file_status("job1", "a.cha", &done, Some("chat"))
+            .await
+            .unwrap();
+
+        let jobs = db.load_all_jobs().await.unwrap();
+        let row = &jobs[0].file_statuses[0];
+        assert_eq!(row.status, "done");
+        assert_eq!(row.error, None);
+        assert_eq!(row.error_category, None);
+        assert_eq!(row.next_eligible_at, None);
+        let (phase, dropped) = FilePhase::from_row(crate::store::FilePhaseColumns {
+            status: crate::api::FileStatusKind::Done,
+            error: row.error.as_deref(),
+            error_category: None,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            next_eligible_at: row.next_eligible_at,
+        });
+        assert_eq!(phase, done);
+        assert_eq!(dropped, None, "nothing stale is left to drop");
     }
 
     #[tokio::test]
@@ -279,7 +351,7 @@ mod tests {
             vec!["a.cha".into()],
             vec![true],
         );
-        record.status = "running".to_string();
+        record.status = crate::api::JobStatus::Running;
         record.staging_dir = "/tmp".to_string();
 
         db.insert_job(&record).await.unwrap();
@@ -289,7 +361,7 @@ mod tests {
                 "job1",
                 "a.cha",
                 WorkUnitKind::FileProcess,
-                1700000001.0,
+                crate::unix_time(1700000001.0),
                 Some("node-a"),
                 Some(4321),
             )
@@ -303,7 +375,7 @@ mod tests {
             AttemptOutcome::Failed,
             Some(FailureCategory::WorkerCrash),
             RetryDisposition::TerminalFailure,
-            1700000002.5,
+            crate::unix_time(1700000002.5),
         )
         .await
         .unwrap();
@@ -323,7 +395,10 @@ mod tests {
         assert_eq!(attempts[0].disposition, RetryDisposition::TerminalFailure);
         assert_eq!(attempts[0].worker_node_id.as_deref(), Some("node-a"));
         assert_eq!(attempts[0].worker_pid, Some(WorkerPid(4321)));
-        assert_eq!(attempts[0].finished_at, Some(UnixTimestamp(1700000002.5)));
+        assert_eq!(
+            attempts[0].finished_at,
+            Some(crate::unix_time(1700000002.5))
+        );
     }
 
     #[tokio::test]
@@ -336,7 +411,7 @@ mod tests {
             vec!["a.cha".into(), "b.cha".into()],
             vec![true, true],
         );
-        record.status = "completed".to_string();
+        record.status = crate::api::JobStatus::Completed;
         record.staging_dir = "/tmp".to_string();
 
         db.insert_job(&record).await.unwrap();
@@ -360,19 +435,18 @@ mod tests {
             vec!["a.cha".into()],
             vec![true],
         );
-        running.status = "running".to_string();
+        running.status = crate::api::JobStatus::Running;
         running.staging_dir = "/tmp".to_string();
 
         db.insert_job(&running).await.unwrap();
-        db.update_file_status(
+        db.seed_file_status_row(
             "job1",
             "a.cha",
             "processing",
             None,
             None,
             None,
-            None,
-            Some(1700000001.0),
+            Some(crate::unix_time(1700000001.0)),
             None,
             None,
         )
@@ -388,7 +462,7 @@ mod tests {
             vec![true],
         );
         queued.staging_dir = "/tmp2".to_string();
-        queued.submitted_at = 1700000002.0;
+        queued.submitted_at = crate::unix_time(1700000002.0);
 
         db.insert_job(&queued).await.unwrap();
 
@@ -400,16 +474,16 @@ mod tests {
             vec!["c.cha".into()],
             vec![true],
         );
-        completed.status = "completed".to_string();
+        completed.status = crate::api::JobStatus::Completed;
         completed.staging_dir = "/tmp3".to_string();
-        completed.submitted_at = 1700000003.0;
+        completed.submitted_at = crate::unix_time(1700000003.0);
 
         db.insert_job(&completed).await.unwrap();
 
-        let interrupted = db.recover_interrupted().await.unwrap();
+        let interrupted = db.recover_interrupted(MachineTime::now()).await.unwrap();
         assert_eq!(interrupted.len(), 2);
-        assert!(interrupted.contains(&"job1".to_string()));
-        assert!(interrupted.contains(&"job2".to_string()));
+        assert!(interrupted.contains(&crate::api::JobId::from("job1")));
+        assert!(interrupted.contains(&crate::api::JobId::from("job2")));
 
         let jobs = db.load_all_jobs().await.unwrap();
         for job in &jobs {
@@ -422,12 +496,181 @@ mod tests {
         }
     }
 
+    /// A file row holds the columns its phase and output own, and nothing
+    /// that is never written (`bug_report_id` was always NULL).
+    #[tokio::test]
+    async fn file_status_rows_have_no_unwritten_columns() {
+        let (db, _dir) = test_db().await;
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('file_statuses')")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert!(
+            !columns.iter().any(|name| name == "bug_report_id"),
+            "{columns:?}"
+        );
+    }
+
+    /// Startup recovery leaves a job row as a shutdown leaves a live job
+    /// (`Job::interrupt_for_shutdown`): interrupted, completed at the
+    /// recovery time, no pending retry time; its error and worker count
+    /// kept. The recovery UPDATE wrote two columns by hand and kept the retry
+    /// time, so the two paths left different rows for one transition.
+    #[tokio::test]
+    async fn recovery_writes_the_interrupted_status_image() {
+        use crate::store::JobStatusColumns;
+        let (db, _dir) = test_db().await;
+        let record = make_job_record(
+            "retrying",
+            "morphotag",
+            morphotag_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        );
+        db.insert_job(&record).await.unwrap();
+        db.write_job_status(
+            "retrying",
+            &JobStatusColumns::for_test(
+                crate::api::JobStatus::Queued,
+                Some("worker crashed".into()),
+                None,
+                Some(2),
+                Some(crate::unix_time(1700000100.0)),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let now = crate::unix_time(1700000050.0);
+        db.recover_interrupted(now).await.unwrap();
+
+        let jobs = db.load_all_jobs().await.unwrap();
+        let job = &jobs[0];
+        assert_eq!(job.status, "interrupted");
+        assert_eq!(job.completed_at, Some(now));
+        assert_eq!(job.next_eligible_at, None, "no retry time survives");
+        assert_eq!(job.error.as_deref(), Some("worker crashed"));
+        assert_eq!(job.num_workers, Some(2));
+    }
+
+    /// Interrupting a job and its files is one transaction: when a file's
+    /// write fails, the job row is not left interrupted with its file still
+    /// in flight.
+    #[tokio::test]
+    async fn interrupting_a_job_and_its_files_is_one_transaction() {
+        let (db, _dir) = test_db().await;
+        let mut record = make_job_record(
+            "in-flight",
+            "morphotag",
+            morphotag_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        );
+        record.status = crate::api::JobStatus::Running;
+        db.insert_job(&record).await.unwrap();
+        db.fail_file_status_updates().await.unwrap();
+
+        db.recover_interrupted(crate::unix_time(1700000050.0))
+            .await
+            .expect_err("the file's write fails");
+
+        let jobs = db.load_all_jobs().await.unwrap();
+        assert_eq!(jobs[0].status, "running", "the job's write is rolled back");
+        assert_eq!(jobs[0].file_statuses[0].status, "queued");
+    }
+
+    /// A row holding part of a lease (an owner without an expiry) is refused
+    /// where it is read, naming the job and the columns, never repaired.
+    #[tokio::test]
+    async fn a_row_with_part_of_a_lease_is_refused_on_load() {
+        let (db, _dir) = test_db().await;
+        let job = make_job_record(
+            "half-lease",
+            "morphotag",
+            morphotag_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        );
+        db.insert_job(&job).await.unwrap();
+        sqlx::query("UPDATE jobs SET leased_by_node = 'node-a' WHERE job_id = 'half-lease'")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let error = db.load_all_jobs().await.unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ServerError::StoredLease(StoredLeaseError::Partial { job_id, node, expires_at: None, heartbeat_at: None })
+                    if job_id == "half-lease" && node.as_deref() == Some("node-a")
+            ),
+            "{error}"
+        );
+    }
+
+    /// A row whose lease expires no later than its heartbeat names a lease
+    /// that could not have been held, and is refused through the same
+    /// constructor deserialization uses.
+    #[tokio::test]
+    async fn a_row_with_a_lease_expiring_before_its_heartbeat_is_refused_on_load() {
+        let (db, _dir) = test_db().await;
+        let job = make_job_record(
+            "inverted-lease",
+            "morphotag",
+            morphotag_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        );
+        db.insert_job(&job).await.unwrap();
+        sqlx::query(
+            "UPDATE jobs SET leased_by_node = 'node-a', lease_heartbeat_at = 50.0, \
+             lease_expires_at = 40.0 WHERE job_id = 'inverted-lease'",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let error = db.load_all_jobs().await.unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ServerError::StoredLease(StoredLeaseError::Unordered { job_id, .. })
+                    if job_id == "inverted-lease"
+            ),
+            "{error}"
+        );
+    }
+
+    /// A stored time that names no instant is refused where the row is read,
+    /// naming its column and value, instead of becoming a job's time.
+    #[tokio::test]
+    async fn a_stored_time_that_names_no_instant_is_refused_on_load() {
+        let (db, _dir) = test_db().await;
+        let job = make_job_record(
+            "bad-time",
+            "morphotag",
+            morphotag_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        );
+        db.insert_job(&job).await.unwrap();
+        sqlx::query("UPDATE jobs SET submitted_at = 1e300 WHERE job_id = 'bad-time'")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let error = db.load_all_jobs().await.unwrap_err().to_string();
+        assert!(error.contains("submitted_at"), "{error}");
+        assert!(error.contains("names no instant"), "{error}");
+    }
+
     #[tokio::test]
     async fn prune_expired() {
         let (db, _dir) = test_db().await;
 
         // Insert an old job (submitted 10 days ago)
-        let old_time = unix_now() - 10.0 * 86400.0;
+        let old_time = MachineTime::now().minus(std::time::Duration::from_secs(10 * 86_400));
         let mut old_job = make_job_record(
             "old",
             "morphotag",
@@ -435,7 +678,7 @@ mod tests {
             vec!["a.cha".into()],
             vec![true],
         );
-        old_job.status = "completed".to_string();
+        old_job.status = crate::api::JobStatus::Completed;
         old_job.staging_dir = "/tmp/old".to_string();
         old_job.submitted_at = old_time;
 
@@ -449,15 +692,26 @@ mod tests {
             vec!["b.cha".into()],
             vec![true],
         );
-        new_job.status = "completed".to_string();
+        new_job.status = crate::api::JobStatus::Completed;
         new_job.staging_dir = "/tmp/new".to_string();
-        new_job.submitted_at = unix_now();
+        new_job.submitted_at = MachineTime::now();
 
         db.insert_job(&new_job).await.unwrap();
 
-        let dirs = db.prune_expired(7).await.unwrap();
-        assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0], "/tmp/old");
+        let dirs = db
+            .prune_expired(
+                crate::config::JobTtlDays::literal::<7>(),
+                MachineTime::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dirs,
+            vec![PrunedJob {
+                job_id: crate::api::JobId::from("old"),
+                staging_dir: batchalign_types::paths::ServerPath::from("/tmp/old"),
+            }]
+        );
 
         let jobs = db.load_all_jobs().await.unwrap();
         assert_eq!(jobs.len(), 1);
@@ -479,7 +733,10 @@ mod tests {
         record.paths_mode = true;
         record.source_paths = vec!["/src/a.cha".into()];
         record.output_paths = vec!["/out/a.cha".into()];
-        record.submitted_by_name = String::new();
+        record.submitter = Some(crate::store::Submitter::client(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            String::new(),
+        ));
 
         db.insert_job(&record).await.unwrap();
 
@@ -508,35 +765,33 @@ mod tests {
             vec!["ok.cha".into(), "broken.cha".into()],
             vec![true, true],
         );
-        job.status = "running".to_string();
+        job.status = crate::api::JobStatus::Running;
         db.insert_job(&job).await.unwrap();
 
         // File "broken.cha" already failed before the crash.
-        db.update_file_status(
+        db.seed_file_status_row(
             "evidence-job",
             "broken.cha",
             "error",
             Some("Stanza crashed: CUDA OOM"),
             Some("worker_crash"),
             None,
-            None,
-            Some(1700000001.0),
-            Some(1700000002.0),
+            Some(crate::unix_time(1700000001.0)),
+            Some(crate::unix_time(1700000002.0)),
             None,
         )
         .await
         .unwrap();
 
         // File "ok.cha" was still processing when the server crashed.
-        db.update_file_status(
+        db.seed_file_status_row(
             "evidence-job",
             "ok.cha",
             "processing",
             None,
             None,
             None,
-            None,
-            Some(1700000001.0),
+            Some(crate::unix_time(1700000001.0)),
             None,
             None,
         )
@@ -544,7 +799,7 @@ mod tests {
         .unwrap();
 
         // Simulate server restart: run recovery.
-        let interrupted = db.recover_interrupted().await.unwrap();
+        let interrupted = db.recover_interrupted(MachineTime::now()).await.unwrap();
         assert_eq!(interrupted, vec!["evidence-job"]);
 
         // Reload and verify evidence preservation.
@@ -595,20 +850,19 @@ mod tests {
             vec!["timed.cha".into(), "untimed.cha".into()],
             vec![true, true],
         );
-        job.status = "running".to_string();
+        job.status = crate::api::JobStatus::Running;
         db.insert_job(&job).await.unwrap();
 
         // "timed.cha" completed successfully with timing.
-        db.update_file_status(
+        db.seed_file_status_row(
             "timing-job",
             "timed.cha",
             "done",
             None,
             None,
             None,
-            None,
-            Some(1700000010.0),
-            Some(1700000020.0),
+            Some(crate::unix_time(1700000010.0)),
+            Some(crate::unix_time(1700000020.0)),
             None,
         )
         .await
@@ -617,7 +871,7 @@ mod tests {
         // "untimed.cha" was still queued.
         // (no update needed: default status is "queued")
 
-        let interrupted = db.recover_interrupted().await.unwrap();
+        let interrupted = db.recover_interrupted(MachineTime::now()).await.unwrap();
         assert_eq!(interrupted.len(), 1);
 
         let jobs = db.load_all_jobs().await.unwrap();
@@ -633,12 +887,12 @@ mod tests {
         assert_eq!(timed.status, "done", "completed file should stay done");
         assert_eq!(
             timed.started_at,
-            Some(1700000010.0),
+            Some(crate::unix_time(1700000010.0)),
             "started_at must be preserved"
         );
         assert_eq!(
             timed.finished_at,
-            Some(1700000020.0),
+            Some(crate::unix_time(1700000020.0)),
             "finished_at must be preserved"
         );
 
@@ -673,46 +927,43 @@ mod tests {
             ],
             vec![true, true, true, true],
         );
-        job.status = "running".to_string();
+        job.status = crate::api::JobStatus::Running;
         db.insert_job(&job).await.unwrap();
 
-        db.update_file_status(
+        db.seed_file_status_row(
             "mixed-job",
             "done.cha",
             "done",
             None,
             None,
             None,
-            None,
-            Some(1700000001.0),
-            Some(1700000005.0),
+            Some(crate::unix_time(1700000001.0)),
+            Some(crate::unix_time(1700000005.0)),
             None,
         )
         .await
         .unwrap();
-        db.update_file_status(
+        db.seed_file_status_row(
             "mixed-job",
             "error.cha",
             "error",
             Some("parse failed: missing @Begin"),
             Some("parse_error"),
-            Some("bug-report-uuid-123"),
             None,
-            Some(1700000002.0),
-            Some(1700000003.0),
+            Some(crate::unix_time(1700000002.0)),
+            Some(crate::unix_time(1700000003.0)),
             None,
         )
         .await
         .unwrap();
-        db.update_file_status(
+        db.seed_file_status_row(
             "mixed-job",
             "processing.cha",
             "processing",
             None,
             None,
             None,
-            None,
-            Some(1700000004.0),
+            Some(crate::unix_time(1700000004.0)),
             None,
             None,
         )
@@ -720,7 +971,7 @@ mod tests {
         .unwrap();
         // "queued.cha" stays in default queued state.
 
-        let interrupted = db.recover_interrupted().await.unwrap();
+        let interrupted = db.recover_interrupted(MachineTime::now()).await.unwrap();
         assert_eq!(interrupted, vec!["mixed-job"]);
 
         let jobs = db.load_all_jobs().await.unwrap();
@@ -747,11 +998,6 @@ mod tests {
             Some("parse failed: missing @Begin")
         );
         assert_eq!(errored.error_category.as_deref(), Some("parse_error"));
-        assert_eq!(
-            errored.bug_report_id.as_deref(),
-            Some("bug-report-uuid-123"),
-            "bug report ID must survive recovery"
-        );
 
         // processing.cha: marked interrupted.
         let processing = job

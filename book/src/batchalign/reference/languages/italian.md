@@ -1,7 +1,7 @@
 # Italian
 
 **Status:** Current
-**Last updated:** 2026-07-28 13:27 EDT
+**Last updated:** 2026-10-01 20:53 EDT
 
 ## Scope
 
@@ -358,7 +358,7 @@ flowchart TD
     Def8["Defect 8<br/>Multi-chunk emit<br/>(dammela, aprila, finila)"]
     Def12["Defect 12<br/>VERB correct lemma<br/>missing MWT<br/>(aprilo)"]
     Def13["Defect 13<br/>VERB fabricated lemma<br/>(leggila)"]
-    NormalSingle["Normal map_ud_word_to_mor"]
+    NormalSingle["Normal map_ud_word"]
 
     Start --> MWT
     MWT -->|"yes"| Range
@@ -415,7 +415,7 @@ flowchart LR
 
     subgraph "Layer 2: Mor synthesis + GRA accounting (morphosyntax)"
         direction TB
-        MapWord["map_ud_word_to_mor<br/>per UdWord"]
+        MapWord["map_ud_word<br/>per UdWord"]
         Assemble["assemble_mors<br/>(Range → multi-chunk Mor)"]
         WithClitic["Mor::with_post_clitic<br/>(Single → multi-chunk Mor)"]
         BuildGra["build_gra_and_validate<br/>, chunk index<br/>, GRA relations<br/>, count invariant"]
@@ -458,52 +458,52 @@ threaded through `build_gra_and_validate`. That coupling leaked
 per-language reconciliation detail into a language-neutral
 helper.
 
-The current design uses a `ChunkProvenance` data structure
-produced by every Mor synthesis site. `map_ud_sentence` now
-returns two parallel vectors internally: `Vec<Mor>` and
-`Vec<MorProvenance>`. Each `MorProvenance` carries one
-`ChunkProvenance` per chunk of its Mor (main first, post-clitics
-after). Each `ChunkProvenance` records:
+The current design: every synthesis site returns a `MappedItem`,
+a `%mor` item with one `ChunkProvenance` per chunk (main first,
+post-clitics after). A `MappedItem` is built a chunk at a time,
+`MappedItem::word(main, provenance)` then
+`with_post_clitic(clitic, provenance)`, and its fields are private,
+so an item cannot have a chunk without provenance or provenance
+without a chunk. Each `ChunkProvenance` (private fields, one
+constructor per kind of chunk) records:
 
-1. `source_ud_ids`: which UD word ids map to this chunk (one
-   for a normal Single, N for a collapsed Range, zero for a
-   synthesized post-clitic).
+1. `source_ud_ids`: which UD words (`UdWordId`) resolve to this
+   chunk: one for a normal word (`ChunkProvenance::of_word`),
+   every id of the range for a collapsed Range
+   (`collapsed_range`), none for a synthesized post-clitic
+   (`synthetic_post_clitic`).
 2. `head`: how to resolve the GRA relation's head index
-   (`Root`, `FromUd(ud_id)`, or `OwningMorMain`).
+   (`Root`, `FromUd(UdWordId)`, or `OwningMorMain`).
 3. `deprel`: pre-normalized relation string.
 
-`build_gra_and_validate` is now language-neutral: it takes
-`(mors, provenance)` plus a `TerminatorPolicy` enum and emits
-GRA relations by walking provenance. No side-tables, no
-language awareness.
+`build_gra_and_validate` is language-neutral: it takes the
+mapped items with their provenance, emits GRA relations by
+walking provenance, and appends the terminator's relation. No
+side-tables, no language awareness.
 
 ```mermaid
 sequenceDiagram
     participant MUS as map_ud_sentence
     participant CI as check_italian_compound_imperative
     participant ACIO as apply_compound_imperative_override
-    participant Mor as Mor::with_post_clitic
-    participant Prov as ChunkProvenance
+    participant Item as MappedItem
     participant BGV as build_gra_and_validate (language-neutral)
     participant P1 as Pass 1, build ud_to_chunk_idx
     participant P2 as Pass 2, emit GRA relations
 
     MUS->>CI: ud.text + ud.upos (for dammela)
     CI-->>MUS: Some(&override) with 2 clitics
-    MUS->>ACIO: override + ud.head + ud.deprel
-    ACIO->>Mor: main verb Mor
-    ACIO->>Mor: with_post_clitic(me)
-    ACIO->>Mor: with_post_clitic(la)
-    Mor-->>ACIO: Mor{main, post_clitics: [me, la]}
-    ACIO-->>MUS: multi-chunk Mor
-    MUS->>Prov: 1 main chunk (source_ud_ids=[ud.id], head=FromUd, deprel=ud.deprel)
-    MUS->>Prov: 1 clitic (source_ud_ids=[], head=OwningMorMain, deprel=me.deprel)
-    MUS->>Prov: 1 clitic (source_ud_ids=[], head=OwningMorMain, deprel=la.deprel)
-    MUS->>BGV: mors, provenance, TerminatorPolicy
+    MUS->>ACIO: override + ud + ChunkProvenance::of_word(ud)
+    ACIO->>Item: word(main verb, main provenance)
+    ACIO->>Item: with_post_clitic(me, synthetic_post_clitic(me.deprel))
+    ACIO->>Item: with_post_clitic(la, synthetic_post_clitic(la.deprel))
+    Item-->>ACIO: 3 chunks, 3 provenance entries
+    ACIO-->>MUS: MappedItem
+    MUS->>BGV: items (each split into its Mor and provenance)
     BGV->>P1: walk provenance; ci += chunks per Mor; map source_ud_ids → ci
     BGV->>P2: walk provenance; emit one relation per chunk; resolve head by ChunkHead variant
     P2-->>BGV: Vec&lt;GrammaticalRelation&gt;
-    BGV->>BGV: validate: gras.len() == sum(count_chunks) + terminator offset
+    BGV->>BGV: append terminator relation, validate
 ```
 
 *Verified against: `map_ud_sentence` (synthesis sites at each
@@ -512,22 +512,18 @@ reconciler branch), `map_ud_sentence_expanded` (uniform
 (language-neutral in
 `crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs`,
 re-exported through `crates/batchalign/src/chat_ops/nlp/mapping/mod.rs`),
-`provenance.rs` (data types), `helpers.rs` (normalize_deprel +
+`mapping_provenance.rs` (data types), `mapping_helpers.rs` (normalize_deprel +
 assemble_mors + provenance_for_ud_word), `apply_compound_imperative_override`
 in `lang_it.rs`, and the test `test_italian_defect8_dammela_emits_multi_chunk_mor`.*
 
 Invariants checked at the end of `build_gra_and_validate`:
 
-- `mors.len() == provenance.len()`
-- For every `i`, `mors[i].count_chunks() == provenance[i].len()`
 - A chunk with `ChunkHead::Root` was encountered
-- `gras.len() == sum(mor.count_chunks()) + terminator_offset`
+- Every `FromUd` head names a UD word some chunk stands for
 
-Violations surface as `MappingError::ChunkCountMismatch` /
-`InvalidRoot` / `InvalidHeadReference`. Because provenance is
-produced alongside the Mor at a single site, the two can't drift
-, the chunk count check is a tripwire if a new synthesis site
-ever produces mismatched counts.
+Violations surface as `MappingError::InvalidRoot` /
+`InvalidHeadReference`. Chunk counts need no check: `MappedItem`
+adds a chunk and its provenance in one call, so they cannot drift.
 
 ### Allowlist design invariants
 

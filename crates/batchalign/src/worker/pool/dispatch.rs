@@ -102,10 +102,10 @@ impl Drop for TcpSlotLease {
 fn saturation_timeout_err(
     target: &WorkerTarget,
     lang: &WorkerLanguage,
-    wait_secs: u64,
+    wait: crate::api::PositiveSeconds,
 ) -> WorkerError {
     WorkerError::SpawnFailed(format!(
-        "no worker available for {target:?}/{lang} within {wait_secs}s, \
+        "no worker available for {target:?}/{lang} within {wait}s, \
          pool saturated with no idle workers to evict"
     ))
 }
@@ -124,7 +124,8 @@ impl WorkerPool {
         // global cap reached, no idle worker to evict). Bounds how long
         // we park on `worker_returned` before returning a typed error
         // the orchestrator can surface as a per-file failure.
-        let wait_deadline = tokio::time::Instant::now() + self.config.checkout_wait_timeout();
+        let wait_limit = self.config.checkout_wait_timeout();
+        let wait_deadline = crate::worker::Deadline::after(wait_limit);
 
         loop {
             // Invariant (normal operation): `group.available.permits() ==
@@ -189,14 +190,11 @@ impl WorkerPool {
                             continue;
                         }
 
-                        if tokio::time::timeout_at(wait_deadline, notified)
-                            .await
-                            .is_err()
-                        {
+                        if wait_deadline.within(notified).await.is_none() {
                             return Err(saturation_timeout_err(
                                 &key.target,
                                 &key.language,
-                                self.config.checkout_wait_timeout().as_secs(),
+                                wait_limit,
                             ));
                         }
                         continue;
@@ -211,15 +209,10 @@ impl WorkerPool {
             // used for the zero-worker saturation path. A stale `total > 0`
             // count or a wedged checked-out worker must fail explicitly
             // instead of hanging the caller forever.
-            let permit = tokio::time::timeout_at(wait_deadline, group.available.acquire())
+            let permit = wait_deadline
+                .within(group.available.acquire())
                 .await
-                .map_err(|_| {
-                    saturation_timeout_err(
-                        &key.target,
-                        &key.language,
-                        self.config.checkout_wait_timeout().as_secs(),
-                    )
-                })?
+                .ok_or_else(|| saturation_timeout_err(&key.target, &key.language, wait_limit))?
                 .map_err(|_| WorkerError::SpawnFailed("worker pool semaphore closed".into()))?;
             permit.forget();
 
@@ -360,17 +353,17 @@ impl WorkerPool {
             WorkerBootstrapMode::LazyProfile => Some(execute_v2::ensure_task_params(request)?),
             WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => None,
         };
-        let timeout = self.config.effective_ensure_task_timeout_s();
+        let timeout = self.config.effective_ensure_task_timeout();
 
         // Try TCP worker first.
         if matches!(key.target, WorkerTarget::Profile(_))
             && let Some(mut checkout) = self.try_checkout_tcp(&key)
         {
             let result = async {
-                if let Some((task_name, overrides)) = &lazy_task {
+                if let Some((task, overrides)) = &lazy_task {
                     checkout
                         .handle()
-                        .ensure_task(task_name, overrides.as_ref(), timeout)
+                        .ensure_task(*task, overrides.as_ref(), timeout)
                         .await?;
                 }
                 checkout
@@ -386,13 +379,40 @@ impl WorkerPool {
         // Fall back to stdio worker.
         let mut worker = self.checkout(&key).await?;
         let _job_guard = TrackerGuard::new(&self.job_tracker, worker.pid());
-        if let Some((task_name, overrides)) = &lazy_task {
+        if let Some((task, overrides)) = &lazy_task {
             worker
-                .ensure_task(task_name, overrides.as_ref(), timeout)
+                .ensure_task(*task, overrides.as_ref(), timeout)
                 .await?;
         }
 
         worker.execute_v2_with_progress(request, progress_tx).await
+    }
+
+    /// The registry GPU daemon connected for `key`, if its stream is still
+    /// open. A connection whose stream has closed is removed here, so dispatch
+    /// falls back to a spawned worker and the next discovery sweep can connect
+    /// to the daemon afresh, instead of every request waiting out its timeout
+    /// on a dead connection.
+    pub(super) async fn live_gpu_tcp_worker(
+        &self,
+        key: &WorkerKey,
+    ) -> Option<Arc<super::shared_gpu::SharedGpuTcpWorker>> {
+        let mut workers = self.gpu_tcp_workers.lock().await;
+        let worker = workers.get(key)?;
+        match worker.check_available() {
+            Ok(()) => Some(worker.clone()),
+            Err(error) => {
+                warn!(
+                    target = %key.target.label(),
+                    lang = %key.language,
+                    pid = %worker.pid(),
+                    %error,
+                    "GPU TCP worker connection is closed; removing it"
+                );
+                workers.remove(key);
+                None
+            }
+        }
     }
 
     /// Dispatch a V2 execute request to a GPU worker.
@@ -415,19 +435,18 @@ impl WorkerPool {
         request: &ExecuteRequestV2,
     ) -> Result<ExecuteResponseV2, WorkerError> {
         // Try TCP worker first (discovered from registry).
-        if matches!(key.target, WorkerTarget::Profile(_)) {
-            let tcp_worker = self.gpu_tcp_workers.lock().await.get(key).cloned();
-            if let Some(tcp_worker) = tcp_worker {
-                let _job_guard = TrackerGuard::new(&self.job_tracker, tcp_worker.pid());
-                if self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-                    let (task_name, overrides) = execute_v2::ensure_task_params(request)?;
-                    let timeout = self.config.effective_ensure_task_timeout_s();
-                    tcp_worker
-                        .ensure_task(&task_name, overrides.as_ref(), timeout)
-                        .await?;
-                }
-                return tcp_worker.execute_v2(request).await;
+        if matches!(key.target, WorkerTarget::Profile(_))
+            && let Some(tcp_worker) = self.live_gpu_tcp_worker(key).await
+        {
+            let _job_guard = TrackerGuard::new(&self.job_tracker, tcp_worker.pid());
+            if self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
+                let (task, overrides) = execute_v2::ensure_task_params(request)?;
+                let timeout = self.config.effective_ensure_task_timeout();
+                tcp_worker
+                    .ensure_task(task, overrides.as_ref(), timeout)
+                    .await?;
             }
+            return tcp_worker.execute_v2(request).await;
         }
 
         // Fall back to stdio worker.
@@ -435,14 +454,32 @@ impl WorkerPool {
         let _job_guard = TrackerGuard::new(&self.job_tracker, gpu_worker.pid());
 
         if self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-            let (task_name, overrides) = execute_v2::ensure_task_params(request)?;
-            let timeout = self.config.effective_ensure_task_timeout_s();
+            let (task, overrides) = execute_v2::ensure_task_params(request)?;
+            let timeout = self.config.effective_ensure_task_timeout();
             gpu_worker
-                .ensure_task(&task_name, overrides.as_ref(), timeout)
+                .ensure_task(task, overrides.as_ref(), timeout)
                 .await?;
         }
 
-        gpu_worker.execute_v2(request).await
+        let result = gpu_worker.execute_v2(request).await;
+        if let Err(WorkerError::Timeout { .. }) = &result {
+            // The worker thread serving the request may still be running it,
+            // holding one of the worker's `gpu_thread_pool_size` slots for
+            // good; enough of them and every request times out. Retire the
+            // worker so the slot replaces it; the requests in flight on it
+            // are answered `WorkerRetired` and retried.
+            warn!(
+                pid = %gpu_worker.pid(),
+                "A shared GPU request timed out; retiring its worker"
+            );
+            let worker = Arc::clone(&gpu_worker);
+            tokio::spawn(async move {
+                worker
+                    .shutdown(super::shared_gpu::Retirement::WorkerRetired)
+                    .await;
+            });
+        }
+        result
     }
 
     /// Load the command's task on the worker it selects, then probe that
@@ -480,28 +517,29 @@ impl WorkerPool {
         let loaded_task = crate::command_model::command_spec(command)
             .capabilities
             .primary_infer_task;
-        let task = crate::worker::target::task_name(loaded_task);
         let overrides = key.engine_selection.overrides().dispatch_overrides();
         let overrides = (!overrides.is_empty()).then_some(overrides);
-        let timeout_s = self.config.effective_ensure_task_timeout_s();
+        let timeout = self.config.effective_ensure_task_timeout();
 
         let reports = if self.serving(key.target).is_shared() {
             let registry_worker = if matches!(key.target, WorkerTarget::Profile(_)) {
-                self.gpu_tcp_workers.lock().await.get(&key).cloned()
+                self.live_gpu_tcp_worker(&key).await
             } else {
                 None
             };
             match registry_worker {
                 Some(worker) => {
                     worker
-                        .ensure_task(task, overrides.as_ref(), timeout_s)
+                        .ensure_task(loaded_task, overrides.as_ref(), timeout)
                         .await?;
                     let caps = worker.capabilities().await?;
                     match self.record_capabilities(&key, caps) {
                         Ok(reports) => reports,
                         Err(refusal) => {
                             self.gpu_tcp_workers.lock().await.remove(&key);
-                            worker.shutdown().await;
+                            worker
+                                .shutdown(super::shared_gpu::Retirement::WorkerRetired)
+                                .await;
                             return Err(refusal.into());
                         }
                     }
@@ -509,14 +547,16 @@ impl WorkerPool {
                 None => {
                     let worker = self.get_or_create_gpu_worker(&key).await?;
                     worker
-                        .ensure_task(task, overrides.as_ref(), timeout_s)
+                        .ensure_task(loaded_task, overrides.as_ref(), timeout)
                         .await?;
                     let caps = worker.capabilities().await?;
                     match self.record_capabilities(&key, caps) {
                         Ok(reports) => reports,
                         Err(refusal) => {
                             self.gpu_workers.lock().await.remove(&key);
-                            worker.shutdown().await;
+                            worker
+                                .shutdown(super::shared_gpu::Retirement::WorkerRetired)
+                                .await;
                             return Err(refusal.into());
                         }
                     }
@@ -530,7 +570,7 @@ impl WorkerPool {
             let admitted = async {
                 checkout
                     .handle()
-                    .ensure_task(task, overrides.as_ref(), timeout_s)
+                    .ensure_task(loaded_task, overrides.as_ref(), timeout)
                     .await?;
                 let caps = checkout.handle().capabilities().await?;
                 self.record_capabilities(&key, caps)
@@ -542,7 +582,7 @@ impl WorkerPool {
         } else {
             let mut worker = self.checkout(&key).await?;
             worker
-                .ensure_task(task, overrides.as_ref(), timeout_s)
+                .ensure_task(loaded_task, overrides.as_ref(), timeout)
                 .await?;
             let caps = worker.capabilities().await?;
             match self.record_capabilities(&key, caps) {
@@ -601,7 +641,7 @@ mod tcp_checkout_tests {
     async fn pool_with_one_tcp_handle(port: u16) -> (WorkerPool, WorkerKey, CommandOptions) {
         let mut config = super::super::PoolConfig::default();
         config.runtime.bootstrap_mode = WorkerBootstrapMode::Profile;
-        config.ensure_task_timeout_s = 5;
+        config.ensure_task_timeout = Some(crate::api::PositiveSeconds::literal::<5>());
         let pool = WorkerPool::new(config);
         let options = CommandOptions::Morphotag(MorphotagOptions::default());
         let key = WorkerKey::from_command_options(
@@ -621,8 +661,7 @@ mod tcp_checkout_tests {
             lang: WorkerLanguage::from(LanguageCode3::eng()),
             engine_overrides: String::new(),
             pid: WorkerPid(1),
-            audio_task_timeout_s: 0,
-            analysis_task_timeout_s: 0,
+            task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
             gpu_thread_pool_size: 1,
         })
         .await
@@ -668,8 +707,32 @@ mod tcp_checkout_tests {
         assert_eq!(pool.spawn_permits.available_permits(), permits_before);
     }
 
-    /// A closed connection is a typed connection failure: the handle is
-    /// retired and its slot released, not returned to serve another request.
+    /// An `ensure_task` reply about another task does not load the asked
+    /// task: on a single-flight connection it is a protocol violation.
+    #[tokio::test]
+    async fn an_ensure_task_reply_about_another_task_is_a_protocol_error() {
+        let port = fake_daemon(Some(
+            "{\"op\":\"ensure_task\",\"response\":{\"status\":\"loaded\",\"task\":\"fa\",\"elapsed_s\":0.1}}\n",
+        ))
+        .await;
+        let (pool, _key, options) = pool_with_one_tcp_handle(port).await;
+        let error = pool
+            .ensure_command_capabilities(
+                ReleasedCommand::Morphotag,
+                WorkerLanguage::from(LanguageCode3::eng()),
+                &options,
+            )
+            .await
+            .expect_err("a reply about fa does not answer ensure_task(morphosyntax)");
+        assert!(
+            matches!(&error, WorkerError::Protocol(message) if message.contains("answered about fa")),
+            "{error:?}"
+        );
+    }
+
+    /// A closed connection is the request losing its worker, as on the
+    /// shared GPU paths (`ProcessExited`, retryable): the handle is retired
+    /// and its slot released, not returned to serve another request.
     #[tokio::test]
     async fn a_closed_connection_retires_the_handle_and_releases_its_slot() {
         let port = fake_daemon(None).await;
@@ -684,7 +747,10 @@ mod tcp_checkout_tests {
             )
             .await
             .expect_err("the fake daemon closed the connection");
-        assert!(matches!(error, WorkerError::Protocol(_)), "{error:?}");
+        assert!(
+            matches!(error, WorkerError::ProcessExited { .. }),
+            "{error:?}"
+        );
 
         let group = pool.get_or_create_group(&key);
         assert!(lock_recovered(&group.tcp_workers).is_empty());
@@ -718,7 +784,7 @@ mod tests {
         let pool = WorkerPool::new(super::super::PoolConfig {
             max_workers_per_key: crate::host_facts::PerProfile::uniform(1),
             max_total_workers: 1,
-            checkout_wait_timeout_s: 1,
+            checkout_wait_timeout: Some(crate::api::PositiveSeconds::literal::<1>()),
             ..Default::default()
         });
         let target = WorkerTarget::infer_task(InferTask::Morphosyntax);

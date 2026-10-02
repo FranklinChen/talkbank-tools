@@ -119,7 +119,31 @@ def test_worker_protocol_v2_fixtures_roundtrip_in_python(entry: dict[str, str]) 
         ),
         (
             AsrElementV2,
-            {"value": "nei5", "start_s": 0.9, "end_s": 0.4, "kind": "text"},
+            {
+                "value": "nei5",
+                "timing": {"kind": "timed", "start_ms": 900, "end_ms": 400},
+                "kind": "text",
+            },
+        ),
+        (
+            AsrElementV2,
+            {
+                "value": "nei5",
+                "timing": {
+                    "kind": "timed",
+                    "start_ms": 1_700_000_000_000,
+                    "end_ms": 1_700_000_000_500,
+                },
+                "kind": "text",
+            },
+        ),
+        (
+            SpeakerSegmentV2,
+            {
+                "start_ms": 1_700_000_000_000,
+                "end_ms": 1_700_000_000_500,
+                "speaker": "S",
+            },
         ),
         (
             IndexedWordTimingV2,
@@ -189,3 +213,24 @@ def test_worker_protocol_v2_rejects_non_finite_elapsed_time() -> None:
                 "elapsed_s": float("nan"),
             }
         )
+
+
+def test_an_item_outcome_admits_neither_a_null_result_nor_an_unknown_field() -> None:
+    """A produced item with a null result, and a field the response does not
+    name, are refused as Rust refuses them (``ItemPayload``,
+    ``deny_unknown_fields``)."""
+    from batchalign.worker._types import InferResponse
+
+    InferResponse.model_validate(
+        {"outcome": {"kind": "produced", "result": {"x": 1}}, "elapsed_s": 0.5}
+    )
+    for payload in [
+        {"outcome": {"kind": "produced", "result": None}, "elapsed_s": 0.5},
+        {
+            "outcome": {"kind": "failed", "error": "x"},
+            "elapsed_s": None,
+            "extra": 1,
+        },
+    ]:
+        with pytest.raises(ValidationError):
+            InferResponse.model_validate(payload)

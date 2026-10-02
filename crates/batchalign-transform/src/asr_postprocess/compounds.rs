@@ -67,13 +67,13 @@ pub fn merge_compounds(elements: &[AsrElement]) -> Vec<AsrElement> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asr_postprocess::AsrTimestampSecs;
+    use crate::asr_postprocess::observed;
 
     fn elem(value: &str, ts: f64, end_ts: f64) -> AsrElement {
         AsrElement {
             value: AsrRawText::new(value),
-            ts: AsrTimestampSecs::Observed(ts),
-            end_ts: AsrTimestampSecs::Observed(end_ts),
+            ts: observed(ts),
+            end_ts: observed(end_ts),
             kind: AsrElementKind::Text,
         }
     }
@@ -100,8 +100,8 @@ mod tests {
         let merged = merge_compounds(&elems);
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[0].value, "airplane");
-        assert_eq!(merged[0].ts, 0.0);
-        assert_eq!(merged[0].end_ts, 0.5); // timing from first
+        assert_eq!(merged[0].ts, observed(0.0));
+        assert_eq!(merged[0].end_ts, observed(0.5)); // timing from first
         assert_eq!(merged[1].value, "is");
         assert_eq!(merged[2].value, "here");
     }

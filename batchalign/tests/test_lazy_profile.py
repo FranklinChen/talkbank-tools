@@ -101,7 +101,8 @@ class TestEnsureTaskLoaded:
         result = ensure_task_loaded("speaker")
         assert result.status == "already_loaded"
         assert result.task == "speaker"
-        assert result.elapsed_s == 0.0
+        # The check is timed, never reported as a constant.
+        assert result.elapsed_s >= 0.0
 
     def test_ensure_task_result_fields(self) -> None:
         """EnsureTaskResponse has correct fields."""

@@ -4,15 +4,20 @@
 //!
 //! | File | Responsibility |
 //! |------|----------------|
-//! | `mod.rs` | Shared types, envelope deserialization helpers, re-exports |
-//! | `stdio.rs` | `SharedGpuWorker`, concurrent V2 dispatch over stdio |
-//! | `tcp.rs` | `SharedGpuTcpWorker`, concurrent V2 dispatch over TCP |
-//! | `reader.rs` | Generic JSON-lines reader loop shared by both transports |
+//! | `mod.rs` | Envelope deserialization helpers, re-exports |
+//! | `channel.rs` | `SharedGpuChannel`, the one transport: dispatch, sequential ops, liveness |
+//! | `routes.rs` | Pending dispatches and the control slot, both closing when the stream ends |
+//! | `reader.rs` | The reader task that routes each line to its owner |
+//! | `stdio.rs` | `SharedGpuWorker`: the channel over a spawned child's stdio, plus process ownership |
+//! | `tcp.rs` | `SharedGpuTcpWorker`: the channel over a daemon's TCP connection |
 
+mod channel;
 mod reader;
+mod routes;
 mod stdio;
 mod tcp;
 
+pub(crate) use routes::Retirement;
 pub(crate) use stdio::SharedGpuWorker;
 pub(crate) use tcp::SharedGpuTcpWorker;
 
@@ -32,17 +37,6 @@ pub(super) fn dispatch_permits_from(gpu_thread_pool_size: u32) -> usize {
         .min(u32::try_from(Semaphore::MAX_PERMITS).unwrap_or(u32::MAX)) as usize
 }
 
-/// Non-V2 responses routed via the control channel.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) enum WorkerControlResponse {
-    Health(crate::worker::WorkerHealthResponse),
-    Capabilities(crate::worker::WorkerCapabilities),
-    EnsureTask(EnsureTaskResponse),
-    Shutdown,
-    Error(String),
-}
-
 /// Deserialization envelope types used by the reader loop to parse
 /// JSON-lines responses from the worker process.
 pub(super) mod envelopes {
@@ -50,12 +44,6 @@ pub(super) mod envelopes {
     #[derive(serde::Deserialize)]
     pub(crate) struct ExecuteResponseV2Envelope {
         pub(crate) response: super::ExecuteResponseV2,
-    }
-
-    /// Helper envelope for deserializing `{"op": "health", "response": {...}}`.
-    #[derive(serde::Deserialize)]
-    pub(crate) struct HealthResponseEnvelope {
-        pub(crate) response: crate::worker::WorkerHealthResponse,
     }
 
     /// Helper envelope for deserializing `{"op": "capabilities", "response": {...}}`.

@@ -1,7 +1,7 @@
 # Batchalign Workers
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-01 07:44 EDT
 
 Per-app worker concerns specific to the Batchalign runtime: pool
 sizing, RAM-tier-aware memory budgets, model loading per worker,
@@ -18,6 +18,22 @@ and the no-`Mutex` policy.
 > architectural principles that prevent the layer-by-layer
 > consolidation bug class from returning are covered by the tier-aware memory
 > tests in `batchalign-types`.
+
+## How a worker process starts
+
+Every route that starts a Python worker (the server's pool, persistent TCP
+workers, `batchalign3 worker start`) builds its command with
+`worker::python::worker_command`: the resolved interpreter run as
+`python -P -c <worker entry>`. The import probes (`python_has_batchalign`,
+`batchalign3 doctor`) use the same isolated interpreter, so a probe checks the
+import a worker will perform.
+
+`-P` is load-bearing. Plain `python -c` puts the current working directory
+first on `sys.path`, so a server started inside a source checkout ran that
+checkout's `batchalign` package, uncommitted edits included, while its build
+identity named the installed wheel (found 2026-10-01). `-P` removes only that
+entry: an editable development install reaches its source through a `.pth`
+file and still works. Tested on a real interpreter in `worker/python.rs`.
 
 ## Three Layers of Parallelism
 

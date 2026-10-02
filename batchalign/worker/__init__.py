@@ -11,8 +11,9 @@ Protocol:
         {"op": "infer", "request": <InferRequest>}
         {"op": "batch_infer", "request": <BatchInferRequest>}
         {"op": "execute_v2", "request": <ExecuteRequestV2>}
+        {"op": "ensure_task", "request": {"request_id": "control-N", "task": ..., "engine_overrides": ...}}
         {"op": "health"}
-        {"op": "capabilities"}
+        {"op": "capabilities", "request": {"request_id": "control-N"}}
         {"op": "shutdown"}
 
     Response (worker -> parent):
@@ -21,8 +22,11 @@ Protocol:
         {"op": "execute_v2", "response": <ExecuteResponseV2>}
         {"op": "health", "response": <HealthResponse>}
         {"op": "capabilities", "response": <CapabilitiesResponse>}
+        {"op": "ensure_task", "response": <EnsureTaskResponse>}
         {"op": "shutdown"}
-        {"op": "error", "error": "..."}
+        {"op": "error", "error": "...", "kind": "runtime" | "bootstrap" | "invalid_request",
+         "request_id": "..." (present when the failed request carried one: a V2
+         dispatch, or a capabilities or ensure_task control request)}
 
 Usage:
     uv run python -m batchalign.worker --task asr --lang eng

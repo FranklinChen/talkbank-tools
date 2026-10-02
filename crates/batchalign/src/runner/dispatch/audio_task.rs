@@ -27,7 +27,7 @@ use crate::runner::util::{
     is_retryable_worker_failure, spawn_progress_forwarder, user_facing_error,
 };
 use crate::scheduling::{FailureCategory, RetryPolicy, WorkUnitKind};
-use crate::store::{PendingJobFile, RunnerJobSnapshot, unix_now};
+use crate::store::{PendingJobFile, RunnerJobSnapshot};
 
 use super::audio_output::{FileOutput, write_primary_output_artifact};
 
@@ -105,7 +105,7 @@ where
     for attempt_number in 1..=retry_policy.max_attempts {
         if attempt_number > 1 {
             lifecycle
-                .restart_attempt(work_unit_kind, unix_now(), running_stage)
+                .restart_attempt(work_unit_kind, running_stage)
                 .await;
         } else {
             lifecycle.stage(running_stage).await;
@@ -130,14 +130,12 @@ where
                             .fail(
                                 &format!("Failed to finalize {command_label} output: {error}"),
                                 FailureCategory::System,
-                                unix_now(),
                             )
                             .await;
                         return FileTaskOutcome::TerminalStateRecorded;
                     }
                 };
                 lifecycle.stage(FileStage::Writing).await;
-                let finished_at = unix_now();
                 let primary_output = match write_primary_output_artifact(
                     &job.filesystem,
                     job.dispatch.command,
@@ -166,7 +164,6 @@ where
                                 // the word "Failed to write" for both.
                                 &error.operator_message(command_label),
                                 error.category(),
-                                finished_at,
                             )
                             .await;
                         return FileTaskOutcome::TerminalStateRecorded;
@@ -177,13 +174,11 @@ where
                     .complete_with_result(
                         primary_output.display_path.clone(),
                         primary_output.content_type,
-                        finished_at,
                     )
                     .await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
             Err(error) => {
-                let finished_at = unix_now();
                 let category = classify_server_error(&error);
                 let raw_msg = format!("{command_label} failed: {error}");
                 warn!(
@@ -203,21 +198,18 @@ where
                 {
                     task.on_retryable_worker_failure(lifecycle, &error).await;
                     let backoff_ms = retry_policy.backoff_for_retry(attempt_number);
-                    let retry_at =
-                        crate::api::UnixTimestamp(finished_at.0 + (backoff_ms.0 as f64 / 1000.0));
                     lifecycle
-                        .retry(
-                            retry_at,
+                        .retry_after(
+                            backoff_ms.duration(),
                             category,
                             &format!("{err_msg}; retrying in {backoff_ms} ms"),
-                            finished_at,
                         )
                         .await;
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.0)).await;
+                    tokio::time::sleep(backoff_ms.duration()).await;
                     continue;
                 }
 
-                lifecycle.fail(&err_msg, category, finished_at).await;
+                lifecycle.fail(&err_msg, category).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
         }
@@ -239,8 +231,8 @@ mod tests {
     use super::super::audio_output::MergeAbbreviations;
     use super::*;
     use crate::api::{
-        CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, NumSpeakers,
-        ReleasedCommand, UnixTimestamp,
+        CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, MachineTime, NumSpeakers,
+        ReleasedCommand,
     };
     use crate::options::{
         AsrEngineName, CommandOptions, CommonOptions, TranscribeOptions, WorTierPolicy,
@@ -279,18 +271,22 @@ mod tests {
 
     #[async_trait]
     impl RunnerEventSink for RecordingSink {
+        fn now(&self) -> crate::store::EventTime {
+            crate::store::EventTime::fixed(crate::unix_time(1_700_000_000.0))
+        }
+
         async fn mark_file_processing(
             &self,
             _job_id: &JobId,
             _filename: &str,
-            _started_at: UnixTimestamp,
+            _started_at: crate::store::EventTime,
         ) {
         }
         async fn mark_file_done(
             &self,
             _job_id: &JobId,
             _filename: &str,
-            _finished_at: UnixTimestamp,
+            _finished_at: crate::store::EventTime,
             _result: Option<crate::store::CompletedFileOutput>,
         ) {
             self.state.lock().unwrap().done += 1;
@@ -301,7 +297,7 @@ mod tests {
             _filename: &str,
             _error: &str,
             _category: FailureCategory,
-            _finished_at: UnixTimestamp,
+            _finished_at: crate::store::EventTime,
         ) {
             self.state.lock().unwrap().errors += 1;
         }
@@ -310,7 +306,7 @@ mod tests {
             _job_id: &JobId,
             _filename: &str,
             _work_unit_kind: WorkUnitKind,
-            _started_at: UnixTimestamp,
+            _started_at: crate::store::EventTime,
         ) {
             self.state.lock().unwrap().started_attempts += 1;
         }
@@ -321,7 +317,7 @@ mod tests {
             outcome: AttemptOutcome,
             _failure_category: Option<FailureCategory>,
             _disposition: RetryDisposition,
-            _finished_at: UnixTimestamp,
+            _finished_at: crate::store::EventTime,
         ) {
             self.state.lock().unwrap().finished_attempts.push(outcome);
         }
@@ -329,10 +325,10 @@ mod tests {
             &self,
             _job_id: &JobId,
             _filename: &str,
-            _retry_at: UnixTimestamp,
+            _retry_at: MachineTime,
             _category: FailureCategory,
             _message: &str,
-            _finished_at: UnixTimestamp,
+            _finished_at: crate::store::EventTime,
         ) {
             self.state.lock().unwrap().retries += 1;
         }
@@ -353,10 +349,10 @@ mod tests {
             None
         }
         async fn bump_forced_terminal_errors(&self, _count: usize) {}
-        async fn fail_job(&self, _job_id: &JobId, _error: &str, _failed_at: UnixTimestamp) {}
+        async fn fail_job(&self, _job_id: &JobId, _error: &str) {}
         async fn mark_job_running(&self, _job_id: &JobId) {}
         async fn record_job_worker_count(&self, _job_id: &JobId, _worker_count: usize) {}
-        async fn requeue_job_after_memory_gate(&self, _job_id: &JobId, _retry_at: UnixTimestamp) {}
+        async fn requeue_job_after_memory_gate(&self, _job_id: &JobId, _retry_at: MachineTime) {}
         async fn bump_deferred_work_units(&self) {}
         async fn bump_memory_gate_aborts(&self) {}
         async fn finalize_job(
@@ -364,7 +360,7 @@ mod tests {
             _job_id: &JobId,
             _expected_generation: crate::store::RunGeneration,
             _final_status: crate::api::JobStatus,
-            _completed_at: UnixTimestamp,
+            _completed_at: crate::store::EventTime,
         ) -> Option<String> {
             None
         }
@@ -386,7 +382,7 @@ mod tests {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt == 0 {
                 Err(ServerError::Worker(WorkerError::ReadyTimeout {
-                    timeout_s: 1,
+                    timeout_s: crate::api::PositiveSeconds::literal::<1>(),
                 }))
             } else {
                 Ok("@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n".to_string())
@@ -476,11 +472,7 @@ mod tests {
             file.filename.as_ref(),
         );
         lifecycle
-            .begin_first_attempt(
-                WorkUnitKind::FileInfer,
-                unix_now(),
-                FileStage::ResolvingAudio,
-            )
+            .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
             .await;
 
         let attempts = Arc::new(AtomicUsize::new(0));

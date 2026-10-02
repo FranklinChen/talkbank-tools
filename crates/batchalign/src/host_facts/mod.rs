@@ -52,7 +52,7 @@ pub use recommendations::{
 pub use validation::{ConfigError, ConfigValidation, ConfigWarning, validate};
 pub use warnings::DetectionWarning;
 
-use crate::api::UnixTimestamp;
+use crate::api::MachineTime;
 
 /// Detected facts about the host on which batchalign3 is running.
 ///
@@ -66,10 +66,7 @@ use crate::api::UnixTimestamp;
 /// poll) is intentional. `ram_total_mb` and `ram_available_mb` here are
 /// snapshots at startup; the live coordinator continues to poll
 /// available memory for runtime gating decisions.
-// `Eq` is intentionally omitted: `detection_timestamp` is a `f64`-backed
-// `UnixTimestamp` and floats do not implement `Eq`. `PartialEq` covers
-// every test that uses `assert_eq!` against synthesized facts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostFacts {
     /// The host operating system family.
     pub os: OperatingSystem,
@@ -95,7 +92,7 @@ pub struct HostFacts {
     /// When detection ran. Useful for "is this snapshot still fresh?"
     /// questions later, though for now the snapshot lives for the
     /// process lifetime.
-    pub detection_timestamp: UnixTimestamp,
+    pub detection_timestamp: MachineTime,
     /// Non-fatal probe failures encountered during detection. The
     /// presence of warnings does not invalidate the rest of the
     /// struct; consumers may surface them in operator-facing output.
@@ -172,11 +169,6 @@ impl HostFactsSource for RealHostFactsSource {
         // over-estimate of headroom on hosts with SMT enabled.
         let cpu_physical_count = cpu_logical_count;
 
-        let detection_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-
         let os = OperatingSystem::from_consts(std::env::consts::OS);
         let arch = CpuArch::from_consts(std::env::consts::ARCH);
         // GPU detection delegates to the pure `detect_gpu_presence`
@@ -198,7 +190,7 @@ impl HostFactsSource for RealHostFactsSource {
             // Placeholder; refined when we wire up a real hostname
             // probe. Not used by `recommend()` or `validate()`.
             hostname: "unknown".to_owned(),
-            detection_timestamp: UnixTimestamp::from(detection_timestamp),
+            detection_timestamp: MachineTime::now(),
             // GPU detection populates warnings (nvidia-smi NotFound /
             // Failed / Unparseable). Future phases will append additional
             // probe failures (Stanza resources, Python interpreter,

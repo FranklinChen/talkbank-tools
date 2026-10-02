@@ -15,11 +15,9 @@ use tokio::sync::broadcast;
 
 use crate::api::{
     CancellationRequest, JobControlPlaneInfo, JobId, JobInfo, JobListItem, JobStatus, NodeId,
-    NumWorkers, UnixTimestamp,
 };
 use crate::db::JobDB;
 use crate::error::ServerError;
-use crate::host_memory::HostMemoryError;
 use crate::runner::util::RunnerEventSink;
 use crate::runner::{
     ExecutionEngine, MemoryGateRejectionDisposition, QueuedJobOrchestrator, ServerExecutionHost,
@@ -27,7 +25,7 @@ use crate::runner::{
 };
 use crate::runtime_supervisor::{RuntimeSupervisor, ShutdownError, ShutdownSummary};
 use crate::scheduling::{DurationMs, RetryPolicy};
-use crate::store::{Job, JobDetail, JobStore, unix_now};
+use crate::store::{Job, JobDetail, JobStore};
 use crate::types::traces::JobTraces;
 use crate::ws::{BROADCAST_CAPACITY, WsEvent};
 
@@ -57,6 +55,9 @@ pub struct ServerControlPlaneSnapshot {
 /// App-facing backend for queued-job orchestration and persisted job state.
 #[async_trait]
 pub trait ServerBackend: Send + Sync {
+    /// Now, by the store's clock, as the time of an event (a submission).
+    fn event_time(&self) -> crate::store::EventTime;
+
     /// Persist a newly submitted job and wake the dispatcher if needed.
     async fn submit_job(&self, job: Job) -> Result<(), ServerError>;
 
@@ -175,11 +176,11 @@ impl QueuedJobOrchestrator for LocalJobOrchestrator {
         &self,
         sink: &Arc<dyn RunnerEventSink>,
         job_id: &JobId,
-        _requested_workers: NumWorkers,
-        _error: &HostMemoryError,
     ) -> Result<MemoryGateRejectionDisposition, ServerError> {
-        let retry_at = UnixTimestamp(
-            unix_now().0 + (self.memory_gate_retry_policy.backoff_for_retry(1).0 as f64 / 1000.0),
+        let retry_at = sink.now().deadline_after(
+            self.memory_gate_retry_policy
+                .backoff_for_retry(1)
+                .duration(),
         );
         sink.requeue_job_after_memory_gate(job_id, retry_at).await;
         sink.bump_deferred_work_units().await;
@@ -209,6 +210,10 @@ fn local_control_plane_info() -> JobControlPlaneInfo {
 
 #[async_trait]
 impl ServerBackend for LocalServerBackend {
+    fn event_time(&self) -> crate::store::EventTime {
+        self.store.event_time()
+    }
+
     async fn submit_job(&self, job: Job) -> Result<(), ServerError> {
         let job_id = job.identity.job_id.clone();
 
@@ -395,9 +400,15 @@ pub(crate) async fn bootstrap_local_server_backend(
     db: Arc<JobDB>,
     engine: ExecutionEngine,
     jobs_dir: std::path::PathBuf,
+    clock: Arc<dyn crate::clock::Clock>,
 ) -> Result<ServerBackendBootstrap, ServerError> {
     let (ws_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(config.clone(), Some(db), ws_tx.clone()));
+    let store = Arc::new(JobStore::new(
+        config.clone(),
+        Some(db),
+        ws_tx.clone(),
+        clock,
+    ));
     let loaded_jobs = store.load_from_db().await?;
 
     // Collect queued job IDs before consuming store/host/runtime into the backend struct.
@@ -487,7 +498,7 @@ mod tests {
     use crate::runner::{ExecutionEngine, RunnerExecutionContext};
     use crate::store::{
         FileStatus, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
-        JobLeaseState, JobRuntimeControl, JobScheduleState, JobSourceContext, unix_now,
+        JobRuntimeControl, JobScheduleState, JobSourceContext,
     };
     use crate::worker::pool::{PoolConfig, WorkerPool};
 
@@ -517,8 +528,10 @@ mod tests {
                 debug_traces: false,
             },
             source: JobSourceContext {
-                submitted_by: "127.0.0.1".into(),
-                submitted_by_name: String::new(),
+                submitter: Some(crate::store::Submitter::client(
+                    std::net::Ipv4Addr::LOCALHOST.into(),
+                    String::new(),
+                )),
                 source_dir: Default::default(),
             },
             filesystem: JobFilesystemConfig {
@@ -541,15 +554,11 @@ mod tests {
                 completed_files: 0,
             },
             schedule: JobScheduleState {
-                submitted_at: unix_now(),
+                submitted_at: crate::api::MachineTime::now(),
                 completed_at: None,
                 next_eligible_at: None,
                 num_workers: None,
-                lease: JobLeaseState {
-                    leased_by_node: None,
-                    expires_at: None,
-                    heartbeat_at: None,
-                },
+                lease: None,
                 last_cancel: None,
             },
             runtime: JobRuntimeControl {
@@ -589,6 +598,7 @@ mod tests {
             db,
             engine,
             tempdir.path().join("jobs"),
+            Arc::new(crate::clock::SystemClock),
         )
         .await
         .expect("bootstrap local backend");

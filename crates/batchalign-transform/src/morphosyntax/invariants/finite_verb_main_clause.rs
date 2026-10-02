@@ -19,8 +19,8 @@
 //! fabricated analysis, which is what this rule existed to prevent.
 
 use crate::morphosyntax::{
-    DepRel, FINITE_COPULA_PRES_3SG, PRESENT_PARTICIPLE, UdId, UdPunctable, UdSentence, UdWord,
-    UniversalPos, has_key_value, ud_pair_value,
+    CuratedFeats, DepRel, FeatName, UdHead, UdId, UdPunctable, UdSentence, UdWord, UdWordId,
+    UniversalPos, ud_pair_value,
 };
 use verb_lemma::VerbLemma;
 
@@ -28,6 +28,14 @@ use verb_lemma::VerbLemma;
 /// lemma as a verb. Must match `VERB_READING_LEMMA_MISC_KEY` in
 /// `batchalign/inference/_english_verb_reading.py`.
 pub const VERB_READING_LEMMA_MISC_KEY: &str = "VerbReadingLemma";
+
+/// The rescue's analysis of `'s`: the finite copula, present, third person
+/// singular.
+const FINITE_COPULA_PRES_3SG: CuratedFeats =
+    CuratedFeats::new("Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin");
+
+/// The rescue's analysis of the `-ing` word: a present participle.
+const PRESENT_PARTICIPLE: CuratedFeats = CuratedFeats::new("Tense=Pres|VerbForm=Part");
 
 /// English-specific rewrite, in place. Returns the input untouched when no
 /// rescue applies.
@@ -65,17 +73,17 @@ mod verb_lemma {
 /// An `-ing` word in one of the two misparse shapes, as one classification:
 /// its id, and its verb lemma when the analysis supplies one.
 struct IngHead {
-    id: usize,
+    id: UdWordId,
     verb_lemma: Option<VerbLemma>,
 }
 
 #[derive(Debug, Clone)]
 struct RescuePlan {
-    part_id: usize,
-    possessor_id: usize,
-    verb_id: usize,
+    part_id: UdWordId,
+    possessor_id: UdWordId,
+    verb_id: UdWordId,
     verb_lemma: VerbLemma,
-    old_root_id: usize,
+    old_root_id: UdWordId,
 }
 
 fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
@@ -88,10 +96,7 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
     sentence.mwt_component_ranges().next()?;
 
     let part = sentence.words.iter().find(|w| is_possessive_part(w))?;
-    let possessor_id = part.head;
-    if possessor_id == 0 {
-        return None;
-    }
+    let possessor_id = part.head.word()?;
     let possessor = find_word_by_single_id(sentence, possessor_id)?;
     let possessor_upos = match &possessor.upos {
         UdPunctable::Value(u) => *u,
@@ -113,7 +118,7 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
     // or the subject of the gerund. Any other relation is not this defect.
     match possessor.dep_rel() {
         DepRel::NmodPoss => {}
-        DepRel::NSubj if possessor.head == verb_id => {}
+        DepRel::NSubj if possessor.head.is(verb_id) => {}
         _ => return None,
     }
     // No verb lemma, no rescue: a VERB with a noun's lemma is the fabrication
@@ -123,16 +128,9 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
     let root = sentence
         .words
         .iter()
-        .find(|w| w.head == 0 && w.dep_rel() == DepRel::Root)?;
-    let old_root_id = match root.id {
-        UdId::Single(n) => n,
-        _ => return None,
-    };
-
-    let part_id = match part.id {
-        UdId::Single(n) => n,
-        _ => return None,
-    };
+        .find(|w| w.head == UdHead::Root && w.dep_rel() == DepRel::Root)?;
+    let old_root_id = single_id(root)?;
+    let part_id = single_id(part)?;
 
     Some(RescuePlan {
         part_id,
@@ -155,42 +153,50 @@ fn apply_rescue(sentence: &mut UdSentence, plan: RescuePlan) {
     let mut verb_lemma = Some(verb_lemma.into_string());
 
     for word in &mut sentence.words {
-        let id_n = match word.id {
-            UdId::Single(n) => n,
-            _ => continue,
+        let Some(id_n) = single_id(word) else {
+            continue;
         };
 
         if id_n == part_id {
             word.upos = UdPunctable::Value(UniversalPos::Aux);
             word.lemma = "be".to_string();
             word.xpos = Some("VBZ".to_string());
-            word.feats = Some(FINITE_COPULA_PRES_3SG.to_string());
+            word.apply_curated(FINITE_COPULA_PRES_3SG);
             word.deprel = DepRel::Aux.as_str().to_string();
-            word.head = verb_id;
+            word.head = UdHead::Word(verb_id);
         } else if id_n == possessor_id {
             word.deprel = DepRel::NSubj.as_str().to_string();
-            word.head = verb_id;
+            word.head = UdHead::Word(verb_id);
         } else if id_n == verb_id {
             word.upos = UdPunctable::Value(UniversalPos::Verb);
             if let Some(lemma) = verb_lemma.take() {
                 word.lemma = lemma;
             }
             word.xpos = Some("VBG".to_string());
-            word.feats = Some(PRESENT_PARTICIPLE.to_string());
+            word.apply_curated(PRESENT_PARTICIPLE);
             word.deprel = DepRel::Root.as_str().to_string();
-            word.head = 0;
+            word.head = UdHead::Root;
         } else if id_n == old_root_id && old_root_id != verb_id {
             word.deprel = DepRel::Obj.as_str().to_string();
-            word.head = verb_id;
-        } else if word.head == old_root_id
+            word.head = UdHead::Word(verb_id);
+        } else if word.head.is(old_root_id)
             && old_root_id != verb_id
             && matches!(
                 word.dep_rel(),
                 DepRel::Cc | DepRel::Punct | DepRel::Discourse | DepRel::Mark,
             )
         {
-            word.head = verb_id;
+            word.head = UdHead::Word(verb_id);
         }
+    }
+}
+
+/// The id of a syntactic word (a `UdId::Single` row); `None` for a range
+/// row or an empty node.
+fn single_id(word: &UdWord) -> Option<UdWordId> {
+    match word.id {
+        UdId::Single(_) => UdWordId::of_row(word),
+        UdId::Range(..) | UdId::Decimal(_) => None,
     }
 }
 
@@ -204,9 +210,7 @@ fn is_possessive_part(word: &UdWord) -> bool {
 /// (verb lemma from the worker's `VerbReadingLemma`), or a gerund VERB (verb
 /// lemma from Stanza). Only single-id words can head the clause.
 fn ing_head(word: &UdWord) -> Option<IngHead> {
-    let UdId::Single(id) = word.id else {
-        return None;
-    };
+    let id = single_id(word)?;
     if !ends_with_ing(&word.text) {
         return None;
     }
@@ -216,7 +220,7 @@ fn ing_head(word: &UdWord) -> Option<IngHead> {
                 .and_then(VerbLemma::parse)
         }
         UdPunctable::Value(UniversalPos::Verb)
-            if has_key_value(word.feats.as_deref(), "VerbForm", "Ger") =>
+            if word.features().value(FeatName::VerbForm) == Some("Ger") =>
         {
             VerbLemma::parse(&word.lemma)
         }
@@ -229,16 +233,14 @@ fn ends_with_ing(text: &str) -> bool {
     text.len() >= 4 && text.to_ascii_lowercase().ends_with("ing")
 }
 
-fn find_word_by_single_id(sentence: &UdSentence, id: usize) -> Option<&UdWord> {
-    sentence
-        .words
-        .iter()
-        .find(|w| matches!(w.id, UdId::Single(n) if n == id))
+fn find_word_by_single_id(sentence: &UdSentence, id: UdWordId) -> Option<&UdWord> {
+    sentence.words.iter().find(|w| single_id(w) == Some(id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::morphosyntax::UdWordAnalysis;
 
     fn word(
         id: UdId,
@@ -249,7 +251,7 @@ mod tests {
         head: usize,
         deprel: &str,
     ) -> UdWord {
-        UdWord {
+        UdWord::from(UdWordAnalysis {
             id,
             text: text.to_string(),
             lemma: lemma.to_string(),
@@ -260,7 +262,7 @@ mod tests {
             deprel: deprel.to_string(),
             deps: None,
             misc: None,
-        }
+        })
     }
 
     /// `w` as the worker sends an English `-ing` noun: with its verb lemma.
@@ -270,7 +272,7 @@ mod tests {
     }
 
     fn punct_word(id: UdId, text: &str, head: usize) -> UdWord {
-        UdWord {
+        UdWord::from(UdWordAnalysis {
             id,
             text: text.to_string(),
             lemma: text.to_string(),
@@ -281,11 +283,11 @@ mod tests {
             deprel: "punct".to_string(),
             deps: None,
             misc: None,
-        }
+        })
     }
 
     fn range_parent(start: usize, end: usize, text: &str) -> UdWord {
-        UdWord {
+        UdWord::from(UdWordAnalysis {
             id: UdId::Range(start, end),
             text: text.to_string(),
             lemma: String::new(),
@@ -296,7 +298,7 @@ mod tests {
             deprel: String::new(),
             deps: None,
             misc: None,
-        }
+        })
     }
 
     fn fixture_sink() -> UdSentence {
@@ -414,7 +416,10 @@ mod tests {
     }
 
     fn find_by_id(s: &UdSentence, id: usize) -> &UdWord {
-        find_word_by_single_id(s, id).expect("expected Single id to exist")
+        s.words
+            .iter()
+            .find(|w| w.id == UdId::Single(id))
+            .expect("expected Single id to exist")
     }
 
     fn assert_unchanged(sentence: UdSentence) {
@@ -429,18 +434,26 @@ mod tests {
         assert!(matches!(s.upos, UdPunctable::Value(UniversalPos::Aux)));
         assert_eq!(s.lemma, "be");
         assert_eq!(s.deprel, "aux");
-        assert_eq!(s.head, 5);
-        assert!(s.feats.as_deref().unwrap().contains("VerbForm=Fin"));
+        assert_eq!(s.head.conllu(), 5);
+        assert!(s.has_finite_verb_form());
+        // The rescue's own table wrote both words' features.
+        for word in [s, find_by_id(&out, 5)] {
+            assert!(
+                word.features()
+                    .iter()
+                    .all(|(_, value)| value.source() == crate::morphosyntax::FeatSource::Curated)
+            );
+        }
 
         let v = find_by_id(&out, 5);
         assert!(matches!(v.upos, UdPunctable::Value(UniversalPos::Verb)));
         assert_eq!(v.deprel, "root");
-        assert_eq!(v.head, 0);
-        assert_eq!(v.feats.as_deref().unwrap(), "Tense=Pres|VerbForm=Part");
+        assert_eq!(v.head.conllu(), 0);
+        assert_eq!(v.features().to_string(), "Tense=Pres|VerbForm=Part");
 
         let p = find_by_id(&out, 3);
         assert_eq!(p.deprel, "nsubj");
-        assert_eq!(p.head, 5);
+        assert_eq!(p.head.conllu(), 5);
     }
 
     #[test]
@@ -450,26 +463,26 @@ mod tests {
         assert!(matches!(s.upos, UdPunctable::Value(UniversalPos::Aux)));
         assert_eq!(s.lemma, "be");
         assert_eq!(s.deprel, "aux");
-        assert_eq!(s.head, 4);
+        assert_eq!(s.head.conllu(), 4);
 
         let v = find_by_id(&out, 4);
         assert!(matches!(v.upos, UdPunctable::Value(UniversalPos::Verb)));
         // Stanza's NOUN lemma was `washing`; the verb carries the verb reading.
         assert_eq!(v.lemma, "wash");
         assert_eq!(v.deprel, "root");
-        assert_eq!(v.head, 0);
-        assert_eq!(v.feats.as_deref().unwrap(), "Tense=Pres|VerbForm=Part");
+        assert_eq!(v.head.conllu(), 0);
+        assert_eq!(v.features().to_string(), "Tense=Pres|VerbForm=Part");
 
         let p = find_by_id(&out, 2);
         assert_eq!(p.deprel, "nsubj");
-        assert_eq!(p.head, 4);
+        assert_eq!(p.head.conllu(), 4);
 
         let old = find_by_id(&out, 5);
         assert_eq!(old.deprel, "obj");
-        assert_eq!(old.head, 4);
+        assert_eq!(old.head.conllu(), 4);
 
         let dot = find_by_id(&out, 6);
-        assert_eq!(dot.head, 4);
+        assert_eq!(dot.head.conllu(), 4);
     }
 
     /// Stanza 1.15's shape: the subject is `nsubj` of a gerund VERB whose
@@ -480,9 +493,15 @@ mod tests {
             match w.id {
                 UdId::Single(3) => w.deprel = "nsubj".to_string(),
                 UdId::Single(5) => {
-                    w.upos = UdPunctable::Value(UniversalPos::Verb);
-                    w.feats = Some("VerbForm=Ger".to_string());
-                    w.misc = None;
+                    *w = word(
+                        w.id.clone(),
+                        &w.text,
+                        &w.lemma,
+                        UniversalPos::Verb,
+                        Some("VerbForm=Ger"),
+                        w.head.conllu(),
+                        &w.deprel,
+                    );
                 }
                 _ => {}
             }
@@ -499,7 +518,7 @@ mod tests {
         let v = find_by_id(&out, 5);
         assert!(matches!(v.upos, UdPunctable::Value(UniversalPos::Verb)));
         assert_eq!(v.lemma, "overflow");
-        assert_eq!(v.feats.as_deref().unwrap(), "Tense=Pres|VerbForm=Part");
+        assert_eq!(v.features().to_string(), "Tense=Pres|VerbForm=Part");
         assert_eq!(find_by_id(&out, 3).deprel, "nsubj");
     }
 
@@ -508,7 +527,7 @@ mod tests {
         let mut s = fixture_sink_gerund();
         for w in &mut s.words {
             if w.id == UdId::Single(3) {
-                w.head = 2;
+                w.head = UdHead::of_conllu(2);
             }
         }
         assert_unchanged(s);

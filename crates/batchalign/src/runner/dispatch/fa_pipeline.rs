@@ -18,7 +18,7 @@ use crate::worker::pool::WorkerPool;
 use async_trait::async_trait;
 use tracing::{info, warn};
 
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::types::request::{
     AdmittedFaParams, DeclaredLanguages, HeaderLanguageError, validate_fa_language_support,
     validate_utr_language_support,
@@ -631,14 +631,9 @@ async fn process_one_fa_file(
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
-    let started_at = unix_now();
 
     lifecycle
-        .begin_first_attempt(
-            WorkUnitKind::FileForcedAlignment,
-            started_at,
-            FileStage::Reading,
-        )
+        .begin_first_attempt(WorkUnitKind::FileForcedAlignment, FileStage::Reading)
         .await;
 
     // `--main-bullets exact` keeps untimed utterances untimed; timing recovery
@@ -648,11 +643,7 @@ async fn process_one_fa_file(
         Ok(admitted) => admitted,
         Err(refused) => {
             lifecycle
-                .fail(
-                    &refused.to_string(),
-                    FailureCategory::Validation,
-                    unix_now(),
-                )
+                .fail(&refused.to_string(), FailureCategory::Validation)
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
@@ -678,7 +669,7 @@ async fn process_one_fa_file(
         Err(e) => {
             let err_msg = format!("Failed to read input: {e}");
             lifecycle
-                .fail(&err_msg, FailureCategory::InputMissing, unix_now())
+                .fail(&err_msg, FailureCategory::InputMissing)
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
@@ -701,7 +692,7 @@ async fn process_one_fa_file(
         Ok(path) => path,
         Err(unresolved) => {
             lifecycle
-                .fail(&unresolved.message, FailureCategory::Validation, unix_now())
+                .fail(&unresolved.message, FailureCategory::Validation)
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
@@ -713,9 +704,7 @@ async fn process_one_fa_file(
         Ok(p) => p,
         Err(e) => {
             let err_msg = format!("Media conversion failed for {filename}: {e}");
-            lifecycle
-                .fail(&err_msg, FailureCategory::Validation, unix_now())
-                .await;
+            lifecycle.fail(&err_msg, FailureCategory::Validation).await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
     };
@@ -754,11 +743,7 @@ async fn process_one_fa_file(
             Ok(main_bullets) => main_bullets,
             Err(backward) => {
                 lifecycle
-                    .fail(
-                        &backward.to_string(),
-                        FailureCategory::Validation,
-                        unix_now(),
-                    )
+                    .fail(&backward.to_string(), FailureCategory::Validation)
                     .await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
@@ -788,9 +773,7 @@ async fn process_one_fa_file(
                  `--lang <iso3>`.",
                 filename, raw
             );
-            lifecycle
-                .fail(&msg, FailureCategory::Validation, unix_now())
-                .await;
+            lifecycle.fail(&msg, FailureCategory::Validation).await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
         Err(HeaderLanguageError::NoHeader) => {
@@ -800,9 +783,7 @@ async fn process_one_fa_file(
                  `--lang <iso3>` so we can stamp `@Languages:` honestly.",
                 filename
             );
-            lifecycle
-                .fail(&msg, FailureCategory::Validation, unix_now())
-                .await;
+            lifecycle.fail(&msg, FailureCategory::Validation).await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
     };
@@ -823,7 +804,7 @@ async fn process_one_fa_file(
         Ok(admitted) => admitted,
         Err(error) => {
             lifecycle
-                .fail(&error.to_string(), FailureCategory::Validation, unix_now())
+                .fail(&error.to_string(), FailureCategory::Validation)
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
@@ -885,7 +866,7 @@ async fn process_one_fa_file(
             }
             Err(error) => {
                 lifecycle
-                    .fail(&error.to_string(), FailureCategory::Validation, unix_now())
+                    .fail(&error.to_string(), FailureCategory::Validation)
                     .await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }

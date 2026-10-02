@@ -108,14 +108,17 @@ async fn cancel_over_http_stops_a_file_held_in_a_worker_dispatch() {
 
     let pool_config = PoolConfig {
         python_path: python,
-        health_check_interval_s: 600,
-        ready_timeout_s: 60,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<60>(),
         test_echo: true,
         test_delay_ms: ECHO_DISPATCH_MS,
         max_workers_per_key: PerProfile::uniform(1),
         verbose: 0,
-        audio_task_timeout_s: 600,
-        worker_registry_path: state_dir.join("workers.json").display().to_string(),
+        task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
+            audio: Some(batchalign::api::PositiveSeconds::literal::<600>()),
+            analysis: None,
+        },
+        worker_registry_path: Some(state_dir.join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(state_dir.clone()),
             ..Default::default()
@@ -128,11 +131,14 @@ async fn cancel_over_http_stops_a_file_held_in_a_worker_dispatch() {
     let (router, _state) = batchalign::create_test_app_with_prepared_workers(
         ServerConfig::default(),
         RuntimeLayout::from_state_dir(state_dir.clone()),
-        Some(scratch.path().join("jobs").display().to_string()),
-        Some(scratch.path().join("db")),
-        Some(scratch.path().join("cache")),
+        batchalign::AppStorageOverrides {
+            jobs_dir: Some(scratch.path().join("jobs").display().to_string()),
+            db_dir: Some(scratch.path().join("db")),
+            cache_dir: Some(scratch.path().join("cache")),
+        },
         Some("cancel-in-flight-test".into()),
         workers,
+        std::sync::Arc::new(batchalign::clock::SystemClock),
     )
     .await
     .expect("test app");

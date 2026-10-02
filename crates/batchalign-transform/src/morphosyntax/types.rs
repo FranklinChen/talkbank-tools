@@ -72,15 +72,6 @@ pub enum MappingError {
         details: String,
     },
 
-    /// Generated %mor and %gra have mismatched chunk counts.
-    #[error("%mor has {mor_chunks} chunks but %gra has {gra_count} relations")]
-    ChunkCountMismatch {
-        /// Number of %mor chunks.
-        mor_chunks: usize,
-        /// Number of %gra relations.
-        gra_count: usize,
-    },
-
     /// The generated %gra tier has no root or multiple roots.
     #[error("Invalid root structure in generated %gra: {details}")]
     InvalidRoot {
@@ -94,6 +85,11 @@ pub enum MappingError {
         /// Description of the invalid deprel.
         details: String,
     },
+
+    /// The UD sentence is structurally malformed (a broken multi-word token,
+    /// a repeated or zero id, a head that is no word of the sentence).
+    #[error("malformed UD sentence: {0}")]
+    Sentence(#[from] super::alignment::UdSentenceError),
 
     /// `assemble_mors` was called with an empty component slice.
     #[error("assemble_mors called with empty components, structural bug in caller")]

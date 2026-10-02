@@ -10,16 +10,16 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use uuid::Uuid;
 
-use crate::api::{MemoryMb, NumWorkers, ReleasedCommand, WorkerLanguage};
-use crate::config::ServerConfig;
+use crate::api::{MachineTime, MemoryMb, NumWorkers, ReleasedCommand, WorkerLanguage};
+use crate::config::{ServerConfig, WorkerStartupLimit};
 use crate::runtime;
+use crate::worker::WorkerPid;
 use crate::worker::WorkerProfile;
 
 const DEFAULT_LOCK_POLL: Duration = Duration::from_secs(1);
@@ -34,8 +34,9 @@ pub struct HostMemoryRuntimeConfig {
     pub coordinator_path: PathBuf,
     /// Minimum free memory to preserve after reservations are granted.
     pub reserve_mb: MemoryMb,
-    /// Maximum concurrent worker/model startups allowed across the host.
-    pub max_concurrent_worker_startups: usize,
+    /// Maximum concurrent worker/model startups allowed across the host;
+    /// at least one by type.
+    pub max_concurrent_worker_startups: WorkerStartupLimit,
 }
 
 impl HostMemoryRuntimeConfig {
@@ -44,7 +45,7 @@ impl HostMemoryRuntimeConfig {
         Self {
             coordinator_path: default_host_memory_ledger_path(),
             reserve_mb: config.resolved_memory_gate_mb(),
-            max_concurrent_worker_startups: config.max_concurrent_worker_startups.get() as usize,
+            max_concurrent_worker_startups: config.max_concurrent_worker_startups,
         }
     }
 
@@ -52,12 +53,12 @@ impl HostMemoryRuntimeConfig {
     pub fn from_sources(
         coordinator_path: PathBuf,
         reserve_mb: MemoryMb,
-        max_concurrent_worker_startups: usize,
+        max_concurrent_worker_startups: WorkerStartupLimit,
     ) -> Self {
         Self {
             coordinator_path,
             reserve_mb,
-            max_concurrent_worker_startups: max_concurrent_worker_startups.max(1),
+            max_concurrent_worker_startups,
         }
     }
 }
@@ -70,9 +71,7 @@ impl Default for HostMemoryRuntimeConfig {
             // so callers (mainly tests) get a sensible reserve without
             // building a `ServerConfig` themselves.
             reserve_mb: ServerConfig::default().resolved_memory_gate_mb(),
-            max_concurrent_worker_startups: ServerConfig::default()
-                .max_concurrent_worker_startups
-                .get() as usize,
+            max_concurrent_worker_startups: ServerConfig::default().max_concurrent_worker_startups,
         }
     }
 }
@@ -175,7 +174,7 @@ impl HostMemoryLease {
     /// Returns `Ok(())` on successful update, or `HostMemoryError` if
     /// the ledger could not be locked or rewritten. The lease's
     /// `released` state is unchanged.
-    pub fn set_worker_pid(&self, worker_pid: u32) -> Result<(), HostMemoryError> {
+    pub fn set_worker_pid(&self, worker_pid: WorkerPid) -> Result<(), HostMemoryError> {
         let path = self.ledger_path.clone();
         let lease_id = self.lease_id.clone();
         with_locked_ledger(&path, move |ledger: &mut MemoryLedger| {
@@ -324,13 +323,39 @@ enum MemoryLeaseKind {
     MlTestExclusive,
 }
 
+impl MemoryLeaseKind {
+    /// Whether a lease of this kind occupies one of the host's worker-startup
+    /// slots. Only a worker startup does; it is a fact about the kind, not a
+    /// second field to keep in agreement with it.
+    fn holds_startup_slot(self) -> bool {
+        match self {
+            Self::WorkerStartup => true,
+            Self::JobExecution | Self::MlTestExclusive => false,
+        }
+    }
+}
+
+/// The ledger's time source: the host wall clock, read here and nowhere else
+/// in this module.
+///
+/// DECISION (2026-10-01), deliberately NOT the store's injected `Clock`: the
+/// ledger is one file shared by every batchalign3 process on the host
+/// (daemons, test servers, `--no-server` runs), and a lease's age is judged
+/// by whichever process next opens it. Each process has its own store clock,
+/// so an injected clock would let one process's test clock decide whether
+/// another process's lease is stale. Wall time is the one clock they share.
+fn ledger_now() -> MachineTime {
+    MachineTime::now()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "MemoryLeaseRecordWire", into = "MemoryLeaseRecordWire")]
 struct MemoryLeaseRecord {
     id: String,
     kind: MemoryLeaseKind,
-    /// PID of the process that requested this lease (the daemon, in
-    /// production). Liveness-checked when `worker_pid` is `None`.
-    owner_pid: u32,
+    /// The process that requested this lease (the daemon, in production).
+    /// Liveness-checked when `worker_pid` is `None`.
+    owner_pid: WorkerPid,
     /// Optional PID of the worker subprocess whose memory the lease
     /// represents. When `Some`, prune_stale_leases checks THIS PID's
     /// liveness instead of `owner_pid`. The daemon spawns workers in
@@ -341,12 +366,106 @@ struct MemoryLeaseRecord {
     /// instead lets the reaper detect the dead worker and reclaim the
     /// slot. `#[serde(default)]` keeps backward compatibility with
     /// older ledger files that predate this field.
+    worker_pid: Option<WorkerPid>,
+    reserved_mb: MemoryMb,
+    label: String,
+    /// When the lease was taken, by [`ledger_now`].
+    created_at: MachineTime,
+}
+
+/// The ledger's file form of one lease, unchanged across builds so daemons of
+/// different builds on one host keep reading each other's ledger.
+///
+/// `startup_slot` is still WRITTEN, from the kind, because an older build
+/// counts slots by reading it; on read it is ignored, since the kind already
+/// says it (every build has written exactly `kind == worker_startup`). It
+/// used to be a field of the record as well, so a job-execution lease holding
+/// a startup slot was representable. `worker_pid` defaults for ledgers that
+/// predate it; times are whole Unix seconds under `created_at_epoch_s`.
+#[derive(Serialize, Deserialize)]
+struct MemoryLeaseRecordWire {
+    id: String,
+    kind: MemoryLeaseKind,
+    owner_pid: WorkerPid,
     #[serde(default)]
-    worker_pid: Option<u32>,
-    reserved_mb: u64,
+    worker_pid: Option<WorkerPid>,
+    reserved_mb: MemoryMb,
     startup_slot: bool,
     label: String,
-    created_at_epoch_s: u64,
+    #[serde(rename = "created_at_epoch_s", with = "ledger_seconds")]
+    created_at: MachineTime,
+}
+
+impl From<MemoryLeaseRecordWire> for MemoryLeaseRecord {
+    fn from(wire: MemoryLeaseRecordWire) -> Self {
+        Self {
+            id: wire.id,
+            kind: wire.kind,
+            owner_pid: wire.owner_pid,
+            worker_pid: wire.worker_pid,
+            reserved_mb: wire.reserved_mb,
+            label: wire.label,
+            created_at: wire.created_at,
+        }
+    }
+}
+
+impl From<MemoryLeaseRecord> for MemoryLeaseRecordWire {
+    fn from(record: MemoryLeaseRecord) -> Self {
+        Self {
+            startup_slot: record.kind.holds_startup_slot(),
+            id: record.id,
+            kind: record.kind,
+            owner_pid: record.owner_pid,
+            worker_pid: record.worker_pid,
+            reserved_mb: record.reserved_mb,
+            label: record.label,
+            created_at: record.created_at,
+        }
+    }
+}
+
+/// One lease's contribution to the reservation arithmetic.
+#[derive(Debug, Clone, Copy)]
+struct Reservation {
+    owner: WorkerPid,
+    kind: MemoryLeaseKind,
+    reserved: MemoryMb,
+}
+
+impl MemoryLeaseRecord {
+    fn reservation(&self) -> Reservation {
+        Reservation {
+            owner: self.owner_pid,
+            kind: self.kind,
+            reserved: self.reserved_mb,
+        }
+    }
+}
+
+/// The ledger's time form: whole Unix seconds, as every build has written
+/// it. A value that names no instant fails the read, which reports the
+/// ledger corrupt rather than inventing a time.
+mod ledger_seconds {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::api::MachineTime;
+
+    pub(super) fn serialize<S: Serializer>(
+        at: &MachineTime,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        at.timestamp().as_second().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<MachineTime, D::Error> {
+        let seconds = i64::deserialize(deserializer)?;
+        jiff::Timestamp::from_second(seconds)
+            .map(MachineTime::from_timestamp)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -359,17 +478,21 @@ struct MemoryLedger {
 /// the same owner (Contract D), so the larger of the two surfaces the
 /// owner's actual pending demand. `MlTestExclusive` carries 0 MB and
 /// folds into the `JobExecution` half.
-fn effective_reserved_mb(leases: &[MemoryLeaseRecord]) -> u64 {
+///
+/// Takes the reservations rather than the records, so admission can project
+/// the total WITH a requested lease by chaining it on, instead of building a
+/// placeholder record with an empty id and label to push onto a copy.
+fn effective_reserved_mb(reservations: impl IntoIterator<Item = Reservation>) -> u64 {
     use std::collections::HashMap;
-    let mut by_owner: HashMap<u32, (u64, u64)> = HashMap::new();
-    for lease in leases {
-        let entry = by_owner.entry(lease.owner_pid).or_default();
-        match lease.kind {
+    let mut by_owner: HashMap<WorkerPid, (u64, u64)> = HashMap::new();
+    for reservation in reservations {
+        let entry = by_owner.entry(reservation.owner).or_default();
+        match reservation.kind {
             MemoryLeaseKind::JobExecution | MemoryLeaseKind::MlTestExclusive => {
-                entry.0 = entry.0.saturating_add(lease.reserved_mb);
+                entry.0 = entry.0.saturating_add(reservation.reserved.0);
             }
             MemoryLeaseKind::WorkerStartup => {
-                entry.1 = entry.1.saturating_add(lease.reserved_mb);
+                entry.1 = entry.1.saturating_add(reservation.reserved.0);
             }
         }
     }
@@ -380,7 +503,6 @@ fn effective_reserved_mb(leases: &[MemoryLeaseRecord]) -> u64 {
 struct MemoryLeaseRequest {
     kind: MemoryLeaseKind,
     reserved_mb: MemoryMb,
-    startup_slot: bool,
     label: String,
 }
 
@@ -416,7 +538,8 @@ impl HostMemoryCoordinator {
     pub fn snapshot(&self) -> Result<HostMemorySnapshot, HostMemoryError> {
         with_locked_ledger(&self.config.coordinator_path, |ledger| {
             let system = system_memory_snapshot();
-            let active_reserved_mb = effective_reserved_mb(&ledger.leases);
+            let active_reserved_mb =
+                effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             let startup_leases = ledger
                 .leases
                 .iter()
@@ -435,7 +558,7 @@ impl HostMemoryCoordinator {
             let active_lease_labels = ledger
                 .leases
                 .iter()
-                .map(|lease| format!("{:?}:{}:{}MB", lease.kind, lease.label, lease.reserved_mb))
+                .map(|lease| format!("{:?}:{}:{}MB", lease.kind, lease.label, lease.reserved_mb.0))
                 .collect();
             Ok(HostMemorySnapshot {
                 total_mb: system.total_mb,
@@ -464,7 +587,6 @@ impl HostMemoryCoordinator {
         let request = MemoryLeaseRequest {
             kind: MemoryLeaseKind::WorkerStartup,
             reserved_mb: startup_reservation_mb,
-            startup_slot: true,
             label: format!(
                 "worker-startup:{}:{}:{}",
                 profile.label(),
@@ -485,7 +607,6 @@ impl HostMemoryCoordinator {
         let request = MemoryLeaseRequest {
             kind: MemoryLeaseKind::MlTestExclusive,
             reserved_mb: MemoryMb(0),
-            startup_slot: false,
             label: label.to_owned(),
         };
         self.wait_for_lease(request, timeout, poll_interval)
@@ -561,7 +682,8 @@ impl HostMemoryCoordinator {
                     spec.profile,
                     &tier,
                 );
-            let pending_reserved_mb = effective_reserved_mb(&ledger.leases);
+            let pending_reserved_mb =
+                effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             let Some((granted_workers, reserved_mb)) = plan_job_reservation(
                 requested_workers.0,
                 per_worker_budget.0,
@@ -584,12 +706,11 @@ impl HostMemoryCoordinator {
             let record = MemoryLeaseRecord {
                 id: Uuid::new_v4().to_string(),
                 kind: MemoryLeaseKind::JobExecution,
-                owner_pid: std::process::id(),
+                owner_pid: WorkerPid(std::process::id()),
                 worker_pid: None,
-                reserved_mb,
-                startup_slot: false,
+                reserved_mb: MemoryMb(reserved_mb),
                 label: label.to_owned(),
-                created_at_epoch_s: unix_epoch_s(),
+                created_at: ledger_now(),
             };
             let lease =
                 HostMemoryLease::new(self.config.coordinator_path.clone(), record.id.clone());
@@ -653,44 +774,38 @@ impl HostMemoryCoordinator {
                 }
             }
 
-            if request.startup_slot {
+            if request.kind.holds_startup_slot() {
                 let active_slots = ledger
                     .leases
                     .iter()
-                    .filter(|lease| lease.startup_slot)
+                    .filter(|lease| lease.kind.holds_startup_slot())
                     .count();
-                if active_slots >= self.config.max_concurrent_worker_startups {
+                if active_slots >= self.config.max_concurrent_worker_startups.get() {
                     return Err(HostMemoryError::StartupSlotsBusy {
                         label: request.label.clone(),
                         active_slots,
-                        max_slots: self.config.max_concurrent_worker_startups,
+                        max_slots: self.config.max_concurrent_worker_startups.get(),
                     });
                 }
             }
 
             let system = system_memory_snapshot();
-            let pending_reserved_mb = effective_reserved_mb(&ledger.leases);
-            // Project what `effective_reserved_mb` would be AFTER admitting
-            // the new lease. We simulate by appending a placeholder lease
-            // record with the same `(kind, owner_pid, reserved_mb)` and
-            // recomputing: Contract D semantics (sub-allocation) then
-            // apply uniformly to the new lease too.
-            let projected_reserved_mb = {
-                let mut simulated: Vec<MemoryLeaseRecord> =
-                    Vec::with_capacity(ledger.leases.len() + 1);
-                simulated.extend(ledger.leases.iter().cloned());
-                simulated.push(MemoryLeaseRecord {
-                    id: String::new(),
-                    kind: request.kind,
-                    owner_pid: std::process::id(),
-                    worker_pid: None,
-                    reserved_mb: request.reserved_mb.0,
-                    startup_slot: request.startup_slot,
-                    label: String::new(),
-                    created_at_epoch_s: 0,
-                });
-                effective_reserved_mb(&simulated)
-            };
+            let pending_reserved_mb =
+                effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
+            // What `effective_reserved_mb` would be AFTER admitting the
+            // request: its reservation is chained onto the ledger's, so
+            // Contract D semantics (sub-allocation) apply to it uniformly.
+            let projected_reserved_mb = effective_reserved_mb(
+                ledger
+                    .leases
+                    .iter()
+                    .map(MemoryLeaseRecord::reservation)
+                    .chain(std::iter::once(Reservation {
+                        owner: WorkerPid(std::process::id()),
+                        kind: request.kind,
+                        reserved: request.reserved_mb,
+                    })),
+            );
             let projected_available_mb =
                 system.available_mb.0.saturating_sub(projected_reserved_mb);
             if projected_available_mb < self.config.reserve_mb.0 {
@@ -707,12 +822,11 @@ impl HostMemoryCoordinator {
             let record = MemoryLeaseRecord {
                 id: Uuid::new_v4().to_string(),
                 kind: request.kind,
-                owner_pid: std::process::id(),
+                owner_pid: WorkerPid(std::process::id()),
                 worker_pid: None,
-                reserved_mb: request.reserved_mb.0,
-                startup_slot: request.startup_slot,
+                reserved_mb: request.reserved_mb,
                 label: request.label,
-                created_at_epoch_s: unix_epoch_s(),
+                created_at: ledger_now(),
             };
             let lease =
                 HostMemoryLease::new(self.config.coordinator_path.clone(), record.id.clone());
@@ -744,11 +858,10 @@ fn with_locked_ledger<T>(
             source,
         })?;
 
-    file.lock_exclusive()
-        .map_err(|source| HostMemoryError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    file.lock().map_err(|source| HostMemoryError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
 
     let mut raw = String::new();
     file.read_to_string(&mut raw)
@@ -815,10 +928,10 @@ fn with_locked_ledger<T>(
 /// workers ever spawned for them; the 228 GB sat as phantom holds for
 /// hours. Without a deadline, every "failed admission cycle" leaks
 /// budget.
-const PRE_SPAWN_INTENT_DEADLINE_S: u64 = 1_800;
+const PRE_SPAWN_INTENT_DEADLINE: Duration = Duration::from_secs(1_800);
 
 fn prune_stale_leases(ledger: &mut MemoryLedger) {
-    let now = unix_epoch_s();
+    let now = ledger_now();
     ledger.leases.retain(|lease| {
         // Bug 2 fix (Contract B): when a lease names a specific worker
         // subprocess, its survival is bound to that worker, NOT to
@@ -845,17 +958,16 @@ fn prune_stale_leases(ledger: &mut MemoryLedger) {
         // older than the deadline window, the spawn it was reserving
         // for didn't materialise: reclaim the budget. A live owner
         // that legitimately holds a long-lived bookkeeping lease can
-        // refresh `created_at_epoch_s` on its own cadence; this prune
+        // refresh `created_at` on its own cadence; this prune
         // protects against the daemon-side leak path, not against
         // healthy long-lived state.
-        let age_s = now.saturating_sub(lease.created_at_epoch_s);
-        age_s < PRE_SPAWN_INTENT_DEADLINE_S
+        now.saturating_duration_since(lease.created_at) < PRE_SPAWN_INTENT_DEADLINE
     });
 }
 
-fn process_is_alive(pid: u32) -> bool {
+fn process_is_alive(pid: WorkerPid) -> bool {
     let mut system = System::new();
-    let pid = Pid::from_u32(pid);
+    let pid = Pid::from_u32(pid.0);
     system.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
     system.process(pid).is_some()
 }
@@ -978,13 +1090,6 @@ fn capacity_rejection_is_retryable(total_mb: u64, requested_mb: u64, reserve_mb:
     requested_mb.saturating_add(reserve_mb) <= total_mb
 }
 
-fn unix_epoch_s() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn host_ledger_suffix() -> String {
     let raw = std::env::var("USER")
         .ok()
@@ -1007,20 +1112,63 @@ mod tests {
     use super::{
         HostMemoryCoordinator, HostMemoryError, HostMemoryLease, HostMemoryPressureLevel,
         HostMemoryRuntimeConfig, MemoryLeaseKind, MemoryLeaseRecord, MemoryLedger,
-        plan_job_reservation, pressure_level_for, retryable_error, unix_epoch_s,
-        with_locked_ledger,
+        plan_job_reservation, pressure_level_for, retryable_error, with_locked_ledger,
     };
+    use crate::api::MachineTime;
+
+    /// The ledger keeps its file form: a lease's time is whole Unix seconds
+    /// under `created_at_epoch_s`, so an older daemon on the same host still
+    /// reads a ledger this build wrote, and this build reads theirs.
+    #[test]
+    fn ledger_times_are_whole_unix_seconds_on_disk() {
+        let old_form = r#"{"leases":[{"id":"a","kind":"job_execution","owner_pid":1,
+            "reserved_mb":10,"startup_slot":false,"label":"x","created_at_epoch_s":1700000000}]}"#;
+        let ledger: MemoryLedger = serde_json::from_str(old_form).unwrap();
+        assert_eq!(
+            ledger.leases[0].created_at,
+            MachineTime::from_timestamp(jiff::Timestamp::constant(1_700_000_000, 0))
+        );
+        let written = serde_json::to_string(&ledger).unwrap();
+        assert!(
+            written.contains(r#""created_at_epoch_s":1700000000"#),
+            "{written}"
+        );
+    }
     use crate::api::MemoryMb;
+    use crate::worker::WorkerPid;
     use std::path::PathBuf;
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    /// `startup_slot` is derived from the kind: it is still written (older
+    /// builds count slots by it) and ignored on read, so a job-execution lease
+    /// can no longer claim a slot. A ledger file round trips unchanged.
+    #[test]
+    fn the_startup_slot_on_disk_follows_the_kind() {
+        let lying = r#"{"leases":[{"id":"a","kind":"job_execution","owner_pid":1,
+            "reserved_mb":10,"startup_slot":true,"label":"x","created_at_epoch_s":1700000000}]}"#;
+        let ledger: MemoryLedger = serde_json::from_str(lying).unwrap();
+        assert!(!ledger.leases[0].kind.holds_startup_slot());
+        let written = serde_json::to_string(&ledger).unwrap();
+        assert!(written.contains(r#""startup_slot":false"#), "{written}");
+
+        let startup = r#"{"leases":[{"id":"b","kind":"worker_startup","owner_pid":1,
+            "reserved_mb":10,"startup_slot":true,"label":"y","created_at_epoch_s":1700000000}]}"#;
+        let ledger: MemoryLedger = serde_json::from_str(startup).unwrap();
+        let written = serde_json::to_string(&ledger).unwrap();
+        assert!(written.contains(r#""startup_slot":true"#), "{written}");
+    }
 
     /// Build a runtime config pointing at a fresh tmp coordinator file.
     /// Returns the TempDir so the caller can keep it alive for the test.
     fn test_runtime_config() -> (TempDir, HostMemoryRuntimeConfig) {
         let dir = TempDir::new().expect("tmp dir for host-memory test");
         let coordinator_path: PathBuf = dir.path().join("ledger.json");
-        let config = HostMemoryRuntimeConfig::from_sources(coordinator_path, MemoryMb(8_000), 4);
+        let config = HostMemoryRuntimeConfig::from_sources(
+            coordinator_path,
+            MemoryMb(8_000),
+            crate::config::WorkerStartupLimit::literal::<4>(),
+        );
         (dir, config)
     }
 
@@ -1038,12 +1186,11 @@ mod tests {
             ledger.leases.push(MemoryLeaseRecord {
                 id: Uuid::new_v4().to_string(),
                 kind,
-                owner_pid,
-                worker_pid,
-                reserved_mb,
-                startup_slot: matches!(kind, MemoryLeaseKind::WorkerStartup),
+                owner_pid: WorkerPid(owner_pid),
+                worker_pid: worker_pid.map(WorkerPid),
+                reserved_mb: MemoryMb(reserved_mb),
                 label: label.to_owned(),
-                created_at_epoch_s: unix_epoch_s(),
+                created_at: MachineTime::now(),
             });
             Ok(())
         })
@@ -1114,12 +1261,11 @@ mod tests {
             ledger.leases.push(MemoryLeaseRecord {
                 id: lease_id.clone(),
                 kind: MemoryLeaseKind::WorkerStartup,
-                owner_pid: std::process::id(),
+                owner_pid: WorkerPid(std::process::id()),
                 worker_pid: None,
-                reserved_mb: 12_000,
-                startup_slot: true,
+                reserved_mb: MemoryMb(12_000),
                 label: "test-startup-lease".to_owned(),
-                created_at_epoch_s: unix_epoch_s(),
+                created_at: MachineTime::now(),
             });
             Ok(())
         })
@@ -1133,7 +1279,7 @@ mod tests {
         //    convention the reaper test uses.
         let dead_worker_pid: u32 = 4_000_000;
         lease
-            .set_worker_pid(dead_worker_pid)
+            .set_worker_pid(WorkerPid(dead_worker_pid))
             .expect("set_worker_pid should rewrite the ledger");
 
         // Don't drop the lease yet, Drop calls release_internal which
@@ -1314,7 +1460,7 @@ mod tests {
         // reasonable startup window.
         with_locked_ledger(&config.coordinator_path, |ledger| {
             for lease in ledger.leases.iter_mut() {
-                lease.created_at_epoch_s = 1;
+                lease.created_at = MachineTime::from_timestamp(jiff::Timestamp::constant(1, 0));
             }
             Ok(())
         })

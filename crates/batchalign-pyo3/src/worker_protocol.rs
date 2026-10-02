@@ -5,6 +5,7 @@
 //! - Shared schema: `ipc-schema/worker_v2/`
 //! - Full Rust/Python responsibility split.
 
+use batchalign_types::worker_v2::WorkerErrorKind;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
@@ -12,23 +13,57 @@ fn repr_text(value: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(value.repr()?.to_str()?.to_string())
 }
 
-/// Build an `{"op":"error",...}` envelope. When `request_id` is
-/// supplied, it is included as a top-level field; the Rust reader loop
-/// matches on `request_id` to fail the matching V2 dispatch's pending
-/// oneshot directly, rather than routing the error to the sequential
-/// control channel where a runtime V2 caller has no consumer registered.
+/// Build an `{"op":"error",...}` envelope: the ONE builder of that line.
+///
+/// Every emitter goes through here: this dispatcher's own refusals, and the
+/// Python request loops through [`error_envelope`]. `kind` is required, so no
+/// emitter can leave a reader to guess what a retry could change. When
+/// `request_id` is supplied it is a top-level field, which the Rust GPU reader
+/// routes on to fail exactly that V2 dispatch.
 fn error_payload<'py>(
     py: Python<'py>,
+    kind: WorkerErrorKind,
     message: &str,
     request_id: Option<&str>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let payload = PyDict::new(py);
     payload.set_item("op", "error")?;
     payload.set_item("error", message)?;
+    payload.set_item("kind", kind.wire_name())?;
     if let Some(rid) = request_id {
         payload.set_item("request_id", rid)?;
     }
     Ok(payload.into_any())
+}
+
+/// A request this dispatcher refuses as sent; same kind at every site.
+fn refusal_payload<'py>(
+    py: Python<'py>,
+    message: &str,
+    request_id: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
+    error_payload(py, WorkerErrorKind::InvalidRequest, message, request_id)
+}
+
+/// Build an `{"op":"error",...}` envelope for the Python request loops.
+///
+/// `kind` must be one of the wire spellings (`runtime`, `bootstrap`,
+/// `invalid_request`); anything else raises `ValueError` rather than
+/// reaching the wire.
+#[pyfunction]
+#[pyo3(signature = (message, kind, request_id=None))]
+pub(crate) fn error_envelope(
+    py: Python<'_>,
+    message: &str,
+    kind: &str,
+    request_id: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let Some(kind) = WorkerErrorKind::from_wire(kind) else {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown worker error kind {kind:?}"
+        )));
+    };
+    Ok(error_payload(py, kind, message, request_id)?.unbind())
 }
 
 /// Extract a `request_id` field from a request payload dict, if present
@@ -83,7 +118,7 @@ fn validate_request_model<'py>(
                 // the operator sees a generic timeout instead of the
                 // validation error.
                 let request_id = extract_request_id(req_payload)?;
-                let payload = error_payload(
+                let payload = refusal_payload(
                     py,
                     &format!("invalid {op} request: {error}"),
                     request_id.as_deref(),
@@ -168,7 +203,7 @@ fn rejected_message(py: Python<'_>, message: &str) -> PyResult<Py<PyAny>> {
     Ok(Py::new(
         py,
         ImmediateProtocolReply {
-            reply: ImmediateReply::Rejected(error_payload(py, message, None)?.unbind()),
+            reply: ImmediateReply::Rejected(refusal_payload(py, message, None)?.unbind()),
         },
     )?
     .into_any())
@@ -263,7 +298,7 @@ pub(crate) fn dispatch_protocol_message(
         ExecutableOperation::Capabilities => response_payload(py, op, &capabilities_fn.call0()?)?,
         ExecutableOperation::Infer => {
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok(error_payload(
+                return Ok(refusal_payload(
                     py,
                     "infer request must include mapping field 'request'",
                     None,
@@ -273,7 +308,7 @@ pub(crate) fn dispatch_protocol_message(
             let req_payload = match req_payload.cast::<PyDict>() {
                 Ok(payload) => payload.as_any(),
                 Err(_) => {
-                    return Ok(error_payload(
+                    return Ok(refusal_payload(
                         py,
                         "infer request must include mapping field 'request'",
                         None,
@@ -295,7 +330,7 @@ pub(crate) fn dispatch_protocol_message(
         }
         ExecutableOperation::BatchInfer => {
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok(error_payload(
+                return Ok(refusal_payload(
                     py,
                     "batch_infer request must include mapping field 'request'",
                     None,
@@ -305,7 +340,7 @@ pub(crate) fn dispatch_protocol_message(
             let req_payload = match req_payload.cast::<PyDict>() {
                 Ok(payload) => payload.as_any(),
                 Err(_) => {
-                    return Ok(error_payload(
+                    return Ok(refusal_payload(
                         py,
                         "batch_infer request must include mapping field 'request'",
                         None,
@@ -327,7 +362,7 @@ pub(crate) fn dispatch_protocol_message(
         }
         ExecutableOperation::ExecuteV2 => {
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok(error_payload(
+                return Ok(refusal_payload(
                     py,
                     "execute_v2 request must include mapping field 'request'",
                     None,
@@ -337,7 +372,7 @@ pub(crate) fn dispatch_protocol_message(
             let req_payload = match req_payload.cast::<PyDict>() {
                 Ok(payload) => payload.as_any(),
                 Err(_) => {
-                    return Ok(error_payload(
+                    return Ok(refusal_payload(
                         py,
                         "execute_v2 request must include mapping field 'request'",
                         None,
@@ -359,9 +394,12 @@ pub(crate) fn dispatch_protocol_message(
         }
         ExecutableOperation::EnsureTask => {
             // ensure_task is a lightweight op: extract task + engine_overrides
-            // from the request dict and call the Python handler directly.
+            // from the request dict and call the Python handler directly. Its
+            // `request_id` (a control request id) is not read here: an
+            // exception raised by the handler is tagged with it by the serve
+            // loop (`ErrorCorrelation.of_message`).
             let Some(req_payload) = message.get_item("request")? else {
-                return Ok(error_payload(
+                return Ok(refusal_payload(
                     py,
                     "ensure_task request must include mapping field 'request'",
                     None,
@@ -372,17 +410,23 @@ pub(crate) fn dispatch_protocol_message(
                 Ok(d) => d,
                 Err(_) => {
                     return Ok(
-                        error_payload(py, "ensure_task request must be a mapping", None)?.unbind(),
+                        refusal_payload(py, "ensure_task request must be a mapping", None)?
+                            .unbind(),
                     );
                 }
             };
             let task = match req_dict.get_item("task")? {
                 Some(v) => v,
                 None => {
-                    return Ok(
-                        error_payload(py, "ensure_task request must include 'task'", None)?
-                            .unbind(),
-                    );
+                    // The control request id travels with the refusal, so
+                    // the reader answers the op that sent it, not a later one.
+                    let request_id = extract_request_id(req_dict.as_any())?;
+                    return Ok(refusal_payload(
+                        py,
+                        "ensure_task request must include 'task'",
+                        request_id.as_deref(),
+                    )?
+                    .unbind());
                 }
             };
             let engine_overrides = req_dict.get_item("engine_overrides")?;

@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationMs, DurationSeconds};
+use crate::api::AudioPositionSeconds;
 use crate::types::worker_v2::SpeakerSegmentV2;
+use batchalign_types::interval::AdmittedInterval;
 
 use super::AsrResponse;
 
@@ -228,21 +229,22 @@ pub(crate) enum LegacyReplayError {
     },
     #[error("projected ASR token {index} has incomplete timing")]
     IncompleteAsrTiming { index: usize },
-    #[error("projected ASR token {index} has invalid timing {start_s}..{end_s}")]
-    InvalidAsrTiming {
+    /// Each bound is a valid position by type (deserialization refuses a
+    /// negative or non-finite one); what is left to refuse is their order.
+    #[error("projected ASR token {index} ends before it starts: {start_s}..{end_s}")]
+    InvertedAsrTiming {
         index: usize,
-        start_s: f64,
-        end_s: f64,
+        start_s: AudioPositionSeconds,
+        end_s: AudioPositionSeconds,
     },
     #[error("speaker turns source must not be empty")]
     EmptyTurnsSource,
     #[error("speaker turn {index} has invalid track {track:?}; expected PAR followed by digits")]
     InvalidTrack { index: usize, track: String },
-    #[error("speaker turn {index} is inverted: {start_ms}..{end_ms}")]
-    InvertedTurn {
+    #[error("speaker turn {index} is not an interval: {refusal}")]
+    InvalidTurnInterval {
         index: usize,
-        start_ms: u64,
-        end_ms: u64,
+        refusal: batchalign_types::interval::IntervalRefusal,
     },
 }
 
@@ -404,9 +406,9 @@ fn validate_asr_response(response: &AsrResponse) -> Result<(), LegacyReplayError
     for (index, token) in response.tokens.iter().enumerate() {
         match (token.start_s, token.end_s) {
             (None, None) => {}
-            (Some(DurationSeconds(start_s)), Some(DurationSeconds(end_s))) => {
-                if !start_s.is_finite() || !end_s.is_finite() || start_s < 0.0 || end_s < start_s {
-                    return Err(LegacyReplayError::InvalidAsrTiming {
+            (Some(start_s), Some(end_s)) => {
+                if end_s < start_s {
+                    return Err(LegacyReplayError::InvertedAsrTiming {
                         index,
                         start_s,
                         end_s,
@@ -441,16 +443,10 @@ fn lower_turns(turns: CanonicalTurnsFile) -> Result<Vec<SpeakerSegmentV2>, Legac
                     track: turn.track,
                 });
             }
-            if turn.start_ms > turn.end_ms {
-                return Err(LegacyReplayError::InvertedTurn {
-                    index,
-                    start_ms: turn.start_ms,
-                    end_ms: turn.end_ms,
-                });
-            }
+            let interval = AdmittedInterval::admit_unsigned_millis(turn.start_ms, turn.end_ms)
+                .map_err(|refusal| LegacyReplayError::InvalidTurnInterval { index, refusal })?;
             Ok(SpeakerSegmentV2 {
-                start_ms: DurationMs(turn.start_ms),
-                end_ms: DurationMs(turn.end_ms),
+                interval,
                 speaker: format!("PAR{suffix}"),
             })
         })
@@ -463,12 +459,17 @@ mod tests {
     use crate::api::LanguageCode3;
     use crate::transcribe::AsrToken;
 
+    /// A fixture position; every literal in this module is a valid one.
+    fn at(seconds: f64) -> Option<AudioPositionSeconds> {
+        Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
+    }
+
     fn response() -> AsrResponse {
         AsrResponse {
             tokens: vec![AsrToken {
                 text: "hello".into(),
-                start_s: Some(DurationSeconds(0.1)),
-                end_s: Some(DurationSeconds(0.4)),
+                start_s: at(0.1),
+                end_s: at(0.4),
                 speaker: Some("0".into()),
                 confidence: Some(0.9),
             }],

@@ -411,7 +411,7 @@ impl ReplayableFaRawEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{DurationMs, DurationSeconds};
+    use crate::api::{AudioPositionSeconds, DurationMs, NonNegativeSeconds};
     use crate::types::engines::FaEngineName;
     use crate::types::worker_v2::{
         ExecuteResponseV2, IndexedWordTimingResultV2, IndexedWordTimingV2, TaskResultV2,
@@ -438,7 +438,7 @@ mod tests {
                     confidence: Some(0.75),
                 })],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let evidence = FaRawEvidence::admit_requested(
@@ -474,10 +474,10 @@ mod tests {
             TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
                 tokens: vec![WhisperTokenTimingV2 {
                     text: "hello".to_owned(),
-                    time_s: DurationSeconds(0.1),
+                    time_s: AudioPositionSeconds::try_from(0.1).expect("fixture onset"),
                 }],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
         let evidence = FaRawEvidence::admit_requested(
             &response,
@@ -512,7 +512,7 @@ mod tests {
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
                 indexed_timings: vec![],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let error = FaRawEvidence::admit_requested(
@@ -536,7 +536,7 @@ mod tests {
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
                 indexed_timings: vec![None],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
         let evidence = FaRawEvidence::admit_requested(
             &response,
@@ -568,10 +568,10 @@ mod tests {
             TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
                 tokens: vec![WhisperTokenTimingV2 {
                     text: "hello".to_owned(),
-                    time_s: DurationSeconds(0.1),
+                    time_s: AudioPositionSeconds::try_from(0.1).expect("fixture onset"),
                 }],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
         let key = cache_key("fallback");
         let evidence = FaRawEvidence::admit_requested(
@@ -608,7 +608,7 @@ mod tests {
             TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
                 tokens: Vec::new(),
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let error = FaRawEvidence::admit_requested(
@@ -647,7 +647,7 @@ mod tests {
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
                 indexed_timings: vec![None],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         for engine in FaEngineName::ALL.iter().copied() {
@@ -685,7 +685,7 @@ mod tests {
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
                 indexed_timings: vec![None],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
         let admitted_version = FaCacheNamespace::for_test("test-fa-wave-v1");
         let evidence = FaRawEvidence::admit_requested(
@@ -721,7 +721,7 @@ mod tests {
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
                 indexed_timings: vec![None],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
         let evidence = FaRawEvidence::admit_requested(
             &response,

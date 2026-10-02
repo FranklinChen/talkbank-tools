@@ -1,16 +1,12 @@
 # L2 Morphotag: Per-Word Code-Switching Analysis
 
 **Status:** Current
-**Last updated:** 2026-05-20 10:25 EDT
+**Last updated:** 2026-10-02 06:50 EDT
 
-> **L2 dispatch is now on by default.** After
-> evaluation across 19 language pairs and 17,352 `@s` words yielded
-> aggregate dispatch rate is high enough (well above 99% across
-> 19 evaluated language pairs), the `--experimental-l2-morphotag`
-> flag was removed and replaced with `--no-l2-morphotag` (opt-out
-> for legacy `L2|xxx` behavior). This design doc is maintained for
-> implementers; users should read the
-> [user guide](../user-guide/commands/morphotag.md).
+L2 dispatch is on by default; `--no-l2-morphotag` opts out and leaves every
+`@s` word as `L2|xxx`. This page is the design reference for implementers;
+users should read the [user guide](../user-guide/commands/morphotag.md).
+Changes to this design are recorded in the repository's `CHANGELOG.md`.
 
 ## Problem
 
@@ -26,22 +22,18 @@ Here `film` and `studies` are English words in a German utterance, marked
 with bare `@s` (shortcut for the secondary language declared in
 `@Languages`).
 
-Historically, batchalign3 blanked all `@s` words to `L2|xxx` in the `%mor`
-tier, discarding morphological information entirely. This document starts
-from that original failure mode because it motivated the current design:
+The primary language's Stanza model (German, here) produces wrong
+morphology for foreign words, so the safe conservative answer is
+`L2|xxx`, which admits ignorance:
 
 ```chat
 %mor: ... adp|auf L2|xxx L2|xxx .
 ```
 
-This is the **safe conservative** choice: the primary language's Stanza
-model (German, in this example) produces wrong morphology for foreign
-words, and presenting that wrong morphology as valid analysis would be
-worse than admitting ignorance.
-
-But `L2|xxx` is a loss. The word `studies` is a perfectly regular English
-plural noun. If we could route it to the English Stanza model, we'd get
-`noun|study-Pl`: real, useful morphological analysis.
+But `L2|xxx` is a loss. `studies` is a regular English plural noun; the
+English Stanza model gives `noun|study-Plur`. L2 morphotag routes `@s`
+words to the model of their own language and combines that analysis with
+what the primary model knows about the utterance.
 
 ## Scale
 
@@ -75,342 +67,308 @@ Across TalkBank's 24 data repos:
 5. **Morphologically integrated:** `tagueé@s:eng+spa`: English verb
    root with Spanish past participle morphology
 
-## Key Insight: Cross-Linguistic Information from the Primary Model
+## Who owns what
 
-The primary model's analysis of @s words is wrong *as morphology*, but
-it contains **structurally valid cross-linguistic information** that can
-be combined with the secondary model's language-specific knowledge.
+Two models see an `@s` word, and each knows something the other cannot.
 
-Universal Dependencies is explicitly designed to be cross-linguistic.
-The UD dependency relations, UPOS tags, and structural attachments have
-the same meaning in all languages by definition. When the German Stanza
-model parses `she was muy@s:spa nice .` and attaches `muy` as `advmod`
-of `nice`, it is making a **structural claim** that is valid regardless
-of language: this word is an adverbial modifier of an adjective.
+- The **secondary model** knows the word's language. It owns the word's
+  lexical category, lemma and features, and every relation inside the
+  `@s` span it analysed.
+- The **primary model** knows the host utterance. It owns where the span
+  attaches in the host tree and with which relation.
 
-### What Each Model Contributes
+The primary's category for a foreign word is a guess: it marks such words
+`X` with `Foreign=Yes`, or `INTJ`, or a category read off the position.
+Its relation for the word is a guess too, but it is the only evidence of
+how the word fits the host sentence, and it is structural (UD relations
+mean the same in every language). So the resolved category is always one
+the secondary model assigned, and where the primary's relation contradicts
+that category, the relation is what gets corrected.
 
 ```mermaid
 flowchart LR
-    subgraph Primary["Primary Model\n(full sentence context)"]
-        P1["deprel\n(syntactic role)"]
-        P2["Head index\n(attachment)"]
-        P3["UPOS\n(structural POS)"]
-        P4["Dependents\n(what attaches to this word)"]
+    subgraph Primary["Primary model\n(the host utterance)"]
+        P1["head\n(which host word)"]
+        P2["relation\n(how it attaches)"]
     end
-    subgraph Secondary["Secondary Model\n(language-specific knowledge)"]
-        S1["Lemma\n(dictionary form)"]
-        S2["Morph features\n(gender, number, tense)"]
-        S3["UPOS\n(lexical POS)"]
+    subgraph Secondary["Secondary model\n(the @s span, its language)"]
+        S1["category"]
+        S2["lemma, features"]
+        S3["relations inside the span"]
     end
-    subgraph Merge["Merged Result"]
-        M1["POS: primary deprel → constraint,\nvalidated by secondary"]
-        M2["Lemma: secondary"]
-        M3["Features: secondary"]
-        M4["GRA: primary structural parse,\nupgraded from FLAT when POS known"]
+    subgraph Merged["Merged %mor / %gra"]
+        M1["%mor: the secondary's items"]
+        M2["%gra inside the span:\nthe secondary's relations"]
+        M3["span root's attachment:\nprimary head, primary relation\ncorrected against the root's category"]
     end
-    P1 --> M1
-    P3 --> M1
-    S3 --> M1
-    S1 --> M2
-    S2 --> M3
-    P1 --> M4
-    P2 --> M4
-    M1 --> M4
+    S1 --> M1
+    S2 --> M1
+    S3 --> M2
+    P1 --> M3
+    P2 --> M3
+    S1 --> M3
 ```
-
-### Primary Model Outputs and Cross-Linguistic Validity
-
-| Output | Cross-linguistic? | Rationale |
-|--------|:-:|-----------|
-| **deprel** (dependency relation) | **Yes** | UD relations are language-universal by design. `advmod` means "adverbial modifier" in every language. |
-| **Head index** | **Yes** | Syntactic attachment is structural. `muy` attaching to `nice` is valid in any language. |
-| **UPOS** (universal POS tag) | **Mostly** | Defined cross-linguistically. Contextual models derive UPOS partly from position, which is language-independent. Risk: OOV heuristics may misfire (e.g., defaulting to PROPN). |
-| **Dependents** (words attaching to this word) | **Yes** | If `the` is `det` of `tienda`, then `tienda` is definitively a noun head. |
-| **XPOS** (language-specific POS) | No | English Penn Treebank tags are meaningless for Spanish words. |
-| **Lemma** | No | Unknown words get identity-lemmatized. |
-| **Morphological features** | No | Gender, number, tense require word-form recognition. |
-
-### Deprel → POS Constraint Mapping
-
-The dependency relation alone strongly constrains the part-of-speech.
-This mapping is a **pure function**: no ML involved, exhaustively
-testable:
-
-```text
-deprel        → POS constraint set
-───────────────────────────────────────────
-det           → {DET}                        ← unambiguous
-amod          → {ADJ}                        ← unambiguous
-advmod        → {ADV}                        ← unambiguous
-case          → {ADP}                        ← unambiguous
-mark          → {SCONJ}                      ← unambiguous
-cc            → {CCONJ}                      ← unambiguous
-nsubj         → {NOUN, PRON, PROPN}          ← narrow
-obj           → {NOUN, PRON, PROPN}          ← narrow
-iobj          → {NOUN, PRON, PROPN}          ← narrow
-obl           → {NOUN, PRON}                 ← narrow
-nmod          → {NOUN, PROPN}                ← narrow
-xcomp         → {VERB, ADJ}                  ← narrow
-ccomp         → {VERB}                       ← unambiguous
-advcl         → {VERB}                       ← unambiguous
-acl           → {VERB, ADJ}                  ← narrow
-appos         → {NOUN, PROPN}                ← narrow
-flat          → {NOUN, PROPN, ADJ, ADV}      ← broadest
-root          → {VERB, NOUN, ADJ}            ← broad
-conj          → (inherit from conjunct head)
-```
-
-For most UD relations, the constraint set is 1-3 POS tags. Even for the
-broadest cases (`flat`, `root`), the secondary model's lexical knowledge
-can disambiguate within the small set.
-
-### Dependent-Based Evidence
-
-A word's dependents provide additional POS evidence:
-
-- If a word has a `det` dependent → it is a **noun** (definitively)
-- If a word has an `nsubj` dependent → it is a **verb** or **adjective**
-- If a word has an `advmod` dependent → it is a **verb**, **adjective**, or **adverb**
-- If a word has a `case` dependent → it is a **noun** (in an oblique/prepositional phrase)
-
-Combined with the deprel constraint, this often narrows POS to exactly
-one candidate, even when the deprel itself is broad (like `flat`).
-
-### Worked Example
-
-```chat
-*PAR: she was muy@s:spa nice .
-```
-
-Primary model (English Stanza) produces for `muy`:
-
-| Field | Value | Cross-lingually valid? |
-|-------|-------|:---------------------:|
-| UPOS | `ADJ` (wrong as English morphology) | Partly, position suggests ADV |
-| deprel | `amod` or `advmod` | **Yes** |
-| head | 4 (`nice`) | **Yes** |
-| lemma | `muy` (identity) | No |
-| feats |: | No |
-
-**Deprel constraint:** `advmod → {ADV}`: exactly one candidate.
-
-Secondary model (Spanish Stanza) on isolated word `"muy"`:
-- UPOS: `ADV` ← matches constraint ✓
-- lemma: `muy`
-- feats: (none for Spanish adverbs)
-
-**Merged result:** `adv|muy` with deprel `ADVMOD` (upgraded from `FLAT`).
-
-Without the primary model's structural information, the secondary model
-seeing just `"muy"` would still likely get `ADV` (since `muy` is almost
-always an adverb). But for genuinely ambiguous words like `bajo` (noun
-"bass" / adjective "short" / preposition "under" / verb "I descend"),
-the deprel constraint from the primary model is decisive.
 
 ## Architecture
 
-### Historical Baseline (L2|xxx blanking)
-
-The pipeline already parses, resolves, and carries per-word language
-information through every stage. It is discarded only at injection time.
-
-```mermaid
-flowchart TD
-    A["ExtractedWord.lang\n(../chatter/crates/talkbank-transform/src/extract.rs)"] -->|"resolve_word_language()"| B["LanguageResolution\n(../chatter/crates/talkbank-model/validation/word/language/resolve.rs)"]
-    B --> C["special_forms[i].1\n(MorphosyntaxBatchItem\ncrates/batchalign-transform/src/morphosyntax/payload.rs)"]
-    C --> D["Grouping by utterance lang\n(crates/batchalign/src/morphosyntax/batch.rs)"]
-    D --> E["Primary Stanza worker\n(worker dispatch)"]
-    E --> F["inject_results()\n(crates/batchalign-transform/src/morphosyntax/injection.rs)"]
-    F -->|"resolved_lang.is_some()"| G["L2|xxx\n(information discarded)"]
-
-    style G fill:#f88,stroke:#a00
-```
-
-### Default: Structural Merge with Secondary Dispatch
-
-The default pipeline preserves the primary model's structural analysis
-and combines it with the secondary model's lexical knowledge (pass
-`--no-l2-morphotag` to opt out and return to the legacy `L2|xxx`
-behavior shown above):
+The L2 path is a chain of owned types. Each is made from the one before by
+one function that consumes it, so a step cannot be skipped and no later
+step refers back to an earlier one by a bare index.
 
 ```mermaid
 flowchart TD
-    A["Primary model processes\nfull utterance"] --> B["For @s words: extract\ndeprel, head, UPOS,\ndependents"]
-    B --> C["Infer POS constraint\nfrom deprel\n(deprel_to_pos_constraint)"]
-    A --> D["Defer L2 blanking\n(keep primary UD output)"]
-    D --> E["Plan contiguous @s spans\nplus host attachment\n(crates/batchalign-transform/src/morphosyntax/l2/plan.rs)"]
-    E --> F{"Stanza model\navailable?"}
-    F -->|"yes"| G["Dispatch spans to\nsecondary Stanza workers"]
-    F -->|"no"| H["Fall back to L2|xxx"]
-    G --> I["merge_planned_secondary_span()\nPOS ← deprel constraint ∩ secondary\nlemma ← secondary\nfeatures ← secondary"]
-    G -->|"dispatch fails"| H
-    I --> J["Upgrade GRA:\nif primary deprel = FLAT\nand POS is known,\nreplace with correct deprel"]
-
-    style I fill:#8f8,stroke:#0a0
-    style H fill:#ff8,stroke:#aa0
-    style C fill:#88f,stroke:#00a
+    UD["primary UdResponse\n+ batch items"] -->|"injection\n(invariants, one walk, UdAlignment)"| EX["InjectionResult::l2\nL2Extraction: positions + unaligned"]
+    EX -->|"into_reported_positions\n(unaligned are logged)"| DP["Vec&lt;L2DeferredPosition&gt;"]
+    DP -->|"plan_dispatch_spans\n(consumes)"| SP["L2SpanPlan\nowns its positions + L2Attachment"]
+    SP -->|"secondary Stanza worker"| SEC["secondary UdSentence"]
+    SP -->|"merge_planned_secondary_span\n(consumes the plan)"| MS["MergedL2Span"]
+    SEC --> MS
+    MS -->|"splice_l2_into_chat\n(consumes)"| CHAT["ChatFile %mor / %gra"]
+    EX -.->|"alignment fails"| FB["L2|xxx stays, reported"]
+    SP -.->|"no model, dispatch fails,\nor L2MergeError"| FB
 ```
 
-The current implementation places deterministic span planning and host
-attachment in `talkbank-transform`; `batchalign` is only the worker-dispatch
-adapter for those planned spans.
+`talkbank-transform` (`crates/batchalign-transform/src/morphosyntax/l2/`)
+owns every step except the worker call; `batchalign`
+(`crates/batchalign/src/morphosyntax/batch.rs`, `dispatch_secondary_l2`) is
+the adapter that sends each planned span to a secondary worker. The
+primary pass writes `L2|xxx` for every `@s` word first, so every failure
+path leaves that placeholder, never a partial analysis.
 
-### Merge Algorithm
+### The index spaces and the alignment
 
-For each @s word, the merge operates on three inputs: the primary
-model's structural analysis of that word, the secondary model's
-lexical analysis, and the **full secondary UD
-sentence** so the merge can see `compound:prt` relations for
-phrasal-verb recognition.
+Four integer spaces meet in this path, and they coincide only in an
+utterance with no contraction:
+
+| Space | Type | Base | Sequence |
+|-------|------|------|----------|
+| host word | `MorItemIndex` | 0 | alignable words of the utterance, one `%mor` item each |
+| span word | `SpanWordPosition` | 0 | words of one dispatched secondary span |
+| token position | `UdTokenIndex` | 0 | top-level tokens of the walked sentence: a word or a complete multi-word token |
+| UD word id | `UdWordId` | 1 | syntactic words of a UD sentence (`ID` column) |
+| UD row | private to the alignment | 0 | rows of `UdSentence::words`, where a multi-word token's range row sits beside its components |
+
+In `avui anem al cole@s per jugar .` the Catalan model splits `al` into
+`a` + `el`, so `cole` is host word 3, UD word 5 and UD row 5; row 3 is the
+`a` of `al`.
+
+`UdTokens::walk` (`morphosyntax/alignment.rs`) is the one walk of a UD
+sentence: one single word or one complete multi-word token per top-level
+token, empty nodes and a terminator-punctuation word skipped. It validates
+what every lookup relies on: multi-word tokens followed by their components,
+no repeated or zero id, every head the root or a walked word, and every
+multi-word token's REPRESENTATIVE (its first component whose head lies
+outside the token). The `%mor` mapper (`map_tokens`) consumes the walk, and
+so does `UdAlignment<W>`, the one place a CHAT word is matched to UD words:
+`UdTokens::align` adds one check, one token per CHAT word, and makes the
+alignment generic over the CHAT-side space `W` (`MorItemIndex` for a host
+utterance, `SpanWordPosition` for a secondary span). Because the mapper and
+the alignment read one walk, the `%mor` item a word gets and the UD words
+the alignment reports for it cannot disagree. After that, every lookup goes
+by UD id, and a head is reported as `HeadTarget::{Root, Word(W)}`: the
+sentinel `0` is a variant, and a head is always a CHAT word of the same
+space.
 
 ```mermaid
-flowchart TD
-    In[["For each @s word at position i"]] --> Ctx{"Secondary UD\ncontext available?"}
-    Ctx -->|"yes"| P0{"Priority 0:\nis this word a\ncompound:prt\nhead or particle?"}
-    Ctx -->|"no"| P1
-    P0 -->|"particle"| Part["Resolve POS = Part\nGRA deprel = compound:prt"]
-    P0 -->|"head (sec.UPOS=Verb)"| Head["Resolve POS = Verb\n(override primary constraint)"]
-    P0 -->|"no"| P1{"Priority 1:\ncopula dependent\nand sec.UPOS=Verb?"}
-    P1 -->|"yes"| Cop["Demote VERB → NOUN/ADJ\nper predicate-nominal rule"]
-    P1 -->|"no"| P2{"Priority 2:\nsec.UPOS matches\nprimary deprel\nconstraint?"}
-    P2 -->|"yes"| Agree["Resolve POS = sec.UPOS"]
-    P2 -->|"no"| P3{"Priority 3:\nsec.UPOS is\nclosed-class?"}
-    P3 -->|"yes"| Closed["Resolve POS = sec.UPOS\n(function word trusted)"]
-    P3 -->|"no"| P4{"Priority 4:\nsec.UPOS is\nNOUN or PROPN?"}
-    P4 -->|"yes"| Noun["Resolve POS = sec.UPOS\n(content noun override)"]
-    P4 -->|"no"| P5{"Priority 5:\nprimary UPOS in\nconstraint?"}
-    P5 -->|"yes"| Prim["Resolve POS = primary.UPOS"]
-    P5 -->|"no"| P6["Priority 6: most likely\nPOS from constraint"]
-
-    Part --> Out
-    Head --> Out
-    Cop --> Out
-    Agree --> Out
-    Closed --> Out
-    Noun --> Out
-    Prim --> Out
-    P6 --> Out
-
-    Out[["Override POS in Mor;\ncompute corrected_deprel"]]
-
-    style P0 fill:#bfd4ff,stroke:#4a90e2,stroke-width:2px
-    style Part fill:#d4f5dd,stroke:#28a745
-    style Head fill:#d4f5dd,stroke:#28a745
+flowchart LR
+    HW["host word\nMorItemIndex"] -->|"UdAlignment::word"| TOK["aligned token\nword or MWT"]
+    SW["span word\nSpanWordPosition"] -->|"UdAlignment::word"| TOK
+    TOK -->|"representative"| ID["UD word\nUdWordId"]
+    ID -->|"head"| HT["HeadTarget\nRoot or a CHAT word"]
+    ID -->|"dependents"| DEP["UD words\n(by id)"]
+    HT -->|"plan"| ATT["L2Attachment"]
+    MS["MergedL2Span\nfirst host word + mors"] -->|"splice"| CH["%gra chunks\n(chatter's MorTier)"]
 ```
 
-**Priority 0** handles phrasal verbs. It runs
-BEFORE the primary-constraint priority chain because the secondary
-model's sentence-level `compound:prt` analysis is more reliable than
-either the primary's deprel (which misclassifies foreign verbs as
-`advmod`) or Priority 3's blind trust of `ADP` as closed-class. See
-[Phrasal-verb recognition](#phrasal-verb-recognition) for the worked
-example.
+A sentence that does not align is a typed `UdAlignmentError`. On the
+primary side the utterance's `@s` words stay `L2|xxx` and the utterance is
+reported in `L2Extraction::unaligned`; on the secondary side the span
+fails with `L2MergeError::Alignment`, reported by the dispatcher.
 
-Concretely, the algorithm in pseudocode:
+### Extraction
 
-```text
-1. primary_deprel   ← primary model's deprel for word i
-2. primary_upos     ← primary model's UPOS for word i
-3. primary_head     ← primary model's head index for word i
-4. constraint_set   ← deprel_to_pos_constraint(primary_deprel)
-5. dependents       ← words whose head = i (from primary parse)
-   refine constraint_set with dependent evidence
+Extraction is a step of primary injection, not a pass of its own. For each
+utterance, injection rewrites the primary analysis by the grammatical
+invariants once, walks it once (`UdTokens::walk`), maps that walk to
+`%mor`, and aligns the same walk to the utterance's words. After the
+utterance is injected, the deferral (`L2Extraction::defer_utterance`)
+records, per dispatchable `@s` word, a `L2DeferredPosition`: the `%mor` item
+it was written as, its target language, its text, the utterance's
+terminator (an input to the secondary model), and `PrimaryStructuralInfo`
+read from the word's representative: relation, head
+(`HeadTarget<MorItemIndex>`), the relations of its dependents, and the head
+word's UPOS. The primary's category for the word is not recorded: nothing
+uses it. Both types have private fields; only the deferral builds them, from
+an aligned word. So a position and the `%gra` it is spliced into come from
+one analysis, after the same rewrites: an `@s` word the contraction rule
+moved under `have` (`you hafta put@s:spa .`) is deferred as `have`'s `xcomp`,
+as its `%gra` says, not as the root the raw analysis made it.
 
-6. secondary_sentence ← Stanza UD response for the @s span
-7. secondary_upos   ← secondary[i].upos
-8. secondary_lemma  ← secondary[i].lemma
-9. secondary_feats  ← secondary[i].feats
+The item and head are named in the space of the `%mor` items injection
+wrote (`ItemPlacement`). In preserve mode that is one item per CHAT word. In
+retokenize mode the main tier is rebuilt from the model's tokens, one item
+per model word: an `@s` word's item is the one token the text mapping that
+rebuilds the main tier gives it, cross-checked against the item the
+analysis gives it, and its head is the item of its head word. In
+`gonna see camino@s:spa .` that makes `camino` item 3 and its head `see`
+(item 2). A word that became several items, or whose two placements
+disagree, is reported (`L2ExtractError::SplitWord`,
+`TokenizationDisagrees`) and stays `L2|xxx`. An utterance that is not
+injected (its analysis does not map, or its item count differs from its word
+count) defers nothing; its decision record reports it.
 
-   // Priority 0 (phrasal-verb structural recognition):
-10. if secondary[i].deprel == "compound:prt":
-        final_pos ← Part
-        final_deprel ← compound:prt
-        skip to 20
-    if some other word has head == i and deprel == "compound:prt"
-       AND secondary_upos == Verb:
-        final_pos ← Verb
-        skip constraint-based resolution
+### Planning
 
-   // Priorities 1-6 (existing constraint-based chain):
-11. if has_copula and secondary_upos == Verb: final_pos ← NOUN or ADJ
-12. if secondary_upos ∈ constraint_set: final_pos ← secondary_upos
-13. if is_closed_class(secondary_upos): final_pos ← secondary_upos
-14. if secondary_upos ∈ {NOUN, PROPN}: final_pos ← secondary_upos
-15. if primary_upos ∈ constraint_set: final_pos ← primary_upos
-16. else: final_pos ← most_likely(constraint_set)
+`plan_dispatch_spans` groups consecutive positions of one utterance and
+one target language into an `L2SpanPlan`, which owns them. It also decides
+the span's `L2Attachment` from the primary heads. The ATTACHMENT SOURCE is
+the first span word whose primary head lies outside the span:
 
-   // Merge lemma and features
-17. final_lemma ← secondary_lemma
-18. final_feats ← secondary_feats
+| `L2Attachment` | When | External relation |
+|----------------|------|-------------------|
+| `HostGovernor { source_word, source, relation }` | some word's head is a host word outside the span | the source's primary relation (corrected at merge) |
+| `UtteranceRoot { source_word }` | no such word, and some word is the primary's utterance root | `root`; the variant has no field for another |
+| `InternalRoot` | every head lies inside the span (only a cyclic primary analysis) | none |
 
-   // Merge GRA (outside Priority 0's explicit deprel)
-19. if primary_deprel = "flat" or constraint mismatch with final_pos:
-        final_deprel ← infer_deprel(final_pos, head_upos)
-    else:
-        final_deprel ← primary_deprel
-20. emit MergedL2Morphology { mor, corrected_deprel }
+A word's head inside the span means the secondary analysis governs it.
+
+### Secondary dispatch
+
+Each span is sent to a Stanza worker for its target language as one
+sentence: its words and the utterance's terminator, with Stanza owning
+tokenization (`retokenize=true`), so contractions expand into multi-word
+tokens (`it's` is `it` + `'s`). In that mode the terminator comes back as
+a final `PUNCT` row, which the alignment skips.
+
+### Merge
+
+`merge_planned_secondary_span` consumes the plan and the secondary
+sentence and produces one `MergedL2Span`:
+
+1. Align the secondary sentence to the span's words
+   (`UdAlignment<SpanWordPosition>`) and map it to `%mor`/`%gra` with
+   `map_ud_sentence` (a multi-word token becomes one item with clitics,
+   `pron|it~aux|be`). The mapping's item count must equal the span's word
+   count.
+2. **Items.** Each span word's `%mor` item is the secondary's, unchanged,
+   except that a phrasal-verb particle is written PART (below).
+3. **Relations inside the span.** The secondary's relations, unchanged;
+   their heads are 1-based within the span and `0` for the secondary root.
+4. **External relation.** For a `HostGovernor` attachment, the source's
+   primary relation is checked against the category of the secondary
+   root, the word that will carry it. If the relation is `flat` or does
+   not admit that category, it is replaced by the relation the category
+   implies under the source's head (`infer_deprel_from_pos`). Where no
+   relation is implied, the primary's stays.
+
+The attachment is typed by stage: a plan's is `L2Attachment<AsPlanned>`,
+whose relation is the source's primary one with no field for anything
+else, and the merge returns `L2Attachment<ExternalRelation>`, which says
+`Primary` or `Corrected(relation)`. The relation is held once, so a span
+cannot carry a correction beside a different external relation, and a plan
+cannot carry a correction at all.
+
+The category check uses `deprel_to_pos_constraint`, which maps a UD
+relation to the categories it admits (`advmod` admits ADV, `obl` NOUN and
+PRON, `flat`, `conj`, `dep` and unknown relations admit anything). It only
+detects a contradiction; it never chooses a category.
+
+| Root's category | Head's category | Relation implied |
+|-----------------|-----------------|------------------|
+| ADV | VERB, ADJ, ADV | `advmod` |
+| ADJ | NOUN, PROPN | `amod` |
+| DET | NOUN, PROPN | `det` |
+| NOUN, PROPN | VERB (source has a `case` dependent) | `obl` |
+| NOUN, PROPN | VERB (no `case` dependent) | `obj` |
+| NOUN, PROPN | NOUN, PROPN | `nmod` |
+
+`ModelAssignedPos` is the only category the merge itself writes or reasons
+with. Its constructors read the secondary analysis through the span
+alignment (the word's tag, a contraction's representative's tag, or PART
+for a particle), and its field is private, so no rule over the primary's
+relation can build one. The `%mor` items are the `%mor` mapper's rendering
+of the secondary analysis, including its language-specific overrides
+(Italian's MWT repairs among them), exactly as for a primary-language
+word. There is no "no secondary category" case: every span word
+is an aligned, tagged UD word, and a span the secondary did not analyse
+fails as a whole.
+
+Worked example, `we talked about los@s:spa niños@s:spa .`:
+
+| | `los` | `niños` |
+|-|-------|---------|
+| primary (English) | PROPN, `obl` under `talked` | PROPN, `flat` under `los` |
+| secondary (Spanish) | DET, `det` under `niños` | NOUN, root |
+
+`los` is the attachment source (its head, `talked`, is outside the span).
+The secondary root `niños` carries `los`'s `obl` to `talked`; `obl` admits
+NOUN, so it stands. Inside the span `los` keeps the secondary's `det`:
+
+```chat
+%mor: pron|we-Prs-Nom-P1 verb|talk-Fin-Ind-Past-P1 adp|about det|el-Masc-Def-Art-Plur noun|niño-Masc-Plur .
+%gra: 1|2|NSUBJ 2|0|ROOT 3|4|CASE 4|5|DET 5|2|OBL 6|2|PUNCT
 ```
 
-### Phrasal-verb recognition
+(`3|4|CASE`: see Limitations.)
 
-Stanza returns `compound:prt` for true verb-particle constructions
-(`wake up`, `give up`, `pick up`, `figure out`). Before the
-earlier behavior had the L2 merge processing each `@s` word in isolation
-and could not see that structural evidence, so:
+### Phrasal verbs
 
-- The **head** (`wake`) could be downgraded to `adv|wake` when the
-  primary parser tagged it as `advmod` (common for German parsing
-  English roots).
-- The **particle** (`up`) was always tagged `adp|up` because
-  Priority 3 (closed-class trusted) returned ADP blindly.
+Stanza attaches the particle of a verb-particle construction to the verb
+with `compound:prt` (`wake up`, `give up`, `pick up`), and tags the
+English particle ADP. A span word the secondary attached `compound:prt`
+to a word it tagged VERB is written PART; its relation is the secondary's
+`compound:prt` (`COMPOUND-PRT`). The verb keeps the secondary's VERB, as
+every word keeps its category. The context is each span word's place in
+the span alignment, so it is present for every word.
 
-The fix threads the full secondary UD sentence into
-`merge_primary_secondary_with_context()`
-(`crates/batchalign-transform/src/morphosyntax/l2/merge.rs:542`), which
-delegates to the inner `resolve_merged_pos_with_context()` at `:152`
-where Priority 0 is implemented. Result on German-English input:
+| Main tier | `%mor` | `%gra` of the span |
+|-----------|--------|--------------------|
+| `ich möchte wake@s up@s jetzt .` | `... verb\|wake-Fin-Imp part\|up ...` | `3\|2\|OBJ 4\|3\|COMPOUND-PRT` |
+| `die kinder give@s up@s immer .` | `... verb\|give-Fin-Imp part\|up ...` | `3\|2\|ADVMOD 4\|3\|COMPOUND-PRT` |
+| `die zeit ist time@s out@s .` | `... noun\|time adp\|out .` | `5\|4\|COMPOUND-PRT` |
 
-| Main | `%mor` (before fix) | `%mor` (after fix) |
-|------|---------------------|--------------------|
-| `ich möchte wake@s up@s jetzt .` | `... verb\|wake adp\|up adv\|jetzt .` | `... verb\|wake-Fin-Imp-S part\|up adv\|jetzt .` |
-| `die kinder give@s up@s immer .` | `... adv\|give adp\|up adv\|immer .` | `... verb\|give-Fin-Imp-S part\|up adv\|immer .` |
-| `die zeit ist time@s out@s .` | `... noun\|time adp\|out .` | `... noun\|time adp\|out .` (unchanged, correctly a compound noun, not a phrasal verb) |
+`time out` is a compound noun: Stanza attaches `out` `compound:prt` to the
+NOUN `time`, so `out` keeps its ADP.
 
-The particle's `%gra` deprel is `COMPOUND-PRT`. Test coverage for the fix:
+### Splice
 
-- `crates/batchalign/src/chat_ops/morphosyntax_ops/l2/tests.rs`: 4 unit
-  tests (particle promotion, head promotion, non-phrasal ADP
-  regression, non-VERB-secondary safety).
-- `crates/batchalign/tests/ml_golden/morphotag/golden_l2.rs::golden_l2_morphotag_phrasal_verbs`
- , end-to-end ML golden locking in the table above.
+`splice_l2_into_chat` consumes merged spans through chatter's
+`MorTier::splice_range_coordinated`, including one-word spans. The span's
+relations are repaired together (`repair_secondary_gras`), then admitted
+as a `SplicedBlock`: one ordered relation per chunk, bounded heads, exactly
+one root and no cycle. `SplicedBlock::root_chunk()` supplies the admitted
+root in block-relative numbering; the consumer does not rediscover it.
 
-### Contiguous Span Grouping
+The caller supplies the root attachment as a `SpanRoot`. A host governor
+is named by its **pre-splice** `SemanticWordIndex1`, with a checked
+`AttachmentRelation` that cannot be `ROOT`; chatter owns translation into
+the resulting tier's numbering. `HostRedirects::PerItem` redirects host
+dependents of the primary attachment source to the block's admitted root.
+Other replaced words follow their counterpart's chunk. Block-relative
+`BlockChunk` values and host indices are distinct types.
 
-Consecutive `@s` words with the same resolved target language are merged
-into a single span and sent as a mini-sentence to the secondary model.
-This gives the model useful context:
+The primary host tree remains canonical. If the secondary requests the
+utterance root while a primary root survives outside the span, the caller
+explicitly attaches the secondary root there with `DEP`. If a requested
+host anchor lies in, or depends on, the replaced span, the caller may
+request the utterance root instead; this succeeds only when chatter admits
+that root replacement. Refused admission leaves both tiers unchanged and
+retains `L2|xxx`, with a warning. An unreadable attachment source is reported
+as `host_anchor_unreadable`, never converted into an absent anchor.
 
-```text
-Input:   we talked about los@s:spa niños@s:spa .
-Span:    ─────────────── ^^^^^^^^^^^^^^^^^^^^^^^^
-                         "los niños" → Spanish Stanza
+Every applied span is additionally validated against the generated `%gra`
+invariants and rolled back if it breaks one. `gra_upgraded` counts only
+planned external corrections actually written under their host governor,
+not `DEP` fallback attachments or utterance-root replacements.
 
-Result:  det|el-Masc-Def-Art-Pl  noun|niño-Masc-Pl
-```
+### LanguageResolution policy
 
-For contiguous spans, the secondary model has enough context to produce
-both correct POS and correct features. The deprel constraint from the
-primary model serves as validation rather than correction in these cases.
-
-### LanguageResolution Policy
-
-| Variant | Policy | Rationale |
-|---------|--------|-----------|
-| `Single(lang)` | Dispatch to `lang` | Unambiguous target |
-| `Multiple(langs)` | Fall back to `L2|xxx` | No single trustworthy target |
-| `Ambiguous(langs)` | Fall back to `L2|xxx` | No single trustworthy target |
-| `Unresolved` | Fall back to `L2|xxx` | No language to dispatch to |
+| Variant | Dispatch target |
+|---------|-----------------|
+| `Single(lang)` | `lang` |
+| `Multiple(langs)` | the first language named |
+| `Ambiguous(langs)` | the first language named |
+| `Unresolved` | none: the word stays `L2|xxx` |
 
 ### Validation and normalization policy
 
@@ -432,170 +390,124 @@ Per-word L2 dispatch and transcript repair are intentionally separate concerns:
 ### Unsupported non-primary language handling
 
 `morphotag` requires only the **primary** `@Languages` code to be
-Stanza-supported. Non-primary content targeting an unsupported language
-, whether via `[- UNSUPPORTEDLANG]` precode or `@s:UNSUPPORTEDLANG`
+Stanza-supported. Non-primary content targeting an unsupported language,
+whether via `[- UNSUPPORTEDLANG]` precode or `@s:UNSUPPORTEDLANG`
 per-word marker, is partitioned out of Stanza dispatch by
 `partition_groups_by_stanza_support` in
 `crates/batchalign/src/morphosyntax/worker.rs` and emitted as `L2|xxx`
 rather than crashing the worker. Supported-language utterances and
 spans in the same file continue to receive real morphology.
 
-### GRA Upgrade: From FLAT to Correct Deprel
-
-The primary model currently produces `FLAT` for most @s words because
-it doesn't recognize them. With a resolved POS, we can upgrade to the
-correct UD relation:
-
-| Resolved POS | Head's POS | Upgraded deprel |
-|-------------|------------|-----------------|
-| ADV | ADJ | `ADVMOD` |
-| ADV | VERB | `ADVMOD` |
-| ADJ | NOUN | `AMOD` |
-| DET | NOUN | `DET` |
-| NOUN | VERB (with case dep) | `OBL` |
-| NOUN | VERB (no case dep) | `OBJ` |
-| NOUN | NOUN | `NMOD` |
-
-This upgrade is conservative, only applied when the primary deprel is
-`FLAT` (indicating the model gave up). Non-FLAT deprels from the primary
-model are kept as-is, since they already carry correct structural
-information.
-
 ## Design Alternatives Considered
 
-### Alternative 1: Secondary Model Only (naive approach)
+### Alternative 1: Secondary Model Only
 
-Send @s words to secondary model in isolation, discard all primary
-model output for those positions.
+Send @s words to the secondary model in isolation and discard the primary
+model's output for them.
 
-**Rejected because:** Throws away the primary model's sentence-level
-structural understanding, the hardest information to recover from
-isolated words. POS accuracy degrades significantly for ambiguous
-words without sentence context.
+**Rejected:** the secondary model cannot know where the span attaches in
+the host utterance. The primary's head and relation are the only evidence
+of that, so the merge keeps them for the span's attachment.
 
 ### Alternative 2: Full Utterance to Secondary Model
 
-Send the entire utterance text to both primary and secondary models.
-Cherry-pick secondary results only at @s positions.
+Send the entire utterance to both models and take the secondary's results
+at @s positions.
 
-**Deferred because:** Tokenization mismatch between models makes
-position alignment fragile. The secondary model may split/merge words
-differently, creating the same retokenization problem we already know
-is complex. Worth investigating later but too fragile for v1.
+**Deferred:** the secondary model tokenizes the host-language words its
+own way, so position alignment is fragile, and its analysis of host words
+is as unreliable as the primary's of foreign ones.
 
 ### Alternative 3: Multilingual Model
 
-Use a single multilingual Stanza model (XLM-R based) that handles
-mixed-language input natively.
+Use a single multilingual Stanza model that handles mixed-language input.
 
-**Rejected because:** Multilingual models trade language-specific
-accuracy for breadth. For TalkBank's morphological detail requirements
-(full CHAT features, language-specific POS subcategories), dedicated
-per-language models produce significantly better output.
+**Rejected:** multilingual models trade language-specific accuracy for
+breadth; TalkBank's morphological detail needs dedicated per-language
+models.
 
 ### Alternative 4: Dictionary Lookup
 
-Use morphological dictionaries (UniMorph, Wiktionary) to look up @s
-words by form + deprel-constrained POS.
+Look @s words up in morphological dictionaries (UniMorph, Wiktionary).
 
-**Not rejected, but deferred:** Could serve as a fast fallback when
-no secondary Stanza model is available. The deprel constraint makes
-dictionary lookup much more reliable (since the POS is known). Worth
-adding as a future enhancement.
+**Deferred:** a possible fallback when no secondary Stanza model exists.
 
-### Alternative 5: Direct UPOS Transfer (no secondary model)
+### Alternative 5: Category from the primary's relation
 
-Use the primary model's UPOS directly for POS. Only dispatch to the
-secondary model for lemma and features.
+Choose the category the primary's relation implies, or the primary's own
+tag, where it disagrees with the secondary's.
 
-**Partially incorporated:** The merge algorithm uses primary UPOS as
-a fallback when the secondary model's POS is outside the deprel
-constraint set. This avoids loading a secondary model when POS is all
-that's needed, but lemma and features are the main value, so the
-secondary dispatch is still necessary.
+**Rejected:** it produces categories neither model assigned beside the
+secondary's lemma and features (`noun|work-Part-Pres`), and it overrides
+the model that knows the language, even where both models agree
+(`je dis ja@s:nld` is INTJ in both). The relation is corrected instead.
 
 ## Flag surface
 
-L2 dispatch is the default. The `--experimental-l2-morphotag` flag
-has been removed and replaced with `--no-l2-morphotag` (opt-out).
+L2 dispatch is the default; `--no-l2-morphotag` opts out.
 
 ```bash
 batchalign3 morphotag input/ -o output/                    # L2 on (default)
-batchalign3 morphotag input/ -o output/ --no-l2-morphotag  # L2 off (legacy)
+batchalign3 morphotag input/ -o output/ --no-l2-morphotag  # L2 off
 ```
 
-Morphotag has no `--lang` flag, every file's primary language is read
+Morphotag has no `--lang` flag; every file's primary language is read
 from its own `@Languages:` header. The L2 dispatch path applies to
 secondary-language tagged words (`@s`, `@s:fra`, etc.) inside any file
 regardless of the primary.
 
-Why keep an opt-out? Two legitimate users: researchers reproducing
-older analyses exactly, and data producers who prefer the honest
-`L2|xxx` to a silently-wrong analysis in cases where the secondary
-Stanza model is known to be weak (the five `L2|xxx` survivors in
-the `cym,eng` eval run fall into that category).
+The opt-out serves researchers reproducing older analyses exactly, and
+data producers who prefer the honest `L2|xxx` where the secondary Stanza
+model is known to be weak.
 
 ## MWT Contraction Expansion
 
-L2 secondary dispatch now sends `retokenize=true` to the worker. For
-MWT-capable languages (English, French, Italian, etc.), Stanza's free
-tokenizer expands contractions into Range tokens:
+The secondary dispatch lets Stanza own tokenization, so for MWT-capable
+languages (English, French, Italian, etc.) contractions expand into
+multi-word tokens, and `map_ud_sentence` assembles each into one item
+matching the single `@s` word on the main tier:
 
-| @s word | Without retokenize | With retokenize |
-|---------|-------------------|-----------------|
-| `it's@s:eng` | `L2\|xxx` or `pron\|its` | `pron\|it~aux\|be` |
-| `don't@s:eng` | `L2\|xxx` or `adv\|dont` | `aux\|do~part\|not` |
-| `working@s:eng` | `noun\|working` | `noun\|work-Part-Pres-S` |
-
-The L2 path uses `map_ud_sentence()` (merged clitics), which collapses
-Range token components into a single clitic MOR matching the original
-@s word on the main tier.
+| @s word | `%mor` |
+|---------|--------|
+| `it's@s:eng` | `pron\|it-Prs-Nom-S3~aux\|be-Fin-Ind-Pres-S3` |
+| `don't@s:eng` | `aux\|do-Fin-Imp~part\|not` |
+| `working@s:eng` | `verb\|work-Part-Pres` |
 
 ## Limitations
 
-1. **Isolated word POS ambiguity partially mitigated.** The deprel
-   constraint narrows POS for most words, but `flat` and `root` deprels
-   leave the constraint set broad.
-2. **Memory cost.** Secondary models must be loaded alongside the
-   primary model. Each Stanza model adds ~200-500 MB.
-3. **Not all languages supported.** Stanza covers ~70 languages, but
-   some `@s` targets (e.g., `@s:nan` Taiwanese, `@s:sun` Sundanese
-  , possibly mistagged in some corpora) have no model. In those
-   cases the dispatcher falls back to `L2|xxx`; there is no silent
-   wrong-analysis failure mode.
-4. **GRA upgrade is heuristic.** The FLAT→correct-deprel upgrade covers
-   common cases but may miss language-specific constructions.
-5. **MWT coverage inherits Stanza's per-language MWT support.**
-   Contractions in `@s` words expand via the same mechanism as non-`@s`
-   contractions (`retokenize=true` to the secondary model). Languages
-   with Stanza MWT processors (English, French, Italian, Spanish, plus
-   ~45 others) expand correctly; Swedish and a few others don't.
-6. **Phrasal-verb coverage is Stanza-model-dependent.** The merge
-   honors Stanza's `compound:prt` analysis whenever the secondary
-   model emits it. Stanza recognizes common English phrasal verbs
-   (`wake up`, `give up`, `pick up`, `figure out`) but disagrees on
-   borderline cases (`look after`, `hang around`), those return
-   `advmod`, so the merge produces `verb|look adv|after` rather than
-   `verb|look part|after`. Fixing these requires either a curated
-   phrasal-verb lexicon or Stanza model improvements.
-
-## Implementation history
-
-The implementation landed in four chunks:
-
-| Date | Commit scope | What |
-|------|--------------|------|
-| (initial) | `feat: experimental L2 morphotag for @s code-switched words` | Core merge algorithm with POS priority chain and contiguous span dispatch. Feature gated behind `--experimental-l2-morphotag` (now removed). |
-| (later) | `feat: L2 morphotag + retokenize MWT fix, full contraction expansion` | Three MWT bug fixes (English added to `MWT_LANGS`, Rust Range-token filter, expanded mapping for Retokenize path). L2 dispatch flipped to `retokenize=true` so clitics expand. |
-| (later) | `feat(l2): phrasal-verb merge via compound:prt` | Priority 0 added to `resolve_merged_pos_with_context`. Secondary UD sentence threaded through merge. `compound:prt` head promotes to VERB; particle promotes to PART with correct GRA deprel. |
-| (later) | `feat(l2): flip L2 dispatch to default-on` | Renamed `--experimental-l2-morphotag` to `--no-l2-morphotag` (inverted semantic). Default behavior is now L2 dispatch on. |
-
-Aggregate evaluation validated the feature across 19 language pairs
-and triggered the ungating.
+1. **Host words that point into a span attach to its first chunk.**
+   Chatter's splice redirects a host relation whose head is a replaced
+   word to the first chunk of the replacing block. Where the source's
+   host dependents should go to the secondary root, the result differs:
+   in `we talked about los@s niños@s .` `about` attaches to `los`
+   (`3|4|CASE`), and in
+   `ich glaube it's@s working@s und don't@s stop@s .` `und` attaches to
+   `do` (`6|7|CC`) and `stop` to `it` (`9|3|CONJ`).
+2. **A single isolated word has only the secondary's analysis of it
+   alone.** The secondary model sees just the span and the terminator;
+   for an ambiguous isolated word its category is the model's best
+   reading of that word out of context.
+3. **Memory cost.** Secondary models are loaded alongside the primary
+   model; each Stanza model adds ~200-500 MB.
+4. **Not all languages supported.** Stanza covers ~70 languages, but
+   some `@s` targets (e.g., `@s:nan` Taiwanese, `@s:sun` Sundanese,
+   possibly mistagged in some corpora) have no model. Those words stay
+   `L2|xxx`; there is no silent wrong-analysis failure mode.
+5. **The relation correction is a table.** It covers common
+   category-under-head cases (table above); elsewhere the primary's
+   relation stands even where it contradicts the category.
+6. **MWT coverage inherits Stanza's per-language MWT support.** Languages
+   with Stanza MWT processors expand contractions; Swedish and a few
+   others don't.
+7. **Phrasal-verb coverage is Stanza-model-dependent.** Stanza
+   recognizes common English phrasal verbs but disagrees on borderline
+   cases (`look after`, `hang around`), which come back `advmod`, so the
+   merge gives `verb|look adv|after`.
 
 ## Related
 
+- [L2 Morphotag Status](l2-morphotag-status.md), what is in place and how it is tested
 - [L2 Morphotag Literature Review](l2-morphotag-literature.md), prior art survey
-- [Transcriber `$POS` Hints](pos-hints.md), complementary post-pass that overrides `%mor` POS with transcriber annotations (default on; opt out via `--no-pos-hints`). Attacks the same `FeaturePosMismatch` error class on embedded-language words that `$POS`-annotating transcribers have already labeled correctly.
+- [Transcriber `$POS` Hints](pos-hints.md), complementary post-pass that overrides `%mor` POS with transcriber annotations (default on; opt out via `--no-pos-hints`).
 - [L2 & Language Switching](l2-handling.md), current behavior reference
 - [Language Routing](../../architecture/language-and-multilingual/language-routing.md), full per-utterance + per-word routing, auto-detection, and the per-word routing gap

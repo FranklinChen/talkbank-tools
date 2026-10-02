@@ -1,6 +1,6 @@
 # Architecture reference
 
-**Last modified:** 2026-09-09 20:37 EDT
+**Last modified:** 2026-10-01 09:50 EDT
 
 Read the sections relevant to your task. [AGENTS.md](../../AGENTS.md)
 is the canonical policy entry point and resolves workflow conflicts here.
@@ -54,7 +54,7 @@ talkbank-transform = { path = "../chatter/crates/talkbank-transform" }
 | `batchalign` | The Batchalign pipeline: ASR, FA, morphotag, jobs/runner, store, dashboard API |
 | `batchalign-transform` | Batchalign-specific CHAT transforms (`asr_postprocess`, `morphosyntax`, `utseg`, FA `decisions`, `compare`, `build_chat`, `dp_align`, ...) layered over chatter's generic `talkbank-transform`, which it re-exports via a facade (`pub use talkbank_transform::*`) |
 | `batchalign-pyo3` | PyO3 bridge for the Python package |
-| `batchalign-types`, `batchalign-whisper-pilot` (experimental) | Shared types |
+| `batchalign-types` | Shared types |
 
 Plus `apps/dashboard-desktop` (Tauri shell, experimental, excluded from CI
 gates), `frontend/` (React dashboard), the `batchalign` / `batchalign_core`

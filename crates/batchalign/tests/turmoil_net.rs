@@ -248,15 +248,15 @@ fn create_real_test_app(python_path: &str) -> RealAppHandle {
         let config = ServerConfig {
             host: "0.0.0.0".into(),
             port: batchalign::config::PortRequest::from_u16(8001),
-            job_ttl_days: batchalign::config::JobTtlDays::new(7),
+            job_ttl_days: batchalign::config::JobTtlDays::literal::<7>(),
             memory_gate_mb: Some(MemoryMb(0)),
             ..Default::default()
         };
         let pool_config = PoolConfig {
             python_path: python_path.into(),
             test_echo: true,
-            health_check_interval_s: 600,
-            ready_timeout_s: 30,
+            health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+            ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
             max_workers_per_key: PerProfile::uniform(1),
             verbose: 0,
             runtime: Default::default(),
@@ -269,6 +269,7 @@ fn create_real_test_app(python_path: &str) -> RealAppHandle {
             Some(jobs_dir.to_string_lossy().into()),
             Some(db_dir),
             Some("turmoil-test-hash".into()),
+            std::sync::Arc::new(batchalign::clock::SystemClock),
         )
         .await
         .expect("create_test_app");

@@ -59,7 +59,7 @@ impl PreparedTextRequestIdsV2 {
 }
 
 /// Prepared morphosyntax batch payload written by Rust.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 pub struct PreparedMorphosyntaxBatchV2 {
     /// Batched utterance payloads in worker order.
     pub items: Vec<MorphosyntaxBatchItem>,

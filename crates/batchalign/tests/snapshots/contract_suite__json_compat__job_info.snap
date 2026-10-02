@@ -1,5 +1,6 @@
 ---
 source: crates/batchalign/tests/json_compat.rs
+assertion_line: 204
 expression: info
 ---
 {
@@ -25,20 +26,20 @@ expression: info
     {
       "filename": "01DM.cha",
       "status": "done",
-      "started_at": 1700000000.0,
-      "finished_at": 1700000005.0
+      "started_at": "2023-11-14T22:13:20.000Z",
+      "finished_at": "2023-11-14T22:13:25.000Z"
     },
     {
       "filename": "04DM.cha",
       "status": "processing",
-      "started_at": 1700000005.0,
+      "started_at": "2023-11-14T22:13:25.000Z",
       "progress_current": 2,
       "progress_total": 5,
       "progress_stage": "analyzing_morphosyntax",
       "progress_label": "Analyzing morphosyntax"
     }
   ],
-  "submitted_at": "2026-01-15T10:00:00Z",
+  "submitted_at": "2026-01-15T10:00:00.000Z",
   "submitted_by": "192.168.1.1",
   "submitted_by_name": "Lab-Mac-1",
   "num_workers": 4

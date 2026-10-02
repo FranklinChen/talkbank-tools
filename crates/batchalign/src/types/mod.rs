@@ -104,7 +104,7 @@
 //! max_concurrent_jobs: 4
 //! "#;
 //!
-//! let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+//! let config: ServerConfig = yaml_serde::from_str(yaml).unwrap();
 //! // `port` is a REQUEST, not the port the server will end up on: the wire
 //! // form stays a bare integer, and 0 asks the OS to choose.
 //! assert_eq!(config.port, PortRequest::from_u16(9000));

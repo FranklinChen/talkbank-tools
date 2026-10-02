@@ -28,14 +28,19 @@ from batchalign.providers import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
 )
 from batchalign.worker._types import WorkerJSONValue
 from batchalign.worker._types_v2 import (
     UtsegBoundaryModelEvidenceV2,
+    UtsegBoundaryModelItemV2,
     UtsegClassifiedBoundaryEvidenceV2,
-    UtsegItemResultV2,
+    UtsegConstituencyItemV2,
     UtsegModelShortCircuitV2,
     UtsegNormalizationOmissionV2,
+    UtsegUnattributedItemV2,
     UtsegWordBoundaryEvidenceV2,
 )
 
@@ -64,7 +69,7 @@ def _serialize_boundary_prediction(
         else:
             assert_never(item)
 
-    result = UtsegItemResultV2(
+    result = UtsegBoundaryModelItemV2(
         assignments=list(prediction.assignments),
         boundary_model_evidence=UtsegBoundaryModelEvidenceV2(
             model_id=prediction.model_id,
@@ -74,10 +79,7 @@ def _serialize_boundary_prediction(
             word_evidence=wire_evidence,
         ),
     )
-    return cast(
-        dict[str, WorkerJSONValue],
-        result.model_dump(mode="json", exclude_none=True),
-    )
+    return cast(dict[str, WorkerJSONValue], result.model_dump(mode="json"))
 
 
 class UtsegModelNotFoundError(RuntimeError):
@@ -169,78 +171,26 @@ class UtsegBatchItem(BaseModel):
 # Per-item work, and the timing that belongs to it
 # ---------------------------------------------------------------------------
 #
-# Until 2026-09-16 this module measured the whole batch and wrote that single
-# duration onto ``results[0]``, leaving every other item at 0.0. The first
-# item's timing was therefore inflated by every other item's work, every other
-# item's timing was simply wrong, and neither was distinguishable from an item
-# that genuinely took no measurable time. That is a misattribution inside
-# provenance-bearing evidence, so the types below exist to make it
-# unrepresentable rather than merely discouraged: a duration is only ever
-# produced by measuring one item's own call, and it travels with the index
-# that earned it.
+# A duration is only ever produced by measuring one item's own call
+# (`InferResponse.timed`), and it travels with the index that earned it, so a
+# batch total has no route onto an item.
 
 
 @dataclass(frozen=True, slots=True)
-class _Produced:
-    """One item's own successful result payload."""
-
-    result: dict[str, WorkerJSONValue]
-
-
-@dataclass(frozen=True, slots=True)
-class _Failed:
-    """One item's own failure, reported against that item alone."""
-
-    error: str
-
-
-_ItemOutcome = _Produced | _Failed
-"""What one item's work produced, before anything has been timed."""
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class _TimedItem:
-    """One item's outcome beside the elapsed time of that item's own work.
-
-    There is no constructor that accepts a duration: `_PendingItem.measure` is
-    the only route to a value of this type, and it measures the call it wraps.
-    A batch total has no signature to travel through, which is precisely what
-    the old `results[0] = InferResponse(..., elapsed_s=batch_total)` line did.
-    """
+class _Answered:
+    """One batch position's own response, at the position that earned it."""
 
     index: int
-    outcome: _ItemOutcome
-    elapsed_s: float
-
-    @classmethod
-    def _measured(
-        cls, index: int, outcome: _ItemOutcome, elapsed_s: float
-    ) -> _TimedItem:
-        """Build the only way a timed item is ever built; see `measure`."""
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "index", index)
-        object.__setattr__(instance, "outcome", outcome)
-        object.__setattr__(instance, "elapsed_s", elapsed_s)
-        return instance
-
-    @property
-    def response(self) -> InferResponse:
-        """Lower this item's own outcome and its own timing onto the wire."""
-        match self.outcome:
-            case _Produced(result=result):
-                return InferResponse(result=result, elapsed_s=self.elapsed_s)
-            case _Failed(error=error):
-                return InferResponse(error=error, elapsed_s=self.elapsed_s)
-            case _ as unreachable:
-                assert_never(unreachable)
+    response: InferResponse
 
 
 @dataclass(frozen=True, slots=True)
 class _RejectedItem:
     """One batch position whose payload never parsed into a request item.
 
-    No work is attributable to it, and this variant is what says so: the zero
-    it reports is not a measurement that happened to round down.
+    No work is attributable to it, and this variant is what says so: its
+    elapsed time is absent (``null`` on the wire), never a zero that reads
+    like a measurement.
     """
 
     index: int
@@ -249,7 +199,7 @@ class _RejectedItem:
     @property
     def response(self) -> InferResponse:
         """Report the rejection at its own position."""
-        return InferResponse(error=self.error, elapsed_s=0.0)
+        return InferResponse.unexecuted(ItemFailed(error=self.error))
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,11 +215,9 @@ class _PendingItem:
     index: int
     item: UtsegBatchItem
 
-    def measure(self, work: Callable[[UtsegBatchItem], _ItemOutcome]) -> _TimedItem:
+    def measure(self, work: Callable[[UtsegBatchItem], ItemOutcome]) -> _Answered:
         """Run this item's own work and attribute exactly that item's time."""
-        started_at = time.monotonic()
-        outcome = work(self.item)
-        return _TimedItem._measured(self.index, outcome, time.monotonic() - started_at)
+        return _Answered(self.index, InferResponse.timed(lambda: work(self.item)))
 
 
 def _admit_batch(
@@ -290,7 +238,7 @@ def _admit_batch(
 
 def _assemble(
     total: int,
-    timed: list[_TimedItem],
+    timed: list[_Answered],
     rejected: list[_RejectedItem],
 ) -> BatchInferResponse:
     """Order every position's own response, refusing a batch with a hole.
@@ -318,31 +266,39 @@ def _assemble(
     return BatchInferResponse(results=[by_index[index] for index in range(total)])
 
 
-def _single_word_outcome(item: UtsegBatchItem) -> _ItemOutcome:
+def _single_word_outcome(item: UtsegBatchItem) -> ItemOutcome:
     """Segment an item that needs no segmenter: one word is one utterance."""
-    return _Produced(result={"assignments": [0] * len(item.words)})
+    return ItemProduced(
+        result=UtsegUnattributedItemV2(assignments=[0] * len(item.words)).model_dump(
+            mode="json"
+        )
+    )
 
 
-def _no_pipeline_outcome(_item: UtsegBatchItem) -> _ItemOutcome:
-    """Report no trees when no language pipeline could be built."""
-    return _Produced(result={"trees": []})
+def _no_pipeline_outcome(_item: UtsegBatchItem) -> ItemOutcome:
+    """Report that no Stanza pipeline could be built for the request's
+    language: a failure, never an empty parse that reads as one utterance."""
+    return ItemFailed(
+        error="Utseg constituency fallback: no Stanza pipeline could be built "
+        "for the request's language"
+    )
 
 
 def _boundary_outcome(
     model: BertUtteranceModel, index: int, item: UtsegBatchItem
-) -> _ItemOutcome:
+) -> ItemOutcome:
     """Predict one item's boundary evidence, reporting its own failure."""
     try:
         prediction = model.predict_boundary_evidence(item.words)
     except (IndexError, AttributeError, TypeError, ValueError) as error:
         L.warning("Utseg boundary-model infer failed for item %d: %s", index, error)
-        return _Failed(error=f"Utseg boundary-model inference failed: {error}")
-    return _Produced(result=_serialize_boundary_prediction(prediction))
+        return ItemFailed(error=f"Utseg boundary-model inference failed: {error}")
+    return ItemProduced(result=_serialize_boundary_prediction(prediction))
 
 
 def _constituency_outcome(
     nlp: StanzaNLP, index: int, item: UtsegBatchItem
-) -> _ItemOutcome:
+) -> ItemOutcome:
     """Run Stanza for one item and return its raw constituency tree strings.
 
     Rust handles tree parsing and assignment computation.
@@ -354,9 +310,17 @@ def _constituency_outcome(
             if sent.constituency is not None:
                 trees.append(str(sent.constituency))
     except (IndexError, AttributeError, TypeError) as error:
+        # A failure, at this item's position: an empty parse would read as
+        # a successful segmentation into one utterance.
         L.warning("Utseg infer failed for item %d: %s", index, error)
-        return _Produced(result={"trees": []})
-    return _Produced(result={"trees": trees})
+        return ItemFailed(error=f"Utseg constituency parse failed: {error}")
+    if not trees:
+        # No sentence carried a constituency tree: no parse to segment by.
+        L.warning("Utseg infer produced no constituency tree for item %d", index)
+        return ItemFailed(error="Utseg constituency parse produced no tree")
+    return ItemProduced(
+        result=UtsegConstituencyItemV2(trees=trees).model_dump(mode="json")
+    )
 
 
 def batch_infer_utseg(
@@ -397,7 +361,7 @@ def batch_infer_utseg(
         return _assemble(total, timed, rejected)
 
     # A single-word item needs no segmenter at all: one word is one utterance.
-    short_circuit: list[_TimedItem] = []
+    short_circuit: list[_Answered] = []
     needs_parse: list[_PendingItem] = []
     for entry in pending:
         if len(entry.item.words) <= 1:

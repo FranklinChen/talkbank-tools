@@ -7,8 +7,8 @@ use super::*;
 fn elem(value: &str, ts: f64, end_ts: f64) -> AsrElement {
     AsrElement {
         value: AsrRawText::new(value),
-        ts: AsrTimestampSecs::Observed(ts),
-        end_ts: AsrTimestampSecs::Observed(end_ts),
+        ts: observed(ts),
+        end_ts: observed(end_ts),
         kind: AsrElementKind::Text,
     }
 }
@@ -18,8 +18,8 @@ fn missing_timestamp_endpoints_never_become_recording_start() {
     for (start, end) in [(None, Some(2.0)), (Some(1.0), None), (None, None)] {
         let element = AsrElement {
             value: AsrRawText::new("hello"),
-            ts: start.into(),
-            end_ts: end.into(),
+            ts: start.and_then(observed),
+            end_ts: end.and_then(observed),
             kind: AsrElementKind::Text,
         };
         let words = extract_timed_words(&[element]);
@@ -31,7 +31,7 @@ fn missing_timestamp_endpoints_never_become_recording_start() {
     assert_eq!(words[0].start_ms, Some(0));
     assert_eq!(words[0].end_ms, Some(2000));
     let missing: AsrElement = serde_json::from_str(r#"{"value":"hello","end_ts":2.0}"#).unwrap();
-    assert_eq!(missing.ts, AsrTimestampSecs::Absent);
+    assert_eq!(missing.ts, None);
     let json = serde_json::to_value(&missing).unwrap();
     assert!(json["ts"].is_null());
     assert_eq!(serde_json::from_value::<AsrElement>(json).unwrap(), missing);
@@ -294,8 +294,8 @@ fn test_process_raw_asr_golden_simple() {
                 elem("world", 0.5, 1.0),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.0),
-                    end_ts: AsrTimestampSecs::Observed(1.1),
+                    ts: observed(1.0),
+                    end_ts: observed(1.1),
                     kind: AsrElementKind::Punctuation,
                 },
                 elem("how", 1.5, 2.0),
@@ -334,8 +334,8 @@ fn test_process_raw_asr_golden_compound() {
                 elem("plane", 0.6, 0.9),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(0.9),
-                    end_ts: AsrTimestampSecs::Observed(1.0),
+                    ts: observed(0.9),
+                    end_ts: observed(1.0),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -362,8 +362,8 @@ fn test_process_raw_asr_golden_number() {
                 elem("cats", 0.9, 1.2),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.2),
-                    end_ts: AsrTimestampSecs::Observed(1.3),
+                    ts: observed(1.2),
+                    end_ts: observed(1.3),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -645,8 +645,8 @@ fn mor_punct_comma_stripped_from_asr_words() {
                 elem("world", 0.6, 1.0),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.0),
-                    end_ts: AsrTimestampSecs::Observed(1.1),
+                    ts: observed(1.0),
+                    end_ts: observed(1.1),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -672,8 +672,8 @@ fn mor_punct_trailing_comma_stripped() {
                 elem("or", 0.6, 0.8),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(0.8),
-                    end_ts: AsrTimestampSecs::Observed(0.9),
+                    ts: observed(0.8),
+                    end_ts: observed(0.9),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -703,8 +703,8 @@ fn mor_punct_tag_marker_stripped() {
                 elem("world", 0.6, 1.0),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.0),
-                    end_ts: AsrTimestampSecs::Observed(1.1),
+                    ts: observed(1.0),
+                    end_ts: observed(1.1),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -731,8 +731,8 @@ fn mor_punct_vocative_marker_stripped() {
                 elem("world", 0.6, 1.0),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.0),
-                    end_ts: AsrTimestampSecs::Observed(1.1),
+                    ts: observed(1.0),
+                    end_ts: observed(1.1),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -759,8 +759,8 @@ fn rtl_comma_stripped() {
                 elem("world", 0.6, 1.0),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.0),
-                    end_ts: AsrTimestampSecs::Observed(1.1),
+                    ts: observed(1.0),
+                    end_ts: observed(1.1),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -789,8 +789,8 @@ fn stripped_empty_words_removed() {
                 elem("world", 0.7, 1.0),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.0),
-                    end_ts: AsrTimestampSecs::Observed(1.1),
+                    ts: observed(1.0),
+                    end_ts: observed(1.1),
                     kind: AsrElementKind::Punctuation,
                 },
             ],
@@ -822,8 +822,8 @@ fn split_pipeline_matches_monolithic_simple() {
                 elem("cats", 0.9, 1.2),
                 AsrElement {
                     value: AsrRawText::new("."),
-                    ts: AsrTimestampSecs::Observed(1.2),
-                    end_ts: AsrTimestampSecs::Observed(1.3),
+                    ts: observed(1.2),
+                    end_ts: observed(1.3),
                     kind: AsrElementKind::Punctuation,
                 },
             ],

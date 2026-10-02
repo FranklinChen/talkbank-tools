@@ -104,8 +104,8 @@ class WhisperCpuPrecision(Enum):
 
     CUDA always loads float16 and this enum does not apply there. On CPU the
     default is float32, the precision every measured number in the book was
-    taken at. ``FLOAT16`` is the experiment knob for the memory saving Houjun's
-    Batchalign takes on Apple Silicon (PyTorch 2.5 and later run half-precision
+    taken at. ``FLOAT16`` is the experiment knob for the memory saving the
+    upstream implementation takes on Apple Silicon (PyTorch 2.5 and later run half-precision
     CPU kernels); it is selected per job through the ``whisper_cpu_dtype``
     engine-override extra and enters the worker key, so a float16 worker never
     serves a float32 job. Adopting it as a default needs the WER comparison the

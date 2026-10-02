@@ -42,9 +42,10 @@ mod tests;
 mod timing;
 mod utterance;
 
+use batchalign_types::domain::AudioPositionSeconds;
 use serde::{Deserialize, Serialize};
 
-pub use asr_types::{AsrNormalizedText, AsrRawText, AsrTimestampSecs, ChatWordText, SpeakerIndex};
+pub use asr_types::{AsrNormalizedText, AsrRawText, ChatWordText, SpeakerIndex};
 pub use cantonese::{AlignedNormalization, NormalizationChangedLength};
 pub use chunking::{
     finalize_words_to_chunks, finalize_words_to_chunks_with_snapshot,
@@ -201,12 +202,18 @@ pub enum AsrElementKind {
 pub struct AsrElement {
     /// Token text (raw from the ASR provider).
     pub value: AsrRawText,
-    /// Start time in seconds.
+    /// Where the token starts in the recording; `None` when the provider
+    /// supplied no start. A real zero is `Some`, never confused with absence.
+    ///
+    /// On the wire this is the number or `null` it has always been, and a
+    /// missing key reads as `None`. A negative or non-finite number is refused
+    /// here, at deserialization, the way `AsrToken` refuses one.
     #[serde(default)]
-    pub ts: AsrTimestampSecs,
-    /// End time in seconds.
+    pub ts: Option<AudioPositionSeconds>,
+    /// Where the token ends in the recording; `None` when the provider
+    /// supplied no end.
     #[serde(default)]
-    pub end_ts: AsrTimestampSecs,
+    pub end_ts: Option<AudioPositionSeconds>,
     /// Element kind: text or punctuation.
     #[serde(default)]
     pub kind: AsrElementKind,
@@ -258,13 +265,23 @@ pub(super) const LONG_PAUSE_SENTENCE_STARTERS: &[&str] = &[
     "yes", "you",
 ];
 
+/// Test fixtures: a provider time literal, as the position it must be.
+///
+/// The one place a test turns a bare `f64` into an element time, so a fixture
+/// that writes an impossible time fails here, by name, rather than somewhere
+/// downstream.
+#[cfg(test)]
+pub(crate) fn observed(seconds: f64) -> Option<AudioPositionSeconds> {
+    Some(AudioPositionSeconds::try_from(seconds).expect("test: a fixture time is a valid position"))
+}
+
 #[cfg(test)]
 mod integration_tests {
     use std::collections::BTreeSet;
 
     use super::{
-        AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
-        ChatWordText, SpeakerIndex, Utterance, expand_number, prepare_words_pre_expansion,
+        AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, ChatWordText,
+        SpeakerIndex, Utterance, expand_number, observed, prepare_words_pre_expansion,
         process_raw_asr,
     };
 
@@ -275,8 +292,8 @@ mod integration_tests {
                 speaker: SpeakerIndex(0),
                 elements: vec![AsrElement {
                     value: AsrRawText::new(value),
-                    ts: AsrTimestampSecs::Observed(start_s),
-                    end_ts: AsrTimestampSecs::Observed(end_s),
+                    ts: observed(start_s),
+                    end_ts: observed(end_s),
                     kind: AsrElementKind::Text,
                 }],
             }],

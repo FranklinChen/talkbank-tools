@@ -1,11 +1,11 @@
 //! Job lifecycle mutations: submit, restart, cancel, interrupt_all_for_shutdown.
 
-use crate::api::{CancellationRequest, JobId, JobInfo, JobStatus};
+use crate::api::{CancellationRequest, JobId, JobInfo};
 use crate::db::NewJobRecord;
 use tracing::{info, warn};
 
+use super::super::JobStore;
 use super::super::job::Job;
-use super::super::{JobStore, PersistedJobUpdate, unix_now};
 use crate::error::ServerError;
 
 impl JobStore {
@@ -17,7 +17,7 @@ impl JobStore {
             command: job.dispatch.command.to_string(),
             lang: job.dispatch.lang.to_string(),
             num_speakers: job.dispatch.num_speakers.0,
-            status: job.execution.status.to_string(),
+            status: job.execution.status,
             staging_dir: job.filesystem.staging_dir.to_string(),
             filenames: job
                 .filesystem
@@ -31,9 +31,8 @@ impl JobStore {
             media_mapping: job.filesystem.media_mapping.to_string(),
             media_subdir: job.filesystem.media_subdir.to_string(),
             source_dir: job.source.source_dir.as_str().to_owned(),
-            submitted_by: job.source.submitted_by.clone(),
-            submitted_by_name: job.source.submitted_by_name.clone(),
-            submitted_at: job.schedule.submitted_at.0,
+            submitter: job.source.submitter.clone(),
+            submitted_at: job.schedule.submitted_at,
             paths_mode: job.filesystem.paths_mode,
             source_paths: job
                 .filesystem
@@ -81,22 +80,9 @@ impl JobStore {
             .ok_or_else(|| ServerError::JobNotFound(job_id.clone()))??;
         self.notify_job_item(info.job_update);
 
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status: JobStatus::Queued,
-                error: None,
-                completed_at: None,
-                num_workers: None,
-                next_eligible_at: None,
-            },
-        )
-        .await;
-        if let Some(db) = &self.db
-            && let Err(e) = db.update_job_lease(job_id, None, None, None).await
-        {
-            warn!(job_id = %job_id, error = %e, "DB update_job_lease failed on restart");
-        }
+        self.db_persist_job_status(job_id).await;
+        self.db_persist_lease(job_id, None, super::db_helpers::LeaseWrite::Restart)
+            .await;
 
         Ok(info.info)
     }
@@ -107,7 +93,7 @@ impl JobStore {
     /// `JobStatus::Interrupted` (resumable) rather than `JobStatus::Cancelled`
     /// (terminal), so the startup recovery path requeues unfinished work.
     pub async fn interrupt_all_for_shutdown(&self) -> usize {
-        self.registry.interrupt_all_active(unix_now()).await
+        self.registry.interrupt_all_active(self.now()).await
     }
 
     /// Records a cancellation audit row with `accepted = true`, without
@@ -130,7 +116,7 @@ impl JobStore {
         job_id: &JobId,
         provenance: &CancellationRequest,
     ) {
-        self.record_audit_row(job_id, provenance, unix_now(), /* accepted = */ true)
+        self.record_audit_row(job_id, provenance, self.now(), /* accepted = */ true)
             .await;
     }
 }
@@ -142,12 +128,13 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+    use crate::api::JobStatus;
     use crate::api::{
         CancelReason, CancelSource, ContentType, FileStatusKind, JobId, ReleasedCommand,
     };
     use crate::db::JobDB;
     use crate::store::queries::tests::{make_job, test_config};
-    use crate::store::{FileResultEntry, JobStore, UnixTimestamp};
+    use crate::store::{FileResultEntry, JobStore, MachineTime};
     use crate::ws::BROADCAST_CAPACITY;
 
     /// A cancelled job must NOT be returned to the queue by the memory gate.
@@ -162,7 +149,12 @@ mod tests {
     #[tokio::test]
     async fn cancelled_job_is_not_requeued_by_the_memory_gate() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job_id = JobId::from("cancel-then-requeue");
         store
@@ -181,7 +173,7 @@ mod tests {
 
         // The memory gate rejects moments later and tries to requeue.
         store
-            .requeue_job_after_memory_gate(&job_id, unix_now())
+            .requeue_job_after_memory_gate(&job_id, MachineTime::now())
             .await;
 
         assert_eq!(
@@ -206,7 +198,12 @@ mod tests {
     #[tokio::test]
     async fn cancelled_job_is_not_resurrected_by_mark_running() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job_id = JobId::from("cancel-then-run");
         store
@@ -248,7 +245,12 @@ mod tests {
     #[tokio::test]
     async fn interrupt_all_for_shutdown_marks_active_jobs_interrupted() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         // Submit two jobs and advance both to Running so they are "active".
         let job_a = make_job(
@@ -307,7 +309,12 @@ mod tests {
     #[tokio::test]
     async fn restart_preserves_successful_morphotag_results_and_requeues_failed_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let mut job = make_job(
             "morphotag-restart",
@@ -321,17 +328,24 @@ mod tests {
             .file_statuses
             .get_mut("eng.cha")
             .expect("english status");
-        eng.status = FileStatusKind::Done;
-        eng.finished_at = Some(UnixTimestamp(10.0));
+        eng.phase = crate::store::FilePhase::Done {
+            started_at: None,
+            finished_at: Some(crate::unix_time(10.0)),
+        };
 
         let missing = job
             .execution
             .file_statuses
             .get_mut("missing_lang.cha")
             .expect("missing lang status");
-        missing.status = FileStatusKind::Error;
-        missing.error = Some("worker dispatch failed".into());
-        missing.finished_at = Some(UnixTimestamp(12.0));
+        missing.phase = crate::store::FilePhase::Error {
+            started_at: None,
+            finished_at: Some(crate::unix_time(12.0)),
+            failure: crate::store::FileFailure::of_failed_row(
+                Some("worker dispatch failed".into()),
+                None,
+            ),
+        };
 
         job.execution.results.push(FileResultEntry {
             filename: "eng.cha".into(),
@@ -416,7 +430,12 @@ mod tests {
                 .expect("open JobDB for shutdown audit test"),
         );
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), Some(db), tx);
+        let store = JobStore::new(
+            test_config(),
+            Some(db),
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         // Submit two jobs and advance both to Running so they are "active".
         let job_a = make_job(
@@ -520,7 +539,7 @@ mod tests {
     ///   2. Server shuts down, `interrupt_all_for_shutdown` writes the row
     ///      as `Interrupted`.
     ///   3. Process exits (we drop the store).
-    ///   4. Server restarts: `db.recover_interrupted()` runs (a no-op for
+    ///   4. Server restarts: `db.recover_interrupted(now)` runs (a no-op for
     ///      already-Interrupted rows; included to faithfully match the
     ///      production startup flow at `server.rs:112`).
     ///   5. `store.load_from_db()` reads the row, sees `Interrupted` plus a
@@ -547,7 +566,12 @@ mod tests {
                     .expect("open JobDB for first lifecycle"),
             );
             let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-            let store = JobStore::new(test_config(), Some(db), tx);
+            let store = JobStore::new(
+                test_config(),
+                Some(db),
+                tx,
+                std::sync::Arc::new(crate::clock::SystemClock),
+            );
 
             let job = make_job(
                 "shutdown-recover",
@@ -584,12 +608,17 @@ mod tests {
                 .expect("re-open JobDB after restart"),
         );
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), Some(db.clone()), tx);
+        let store = JobStore::new(
+            test_config(),
+            Some(db.clone()),
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         // Faithfully mirror server.rs:112: recover_interrupted runs first.
         // It is a no-op for already-Interrupted rows (it only matches
         // 'queued' and 'running'), but a real startup always calls it.
-        db.recover_interrupted()
+        db.recover_interrupted(MachineTime::now())
             .await
             .expect("recover_interrupted at restart");
 

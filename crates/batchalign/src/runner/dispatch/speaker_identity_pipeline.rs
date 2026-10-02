@@ -23,7 +23,7 @@ use crate::error::ServerError;
 use crate::options::CommandOptions;
 use crate::runner::DispatchHostContext;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::worker::pool::WorkerPool;
 use crate::worker::speaker_embedding_request_v2::{
     PreparedRecording, parse_speaker_embedding_response_v2, prepare_recording_for_embedding,
@@ -186,7 +186,7 @@ pub(crate) async fn dispatch_speaker_identity(
         let message =
             "speaker-identify job carries options for another command; its row is corrupt"
                 .to_owned();
-        sink.fail_job(job_id, &message, unix_now()).await;
+        sink.fail_job(job_id, &message).await;
         return;
     };
 
@@ -198,7 +198,7 @@ pub(crate) async fn dispatch_speaker_identity(
             "speaker-identify requires `--lang <iso3>`; got '{}'.",
             job.dispatch.lang
         );
-        sink.fail_job(job_id, &message, unix_now()).await;
+        sink.fail_job(job_id, &message).await;
         return;
     };
 
@@ -251,7 +251,7 @@ async fn process_one_file(
     let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
 
     lifecycle
-        .begin_first_attempt(WorkUnitKind::FileInfer, unix_now(), FileStage::Reading)
+        .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::Reading)
         .await;
 
     let read_path: PathBuf =
@@ -276,7 +276,6 @@ async fn process_one_file(
                 .fail(
                     &format!("Failed to read input: {error}"),
                     FailureCategory::InputMissing,
-                    unix_now(),
                 )
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;
@@ -291,7 +290,7 @@ async fn process_one_file(
             Ok(path) => path,
             Err(unresolved) => {
                 lifecycle
-                    .fail(&unresolved.message, FailureCategory::Validation, unix_now())
+                    .fail(&unresolved.message, FailureCategory::Validation)
                     .await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
@@ -304,7 +303,6 @@ async fn process_one_file(
                 .fail(
                     &format!("Media conversion failed for {filename}: {error}"),
                     FailureCategory::Validation,
-                    unix_now(),
                 )
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;

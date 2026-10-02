@@ -62,8 +62,8 @@ fn test_pool(python: String) -> WorkerPool {
     common::test_server_fixture::isolate_host_memory_ledger();
     WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -124,8 +124,14 @@ async fn concurrent_dispatch_to_different_languages() {
 
     let eng_resp = eng_result.expect("eng dispatch failed");
     let spa_resp = spa_result.expect("spa dispatch failed");
-    assert_eq!(eng_resp.results[0].result, Some(eng_item));
-    assert_eq!(spa_resp.results[0].result, Some(spa_item));
+    assert_eq!(
+        eng_resp.results[0].outcome.result().cloned(),
+        Some(eng_item)
+    );
+    assert_eq!(
+        spa_resp.results[0].outcome.result().cloned(),
+        Some(spa_item)
+    );
 
     // Two different languages → two separate workers.
     assert_eq!(
@@ -216,7 +222,7 @@ async fn cross_platform_worker_spawn_and_shutdown() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -249,7 +255,7 @@ async fn cross_platform_pool_lifecycle() {
         )
         .await
         .expect("dispatch failed");
-    assert_eq!(response.results[0].result, Some(item));
+    assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
     assert_eq!(pool.worker_count().await, 1);
 
     // Shutdown.
@@ -266,7 +272,7 @@ async fn cross_platform_worker_health_check() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -287,7 +293,7 @@ async fn cross_platform_worker_capabilities() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 

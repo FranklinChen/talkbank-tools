@@ -5,6 +5,7 @@ that calls into the Rust worker runtime.
 """
 
 from collections.abc import Callable
+from typing import Literal
 
 # ---------------------------------------------------------------------------
 # Worker protocol dispatch
@@ -44,6 +45,19 @@ def dispatch_protocol_message(
     batch_infer_request_model: object,
     execute_v2_request_model: object,
     validation_error_type: object,
+) -> dict[str, object]: ...
+
+WorkerErrorKind = Literal["runtime", "bootstrap", "invalid_request"]
+"""What an ``{"op": "error"}`` line reports. The one Python spelling of
+Rust's ``WorkerErrorKind``; ``WORKER_ERROR_KINDS`` is the Rust list itself,
+and ``test_worker_error_kinds_match_rust`` holds the two equal."""
+
+WORKER_ERROR_KINDS: tuple[WorkerErrorKind, ...]
+
+def error_envelope(
+    message: str,
+    kind: WorkerErrorKind,
+    request_id: str | None = None,
 ) -> dict[str, object]: ...
 
 # ---------------------------------------------------------------------------

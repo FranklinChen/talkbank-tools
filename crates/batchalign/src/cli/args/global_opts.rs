@@ -30,9 +30,10 @@ pub struct GlobalOpts {
     /// path), the per-task ceiling was fixed at the daemon's startup
     /// and `--timeout` here does NOT override it, pass `--no-server`
     /// or restart the daemon to change the ceiling. A note is printed
-    /// when `--timeout` is provided but reuse is happening.
+    /// when `--timeout` is provided but reuse is happening. Must be
+    /// positive; leave it out for the built-in ceiling.
     #[arg(long, global = true)]
-    pub timeout: Option<u64>,
+    pub timeout: Option<crate::api::PositiveSeconds>,
 
     /// Disable MPS/CUDA and force CPU-only models.
     #[arg(long, global = true)]

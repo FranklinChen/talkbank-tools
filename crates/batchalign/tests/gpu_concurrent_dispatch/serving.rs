@@ -25,12 +25,12 @@ fn cpu_only_pool(python: String, per_key: usize) -> WorkerPool {
     common::test_server_fixture::isolate_host_memory_ledger();
     WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 600,
-        ready_timeout_s: 60,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<60>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(per_key),
         verbose: 0,
-        worker_registry_path: test_state_dir().join("workers.json").display().to_string(),
+        worker_registry_path: Some(test_state_dir().join("workers.json")),
         runtime: cpu_only_runtime(),
         ..Default::default()
     })

@@ -153,8 +153,8 @@ async fn measure_stanza_per_key_throughput() {
         // Long timeouts so cold model loads (~30 s) on every spawn
         // don't trip the readiness gate. We're measuring steady-state
         // throughput, not warmup.
-        health_check_interval_s: 600,
-        ready_timeout_s: 180,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<180>(),
         ..Default::default()
     }));
 

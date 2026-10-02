@@ -1,7 +1,7 @@
 # Job State Machine
 
 **Status:** Current
-**Last updated:** 2026-07-29 08:51 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 ## Overview
 
@@ -181,9 +181,10 @@ catches this outcome and spawns a delayed replacement runner:
 
 ```rust
 Ok(HostedJobRunOutcome::Requeued { retry_at }) => {
-    let delay_secs = (retry_at.0 - unix_now().0).max(0.0);
+    // Never negative: a deadline already past is a delay of zero.
+    let delay = retry_at.saturating_duration_since(host.store.now());
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs_f64(delay_secs)).await;
+        tokio::time::sleep(delay).await;
         job_task(job_id_retry, host_retry).await;
     });
 }
@@ -301,9 +302,16 @@ rejection that lost its runner.
 
 **Recovery is a two-step sequence that only fires at startup:**
 
-1. `db.recover_interrupted()` (`db/recovery.rs`) is a SQL migration that
-   flips rows in `('queued', 'running')` to `interrupted`. It does NOT
-   touch existing `interrupted` rows and does NOT requeue.
+1. `db.recover_interrupted()` (`db/recovery.rs`) reads each `queued` or
+   `running` row's status columns as their typed image
+   (`JobStatusColumns`), applies `JobStatusColumns::stopped` with
+   `Stop::Interrupted` (the one statement of the transition, which a live
+   job's shutdown and cancellation also apply through `Job::stop`:
+   the stop's status,
+   completed now, no pending retry time, error and worker count kept), and
+   writes the image whole, with each of the job's files the interruption
+   moves, in one transaction per job. It does NOT touch existing
+   `interrupted` rows and does NOT requeue.
 2. `store.load_from_db()` (`store/queries/recovery.rs`) reads each row
    back into memory. For any job with `status ∈ {Interrupted, Running}`,
    it calls `Job::reconcile_recovered_runtime_state()`: which transitions

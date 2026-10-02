@@ -62,8 +62,8 @@ use batchalign::options::CommandOptions;
 use batchalign::worker::InferTask;
 use batchalign::worker::pool::PoolConfig;
 use batchalign::{
-    AppState, DirectHost, PreparedWorkers, RegistryDiscovery, create_app_with_prepared_workers,
-    prepare_workers,
+    AppState, AppStorageOverrides, DirectHost, PreparedWorkers, RegistryDiscovery,
+    create_app_with_prepared_workers, prepare_workers,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -363,6 +363,7 @@ impl LiveDirectSession {
             None,
             Some(state_dir.join("cache")),
             &snapshot.prepared_workers,
+            std::sync::Arc::new(batchalign::clock::SystemClock),
         )
         .await
         .expect("create live direct host");
@@ -848,11 +849,14 @@ async fn start_session(
     let (router, state) = create_app_with_prepared_workers(
         backend.session_config.clone(),
         layout,
-        None,
-        None,
-        Some(cache_dir),
+        AppStorageOverrides {
+            jobs_dir: None,
+            db_dir: None,
+            cache_dir: Some(cache_dir),
+        },
         Some("live-fixture-hash".into()),
         backend.prepared_workers.clone(),
+        std::sync::Arc::new(batchalign::clock::SystemClock),
     )
     .await
     .map_err(|error| format!("Could not create app with live fixture workers: {error}"))?;
@@ -1320,7 +1324,7 @@ fn live_fixture_server_config() -> ServerConfig {
     ServerConfig {
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
-        job_ttl_days: batchalign::config::JobTtlDays::new(1),
+        job_ttl_days: batchalign::config::JobTtlDays::literal::<1>(),
         memory_gate_mb: Some(MemoryMb(0)),
         ..Default::default()
     }
@@ -1337,10 +1341,10 @@ fn live_fixture_pool_config(python_path: &str) -> PoolConfig {
     PoolConfig {
         python_path: python_path.into(),
         test_echo: false,
-        health_check_interval_s: 3_600,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<3_600>(),
         // One number buys both winning a host-wide startup slot and this
         // worker's own model load; see `HarnessBudget::FixtureWorkerReady`.
-        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_secs(),
+        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_positive_seconds(),
         // Allow 2 workers per key so sequential tests don't block waiting
         // for a prior test's checked-out worker to be returned to the pool.
         max_workers_per_key: PerProfile::uniform(2),

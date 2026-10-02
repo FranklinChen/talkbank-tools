@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 use tracing::warn;
 
-use crate::api::{NumWorkers, UnixTimestamp};
+use crate::api::NumWorkers;
 use crate::benchmark::{BenchmarkRequest, process_benchmark};
 use crate::cache::UtteranceCache;
 use crate::pipeline::PipelineServices;
@@ -18,7 +18,7 @@ use crate::recipe_runner::runtime::{
 use crate::recipe_runner::work_unit::{BenchmarkWorkUnit, PlannedWorkUnit};
 use crate::runner::DispatchHostContext;
 use crate::scheduling::{FailureCategory, RetryPolicy, WorkUnitKind};
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::transcribe::TranscribeOptions;
 use crate::worker::pool::WorkerPool;
 
@@ -104,7 +104,6 @@ pub(crate) async fn dispatch_benchmark_infer(
                     .fail(
                         &format!("Benchmark planning failed: {error}"),
                         FailureCategory::Validation,
-                        unix_now(),
                     )
                     .await;
                 }
@@ -200,14 +199,9 @@ async fn process_one_benchmark_file(
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
-    let started_at = unix_now();
 
     lifecycle
-        .begin_first_attempt(
-            WorkUnitKind::FileInfer,
-            started_at,
-            FileStage::ResolvingAudio,
-        )
+        .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
         .await;
 
     let original_audio_path =
@@ -218,7 +212,6 @@ async fn process_one_benchmark_file(
             .fail(
                 &format!("Benchmark planning produced no work unit for {filename}"),
                 FailureCategory::Validation,
-                unix_now(),
             )
             .await;
         return FileTaskOutcome::TerminalStateRecorded;
@@ -232,7 +225,7 @@ async fn process_one_benchmark_file(
                 planned_unit.gold_chat().display_path
             );
             lifecycle
-                .fail(&err_msg, FailureCategory::InputMissing, unix_now())
+                .fail(&err_msg, FailureCategory::InputMissing)
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
@@ -244,9 +237,7 @@ async fn process_one_benchmark_file(
             Ok(prepared) => prepared,
             Err(error) => {
                 let err_msg = error.to_string();
-                lifecycle
-                    .fail(&err_msg, FailureCategory::Validation, unix_now())
-                    .await;
+                lifecycle.fail(&err_msg, FailureCategory::Validation).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
         };
@@ -258,7 +249,7 @@ async fn process_one_benchmark_file(
     for attempt_number in 1..=retry_policy.max_attempts {
         if attempt_number > 1 {
             lifecycle
-                .restart_attempt(WorkUnitKind::FileInfer, unix_now(), FileStage::Benchmarking)
+                .restart_attempt(WorkUnitKind::FileInfer, FileStage::Benchmarking)
                 .await;
         } else {
             lifecycle.stage(FileStage::Benchmarking).await;
@@ -280,7 +271,6 @@ async fn process_one_benchmark_file(
         {
             Ok(outputs) => {
                 lifecycle.stage(FileStage::Writing).await;
-                let finished_at = unix_now();
 
                 // The merge is the LAST transition on the proof, so the bytes
                 // written are bytes the gate judged. It ran on the finished
@@ -303,11 +293,7 @@ async fn process_one_benchmark_file(
                                 // This is the same shape the
                                 // non-retryable arm below uses.
                                 lifecycle
-                                    .fail(
-                                        &refused.to_string(),
-                                        FailureCategory::Validation,
-                                        finished_at,
-                                    )
+                                    .fail(&refused.to_string(), FailureCategory::Validation)
                                     .await;
                                 return FileTaskOutcome::TerminalStateRecorded;
                             }
@@ -358,13 +344,11 @@ async fn process_one_benchmark_file(
                     .complete_with_result(
                         primary_output.display_path.clone(),
                         primary_output.content_type,
-                        finished_at,
                     )
                     .await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
             Err(err) => {
-                let finished_at = unix_now();
                 let category = classify_server_error(&err);
                 let raw_msg = format!("Benchmark failed: {err}");
                 warn!(
@@ -383,14 +367,17 @@ async fn process_one_benchmark_file(
                 {
                     let retry_number = attempt_number;
                     let backoff_ms = retry_policy.backoff_for_retry(retry_number);
-                    let retry_at = UnixTimestamp(finished_at.0 + (backoff_ms.0 as f64 / 1000.0));
                     lifecycle
-                        .retry(retry_at, category, &err_msg, finished_at)
+                        .retry_after(backoff_ms.duration(), category, &err_msg)
                         .await;
+                    // Honour the deadline just recorded, as the audio and
+                    // media-analysis pipelines do; retrying at once would
+                    // publish a retry time the runner then ignores.
+                    tokio::time::sleep(backoff_ms.duration()).await;
                     continue;
                 }
 
-                lifecycle.fail(&err_msg, category, finished_at).await;
+                lifecycle.fail(&err_msg, category).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
         }

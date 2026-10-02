@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use crate::api::MachineTime;
 use crate::api::{
     ContentType, DisplayPath, FileProgressStage, FileStatusKind, JobId, JobStatus, LanguageCode3,
     LanguageSpec, NumSpeakers, ReleasedCommand,
@@ -14,14 +15,12 @@ use crate::api::{
 use crate::db::JobDB;
 use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
-use crate::store::unix_now;
 use crate::store::{
     FileStatus, Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
-    JobLeaseState, JobRuntimeControl, JobScheduleState, JobSourceContext,
+    JobRuntimeControl, JobScheduleState, JobSourceContext,
 };
 use crate::ws::BROADCAST_CAPACITY;
 
-use super::tracker::mark_file_processing;
 use super::*;
 use crate::store::JobStore;
 
@@ -145,8 +144,10 @@ fn make_job(id: &str) -> Job {
             debug_traces: false,
         },
         source: JobSourceContext {
-            submitted_by: "127.0.0.1".into(),
-            submitted_by_name: String::new(),
+            submitter: Some(crate::store::Submitter::client(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                String::new(),
+            )),
             source_dir: Default::default(),
         },
         filesystem: JobFilesystemConfig {
@@ -169,15 +170,11 @@ fn make_job(id: &str) -> Job {
             completed_files: 0,
         },
         schedule: JobScheduleState {
-            submitted_at: unix_now(),
+            submitted_at: MachineTime::now(),
             completed_at: None,
             next_eligible_at: None,
             num_workers: None,
-            lease: JobLeaseState {
-                leased_by_node: None,
-                expires_at: None,
-                heartbeat_at: None,
-            },
+            lease: None,
             last_cancel: None,
         },
         runtime: JobRuntimeControl {
@@ -226,12 +223,18 @@ async fn progress_forwarder_routes_updates_through_sink_boundary() {
 #[tokio::test]
 async fn supervised_task_marks_non_terminal_exit_as_error() {
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(test_config(), None, tx));
+    let store = Arc::new(JobStore::new(
+        test_config(),
+        None,
+        tx,
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let sink = StoreRunnerEventSink::wrap(store.clone());
     let job_id = JobId::from("job-1");
     store.submit(make_job("job-1")).await.unwrap();
 
-    mark_file_processing(sink.as_ref(), &job_id, "a.cha", unix_now()).await;
+    sink.mark_file_processing(&job_id, "a.cha", sink.now())
+        .await;
 
     let tasks = vec![spawn_supervised_file_task(
         DisplayPath::from("a.cha"),
@@ -260,12 +263,18 @@ async fn supervised_task_marks_non_terminal_exit_as_error() {
 #[tokio::test]
 async fn supervised_task_marks_panic_as_error() {
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(test_config(), None, tx));
+    let store = Arc::new(JobStore::new(
+        test_config(),
+        None,
+        tx,
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let sink = StoreRunnerEventSink::wrap(store.clone());
     let job_id = JobId::from("job-2");
     store.submit(make_job("job-2")).await.unwrap();
 
-    mark_file_processing(sink.as_ref(), &job_id, "a.cha", unix_now()).await;
+    sink.mark_file_processing(&job_id, "a.cha", sink.now())
+        .await;
 
     let tasks = vec![spawn_supervised_file_task(
         DisplayPath::from("a.cha"),
@@ -293,45 +302,60 @@ async fn supervised_task_marks_panic_as_error() {
     );
 }
 
+/// The tracker stamps every event from the store's clock: the attempt starts
+/// when the clock says, a retry deadline is that instant plus the backoff,
+/// and the file's duration is the clock's elapsed time, never a time the
+/// pipeline chose.
 #[tokio::test]
 async fn file_run_tracker_retries_then_completes_cleanly() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(JobDB::open(Some(tempdir.path())).await.expect("open db"));
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(test_config(), Some(db.clone()), tx));
+    let start = crate::unix_time(1_700_000_000.0);
+    let clock = Arc::new(crate::clock::ManualClock::at(start));
+    let store = Arc::new(JobStore::new(
+        test_config(),
+        Some(db.clone()),
+        tx,
+        clock.clone(),
+    ));
     let sink = StoreRunnerEventSink::wrap(store.clone());
     let job_id = JobId::from("job-tracker");
     store.submit(make_job("job-tracker")).await.unwrap();
 
     let lifecycle = FileRunTracker::new(sink.as_ref(), &job_id, "a.cha");
-    let started_at = unix_now();
     lifecycle
-        .begin_first_attempt(WorkUnitKind::FileProcess, started_at, FileStage::Reading)
+        .begin_first_attempt(WorkUnitKind::FileProcess, FileStage::Reading)
         .await;
 
-    let retry_finished_at = unix_now();
-    let retry_at = crate::store::unix_now();
+    clock.advance(std::time::Duration::from_secs(5));
     lifecycle
-        .retry(
-            retry_at,
+        .retry_after(
+            std::time::Duration::from_secs(10),
             FailureCategory::ProviderTransient,
             "temporary failure",
-            retry_finished_at,
         )
         .await;
+    let pending = store.get_job_detail(&job_id).await.expect("job detail");
+    let pending = pending
+        .file_statuses
+        .iter()
+        .find(|entry| entry.filename == "a.cha")
+        .expect("tracked file");
+    assert_eq!(
+        pending.next_eligible_at,
+        Some(crate::unix_time(1_700_000_015.0)),
+        "retry deadline = the failure's instant + backoff"
+    );
 
-    let restarted_at = unix_now();
+    clock.advance(std::time::Duration::from_secs(10));
     lifecycle
-        .restart_attempt(
-            WorkUnitKind::FileProcess,
-            restarted_at,
-            FileStage::Processing,
-        )
+        .restart_attempt(WorkUnitKind::FileProcess, FileStage::Processing)
         .await;
 
-    let finished_at = unix_now();
+    clock.advance(std::time::Duration::from_secs(2));
     lifecycle
-        .complete_with_result(DisplayPath::from("a.ana"), ContentType::Chat, finished_at)
+        .complete_with_result(DisplayPath::from("a.ana"), ContentType::Chat)
         .await;
 
     let detail = store.get_job_detail(&job_id).await.expect("job detail");
@@ -343,6 +367,7 @@ async fn file_run_tracker_retries_then_completes_cleanly() {
     assert_eq!(file.status, FileStatusKind::Done);
     assert!(file.next_eligible_at.is_none());
     assert!(file.error.is_none());
+    assert_eq!(file.finished_at, Some(crate::unix_time(1_700_000_017.0)));
 
     let attempts = db
         .load_attempts_for_job("job-tracker")
@@ -351,8 +376,18 @@ async fn file_run_tracker_retries_then_completes_cleanly() {
     assert_eq!(attempts.len(), 2);
     assert_eq!(attempts[0].outcome, AttemptOutcome::RetryableFailure);
     assert_eq!(attempts[0].disposition, RetryDisposition::Retry);
+    assert_eq!(attempts[0].started_at, start);
+    assert_eq!(
+        attempts[0].finished_at,
+        Some(crate::unix_time(1_700_000_005.0))
+    );
     assert_eq!(attempts[1].outcome, AttemptOutcome::Succeeded);
     assert_eq!(attempts[1].disposition, RetryDisposition::Succeed);
+    assert_eq!(attempts[1].started_at, crate::unix_time(1_700_000_015.0));
+    assert_eq!(
+        attempts[1].finished_at,
+        Some(crate::unix_time(1_700_000_017.0))
+    );
 }
 
 #[tokio::test]
@@ -360,21 +395,19 @@ async fn file_run_tracker_records_setup_failure() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(JobDB::open(Some(tempdir.path())).await.expect("open db"));
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(test_config(), Some(db.clone()), tx));
+    let store = Arc::new(JobStore::new(
+        test_config(),
+        Some(db.clone()),
+        tx,
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let sink = StoreRunnerEventSink::wrap(store.clone());
     let job_id = JobId::from("job-setup-failure");
     store.submit(make_job("job-setup-failure")).await.unwrap();
 
     let lifecycle = FileRunTracker::new(sink.as_ref(), &job_id, "a.cha");
-    let started_at = unix_now();
-    let finished_at = unix_now();
     lifecycle
-        .record_setup_failure(
-            started_at,
-            "media preflight failed",
-            FailureCategory::Validation,
-            finished_at,
-        )
+        .record_setup_failure("media preflight failed", FailureCategory::Validation)
         .await;
 
     let detail = store.get_job_detail(&job_id).await.expect("job detail");

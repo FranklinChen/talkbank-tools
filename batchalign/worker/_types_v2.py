@@ -28,7 +28,11 @@ from batchalign.inference._domain_types import (
     SpeakerId,
     TranslationBackend,
 )
-from batchalign.worker._types import ReportedEngineName, WorkerJSONValue
+from batchalign.worker._types import (
+    FiniteNonNegativeFloat,
+    ReportedEngineName,
+    WorkerJSONValue,
+)
 
 WorkerRequestIdV2: TypeAlias = Annotated[str, StringConstraints(min_length=1)]
 """Stable identifier for one V2 protocol request/response pair."""
@@ -41,9 +45,6 @@ WorkerArtifactPathV2: TypeAlias = Annotated[str, StringConstraints(min_length=1)
 
 ProtocolVersionV2: TypeAlias = Annotated[int, Field(ge=2)]
 """Worker protocol major version."""
-
-FiniteNonNegativeFloat: TypeAlias = Annotated[FiniteFloat, Field(ge=0)]
-"""Finite floating-point value constrained to be non-negative."""
 
 
 class WorkerKindV2(str, Enum):
@@ -774,24 +775,63 @@ class AsrElementKindV2(str, Enum):
     PUNCTUATION = "punctuation"
 
 
+# The largest admitted media offset, in milliseconds: Rust's
+# `batchalign_types::interval::AdmittedInterval::MAX_MS`, the schema's
+# `maximum` for an interval bound (held to it by
+# `test_ipc_type_conformance.py`). A larger value is an absolute timestamp, not
+# a media offset.
+ADMITTED_INTERVAL_MAX_MS = 1_000_000_000_000
+
+AdmittedMillisV2: TypeAlias = Annotated[int, Field(ge=0, le=ADMITTED_INTERVAL_MAX_MS)]
+"""One bound of an admitted interval, in whole milliseconds of the media."""
+
+
+class AsrElementTimedV2(BaseModel):
+    """The provider timed the element, and the interval was admitted."""
+
+    kind: Literal["timed"] = "timed"
+    start_ms: AdmittedMillisV2
+    end_ms: AdmittedMillisV2
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> AsrElementTimedV2:
+        if self.end_ms < self.start_ms:
+            raise ValueError("ASR element end_ms must be >= start_ms")
+        return self
+
+
+UntimedCauseV2: TypeAlias = Literal[
+    "provider_reported_no_timing",
+    "provider_reported_no_start",
+    "provider_reported_no_end",
+    "segment_start_absent",
+    "zero_length_span",
+    "refused_by_admission",
+]
+"""Why an ASR element carries no interval (Rust ``UntimedCause``)."""
+
+
+class AsrElementUntimedV2(BaseModel):
+    """The element has no interval, for the named reason."""
+
+    kind: Literal["untimed"] = "untimed"
+    cause: UntimedCauseV2
+
+
+AsrElementTimingV2: TypeAlias = Annotated[
+    AsrElementTimedV2 | AsrElementUntimedV2, Field(discriminator="kind")
+]
+"""When one ASR element happened, admitted once where the provider's numbers
+were read (Rust ``AsrElementTimingV2``)."""
+
+
 class AsrElementV2(BaseModel):
     """One raw ASR element inside a speaker monologue."""
 
     value: str
-    start_s: FiniteNonNegativeFloat | None = None
-    end_s: FiniteNonNegativeFloat | None = None
+    timing: AsrElementTimingV2
     kind: AsrElementKindV2
     confidence: FiniteFloat | None = None
-
-    @model_validator(mode="after")
-    def _validate_range(self) -> AsrElementV2:
-        if (
-            self.start_s is not None
-            and self.end_s is not None
-            and self.end_s < self.start_s
-        ):
-            raise ValueError("ASR element end_s must be >= start_s")
-        return self
 
 
 class AttributedSpeakerV2(BaseModel):
@@ -1049,13 +1089,52 @@ class UtsegBoundaryModelEvidenceV2(BaseModel):
     word_evidence: list[UtsegWordBoundaryEvidenceV2]
 
 
-class UtsegItemResultV2(BaseModel):
-    """One utterance-segmentation item result returned by Python."""
+class UtsegBoundaryModelItemV2(BaseModel):
+    """An item the boundary model segmented, with its per-word evidence."""
 
-    assignments: list[int] | None = None
-    trees: list[str] | None = None
-    boundary_model_evidence: UtsegBoundaryModelEvidenceV2 | None = None
-    error: str | None = None
+    kind: Literal["boundary_model"] = "boundary_model"
+    assignments: list[int]
+    boundary_model_evidence: UtsegBoundaryModelEvidenceV2
+
+
+class UtsegUnattributedItemV2(BaseModel):
+    """An item assigned without a model: one word is one utterance."""
+
+    kind: Literal["unattributed"] = "unattributed"
+    assignments: list[int]
+
+
+class UtsegConstituencyItemV2(BaseModel):
+    """An item the Stanza constituency fallback parsed; Rust computes the
+    assignments from the trees."""
+
+    kind: Literal["constituency"] = "constituency"
+    # At least one tree: a parse with none is the item's failure, which Rust
+    # refuses too (`ConstituencyParse::read`).
+    trees: list[str] = Field(min_length=1)
+
+
+class UtsegFailedItemV2(BaseModel):
+    """An item that could not be segmented, with the reason."""
+
+    kind: Literal["failed"] = "failed"
+    error: str
+
+
+UtsegItemResultV2: TypeAlias = Annotated[
+    UtsegBoundaryModelItemV2
+    | UtsegUnattributedItemV2
+    | UtsegConstituencyItemV2
+    | UtsegFailedItemV2,
+    Field(discriminator="kind"),
+]
+"""One utseg item outcome (internally tagged on ``kind``).
+
+A union rather than four optional fields: assignments beside trees, evidence
+without assignments, an error beside a success, or no outcome at all is no
+longer a value this type can hold, so neither the bridge nor the server
+checks for it.
+"""
 
 
 class UtsegResultPayloadV2(BaseModel):
@@ -1181,8 +1260,8 @@ class CorefResultPayloadV2(BaseModel):
 class SpeakerSegmentV2(BaseModel):
     """One raw speaker diarization segment returned by Python."""
 
-    start_ms: int = Field(ge=0)
-    end_ms: int = Field(ge=0)
+    start_ms: AdmittedMillisV2
+    end_ms: AdmittedMillisV2
     speaker: SpeakerId
 
     @model_validator(mode="after")

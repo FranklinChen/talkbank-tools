@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::api::{JobId, NumWorkers, UnixTimestamp};
+use crate::api::{JobId, MachineTime, NumWorkers};
 use crate::cache::UtteranceCache;
 use crate::config::ServerConfig;
 use crate::host_facts::EffectiveConfig;
@@ -207,7 +207,7 @@ pub(super) enum ExecutionReservationError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum MemoryGateRejectionDisposition {
     /// The host re-queued the job for a later eligibility deadline.
-    Requeued { retry_at: UnixTimestamp },
+    Requeued { retry_at: MachineTime },
 }
 
 /// Result of one host-owned job execution attempt.
@@ -216,7 +216,7 @@ pub(crate) enum HostedJobRunOutcome {
     /// The job finished its current lifecycle attempt.
     Completed,
     /// The host deferred the job for a later eligibility deadline.
-    Requeued { retry_at: UnixTimestamp },
+    Requeued { retry_at: MachineTime },
 }
 
 /// Host-owned orchestration seam for queued job execution policy.
@@ -226,13 +226,13 @@ pub(crate) enum HostedJobRunOutcome {
 /// cannot currently run.
 #[async_trait]
 pub(crate) trait QueuedJobOrchestrator: Send + Sync {
-    /// Handle a host-memory rejection for one queued job.
+    /// Handle a host-memory rejection for one queued job. The runner logs
+    /// what was requested and why it was refused; the orchestrator decides
+    /// only what happens to the job.
     async fn handle_memory_gate_rejection(
         &self,
         sink: &Arc<dyn RunnerEventSink>,
         job_id: &JobId,
-        requested_workers: NumWorkers,
-        error: &HostMemoryError,
     ) -> Result<MemoryGateRejectionDisposition, crate::error::ServerError>;
 }
 

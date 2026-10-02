@@ -25,6 +25,7 @@ use crate::params::CachePolicy;
 use crate::pipeline::PipelineServices;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::types::worker_v2::DecodeBudgetSeconds;
+use batchalign_types::interval::AdmittedInterval;
 use tracing::{info, warn};
 
 /// Immutable runtime inputs for one UTR execution.
@@ -804,6 +805,7 @@ impl UtrTokenConversion {
             no_extent = self.rejected.no_extent,
             inverted = self.rejected.inverted,
             outside_window = self.rejected.outside_window,
+            inadmissible = self.rejected.inadmissible,
             worst_overshoot_ms = self.rejected.worst_overshoot.0,
             "ASR tokens discarded before UTR"
         );
@@ -853,11 +855,22 @@ fn asr_response_to_utr_tokens(
             conversion.dropped_untimed += 1;
             continue;
         };
-        // Seconds relative to the extracted segment. Naming the space is the
-        // point: these cannot be written to a transcript without conversion,
-        // because a transcript's timings are not measured from a segment.
-        let reported_start = WindowMs::reported((start_s.0 * 1000.0).round() as u64);
-        let reported_end = WindowMs::reported((end_s.0 * 1000.0).round() as u64);
+        // The pair is admitted once as an interval: rounded to the nearest
+        // millisecond, ordered, and within the admissible range (a bound
+        // past it, as an epoch timestamp is, used to saturate into a number).
+        let interval = match AdmittedInterval::admit_positions(start_s, end_s) {
+            Ok(interval) => interval,
+            Err(refusal) => {
+                conversion.rejected.record_refusal(refusal);
+                continue;
+            }
+        };
+        // Milliseconds relative to the extracted segment. Naming the space is
+        // the point: these cannot be written to a transcript without
+        // conversion, because a transcript's timings are not measured from a
+        // segment.
+        let reported_start = WindowMs::reported(interval.start_millis());
+        let reported_end = WindowMs::reported(interval.end_millis());
 
         match (
             window.to_file(reported_start, engine),
@@ -924,7 +937,7 @@ fn normalize_utr_tokens(
 #[cfg(test)]
 mod utr_token_conversion_tests {
     use super::*;
-    use crate::api::DurationSeconds;
+    use crate::api::AudioPositionSeconds;
     use crate::chat_ops::fa::coordinates::Ms;
     use crate::transcribe::{AsrResponse, AsrToken};
 
@@ -940,8 +953,8 @@ mod utr_token_conversion_tests {
     fn token(text: &str, start_s: Option<f64>, end_s: Option<f64>) -> AsrToken {
         AsrToken {
             text: text.to_owned(),
-            start_s: start_s.map(DurationSeconds),
-            end_s: end_s.map(DurationSeconds),
+            start_s: start_s.map(|s| AudioPositionSeconds::try_from(s).expect("fixture position")),
+            end_s: end_s.map(|s| AudioPositionSeconds::try_from(s).expect("fixture position")),
             speaker: None,
             confidence: None,
         }
@@ -994,6 +1007,27 @@ mod utr_token_conversion_tests {
         // incomparable for the same engine failure.
         assert_eq!(converted.rejected.no_extent, 1);
         assert_eq!(converted.rejected.inverted, 1);
+        assert_eq!(converted.rejected.outside_window, 0);
+    }
+
+    /// A token whose ends lie past the admissible range (an epoch timestamp
+    /// in seconds) is refused as an interval and counted as inadmissible. Its
+    /// ends used to saturate into millisecond counts and be counted as a
+    /// report outside the window.
+    #[test]
+    fn a_token_past_the_admissible_range_is_inadmissible() {
+        let (_rec, window) = wide_window(0, 60_000);
+        let epoch = 1_700_000_000.0;
+        let converted = asr_response_to_utr_tokens(
+            &response(vec![
+                token("kept", Some(1.0), Some(1.5)),
+                token("epoch", Some(epoch), Some(epoch + 0.5)),
+            ]),
+            &window,
+            &test_engine(),
+        );
+        assert_eq!(converted.tokens.len(), 1);
+        assert_eq!(converted.rejected.inadmissible, 1);
         assert_eq!(converted.rejected.outside_window, 0);
     }
 

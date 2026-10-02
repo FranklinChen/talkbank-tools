@@ -85,8 +85,6 @@
 //! | POST   | `/jobs/{id}/restart`        | Restart a failed/completed job             |
 //! | DELETE | `/jobs/{id}/delete`         | Permanently delete a job                   |
 //! | GET    | `/media/list`               | List media files from configured roots     |
-//! | GET    | `/bug-reports`              | List filed bug reports                     |
-//! | GET    | `/bug-reports/{id}`         | Get a single bug report                    |
 //! | GET    | `/dashboard/**`             | Static dashboard SPA                       |
 //! | GET    | `/ws`                       | WebSocket for real-time updates            |
 //!
@@ -113,6 +111,8 @@
 //!     None,  // jobs_dir (default: ~/.batchalign3/jobs/)
 //!     None,  // db_dir   (default: ~/.batchalign3/)
 //!     None,  // build_hash
+//!     // The one clock the store records with, created here at the root.
+//!     std::sync::Arc::new(batchalign::clock::SystemClock),
 //! ).await?;
 //!
 //! // Option B: serve on the configured host:port with graceful shutdown
@@ -142,6 +142,9 @@
 //! | [`fa`]          | Server-side forced alignment orchestrator (per-file, audio-aware)|
 
 pub mod types;
+
+pub(crate) mod atomic_file;
+pub(crate) mod file_lock;
 // Re-export non-conflicting types modules at crate root for flat access.
 // `types::worker` is NOT re-exported because it conflicts with `crate::worker`
 // (the WorkerHandle/WorkerPool module). Access types::worker items via
@@ -156,6 +159,7 @@ pub mod cache;
 pub(crate) mod capability;
 pub mod chat_ops;
 pub mod cli;
+pub mod clock;
 pub(crate) mod command_model;
 pub mod compare;
 pub mod coref;
@@ -230,8 +234,8 @@ pub use worker_setup::{PreparedWorkers, RegistryDiscovery, prepare_workers};
 // Server-level exports (require axum and sqlx).
 #[cfg(feature = "server")]
 pub use server::{
-    create_app, create_app_with_prepared_workers, create_app_with_runtime, create_test_app,
-    create_test_app_with_prepared_workers, serve, serve_with_runtime,
+    AppStorageOverrides, create_app, create_app_with_prepared_workers, create_app_with_runtime,
+    create_test_app, create_test_app_with_prepared_workers, serve, serve_with_runtime,
 };
 #[cfg(feature = "server")]
 pub use state::AppState;
@@ -257,6 +261,13 @@ pub fn build_hash() -> &'static str {
 pub(crate) fn chat_parser() -> batchalign_transform::parse::TreeSitterParser {
     batchalign_transform::parse::TreeSitterParser::new()
         .expect("tree-sitter CHAT grammar must load")
+}
+
+/// A job-store time from Unix seconds, for fixtures written as the store
+/// keeps them. Panics when the literal names no instant.
+#[cfg(test)]
+pub(crate) fn unix_time(seconds: f64) -> crate::api::MachineTime {
+    crate::api::MachineTime::from_unix_seconds(seconds).expect("fixture time must name an instant")
 }
 
 /// A `ChatCleanedText` built the way production builds one: by PARSING.

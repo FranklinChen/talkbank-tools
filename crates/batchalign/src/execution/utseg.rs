@@ -7,7 +7,7 @@ use crate::planning;
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage};
 use crate::scheduling::WorkUnitKind;
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::utseg_route::UtsegRoute;
 
 use super::text_io::{load_text_inputs, write_text_results};
@@ -46,7 +46,6 @@ pub(crate) async fn dispatch_utseg_job(
     })?;
     let plan = Arc::new(plan);
     let sink = host.sink().clone();
-    let started_at = unix_now();
 
     let inputs = load_text_inputs(job, host, false).await;
     if inputs.file_texts.is_empty() {
@@ -55,7 +54,7 @@ pub(crate) async fn dispatch_utseg_job(
 
     for file in &job.pending_files {
         FileRunTracker::new(sink.as_ref(), &job.identity.job_id, file.filename.as_ref())
-            .begin_first_attempt(WorkUnitKind::BatchInfer, started_at, FileStage::Segmenting)
+            .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Segmenting)
             .await;
     }
 
@@ -314,6 +313,7 @@ mod tests {
             crate::config::ServerConfig::default(),
             None,
             tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
         )))
     }
 

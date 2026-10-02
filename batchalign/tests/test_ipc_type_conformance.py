@@ -289,6 +289,25 @@ class TestWorkerV2Conformance:
         schema = _load_schema("worker_v2", "SpeakerSegmentV2")
         _assert_fields_match(schema, SpeakerSegmentV2)
 
+    def test_interval_bounds_match_the_rust_range(self) -> None:
+        """The Python interval bound admits exactly the schema's range.
+
+        Rust's `AdmittedInterval` bounds are 0..=MAX_MS; the hand-written
+        Python bound must refuse the same values, or an out-of-range segment
+        passes Python and is refused by Rust as a runtime failure.
+        """
+        from annotated_types import Ge, Le
+
+        from batchalign.worker._types_v2 import SpeakerSegmentV2
+
+        schema = _load_schema("worker_v2", "SpeakerSegmentV2")
+        for field in ("start_ms", "end_ms"):
+            bound = schema["properties"][field]
+            metadata = SpeakerSegmentV2.model_fields[field].metadata
+            ge = next(m.ge for m in metadata if isinstance(m, Ge))
+            le = next(m.le for m in metadata if isinstance(m, Le))
+            assert (ge, le) == (bound["minimum"], bound["maximum"]), field
+
     def test_morphosyntax_request(self) -> None:
         from batchalign.worker._types_v2 import MorphosyntaxRequestV2
 
@@ -354,3 +373,35 @@ class TestWorkerV2Conformance:
             "factor drives (Python's decode budget, Rust's transport "
             "ceiling) must be computed from the same number."
         )
+
+
+def test_worker_error_kinds_match_rust() -> None:
+    """The stub's ``WorkerErrorKind`` spells exactly Rust's error kinds.
+
+    Rust's list (``batchalign_types::worker_v2::WorkerErrorKind::ALL``) is
+    exported as ``batchalign_core.WORKER_ERROR_KINDS``; the stub's ``Literal``
+    is the one Python spelling, which mypy checks every use against.
+    """
+    import ast
+
+    import batchalign_core
+
+    stub = ROOT / "stubs" / "batchalign_core" / "__init__.pyi"
+    tree = ast.parse(stub.read_text())
+    literal = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "WorkerErrorKind"
+            for target in node.targets
+        )
+    )
+    assert isinstance(literal, ast.Subscript)
+    assert isinstance(literal.slice, ast.Tuple)
+    spelled = tuple(
+        element.value
+        for element in literal.slice.elts
+        if isinstance(element, ast.Constant)
+    )
+    assert spelled == tuple(batchalign_core.WORKER_ERROR_KINDS)

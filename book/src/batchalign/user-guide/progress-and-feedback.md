@@ -1,7 +1,7 @@
 # Progress and Feedback
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 Batchalign reports real-time progress during processing. This page explains what
 to expect for each command, what the progress indicators mean, and when to worry
@@ -21,9 +21,8 @@ For direct local runs, the CLI also prints a stable debug handle at startup:
 - the direct job ID
 - the local artifact directory for that job
 
-On failures, the CLI prints any persisted bug-report IDs and direct debug
-artifact paths so you can inspect the failed run later without keeping the
-process alive.
+On failures, the CLI prints direct debug artifact paths so you can inspect
+the failed run later without keeping the process alive.
 
 There are two progress tiers:
 

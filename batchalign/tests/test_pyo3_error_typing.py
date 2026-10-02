@@ -104,8 +104,8 @@ class TestExceptionAttributesShape:
     documented shape, even before all callers populate them."""
 
     def test_chat_validation_exception_carries_errors_attribute(self):
-        """A bare-constructed ``CHATValidationException`` has empty
-        ``errors`` and ``bug_report_id=None``.
+        """A bare-constructed ``CHATValidationException`` has no
+        ``errors``.
 
         Bare-constructed instances (from Python `raise`) won't have
         attributes set; only Rust-raised ones do via the boundary's
@@ -116,7 +116,5 @@ class TestExceptionAttributesShape:
         #: that only happens through the Rust `From` impl. This is
         # the documented behaviour, not a bug.
         exc = CHATValidationException("test")
-        # `getattr` with default returns the default for missing attrs
-        # , which is the contract `classify_error` already relies on.
+        # `getattr` with default returns the default for missing attrs.
         assert getattr(exc, "errors", None) is None
-        assert getattr(exc, "bug_report_id", None) is None

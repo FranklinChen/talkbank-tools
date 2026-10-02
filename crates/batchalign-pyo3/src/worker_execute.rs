@@ -12,7 +12,7 @@
 
 use std::time::Instant;
 
-use batchalign_types::api::DurationSeconds;
+use batchalign_types::api::NonNegativeSeconds;
 use batchalign_types::worker_v2::{
     ExecuteRequestV2, ExecuteResponseV2, ProtocolErrorCodeV2, TaskRequestV2, TaskResultV2,
 };
@@ -235,7 +235,7 @@ where
 
     let outcome = validate_request(&request).and_then(run);
 
-    let elapsed_s = DurationSeconds(started_at.elapsed().as_secs_f64());
+    let elapsed_s = NonNegativeSeconds::from(started_at.elapsed());
     let response = match outcome {
         Ok(result) => ExecuteResponseV2::success(request.request_id.clone(), result, elapsed_s),
         Err(failure) => {

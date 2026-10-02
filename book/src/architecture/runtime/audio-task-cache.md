@@ -1,7 +1,7 @@
 # Audio-Task Cache
 
 **Status:** Current
-**Last updated:** 2026-09-30 22:58 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 Batchalign caches **audio-task results** (forced alignment, UTR ASR, raw Rev
 transcript evidence, dedicated transcribe speaker evidence, and media
@@ -527,7 +527,8 @@ boundary rather than merely testing SQLite in isolation.
 
 Stored evidence is a versioned JSON envelope containing the request
 fingerprint and normalized `SpeakerSegmentV2` list. Reads validate the schema,
-fingerprint, nonempty labels, non-inverted intervals, and nondecreasing starts.
+fingerprint, nonempty labels and nondecreasing starts; each segment's own order
+is its `AdmittedInterval`, refused when the envelope is parsed.
 Corruption is an error, never a miss. A successful service response must be
 validated and durably committed before the pipeline continues; a write error
 fails the file instead of silently losing reusable evidence.
@@ -587,13 +588,11 @@ per-file concurrency. A future cache-aware parallel preflight may recover the
 old wider submission window only if its plan variants carry validated hits or
 typed miss authorizations.
 
-## Self-Correcting Cache Purges
+## Validation Does Not Purge the Cache
 
-FA/UTR post-serialization validation can delete the cache entries that
-produced invalid output. Rev and speaker envelopes instead validate at their
-evidence boundaries; their keys are not yet retained through final CHAT
-serialization for automatic downstream purge. Validation failures also
-trigger bug reports to `~/.batchalign3/bug-reports/`.
+Post-serialization validation fails the file but deletes no cache entry. Rev
+and speaker envelopes validate at their evidence boundaries; FA and UTR
+entries are reused on a rerun until overridden.
 
 ## Override
 

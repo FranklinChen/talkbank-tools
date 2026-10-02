@@ -16,10 +16,11 @@
     "tokens"
   ],
   "$defs": {
-    "DurationSeconds": {
-      "description": "Duration measured in fractional seconds.",
+    "AudioPositionSeconds": {
+      "description": "A point in the audio, in finite non-negative seconds from its start.",
       "type": "number",
-      "format": "double"
+      "format": "double",
+      "minimum": 0.0
     },
     "WhisperTokenTimingV2": {
       "description": "One raw Whisper forced-alignment token span returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
@@ -31,7 +32,7 @@
         },
         "time_s": {
           "description": "Token onset timestamp in seconds.",
-          "$ref": "#/$defs/DurationSeconds"
+          "$ref": "#/$defs/AudioPositionSeconds"
         }
       },
       "required": [

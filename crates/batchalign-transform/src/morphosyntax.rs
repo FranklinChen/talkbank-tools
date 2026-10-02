@@ -43,11 +43,12 @@
 //! - [`types`]: small mapping types: `MwtDict`, `MappingContext`, `lang2`,
 //!   `MappingError`, `TokenizationMode`, `MultilingualPolicy`.
 //! - [`ud_types`]: UD value types: `UniversalPos`, `DepRel`, `VerbForm`,
-//!   feature constants, `UdId`, `UdPunctable`, `UdWord`, `UdSentence`,
-//!   `UdResponse`, plus `validate_and_clean` / `is_bogus_lemma` /
+//!   `UdId`, `UdPunctable`, `UdWord` (and its wire record `UdWordAnalysis`),
+//!   the typed features `WordFeatures` with their `FeatSource` and the
+//!   curated-table bundle `CuratedFeats`, `UdSentence`, `UdResponse`, plus `validate_and_clean` / `is_bogus_lemma` /
 //!   `sanitize_mor_text`.
 //! - [`payload`]: payload collection (`collect_payloads`, `declared_languages`,
-//!   `MorphosyntaxBatchItem`, `BatchItemWithPosition`, `AlignmentWarning`,
+//!   `MorphosyntaxBatchItem`, `CollectedUtterance`, `AlignmentWarning`,
 //!   `PayloadCollection`) and `%mor`/`%gra` mutation passes
 //!   (`clear_morphosyntax`, `validate_mor_alignment`, `prepare_text`, etc.).
 //! - [`pos_hints`]: `apply_pos_hints` + `HintOutcome`, `is_stanza_supported`
@@ -61,6 +62,7 @@
 
 pub use crate::inject::{MisalignmentClass, MisalignmentDiagnostic};
 
+pub mod alignment;
 pub mod evidence;
 mod features;
 mod gra_validate;
@@ -92,17 +94,18 @@ pub use gra_validate::validate_generated_gra;
 pub use injection::{InjectionResult, RetokenizationInfo, inject_results};
 pub use invariants::*;
 pub use lang_en::is_irregular;
-pub use lang_fr::{french_pronoun_case, is_apm_noun};
+pub use lang_fr::{FrenchPronounCase, french_pronoun_case, is_apm_noun};
 pub use lang_it::{try_handle_italian_range_override, try_handle_italian_single_override};
 pub use lang_ja::{JaOverride, japanese_verbform};
 pub use mapping_helpers::{assemble_mors, normalize_deprel, provenance_for_ud_word};
-pub use mapping_provenance::{ChunkHead, ChunkProvenance, MorProvenance};
-pub use mor_word::{clean_lemma, is_clitic, map_ud_word_to_mor};
+pub use mapping_provenance::{ChunkHead, ChunkProvenance, MappedItem, MorProvenance};
+pub use mor_word::{clean_lemma, is_clitic, map_ud_word};
 pub use outcome::{MorOutcome, MorOutcomeKind, NotApplicableReason, classify_not_applicable};
 pub use payload::{
-    AlignmentWarning, BatchItemWithPosition, MorphosyntaxBatchItem, PayloadCollection,
-    clear_morphosyntax, clear_morphosyntax_selective, collect_payloads, declared_languages,
-    prepare_text, remove_empty_morphosyntax_placeholders, validate_mor_alignment,
+    AlignmentWarning, BatchWord, CollectedUtterance, MorphosyntaxBatchItem, PayloadCollection,
+    WordRole, clear_morphosyntax, clear_morphosyntax_selective, collect_payloads,
+    declared_languages, prepare_text, remove_empty_morphosyntax_placeholders,
+    validate_mor_alignment,
 };
 pub use pos_hints::{
     HintOutcome, PosHintEvidence, apply_pos_hint_evidence, apply_pos_hints, collect_pos_hints,
@@ -110,16 +113,17 @@ pub use pos_hints::{
 };
 pub use responses::{MatchedMorphosyntaxResponses, ResponseCountMismatch};
 pub use sentence_mapping::{
-    TerminatorPolicy, build_gra_and_validate, is_terminator_punct, map_ud_sentence,
-    map_ud_sentence_expanded, map_ud_sentence_with_overrides,
+    ItemLayout, MappedTokens, TokenItems, is_terminator_punct, map_tokens, map_ud_sentence,
+    map_ud_sentence_expanded,
 };
 pub use stanza_raw::*;
 pub use synthesis::synthesize_special_form_mor;
 pub use types::{
     MappingContext, MappingError, MultilingualPolicy, MwtDict, TokenizationMode, lang2,
 };
+pub(crate) use ud_types::FeatName;
 pub use ud_types::{
-    DepRel, FINITE_COPULA_PRES_3SG, PRESENT_PARTICIPLE, UdId, UdPunctable, UdResponse, UdSentence,
-    UdWord, UniversalPos, VerbForm, has_key_value, has_verb_form_fin, is_bogus_lemma,
+    CuratedFeats, DepRel, FeatSource, FeatValue, UdHead, UdId, UdPunctable, UdResponse, UdSentence,
+    UdWord, UdWordAnalysis, UdWordId, UniversalPos, VerbForm, WordFeatures, is_bogus_lemma,
     sanitize_mor_text, ud_pair_value, validate_and_clean,
 };

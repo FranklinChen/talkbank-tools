@@ -31,11 +31,20 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TextIO, cast
+
+import batchalign_core
 
 if TYPE_CHECKING:
+    # What an ``{"op": "error"}`` line reports, and so what a retry could
+    # change: ``runtime`` (the admitted work failed; another attempt may
+    # succeed), ``bootstrap`` (a deterministic model-load, catalog or import
+    # failure) or ``invalid_request`` (the request was refused as sent).
+    # Required on the wire. Spelled once, in the extension's stub, against
+    # Rust's own list (``batchalign_core.WORKER_ERROR_KINDS``).
     from batchalign.inference._domain_types import TcpPort
     from batchalign.worker._registry import WorkerRegistryEntry
+    from batchalign_core import WorkerErrorKind
 
 from batchalign.worker._protocol_ops import (
     PendingProtocolRequest,
@@ -48,6 +57,7 @@ from batchalign.worker._runtime_identity import observe_worker_runtime
 from batchalign.worker._types import WorkerJSONValue
 
 logger = logging.getLogger(__name__)
+
 
 # Reentrant stdout lock shared between sequential and concurrent modes.
 # In sequential mode it is never contended (single thread); in concurrent
@@ -113,31 +123,55 @@ def _registry_entry(host: str, port: TcpPort) -> WorkerRegistryEntry:
     )
 
 
-# Bootstrap-vs-request stdout discipline.
-#
-# The Rust supervisor reads exactly one JSON line from worker stdout during
-# the handshake: the ready signal `{"ready": true, "pid": N, "transport": ...}`.
-# Anything else on the first line fails the handshake with
-# "invalid ready JSON: missing field `ready`". So during the
-# pre-ready window (model loading, catalog bootstrap, language-pack
-# downloads at worker startup), no other JSON line may reach stdout.
-#
-# This flag separates the two phases. Pre-ready callers of
-# ``write_progress_event`` (from ``_progress.emit_download_event`` etc.)
-# emit their JSON line to stdout as ``{"op": "progress_v2", ...}``;
-# the Rust supervisor's ``read_ready_line`` accepts these as preamble
-# events before the ``{"ready": true, ...}`` envelope and logs each
-# one as ``tracing::info!``, so bootstrap-time timings reach the
-# daemon log live (otherwise stderr is buffered until process exit).
-# ``_print_ready`` flips the flag the moment the ready line is on the
-# wire, after which all later progress events behave normally.
-_handshake_complete = False
+# The protocol stream before the ready line. The Rust supervisor's
+# ``read_ready_line`` accepts ``{"op": "progress_v2", ...}`` lines as
+# bootstrap-time preamble before the ``{"ready": true, ...}`` envelope and
+# logs each as ``tracing::info!``, so a progress event takes the same route
+# (``_write_json``) before and after the ready line: bootstrap timings reach
+# the daemon log live, where stderr is buffered until process exit.
+
+
+# Where protocol lines go. ``None`` until :func:`claim_protocol_stdout` runs:
+# the protocol is then ``sys.stdout`` itself, as in tests that capture it.
+# A stdio worker claims it at startup, after which this is a private
+# descriptor onto the pipe the Rust server reads, and nothing else in the
+# process can write to that pipe.
+_protocol_out: TextIO | None = None
+
+
+def claim_protocol_stdout() -> None:
+    """Give the protocol the process's stdout and give everyone else stderr.
+
+    The Rust server reads protocol lines from this process's stdout. Any
+    library that prints (a model download banner, a C extension writing to
+    file descriptor 1) would otherwise put text into that stream, and enough
+    of it makes the server stop trusting the stream and retire the worker.
+    So the pipe is duplicated onto a private descriptor that only
+    :func:`_write_json` writes to, and descriptor 1 and ``sys.stdout`` are
+    pointed at stderr, where such output is only logged. Called once, at
+    startup, before any model loads; a second call does nothing.
+    """
+    global _protocol_out
+    if _protocol_out is not None:
+        return
+    sys.stdout.flush()
+    stdout_fd = sys.stdout.fileno()
+    private_fd = os.dup(stdout_fd)
+    os.dup2(sys.stderr.fileno(), stdout_fd)
+    _protocol_out = os.fdopen(private_fd, "w", encoding="utf-8")
+    sys.stdout = sys.stderr
+
+
+def _protocol_stream() -> TextIO:
+    """The stream protocol lines are written to."""
+    return sys.stdout if _protocol_out is None else _protocol_out
 
 
 def _write_json(payload: dict[str, WorkerJSONValue]) -> None:
-    """Emit a single JSON message line to stdout."""
-    sys.stdout.write(json.dumps(payload) + "\n")
-    sys.stdout.flush()
+    """Emit a single JSON message line on the protocol stream."""
+    out = _protocol_stream()
+    out.write(json.dumps(payload) + "\n")
+    out.flush()
 
 
 def write_progress_event(
@@ -151,14 +185,10 @@ def write_progress_event(
     The Rust worker handle reads these intermediate JSON lines before the
     final response. Progress events use the ``progress_v2`` op tag so
     the handle can distinguish them from the final ``execute_v2`` response.
-
-    During the pre-ready handshake window (worker startup, model loading,
-    catalog bootstrap), the JSON line still goes to stdout. The Rust
-    supervisor's ``read_ready_line`` accepts ``progress_v2`` lines as
-    preamble events before the ``{"ready": true, ...}`` envelope and
-    emits each as ``tracing::info!``. Stderr is buffered until process
-    exit, so bootstrap-time visibility requires the stdout path.
+    Before the ready line they are bootstrap preamble, which the Rust
+    supervisor's ``read_ready_line`` logs; the line is the same either way.
     """
+
     payload: dict[str, WorkerJSONValue] = {
         "op": "progress_v2",
         "event": {
@@ -168,10 +198,6 @@ def write_progress_event(
             "stage": stage,
         },
     }
-    if not _handshake_complete:
-        sys.stdout.write(json.dumps(payload) + "\n")
-        sys.stdout.flush()
-        return
     _write_json(payload)
 
 
@@ -199,10 +225,11 @@ class ErrorCorrelation:
         """No request owns this error, and that is a fact, not an omission.
 
         Two real cases: the line never parsed, so there is no message to read
-        an id out of; and the failing op is a sequential one (health,
-        capabilities, ensure_task) whose caller waits on the control channel,
-        where a tagged error would be routed to a pending map that has no such
-        entry and the caller would wait forever.
+        an id out of; and the failing op is one whose request carries no id
+        (health). A ``capabilities`` or ``ensure_task`` request carries a
+        control request id, and the Rust reader routes a failure tagged with
+        it to the control op that sent it, so a late failure of an op that
+        timed out cannot answer the next one.
         """
         return cls(request_id=None)
 
@@ -214,7 +241,7 @@ class ErrorCorrelation:
         ...}}``), which is the same place the Rust-owned dispatcher reads it
         from when it refuses a payload; see
         ``crates/batchalign-pyo3/src/worker_protocol.rs::extract_request_id``.
-        A message that carries none is uncorrelated, which every sequential op
+        A message that carries none is uncorrelated, which a health probe
         legitimately is.
         """
         if not isinstance(message, dict):
@@ -230,54 +257,38 @@ class ErrorCorrelation:
 
 def error_envelope(
     message: str,
-    kind: str,
+    kind: WorkerErrorKind,
     correlation: ErrorCorrelation,
 ) -> dict[str, WorkerJSONValue]:
-    """Build the one error envelope every transport emits.
+    """Build an ``{"op": "error"}`` envelope through the one Rust builder.
 
-    The single owner of this shape. It was written out by hand at five call
-    sites across stdio and TCP, and none of them could carry a correlation,
-    so adding the field to one would have left the other four silently
-    uncorrelated.
+    ``batchalign_core.error_envelope`` is the same function the Rust-owned
+    request dispatcher uses for its own refusals, so the Python request loops
+    and the dispatcher cannot write two shapes of this line.
     """
-    payload: dict[str, WorkerJSONValue] = {
-        "op": "error",
-        "error": message,
-        "kind": kind,
-    }
-    if correlation.request_id is not None:
-        payload["request_id"] = correlation.request_id
-    return payload
+    return cast(
+        dict[str, WorkerJSONValue],
+        batchalign_core.error_envelope(message, kind, correlation.request_id),
+    )
 
 
 def _write_error(
     message: str,
     *,
     correlation: ErrorCorrelation,
-    kind: str = "runtime",
+    kind: WorkerErrorKind,
 ) -> None:
     """Emit a protocol-level error response.
 
-    Two kinds:
-
-    - ``"runtime"`` (default): per-request failure that may succeed on
-      retry (transient resource state, malformed input, external-API
-      hiccup). The orchestrator's retry policy may attempt up to 3×.
-    - ``"bootstrap"``: deterministic model-load / catalog-download /
-      package-import failure that will recur identically across retries.
-      The Rust side classifies these as terminal at the worker layer.
-
-    The ``kind`` field is read by the Rust ``WorkerResponse::Error``
-    deserializer (see
-    ``crates/batchalign/src/worker/handle/protocol.rs::WorkerErrorKind``).
-    Legacy workers without this field default to ``"runtime"`` on the Rust
-    side, so existing call sites that omit ``kind`` keep their previous
-    semantics.
+    ``kind`` is required on the wire (see :data:`WorkerErrorKind`); the Rust
+    readers refuse an envelope without it.
     """
     _write_json(error_envelope(message, kind, correlation))
 
 
-def _classify_dispatch_exception(exc: BaseException) -> str:
+def _classify_dispatch_exception(
+    exc: BaseException,
+) -> Literal["runtime", "bootstrap"]:
     """Return ``"bootstrap"`` for typed bootstrap-class exceptions, else ``"runtime"``.
 
     The set of bootstrap-class exception types is small and stable
@@ -285,7 +296,7 @@ def _classify_dispatch_exception(exc: BaseException) -> str:
     inherits from one of the named classes here. New bootstrap-class
     error types added to the worker must extend this match.
 
-    Side-effect-free: takes the exception, returns the wire-kind string.
+    Side-effect-free: takes the exception, returns the wire kind.
     Imports the type modules lazily so a missing optional dep can't crash
     the classifier itself.
     """
@@ -309,13 +320,8 @@ def _classify_dispatch_exception(exc: BaseException) -> str:
 
 
 def _print_ready() -> None:
-    """Print a JSON ready line to stdout so the Rust parent can discover us.
-
-    Flips the ``_handshake_complete`` flag so subsequent ``progress_v2``
-    emissions go through the normal stdout path. Pre-ready emissions get
-    redirected to stderr: see ``write_progress_event`` for the rationale.
-    """
-    global _handshake_complete
+    """Print a JSON ready line on the protocol stream so the Rust parent can
+    discover us."""
     _write_json(
         {
             "ready": True,
@@ -324,7 +330,6 @@ def _print_ready() -> None:
             "runtime": observe_worker_runtime().json_value(),
         }
     )
-    _handshake_complete = True
 
 
 def _serve_stdio() -> None:
@@ -353,6 +358,7 @@ def _serve_stdio() -> None:
             _write_error(
                 f"invalid JSON request: {exc}",
                 correlation=ErrorCorrelation.uncorrelated(),
+                kind="invalid_request",
             )
             continue
 
@@ -452,7 +458,7 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
                     _respond(
                         error_envelope(
                             f"invalid JSON request: {exc}",
-                            "runtime",
+                            "invalid_request",
                             ErrorCorrelation.uncorrelated(),
                         )
                     )
@@ -480,15 +486,7 @@ def _print_ready_tcp(host: str, port: TcpPort) -> None:
 
     Unlike stdio mode where ready goes to stdout (consumed by the Rust parent),
     TCP mode prints to stderr since stdout is not connected to any parent pipe.
-
-    Flips the ``_handshake_complete`` flag so any subsequent stdio progress
-    events (post-ready, per-connection) go through the normal stdout path.
-    For TCP mode this is a no-op in practice since per-connection responses
-    use the connection's wfile rather than process stdout, but we keep the
-    flag consistent so the bootstrap-vs-request distinction holds across
-    transports.
     """
-    global _handshake_complete
     ready = json.dumps(
         {
             "ready": True,
@@ -500,7 +498,6 @@ def _print_ready_tcp(host: str, port: TcpPort) -> None:
     )
     sys.stderr.write(ready + "\n")
     sys.stderr.flush()
-    _handshake_complete = True
 
 
 def _handle_tcp_connection_sequential(
@@ -524,7 +521,7 @@ def _handle_tcp_connection_sequential(
                 error_payload = json.dumps(
                     error_envelope(
                         f"invalid JSON request: {exc}",
-                        "runtime",
+                        "invalid_request",
                         ErrorCorrelation.uncorrelated(),
                     )
                 )
@@ -659,7 +656,7 @@ def _handle_tcp_connection_concurrent(
                     error_payload = json.dumps(
                         error_envelope(
                             f"invalid JSON request: {exc}",
-                            "runtime",
+                            "invalid_request",
                             ErrorCorrelation.uncorrelated(),
                         )
                     )

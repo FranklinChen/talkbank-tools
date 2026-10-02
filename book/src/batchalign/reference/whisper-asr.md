@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-09-22 19:22 EDT
+**Last updated:** 2026-10-01 14:00 EDT
 
 ## Overview
 
@@ -107,8 +107,10 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
   neighbours rather than by a guess at which bound was right. The fit is
   checked against an exact isotonic-regression oracle on every short
   sequence, over the chunks that have both bounds. Each bound, when present,
-  is a finite non-negative time by type (`NonNegativeSeconds`, refused in
-  deserialization otherwise), from both producers.
+  is a finite non-negative POSITION by type (`AudioPositionSeconds`, refused
+  in deserialization otherwise), from both producers, and so is each fitted
+  boundary: the projection returns a refusal rather than an infinite position
+  if a run of bounds near `f64::MAX` seconds overflows the fit's sum.
 - No per-language overrides of the generation config. Until 2026-09-22 a
   Cantonese block set `no_timestamps_token_id = 50363` and nine
   `alignment_heads` at layers 5 to 10: whisper-small's values, inherited from
@@ -378,8 +380,12 @@ use, not at CLI startup.
   per-(head,frame) standardization over tokens, median filter,
   head-mean cost matrix (row 0 flattened), DTW at 20 ms frames. Pieces:
   the shared numeric core (`whisper_native/fa_dtw.rs`, unit-tested),
-  a vendored capture-enabled model + driver + parity harness in
-  `batchalign-whisper-pilot` (`fa_model.rs`, `fa.rs`, `bin/fa_parity`).
+  and a vendored capture-enabled candle model + driver + parity harness
+  (`fa_model.rs`, `fa.rs`, `bin/fa_parity`) in the
+  `batchalign-whisper-pilot` crate. That crate was RETIRED on 2026-10-01
+  once its measurement job was done; production keeps only the numeric
+  core. Recover the candle model and the parity harness from git
+  history: `git log --diff-filter=D -- crates/batchalign-whisper-pilot`.
   Measured parity on large-v2/JFK vs the production Python path: token
   sequences identical, max |delta| 0.040 s, mean 0.014 s. The critical
   subtlety, do not lose it: HF's `model(labels=...)` applies
@@ -390,8 +396,8 @@ use, not at CLI startup.
   `batchalign-fa-core` (shared without the server stack);
   `FaAssets::load`/`align` is the promotion seam (load once, align per
   call); capture is restricted to the alignment-head layers; an
-  ignored-by-default equivalence test guards the vendored model against
-  upstream candle drift; per-job model selection
+  ignored-by-default equivalence test guarded the vendored model against
+  upstream candle drift (retired with the pilot); per-job model selection
   (`whisper_rs_model` engine-override extra) and
   `setup --prefetch-whisper-rs` complete the ASR-side surface.
   Remaining for production: the `FaInferItem`-shaped dispatch behind

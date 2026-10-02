@@ -1120,40 +1120,215 @@ numeric_id!(
     pub UtteranceCount(u64) [Eq]
 );
 
-numeric_id!(
-    /// Duration measured in fractional seconds.
-    pub DurationSeconds(f64)
-);
-
 validated_numeric!(
-    /// A finite, non-negative number of seconds, proven at construction.
+    /// A LENGTH of time in seconds: finite and non-negative, proven at
+    /// construction. Not a position.
     ///
-    /// [`DurationSeconds`] admits any `f64`, negative and non-finite included,
-    /// so a wire type that promises a usable timestamp could not use it
-    /// without a check at every consumer, and the checks drifted: the Python
-    /// path ran two (a Pydantic bound and a PyO3 loop) while the in-process
-    /// whisper.cpp path ran none. This type carries the proof instead.
+    /// Elapsed and uptime readings, cooldowns and job durations are lengths.
+    /// A POINT in the audio is [`AudioPositionSeconds`], which has the same
+    /// representation and is a different type for the reason `DurationMs`
+    /// records: one type standing for both facts lets nothing notice a length
+    /// passed where an offset belongs.
+    ///
+    /// This replaced `DurationSeconds`, an unvalidated `f64` newtype with a
+    /// public field and a `Default` of zero that carried both lengths and ASR
+    /// token positions. Nothing it carried was a signed length, so it went
+    /// rather than being kept beside this type.
     pub NonNegativeSeconds(f64 = "f64"), InvalidSeconds,
     |v| v.is_finite() && v >= 0.0, "seconds must be finite and non-negative",
-    {
-        "type": "number",
-        "format": "double",
-        "minimum": 0.0,
-        "description": "A finite, non-negative number of seconds."
-    }
+    schema(number, "double", minimum 0.0, description "A finite, non-negative number of seconds.")
 );
 
-/// Widening: every proven value is a duration, so this cannot fail.
-impl From<NonNegativeSeconds> for DurationSeconds {
-    fn from(value: NonNegativeSeconds) -> Self {
-        Self(value.0)
+impl NonNegativeSeconds {
+    /// No time at all.
+    ///
+    /// A zero LENGTH is a real quantity ("no time passed"), which is why a
+    /// length may name it while a position type has no such constant.
+    pub const ZERO: Self = Self(0.0);
+}
+
+impl NonNegativeSeconds {
+    /// How long from `start` to `end`, never negative: an `end` before
+    /// `start` (clock skew across a restart) is zero. The one way a span
+    /// between two recorded instants becomes a length.
+    pub fn between(
+        start: crate::machine_time::MachineTime,
+        end: crate::machine_time::MachineTime,
+    ) -> Self {
+        Self::from(end.saturating_duration_since(start))
     }
 }
 
-numeric_id!(
-    /// Unix timestamp as fractional seconds since epoch.
-    pub UnixTimestamp(f64)
+/// A `std::time::Duration` is finite and non-negative by construction, so
+/// this cannot fail.
+impl From<std::time::Duration> for NonNegativeSeconds {
+    fn from(value: std::time::Duration) -> Self {
+        Self(value.as_secs_f64())
+    }
+}
+
+/// A length of time in whole seconds that is never zero: a timeout or an
+/// interval an operator sets.
+///
+/// "Not set" is `Option<PositiveSeconds>::None`, never a zero. Configuration
+/// used to spell "use the built-in default" as `0` in a `u64`, so every
+/// consumer had to remember to test for it (`if n > 0 { n } else { default }`)
+/// and a zero that reached a timer meant "expire at once". `serde` reads it as
+/// a `NonZeroU64`, so a bare `0` is refused; configuration fields that still
+/// accept the legacy `0` say so in their own deserializer.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct PositiveSeconds(std::num::NonZeroU64);
+
+/// Why a value was refused as [`PositiveSeconds`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidPositiveSeconds {
+    /// Zero seconds: leave the setting out for the built-in default.
+    #[error("0 is not a timeout or interval; leave it out for the built-in default")]
+    Zero,
+    /// Not a whole number of seconds.
+    #[error("{0:?} is not a whole number of seconds")]
+    NotWholeSeconds(String),
+}
+
+impl PositiveSeconds {
+    /// A literal or already-proven count.
+    pub const fn new(seconds: std::num::NonZeroU64) -> Self {
+        Self(seconds)
+    }
+
+    /// A literal count, checked non-zero when the constant is evaluated, so a
+    /// default can be written as a number without a runtime check.
+    pub const fn literal<const SECONDS: u64>() -> Self {
+        const {
+            assert!(
+                SECONDS > 0,
+                "PositiveSeconds::literal needs a non-zero count"
+            )
+        };
+        Self(std::num::NonZeroU64::MIN.saturating_add(SECONDS - 1))
+    }
+
+    /// The count of seconds.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    /// The same length as a `std::time::Duration`.
+    pub const fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.0.get())
+    }
+
+    /// The larger of a computed count and a positive floor: a budget that
+    /// scales with work but never falls below its minimum, positive by
+    /// construction.
+    pub const fn at_least(seconds: u64, floor: Self) -> Self {
+        match std::num::NonZeroU64::new(seconds) {
+            Some(computed) if computed.get() > floor.0.get() => Self(computed),
+            Some(_) | None => floor,
+        }
+    }
+
+    /// This length plus `seconds`, saturating at `u64::MAX`.
+    pub const fn saturating_add_seconds(self, seconds: u64) -> Self {
+        Self(self.0.saturating_add(seconds))
+    }
+}
+
+impl TryFrom<u64> for PositiveSeconds {
+    type Error = InvalidPositiveSeconds;
+
+    fn try_from(seconds: u64) -> Result<Self, Self::Error> {
+        match std::num::NonZeroU64::new(seconds) {
+            Some(seconds) => Ok(Self(seconds)),
+            None => Err(InvalidPositiveSeconds::Zero),
+        }
+    }
+}
+
+/// The command-line form: a whole number of seconds, never zero.
+impl std::str::FromStr for PositiveSeconds {
+    type Err = InvalidPositiveSeconds;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let seconds: u64 = text
+            .parse()
+            .map_err(|_| InvalidPositiveSeconds::NotWholeSeconds(text.to_owned()))?;
+        Self::try_from(seconds)
+    }
+}
+
+/// The bare count, as a command line or a config file writes it.
+impl std::fmt::Display for PositiveSeconds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+validated_numeric!(
+    /// A POINT in an audio stream, in seconds from the start of the audio the
+    /// reporting engine was given: finite and non-negative, proven at
+    /// construction. Not a length.
+    ///
+    /// ASR token and chunk bounds, Whisper forced-alignment token onsets and
+    /// Rev.AI element times are all positions. Which audio the origin belongs
+    /// to is the producer's: the whole recording for ASR, the alignment window
+    /// for forced alignment. The millisecond types in `batchalign::time`
+    /// (`FileMs`, `WindowMs`) name that origin; this type marks only that the
+    /// value is a point and not a [`NonNegativeSeconds`] length.
+    ///
+    /// No `Default` and no zero constant: a zero POSITION is a real instant,
+    /// and a default one would be an instant masquerading as "unset". Absence
+    /// is `Option<AudioPositionSeconds>`.
+    pub AudioPositionSeconds(f64 = "f64"), InvalidAudioPosition,
+    |v| v.is_finite() && v >= 0.0, "an audio position must be finite and non-negative seconds",
+    schema(number, "double", minimum 0.0, description "A point in the audio, in finite non-negative seconds from its start.")
 );
+
+impl AudioPositionSeconds {
+    /// A position given in whole milliseconds. Every `u64` converts to a
+    /// finite non-negative `f64`, so this cannot fail.
+    pub fn from_millis(ms: u64) -> Self {
+        Self(ms as f64 / 1000.0)
+    }
+
+    /// The position in whole milliseconds, truncated toward zero.
+    ///
+    /// Saturates at `u64::MAX` for a position beyond it; it cannot see a
+    /// negative or non-finite value, which the type refuses.
+    pub fn whole_millis(self) -> u64 {
+        (self.0 * 1000.0) as u64
+    }
+}
+
+/// Seconds with the unit, for diagnostics.
+impl std::fmt::Display for AudioPositionSeconds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}s", self.0)
+    }
+}
+
+impl AudioPositionSeconds {
+    /// Which of two positions comes first. Total, because a position is never
+    /// NaN, so sorting by one needs no fallback for an incomparable pair.
+    ///
+    /// An inherent method rather than `Ord`: the macro derives `PartialOrd`,
+    /// and a hand-written `Ord` beside a derived `PartialOrd` is what
+    /// Clippy's `derive_ord_xor_partial_ord` refuses. Written with the
+    /// comparison operators rather than `f64::total_cmp` so it agrees with the
+    /// derived `PartialEq`, under which `-0.0` and `0.0` are the same instant.
+    pub fn order(self, other: Self) -> std::cmp::Ordering {
+        if self.0 < other.0 {
+            std::cmp::Ordering::Less
+        } else if self.0 > other.0 {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    }
+}
 
 numeric_id!(
     /// A LENGTH of time in milliseconds. Not a position.
@@ -1179,6 +1354,13 @@ numeric_id!(
     /// would have to go.
     pub DurationMs(u64) [Eq]
 );
+
+impl DurationMs {
+    /// The same length as a `std::time::Duration`.
+    pub fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.0)
+    }
+}
 
 numeric_id!(
     /// Physical memory quantity in megabytes.
@@ -1805,6 +1987,70 @@ impl std::fmt::Display for HealthStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- PositiveSeconds: "not set" is absence, never zero ----
+
+    #[test]
+    fn positive_seconds_refuses_zero_from_every_route() {
+        assert_eq!(
+            PositiveSeconds::try_from(0),
+            Err(InvalidPositiveSeconds::Zero)
+        );
+        assert_eq!(
+            "0".parse::<PositiveSeconds>(),
+            Err(InvalidPositiveSeconds::Zero)
+        );
+        assert!(matches!(
+            "1.5".parse::<PositiveSeconds>(),
+            Err(InvalidPositiveSeconds::NotWholeSeconds(_))
+        ));
+        assert!(serde_json::from_str::<PositiveSeconds>("0").is_err());
+        assert_eq!(
+            "3600".parse::<PositiveSeconds>().map(PositiveSeconds::get),
+            Ok(3600)
+        );
+        assert_eq!(PositiveSeconds::literal::<30>().get(), 30);
+        let floor = PositiveSeconds::literal::<120>();
+        assert_eq!(PositiveSeconds::at_least(0, floor), floor);
+        assert_eq!(PositiveSeconds::at_least(119, floor), floor);
+        assert_eq!(PositiveSeconds::at_least(500, floor).get(), 500);
+        assert_eq!(
+            PositiveSeconds::literal::<300>()
+                .saturating_add_seconds(u64::MAX)
+                .get(),
+            u64::MAX
+        );
+    }
+
+    // ---- AudioPositionSeconds: the admission every position crosses ----
+
+    #[test]
+    fn audio_position_refuses_negative_and_non_finite_seconds() {
+        for raw in [-0.001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(AudioPositionSeconds::try_from(raw).is_err(), "{raw}");
+        }
+        assert_eq!(
+            AudioPositionSeconds::try_from(0.0).map(AudioPositionSeconds::get),
+            Ok(0.0)
+        );
+    }
+
+    #[test]
+    fn audio_position_deserialization_refuses_what_the_constructor_refuses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert!(serde_json::from_str::<AudioPositionSeconds>("-1.5").is_err());
+        let position: AudioPositionSeconds = serde_json::from_str("1.25")?;
+        assert_eq!(serde_json::to_string(&position)?, "1.25");
+        Ok(())
+    }
+
+    #[test]
+    fn audio_position_millisecond_conversions() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(AudioPositionSeconds::from_millis(1_500).get(), 1.5);
+        let position = AudioPositionSeconds::try_from(0.4567)?;
+        assert_eq!(position.whole_millis(), 456, "truncates toward zero");
+        Ok(())
+    }
 
     // ---- LanguageCode3 validation ----
 

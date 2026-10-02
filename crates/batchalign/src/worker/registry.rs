@@ -77,6 +77,12 @@ pub struct RegistryEntry {
 }
 
 impl RegistryEntry {
+    /// Whether two entries describe the same daemon: the same process at the
+    /// same address.
+    fn is_same_daemon(&self, other: &Self) -> bool {
+        self.pid == other.pid && self.host == other.host && self.port == other.port
+    }
+
     /// Parse the profile string into a [`WorkerProfile`].
     pub fn worker_profile(&self) -> Option<WorkerProfile> {
         WorkerProfile::try_from_name(&self.profile)
@@ -228,17 +234,36 @@ pub fn read_registry(path: &Path) -> Vec<RegistryEntry> {
     }
 }
 
-/// Write entries back to the registry file (for removing stale entries).
-fn write_registry(path: &Path, entries: &[RegistryEntry]) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// Remove every entry `stale` matches, as one read-modify-write under the
+/// registry's lock (`workers.json.lock`, which the Python registry writers
+/// take too), so an entry a daemon registers meanwhile is never overwritten
+/// by a stale snapshot. Returns how many entries were removed.
+fn remove_entries(
+    path: &Path,
+    stale: impl Fn(&RegistryEntry) -> bool,
+) -> Result<usize, std::io::Error> {
+    let _lock = crate::file_lock::HeldFileLock::acquire(crate::file_lock::lock_file_for(path))?;
+    let entries = read_registry(path);
+    let before = entries.len();
+    let remaining: Vec<RegistryEntry> = entries.into_iter().filter(|e| !stale(e)).collect();
+    let removed = before - remaining.len();
+    if removed > 0 {
+        write_registry(path, &remaining)?;
     }
+    Ok(removed)
+}
+
+/// Write entries back to the registry file; only [`remove_entries`] calls
+/// this, holding the registry's lock.
+fn write_registry(path: &Path, entries: &[RegistryEntry]) -> Result<(), std::io::Error> {
     let data = serde_json::to_string_pretty(entries)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, data)?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    crate::atomic_file::write_atomically(
+        path,
+        data.as_bytes(),
+        crate::atomic_file::Existing::Replace,
+        crate::atomic_file::Audience::Owner,
+    )
 }
 
 #[cfg(unix)]
@@ -325,47 +350,36 @@ fn terminate_registered_daemon(pid: u32, profile: &str) {
 // Discovery
 // ---------------------------------------------------------------------------
 
-/// Remove a stale entry by PID (for crash cleanup).
+/// Remove a stale entry by PID (for crash cleanup). Takes the registry's
+/// lock, so callers on the async runtime run it with `spawn_blocking`.
 pub fn remove_stale_entry(registry_path: &Path, pid: u32) -> bool {
-    let entries = read_registry(registry_path);
-    let before = entries.len();
-    let remaining: Vec<RegistryEntry> = entries.into_iter().filter(|e| e.pid != pid).collect();
-    if remaining.len() == before {
-        return false;
+    match remove_entries(registry_path, |entry| entry.pid == pid) {
+        Ok(removed) => removed > 0,
+        Err(e) => {
+            warn!(error = %e, "Failed to write registry after stale removal");
+            false
+        }
     }
-    if let Err(e) = write_registry(registry_path, &remaining) {
-        warn!(error = %e, "Failed to write registry after stale removal");
-    }
-    true
 }
 
 /// Kill all TCP daemon workers owned by the current server instance and remove
 /// their registry entries. External daemons are preserved.
+///
+/// Kills and removes in one pass under the registry's lock, so a daemon that
+/// registers meanwhile is never dropped from the registry without being
+/// killed. Takes the lock, so callers on the async runtime run it with
+/// `spawn_blocking`.
 pub fn kill_owned_daemons(registry_path: &Path, current_server_instance_id: &str) {
-    let entries = read_registry(registry_path);
-    if entries.is_empty() {
-        return;
-    }
-
-    let mut killed = 0usize;
-    let mut remaining = Vec::new();
-    for entry in entries {
-        if should_shutdown_entry(&entry, current_server_instance_id) {
+    match remove_entries(registry_path, |entry| {
+        let owned = should_shutdown_entry(entry, current_server_instance_id);
+        if owned {
             terminate_registered_daemon(entry.pid, &entry.profile);
-            killed += 1;
-        } else {
-            remaining.push(entry);
         }
-    }
-
-    if let Err(e) = write_registry(registry_path, &remaining) {
-        warn!(error = %e, "Failed to rewrite worker registry after shutdown");
-    } else {
-        info!(
-            killed,
-            remaining = remaining.len(),
-            "Retired owned TCP daemon workers"
-        );
+        owned
+    }) {
+        Ok(0) => {}
+        Ok(killed) => info!(killed, "Retired owned TCP daemon workers"),
+        Err(e) => warn!(error = %e, "Failed to retire owned TCP daemon workers"),
     }
 }
 
@@ -377,8 +391,7 @@ pub fn kill_owned_daemons(registry_path: &Path, current_server_instance_id: &str
 /// same TCP connection used during discovery.
 pub async fn discover_workers(
     registry_path: &Path,
-    audio_task_timeout_s: u64,
-    analysis_task_timeout_s: u64,
+    task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides,
     current_server_instance_id: &str,
 ) -> RegistryDiscovery {
     let entries = read_registry(registry_path);
@@ -467,8 +480,7 @@ pub async fn discover_workers(
             lang: lang.clone(),
             engine_overrides: entry.engine_overrides.clone(),
             pid: WorkerPid(entry.pid),
-            audio_task_timeout_s,
-            analysis_task_timeout_s,
+            task_timeouts,
             // Placeholder per the comment above, the registry walker
             // does not own the host-facts pipeline; the discovery /
             // pool integration step replaces this with the real
@@ -553,23 +565,20 @@ pub async fn discover_workers(
         }
     }
 
-    // Remove stale entries from the registry file.
+    // Remove stale entries from the registry file, by identity under the
+    // registry's lock, off the async runtime.
     if !stale_indices.is_empty() {
-        let remaining: Vec<RegistryEntry> = entries
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !stale_indices.contains(i))
-            .map(|(_, e)| e)
-            .collect();
-
-        info!(
-            removed = stale_indices.len(),
-            remaining = remaining.len(),
-            "Removed stale entries from worker registry"
-        );
-
-        if let Err(e) = write_registry(registry_path, &remaining) {
-            warn!(error = %e, "Failed to update worker registry after stale removal");
+        let stale: Vec<RegistryEntry> = stale_indices.iter().map(|&i| entries[i].clone()).collect();
+        let path = registry_path.to_path_buf();
+        let removal = crate::blocking::spawn_in_span(move || {
+            remove_entries(&path, |entry| stale.iter().any(|s| s.is_same_daemon(entry)))
+        })
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|removed| removed);
+        match removal {
+            Ok(removed) => info!(removed, "Removed stale entries from worker registry"),
+            Err(e) => warn!(error = %e, "Failed to update worker registry after stale removal"),
         }
     }
 
@@ -624,7 +633,7 @@ mod refused_registry_worker_tests {
 mod tests {
     use super::{
         DiscoveryDisposition, RegistryEntry, RegistryOwnership, discovery_disposition,
-        should_shutdown_entry,
+        read_registry, remove_stale_entry, should_shutdown_entry,
     };
 
     fn external_entry() -> RegistryEntry {
@@ -644,6 +653,35 @@ mod tests {
     }
 
     const OUR_BUILD: &str = "our-build";
+
+    /// Removal rereads the registry under its lock and removes by identity:
+    /// an entry another writer added after a snapshot survives, and the
+    /// shared lock file (the one the Python writers take) sits beside it.
+    #[test]
+    fn removal_keeps_entries_it_was_not_asked_to_remove() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workers.json");
+        let mut second = external_entry();
+        second.pid = 11;
+        second.port = 1235;
+        std::fs::write(
+            &path,
+            serde_json::to_string(&[external_entry(), second]).expect("encode"),
+        )
+        .expect("seed");
+
+        assert!(remove_stale_entry(&path, 10));
+        let left = read_registry(&path);
+        assert_eq!(left.len(), 1);
+        assert!(left[0].is_same_daemon(&{
+            let mut expected = external_entry();
+            expected.pid = 11;
+            expected.port = 1235;
+            expected
+        }));
+        assert!(dir.path().join("workers.json.lock").exists());
+        assert!(!remove_stale_entry(&path, 10), "nothing left to remove");
+    }
 
     #[test]
     fn discovery_accepts_external_entry() {

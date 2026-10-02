@@ -6,20 +6,19 @@ mod execution;
 pub(crate) mod file_state;
 mod lifecycle;
 mod recovery;
+pub(crate) use recovery::recover_file_phase;
 mod runner;
 
-pub(crate) use db_helpers::{
-    AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate, PersistedJobUpdate,
-};
+pub(crate) use db_helpers::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};
 pub(crate) use dispatch::LeaseRenewalOutcome;
 
 use crate::api::{
-    CancellationRequest, JobId, JobInfo, JobListItem, JobStatus, StatusChange, UnixTimestamp,
+    CancellationRequest, JobId, JobInfo, JobListItem, JobStatus, MachineTime, StatusChange,
 };
 
 use tracing::warn;
 
-use super::{JobDetail, JobStore, OperationalCounters, unix_now};
+use super::{JobDetail, JobStore, OperationalCounters};
 use crate::error::ServerError;
 use crate::ws::WsEvent;
 
@@ -32,13 +31,11 @@ fn non_empty(s: Option<&str>) -> Option<&str> {
 }
 
 impl JobStore {
-    /// Seconds before a locally-dispatched file lease is considered orphaned.
-    /// Reads from `ServerConfig::local_lease_ttl_s` at construction; this
-    /// method provides a convenience accessor for query code.
-    fn local_lease_ttl_s(&self) -> f64 {
-        self.config().local_lease_ttl_s as f64
+    /// How long a locally-dispatched lease lives before it is considered
+    /// orphaned (`ServerConfig::local_lease_ttl`).
+    fn local_lease_ttl(&self) -> crate::config::LeaseTtl {
+        self.config().local_lease_ttl
     }
-    pub(crate) const LOCAL_LEASE_HEARTBEAT_S: u64 = 60;
 
     /// Look up a job by ID.
     pub async fn get(&self, job_id: &JobId) -> Option<JobInfo> {
@@ -65,7 +62,7 @@ impl JobStore {
         job_id: &JobId,
         provenance: CancellationRequest,
     ) -> Result<(), ServerError> {
-        let now = unix_now();
+        let now = self.now();
         let registry_outcome = self.registry.request_cancellation(job_id, now).await;
         let accepted = registry_outcome.is_some();
 
@@ -79,21 +76,11 @@ impl JobStore {
             return Err(ServerError::JobNotFound(job_id.clone()));
         }
 
-        // Persist Cancelled status even if the runner is stuck in
-        // synchronous code and hasn't seen the in-memory cancellation
-        // token yet: otherwise a daemon restart resurrects the job.
-        let completed_at = registry_outcome.and_then(|inner| inner).unwrap_or(now);
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status: JobStatus::Cancelled,
-                error: None,
-                completed_at: Some(completed_at),
-                num_workers: None,
-                next_eligible_at: None,
-            },
-        )
-        .await;
+        // Persist the job's status now, even if the runner is stuck in
+        // synchronous code and has not seen the cancellation token yet:
+        // otherwise a daemon restart resurrects a cancelled job. A job that
+        // was already terminal keeps its own status.
+        self.db_persist_job_status(job_id).await;
         Ok(())
     }
 
@@ -105,7 +92,7 @@ impl JobStore {
         job_id: &JobId,
         provenance: CancellationRequest,
     ) -> Result<(), ServerError> {
-        let now = unix_now();
+        let now = self.now();
         self.record_audit_row(job_id, &provenance, now, false).await;
         Ok(())
     }
@@ -123,7 +110,7 @@ impl JobStore {
         &self,
         job_id: &JobId,
         provenance: &CancellationRequest,
-        requested_at: UnixTimestamp,
+        requested_at: MachineTime,
         accepted: bool,
     ) {
         let source = provenance.source.unwrap_or(crate::api::CancelSource::Api);
@@ -138,7 +125,7 @@ impl JobStore {
             && let Err(e) = db
                 .insert_cancellation(
                     job_id,
-                    requested_at.0,
+                    requested_at,
                     &source_str,
                     host_str,
                     pid_value,
@@ -255,7 +242,7 @@ impl JobStore {
     ) {
         let error_clone = error.clone();
         let completed_at = if status.is_terminal() {
-            Some(super::unix_now())
+            Some(self.now())
         } else {
             None
         };
@@ -285,17 +272,7 @@ impl JobStore {
         }
 
         // Persist to SQLite
-        self.db_update_job(
-            job_id,
-            PersistedJobUpdate {
-                status,
-                error: error.as_deref(),
-                completed_at,
-                num_workers: None,
-                next_eligible_at: None,
-            },
-        )
-        .await;
+        self.db_persist_job_status(job_id).await;
     }
 
     /// Count of currently running jobs.
@@ -345,14 +322,15 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::api::{DisplayPath, UnixTimestamp};
+    use crate::api::{DisplayPath, MachineTime};
     use crate::db::JobDB;
     use crate::options::FaEngineName;
+    use crate::scheduling::LeaseRecord;
     use crate::store::job::{
-        Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity, JobLeaseState,
+        Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
         JobRuntimeControl, JobScheduleState, JobSourceContext,
     };
-    use crate::store::{FileStatus, auto_max_concurrent_from, ts_iso, unix_now};
+    use crate::store::{FileStatus, auto_max_concurrent_from};
     use crate::ws::BROADCAST_CAPACITY;
 
     pub(super) fn test_config() -> crate::config::ServerConfig {
@@ -400,7 +378,7 @@ mod tests {
                 &job_id,
                 crate::store::RunGeneration::FIRST,
                 JobStatus::Completed,
-                unix_now(),
+                crate::store::EventTime::fixed(MachineTime::now()),
             )
             .await;
 
@@ -425,7 +403,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(JobDB::open(Some(dir.path())).await.unwrap());
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), Some(db.clone()), tx);
+        let store = JobStore::new(
+            test_config(),
+            Some(db.clone()),
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
         (store, db, dir)
     }
 
@@ -479,8 +462,10 @@ mod tests {
                 debug_traces: false,
             },
             source: JobSourceContext {
-                submitted_by: "127.0.0.1".into(),
-                submitted_by_name: String::new(),
+                submitter: Some(crate::store::Submitter::client(
+                    std::net::Ipv4Addr::LOCALHOST.into(),
+                    String::new(),
+                )),
                 source_dir: Default::default(),
             },
             filesystem: JobFilesystemConfig {
@@ -503,15 +488,11 @@ mod tests {
                 completed_files: 0,
             },
             schedule: JobScheduleState {
-                submitted_at: unix_now(),
+                submitted_at: MachineTime::now(),
                 completed_at: None,
                 next_eligible_at: None,
                 num_workers: None,
-                lease: JobLeaseState {
-                    leased_by_node: None,
-                    expires_at: None,
-                    heartbeat_at: None,
-                },
+                lease: None,
                 last_cancel: None,
             },
             runtime: JobRuntimeControl {
@@ -526,7 +507,12 @@ mod tests {
     #[tokio::test]
     async fn submit_and_get() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         store.submit(job).await.unwrap();
@@ -539,7 +525,12 @@ mod tests {
     #[tokio::test]
     async fn conflict_detection() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job1 = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         store.submit(job1).await.unwrap();
@@ -552,7 +543,12 @@ mod tests {
     #[tokio::test]
     async fn cancel_job() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         store.submit(job).await.unwrap();
@@ -568,7 +564,12 @@ mod tests {
     #[tokio::test]
     async fn delete_completed_job() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let mut job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         job.execution.status = JobStatus::Completed;
@@ -630,15 +631,20 @@ mod tests {
     #[tokio::test]
     async fn list_all_ordered() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let mut j1 = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        j1.schedule.submitted_at = UnixTimestamp(100.0);
+        j1.schedule.submitted_at = crate::unix_time(100.0);
         j1.execution.status = JobStatus::Completed;
         store.submit(j1).await.unwrap();
 
         let mut j2 = make_job("j2", ReleasedCommand::Align, vec!["b.cha".into()]);
-        j2.schedule.submitted_at = UnixTimestamp(200.0);
+        j2.schedule.submitted_at = crate::unix_time(200.0);
         j2.execution.status = JobStatus::Completed;
         store.submit(j2).await.unwrap();
 
@@ -652,14 +658,19 @@ mod tests {
     #[tokio::test]
     async fn claim_ready_queued_jobs_orders_by_submission_time() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let mut early = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        early.schedule.submitted_at = UnixTimestamp(100.0);
+        early.schedule.submitted_at = crate::unix_time(100.0);
         store.submit(early).await.unwrap();
 
         let mut late = make_job("j2", ReleasedCommand::Align, vec!["b.cha".into()]);
-        late.schedule.submitted_at = UnixTimestamp(200.0);
+        late.schedule.submitted_at = crate::unix_time(200.0);
         store.submit(late).await.unwrap();
 
         let poll = store.claim_ready_queued_jobs().await;
@@ -687,26 +698,28 @@ mod tests {
             .registry
             .lease_state(&JobId::from("j1"))
             .await
-            .unwrap();
-        assert_eq!(
-            lease.leased_by_node.as_deref(),
-            Some(store.node_id().as_ref())
-        );
-        assert!(lease.expires_at.is_some() && lease.heartbeat_at.is_some());
+            .unwrap()
+            .expect("the claim takes a lease");
+        assert_eq!(lease.leased_by_node().as_ref(), store.node_id().as_ref());
     }
 
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_deferred_and_reports_next_wake() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let mut ready = make_job("ready", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        ready.schedule.submitted_at = UnixTimestamp(100.0);
+        ready.schedule.submitted_at = crate::unix_time(100.0);
         store.submit(ready).await.unwrap();
 
-        let deferred_at = UnixTimestamp(unix_now().0 + 60.0);
+        let deferred_at = MachineTime::now().plus(std::time::Duration::from_secs(60));
         let mut deferred = make_job("deferred", ReleasedCommand::Align, vec!["b.cha".into()]);
-        deferred.schedule.submitted_at = UnixTimestamp(50.0);
+        deferred.schedule.submitted_at = crate::unix_time(50.0);
         deferred.schedule.next_eligible_at = Some(deferred_at);
         store.submit(deferred).await.unwrap();
 
@@ -732,10 +745,11 @@ mod tests {
             .registry
             .lease_state(&JobId::from("ready"))
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the ready job is claimed");
         assert_eq!(
-            ready_lease.leased_by_node.as_deref(),
-            Some(store.node_id().as_ref())
+            ready_lease.leased_by_node().as_ref(),
+            store.node_id().as_ref()
         );
         assert!(
             store
@@ -743,7 +757,6 @@ mod tests {
                 .lease_state(&JobId::from("deferred"))
                 .await
                 .unwrap()
-                .leased_by_node
                 .is_none()
         );
     }
@@ -751,47 +764,72 @@ mod tests {
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_unexpired_leases_and_reclaims_expired_ones() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
-        let now = unix_now();
+        let now = MachineTime::now();
 
         let mut leased = make_job("leased", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        leased.schedule.lease.leased_by_node = Some("other-node".into());
-        leased.schedule.lease.heartbeat_at = Some(UnixTimestamp(now.0 - 10.0));
-        leased.schedule.lease.expires_at = Some(UnixTimestamp(now.0 + 120.0));
+        leased.schedule.lease = Some(
+            LeaseRecord::new(
+                "other-node".into(),
+                now.minus(std::time::Duration::from_secs(10)),
+                now.plus(std::time::Duration::from_secs(120)),
+            )
+            .expect("an ordered fixture lease"),
+        );
         store.submit(leased).await.unwrap();
 
         let mut expired = make_job("expired", ReleasedCommand::Align, vec!["b.cha".into()]);
-        expired.schedule.lease.leased_by_node = Some("dead-node".into());
-        expired.schedule.lease.heartbeat_at = Some(UnixTimestamp(now.0 - 600.0));
-        expired.schedule.lease.expires_at = Some(UnixTimestamp(now.0 - 1.0));
+        expired.schedule.lease = Some(
+            LeaseRecord::new(
+                "dead-node".into(),
+                now.minus(std::time::Duration::from_secs(600)),
+                now.minus(std::time::Duration::from_secs(1)),
+            )
+            .expect("an ordered fixture lease"),
+        );
         store.submit(expired).await.unwrap();
 
         let poll = store.claim_ready_queued_jobs().await;
         assert_eq!(poll.ready_job_ids, vec![JobId::from("expired")]);
-        assert_eq!(poll.next_wake_at, Some(UnixTimestamp(now.0 + 120.0)));
+        assert_eq!(
+            poll.next_wake_at,
+            Some(now.plus(std::time::Duration::from_secs(120)))
+        );
 
         let expired_lease = store
             .registry
             .lease_state(&JobId::from("expired"))
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the expired lease is reclaimed");
         assert_eq!(
-            expired_lease.leased_by_node.as_deref(),
-            Some(store.node_id().as_ref())
+            expired_lease.leased_by_node().as_ref(),
+            store.node_id().as_ref()
         );
         let leased_lease = store
             .registry
             .lease_state(&JobId::from("leased"))
             .await
-            .unwrap();
-        assert_eq!(leased_lease.leased_by_node.as_deref(), Some("other-node"));
+            .unwrap()
+            .expect("the live lease stays");
+        assert_eq!(leased_lease.leased_by_node().as_ref(), "other-node");
     }
 
     #[tokio::test]
     async fn release_runner_claim_makes_job_eligible_again() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         store.submit(job).await.unwrap();
@@ -813,15 +851,18 @@ mod tests {
             .lease_state(&JobId::from("j1"))
             .await
             .unwrap();
-        assert!(lease.leased_by_node.is_none());
-        assert!(lease.expires_at.is_none());
-        assert!(lease.heartbeat_at.is_none());
+        assert!(lease.is_none());
     }
 
     #[tokio::test]
     async fn renew_job_lease_updates_heartbeat_and_expiry_for_local_claim() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         store.submit(job).await.unwrap();
@@ -832,8 +873,8 @@ mod tests {
             .lease_state(&JobId::from("j1"))
             .await
             .unwrap()
-            .heartbeat_at
-            .unwrap();
+            .expect("claimed")
+            .heartbeat_at();
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert_eq!(
@@ -845,17 +886,20 @@ mod tests {
             .registry
             .lease_state(&JobId::from("j1"))
             .await
-            .unwrap();
-        let heartbeat_at = lease.heartbeat_at;
-        let expires_at = lease.expires_at;
-        assert!(heartbeat_at.unwrap() >= before);
-        assert!(expires_at.unwrap() > heartbeat_at.unwrap());
+            .unwrap()
+            .expect("renewed");
+        assert!(lease.heartbeat_at() >= before);
     }
 
     #[tokio::test]
     async fn renew_job_lease_stops_after_claim_is_released() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
         let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         store.submit(job).await.unwrap();
@@ -866,19 +910,6 @@ mod tests {
             store.renew_job_lease(&JobId::from("j1")).await,
             crate::store::LeaseRenewalOutcome::Stop
         );
-    }
-
-    #[test]
-    fn ts_iso_format() {
-        let ts = UnixTimestamp(1700000000.0);
-        let iso = ts_iso(ts);
-        assert!(iso.starts_with("2023-11-14"));
-    }
-
-    #[test]
-    fn ts_iso_invalid_timestamp_is_explicit() {
-        let iso = ts_iso(UnixTimestamp(f64::INFINITY));
-        assert!(iso.starts_with("invalid-unix-timestamp("));
     }
 
     #[test]

@@ -108,6 +108,19 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         worker_protocol::dispatch_protocol_message,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(worker_protocol::error_envelope, m)?)?;
+    // The error kinds' wire spellings, from the one Rust list, so Python's
+    // type-level spelling (the stub's `WorkerErrorKind`) is checked against
+    // it rather than kept in step by hand.
+    m.add(
+        "WORKER_ERROR_KINDS",
+        pyo3::types::PyTuple::new(
+            m.py(),
+            batchalign_types::worker_v2::WorkerErrorKind::ALL
+                .iter()
+                .map(|kind| kind.wire_name()),
+        )?,
+    )?;
 
     // Worker V2 execution
     m.add_function(wrap_pyfunction!(

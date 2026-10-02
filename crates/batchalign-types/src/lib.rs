@@ -11,11 +11,14 @@ pub mod api {
     //! Backward-compatible re-export of domain types historically reached via
     //! `batchalign::api`.
     pub use crate::domain::*;
+    pub use crate::machine_time::MachineTime;
 }
 
 pub mod command_spec;
 pub mod domain;
+pub mod interval;
 pub mod iso639_part1;
+pub mod machine_time;
 pub mod memory;
 pub mod paths;
 pub mod scheduling;

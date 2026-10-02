@@ -11,6 +11,9 @@ from batchalign.worker._types import (
     BatchInferResponse,
     InferResponse,
     InferTask,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
     WorkerJSONValue,
 )
 
@@ -19,5 +22,8 @@ __all__ = [
     "BatchInferResponse",
     "InferResponse",
     "InferTask",
+    "ItemFailed",
+    "ItemOutcome",
+    "ItemProduced",
     "WorkerJSONValue",
 ]

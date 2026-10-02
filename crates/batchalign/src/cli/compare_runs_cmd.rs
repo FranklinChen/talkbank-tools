@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use batchalign_transform::compare::{
@@ -580,15 +579,12 @@ fn pointer_text(value: &Value, path: &str) -> String {
         .to_string()
 }
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    let parent = path.parent().ok_or_else(|| {
-        CliError::InvalidArgument(format!("output path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path)
-        .map_err(|error| CliError::Io(error.error))?;
+    crate::atomic_file::write_atomically(
+        path,
+        bytes,
+        crate::atomic_file::Existing::Replace,
+        crate::atomic_file::Audience::UmaskDefault,
+    )?;
     Ok(())
 }
 

@@ -5,11 +5,23 @@ from __future__ import annotations
 import configparser
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from batchalign.config import config_read
 from batchalign.errors import ConfigError
+from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
+from batchalign.worker._batch import answer_batch
+from batchalign.worker._types import (
+    BatchInferResponse,
+    InferResponse,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
+    WorkerJSONValue,
+)
 
 L = logging.getLogger("batchalign.hk")
 
@@ -92,3 +104,48 @@ def parse_timestamp_pair(value: Any) -> tuple[int | None, int | None]:
     except Exception:
         return None, None
     return start, end
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderNotLoaded:
+    """A provider whose recognizer is not loaded: every item of a batch fails
+    unexecuted, with ``message``."""
+
+    message: str
+
+
+def answer_asr_batch(
+    provider: str,
+    raw_items: list[WorkerJSONValue],
+    transcribe: Callable[[AsrBatchItem], MonologueAsrResponse] | ProviderNotLoaded,
+) -> BatchInferResponse:
+    """Answer one HK ASR batch: each item validated, then transcribed and timed
+    on its own, its failure reported against it alone.
+
+    With the provider not loaded every item fails unexecuted; otherwise the
+    batch is answered by ``answer_batch``. Shared by the Aliyun, FunAudio,
+    Qwen and Tencent providers.
+    """
+    if isinstance(transcribe, ProviderNotLoaded):
+        return BatchInferResponse(
+            results=[
+                InferResponse.unexecuted(ItemFailed(error=transcribe.message))
+                for _ in raw_items
+            ]
+        )
+
+    def outcome(index: int, item: AsrBatchItem) -> ItemOutcome:
+        try:
+            return ItemProduced(result=transcribe(item).model_dump())
+        except Exception as error:
+            L.warning(
+                "%s failed for item %d: %s", provider, index, error, exc_info=True
+            )
+            return ItemFailed(error=str(error))
+
+    return answer_batch(
+        provider,
+        raw_items,
+        AsrBatchItem,
+        lambda index, item: partial(outcome, index, item),
+    )

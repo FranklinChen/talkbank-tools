@@ -6,7 +6,7 @@
   "properties": {
     "elapsed_s": {
       "description": "Execution time in seconds.",
-      "$ref": "#/$defs/DurationSeconds"
+      "$ref": "#/$defs/NonNegativeSeconds"
     },
     "outcome": {
       "description": "Success or typed protocol/runtime error.",
@@ -50,8 +50,60 @@
         }
       ]
     },
+    "AsrElementTimingV2": {
+      "description": "When one ASR element happened, admitted once where the provider's numbers\nwere read: on the wire `{\"kind\": \"timed\", \"start_ms\", \"end_ms\"}` or\n`{\"kind\": \"untimed\", \"cause\"}`.\n\nOne policy for every ASR route: a pair of bounds that is not an admissible\ninterval (inverted, or past the admissible range, as an epoch timestamp\nwould be) refuses the response the element came in, naming the element, as\nthe provider bridges refuse it; an absent bound is the provider's own\nreport and makes the element untimed with that cause.",
+      "oneOf": [
+        {
+          "description": "The provider timed the element, and the interval was admitted.",
+          "type": "object",
+          "properties": {
+            "end_ms": {
+              "description": "The end, in milliseconds; never before the start.",
+              "type": "integer",
+              "format": "int64",
+              "maximum": 1000000000000,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "timed"
+            },
+            "start_ms": {
+              "description": "The start, in milliseconds from the start of the media.",
+              "type": "integer",
+              "format": "int64",
+              "maximum": 1000000000000,
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "start_ms",
+            "end_ms"
+          ]
+        },
+        {
+          "description": "The element has no interval, for this reason.",
+          "type": "object",
+          "properties": {
+            "cause": {
+              "description": "Why.",
+              "$ref": "#/$defs/UntimedCause"
+            },
+            "kind": {
+              "type": "string",
+              "const": "untimed"
+            }
+          },
+          "required": [
+            "kind",
+            "cause"
+          ]
+        }
+      ]
+    },
     "AsrElementV2": {
-      "description": "One raw ASR element inside a speaker monologue.\n\nEach bound, when present, is a finite non-negative time by type; their\norder is checked where the element is admitted.",
+      "description": "One raw ASR element inside a speaker monologue.",
       "type": "object",
       "properties": {
         "confidence": {
@@ -63,33 +115,13 @@
           "format": "double",
           "default": null
         },
-        "end_s": {
-          "description": "End timestamp in seconds when the provider exposes one.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonNegativeSeconds"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "kind": {
           "description": "Stable element kind selected by the worker adapter.",
           "$ref": "#/$defs/AsrElementKindV2"
         },
-        "start_s": {
-          "description": "Start timestamp in seconds when the provider exposes one.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonNegativeSeconds"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "timing": {
+          "description": "When the element happened, or why that is not known.",
+          "$ref": "#/$defs/AsrElementTimingV2"
         },
         "value": {
           "description": "Surface token or punctuation value.",
@@ -98,6 +130,7 @@
       },
       "required": [
         "value",
+        "timing",
         "kind"
       ]
     },
@@ -290,6 +323,12 @@
         "speaker",
         "elements"
       ]
+    },
+    "AudioPositionSeconds": {
+      "description": "A point in the audio, in finite non-negative seconds from its start.",
+      "type": "number",
+      "format": "double",
+      "minimum": 0.0
     },
     "AvqiResultV2": {
       "description": "Raw AVQI output returned by the model host.",
@@ -508,11 +547,6 @@
       "type": "integer",
       "format": "uint64",
       "minimum": 0
-    },
-    "DurationSeconds": {
-      "description": "Duration measured in fractional seconds.",
-      "type": "number",
-      "format": "double"
     },
     "ExecuteOutcomeV2": {
       "description": "Top-level execute outcome.",
@@ -1302,20 +1336,26 @@
       ]
     },
     "SpeakerSegmentV2": {
-      "description": "One raw speaker diarization segment returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+      "description": "One raw speaker diarization segment returned by Python.\n\nOn the wire `{\"start_ms\", \"end_ms\", \"speaker\"}`; the two bounds are one\n[`AdmittedInterval`], admitted when the segment is read, so an inverted,\nnegative or out-of-range segment is refused at the boundary and no\nconsumer checks the order again.",
       "type": "object",
       "properties": {
         "end_ms": {
-          "description": "Segment end in milliseconds.",
-          "$ref": "#/$defs/DurationMs"
+          "description": "The end, in milliseconds; never before the start.",
+          "type": "integer",
+          "format": "int64",
+          "maximum": 1000000000000,
+          "minimum": 0
         },
         "speaker": {
           "description": "Stable speaker label chosen by the model adapter.",
           "type": "string"
         },
         "start_ms": {
-          "description": "Segment start in milliseconds.",
-          "$ref": "#/$defs/DurationMs"
+          "description": "The start, in milliseconds from the start of the media.",
+          "type": "integer",
+          "format": "int64",
+          "maximum": 1000000000000,
+          "minimum": 0
         }
       },
       "required": [
@@ -1673,6 +1713,41 @@
         "to_relation"
       ]
     },
+    "UntimedCause": {
+      "description": "Why an ASR word or element carries no interval.\n\nA closed set, because \"untimed\" with no reason is how a fabricated zero got\nin: once the reason has to be named, there is nowhere to hide a default.",
+      "oneOf": [
+        {
+          "description": "The provider reported neither bound.",
+          "type": "string",
+          "const": "provider_reported_no_timing"
+        },
+        {
+          "description": "The provider reported an end but no start.",
+          "type": "string",
+          "const": "provider_reported_no_start"
+        },
+        {
+          "description": "The provider reported a start but no end.",
+          "type": "string",
+          "const": "provider_reported_no_end"
+        },
+        {
+          "description": "The enclosing segment carried no start, so the word's offsets cannot be\nmade absolute. Tencent's `StartMs` is the field in question; before this\nstate existed, an absent one became the start of the recording.",
+          "type": "string",
+          "const": "segment_start_absent"
+        },
+        {
+          "description": "The provider reported a zero-width span, which locates nothing.",
+          "type": "string",
+          "const": "zero_length_span"
+        },
+        {
+          "description": "The bounds were present but not admissible (inverted, or past\n[`AdmittedInterval::MAX_MS`]). The refusal itself is logged where the\nbounds were read; the word carries no time and says so.",
+          "type": "string",
+          "const": "refused_by_admission"
+        }
+      ]
+    },
     "UtsegAdjacencyPolicyRevisionV2": {
       "description": "Closed raw-to-applied boundary-action policy revisions.",
       "oneOf": [
@@ -1760,50 +1835,99 @@
       ]
     },
     "UtsegItemResultV2": {
-      "description": "One utseg item result returned by Python.",
-      "type": "object",
-      "properties": {
-        "assignments": {
-          "description": "Direct word-group assignments when inference succeeded without raw trees.",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "integer",
-            "format": "uint",
-            "minimum": 0
-          }
-        },
-        "boundary_model_evidence": {
-          "description": "Provenance-bearing classifier evidence parallel to the request words.",
-          "anyOf": [
-            {
+      "description": "One utseg item result: what produced the item's segmentation and what it\nproduced, or the item's failure. One variant per real state, so an item\ncannot hold both assignments and trees, evidence without assignments, an\nerror beside a success, or nothing at all.",
+      "oneOf": [
+        {
+          "description": "The boundary model segmented the item, with its per-word evidence.",
+          "type": "object",
+          "properties": {
+            "assignments": {
+              "description": "Word-group assignments, one per request word.",
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "boundary_model_evidence": {
+              "description": "Provenance-bearing classifier evidence parallel to the request\nwords.",
               "$ref": "#/$defs/UtsegBoundaryModelEvidenceV2"
             },
-            {
-              "type": "null"
+            "kind": {
+              "type": "string",
+              "const": "boundary_model"
             }
+          },
+          "required": [
+            "kind",
+            "assignments",
+            "boundary_model_evidence"
           ]
         },
-        "error": {
-          "description": "Optional per-item runtime error.",
-          "type": [
-            "string",
-            "null"
+        {
+          "description": "The worker assigned the item without a model (one word is one\nutterance).",
+          "type": "object",
+          "properties": {
+            "assignments": {
+              "description": "Word-group assignments, one per request word.",
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "unattributed"
+            }
+          },
+          "required": [
+            "kind",
+            "assignments"
           ]
         },
-        "trees": {
-          "description": "Raw constituency trees when inference succeeded.",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+        {
+          "description": "The Stanza constituency fallback parsed the item; the server computes\nthe assignments from the trees.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "constituency"
+            },
+            "trees": {
+              "description": "Raw constituency trees, one per sentence Stanza found.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "trees"
+          ]
+        },
+        {
+          "description": "The worker failed on the item.",
+          "type": "object",
+          "properties": {
+            "error": {
+              "description": "The worker's diagnosis.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
         }
-      }
+      ]
     },
     "UtsegNormalizationRevisionV2": {
       "description": "Closed lexical-normalization semantics applied before model inference.",
@@ -1922,14 +2046,14 @@
       ]
     },
     "WhisperChunkSpanV2": {
-      "description": "One raw Whisper chunk as a producer emitted it: its words, and whichever\nbounds the model reported.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat a bound, when present, is a finite non-negative duration, which its\ntype proves.\n\nA bound is absent when the model predicted no timestamp for it: the\nHuggingFace pipeline reports `(start, None)` for a chunk cut off\nmid-word, and `(None, None)` for a whole transcript when timestamps were\nsuppressed. A missing bound is an absence of TIMING, never of words, and\nthe words travel untimed exactly as a Tencent or Aliyun word with a\nmissing offset does. Between 536f29c8 and this change such a chunk was\ndropped, which emptied every Cantonese Whisper transcript.",
+      "description": "One raw Whisper chunk as a producer emitted it: its words, and whichever\nbounds the model reported.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat a bound, when present, is a finite non-negative position in the\naudio, which its type proves.\n\nA bound is absent when the model predicted no timestamp for it: the\nHuggingFace pipeline reports `(start, None)` for a chunk cut off\nmid-word, and `(None, None)` for a whole transcript when timestamps were\nsuppressed. A missing bound is an absence of TIMING, never of words, and\nthe words travel untimed exactly as a Tencent or Aliyun word with a\nmissing offset does. Between 536f29c8 and this change such a chunk was\ndropped, which emptied every Cantonese Whisper transcript.",
       "type": "object",
       "properties": {
         "end_s": {
           "description": "End timestamp in seconds, when the model reported one.",
           "anyOf": [
             {
-              "$ref": "#/$defs/NonNegativeSeconds"
+              "$ref": "#/$defs/AudioPositionSeconds"
             },
             {
               "type": "null"
@@ -1941,7 +2065,7 @@
           "description": "Start timestamp in seconds, when the model reported one.",
           "anyOf": [
             {
-              "$ref": "#/$defs/NonNegativeSeconds"
+              "$ref": "#/$defs/AudioPositionSeconds"
             },
             {
               "type": "null"
@@ -1984,7 +2108,7 @@
         },
         "time_s": {
           "description": "Token onset timestamp in seconds.",
-          "$ref": "#/$defs/DurationSeconds"
+          "$ref": "#/$defs/AudioPositionSeconds"
         }
       },
       "required": [

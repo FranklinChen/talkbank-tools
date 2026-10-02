@@ -7,7 +7,7 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 
@@ -19,7 +19,7 @@ fn test_italian_mwt_contraction_della() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "della".into(),
                 lemma: "della".into(),
@@ -30,8 +30,8 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "di".into(),
                 lemma: "di".into(),
@@ -42,8 +42,8 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "case".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "la".into(),
                 lemma: "il".into(),
@@ -54,8 +54,8 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "det".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "casa".into(),
                 lemma: "casa".into(),
@@ -66,7 +66,7 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let mors = map_ud_sentence_to_mors(&sentence, &ctx);
@@ -81,62 +81,30 @@ fn test_italian_mwt_contraction_della() {
 }
 
 #[test]
-fn a_verb_without_verbform_gets_no_invented_form() {
-    // Batchalign 2 wrote `Inf` onto every verb whose analysis lacked
-    // `VerbForm`, in every language; a form the tagger did not assign is not
-    // ours to invent, so none is written.
+fn a_verb_without_verbform_or_number_is_written_bare() {
+    // BA2 wrote an invented `Inf` and `S` on a verb whose analysis lacked
+    // `VerbForm` and `Number`, in every language. Nothing the analysis does
+    // not give is written now.
     for lang in ["fr", "de", "es", "it", "pt", "ja", "ko", "he"] {
         let ctx = MappingContext {
             lang: talkbank_model::model::LanguageCode::new(lang).expect("valid test language code"),
         };
-        let ud = UdWord {
+        let ud = UdWord::from(UdWordAnalysis {
             id: UdId::Single(1),
             text: "x".into(),
             lemma: "x".into(),
             upos: UdPunctable::Value(UniversalPos::Verb),
             xpos: None,
-            feats: None, // No features → defaults
+            feats: None,
             head: 0,
             deprel: "root".into(),
             deps: None,
             misc: None,
-        };
-        let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+        });
+        let mor = map_ud_word(&ud, &ctx).unwrap();
         let mut out = String::new();
         mor.write_chat(&mut out).unwrap();
-        assert!(
-            !out.contains("Inf"),
-            "no VerbForm must yield no form suffix for lang={lang}, got: {out}"
-        );
-    }
-}
-
-#[test]
-fn test_verb_default_number_sing() {
-    // ba2: Number defaults to "Sing" (→ "S") for verbs (ALL languages)
-    for lang in ["fr", "de", "es", "it"] {
-        let ctx = MappingContext {
-            lang: talkbank_model::model::LanguageCode::new(lang).expect("valid test language code"),
-        };
-        let ud = UdWord {
-            id: UdId::Single(1),
-            text: "x".into(),
-            lemma: "x".into(),
-            upos: UdPunctable::Value(UniversalPos::Verb),
-            xpos: None,
-            feats: None, // No Number → defaults to "Sing" → "S"
-            head: 0,
-            deprel: "root".into(),
-            deps: None,
-            misc: None,
-        };
-        let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
-        let mut out = String::new();
-        mor.write_chat(&mut out).unwrap();
-        assert!(
-            out.contains("-S"),
-            "Number must default to S(ing) for lang={lang}, got: {out}"
-        );
+        assert_eq!(out, "verb|x", "lang={lang}");
     }
 }
 
@@ -148,7 +116,7 @@ fn test_garbage_deprel_rejected() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "dog".to_string(),
                 lemma: "dog".to_string(),
@@ -159,8 +127,8 @@ fn test_garbage_deprel_rejected() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "big".to_string(),
                 lemma: "big".to_string(),
@@ -171,7 +139,7 @@ fn test_garbage_deprel_rejected() {
                 deprel: "<PAD>".to_string(), // garbage deprel
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let err = map_ud_sentence(&sentence, &ctx).unwrap_err();
@@ -183,17 +151,19 @@ fn test_garbage_deprel_rejected() {
 
 #[test]
 fn is_terminator_punct_matches_only_sentence_terminators() {
-    let make = |text: &str, lemma: &str| UdWord {
-        id: UdId::Single(1),
-        text: text.to_string(),
-        lemma: lemma.to_string(),
-        upos: UdPunctable::Value(UniversalPos::Punct),
-        xpos: None,
-        feats: None,
-        head: 0,
-        deprel: "punct".to_string(),
-        deps: None,
-        misc: None,
+    let make = |text: &str, lemma: &str| {
+        UdWord::from(UdWordAnalysis {
+            id: UdId::Single(1),
+            text: text.to_string(),
+            lemma: lemma.to_string(),
+            upos: UdPunctable::Value(UniversalPos::Punct),
+            xpos: None,
+            feats: None,
+            head: 0,
+            deprel: "punct".to_string(),
+            deps: None,
+            misc: None,
+        })
     };
 
     // The positive direction, on two representatives. The vocabulary belongs
@@ -204,7 +174,7 @@ fn is_terminator_punct_matches_only_sentence_terminators() {
     assert!(super::is_terminator_punct(&make("+...", "+...")));
 
     // Content punctuation MUST NOT be classified as a terminator
-    // these flow through to `map_ud_word_to_mor` to produce Mor items
+    // these flow through to `map_ud_word` to produce Mor items
     // (`cm|cm`, `end|end`, `beg|beg`, etc.). The CA-prosody arrows
     // (`⇗ ↗ → ↘ ⇘ ≋ ≈`) belong here too: per CHECK they are
     // SEPARATORS, not terminators (BUG-009, 2026-05-01).
@@ -240,7 +210,7 @@ fn is_terminator_punct_matches_only_sentence_terminators() {
     }
 
     // Non-PUNCT UPOS is never a terminator even with a '.' text.
-    let non_punct = UdWord {
+    let non_punct = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: ".".to_string(),
         lemma: ".".to_string(),
@@ -251,7 +221,7 @@ fn is_terminator_punct_matches_only_sentence_terminators() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
     assert!(!super::is_terminator_punct(&non_punct));
 }
 
@@ -262,7 +232,7 @@ fn mid_utterance_comma_produces_cm_mor_item() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "hello".to_string(),
                 lemma: "hello".to_string(),
@@ -273,8 +243,8 @@ fn mid_utterance_comma_produces_cm_mor_item() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: ",".to_string(),
                 lemma: ",".to_string(),
@@ -285,8 +255,8 @@ fn mid_utterance_comma_produces_cm_mor_item() {
                 deprel: "punct".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "world".to_string(),
                 lemma: "world".to_string(),
@@ -297,7 +267,7 @@ fn mid_utterance_comma_produces_cm_mor_item() {
                 deprel: "parataxis".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let (mors, _gras) = map_ud_sentence(&sentence, &ctx).unwrap();
@@ -325,7 +295,7 @@ fn sentence_terminator_is_dropped_from_mor_output() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "hi".to_string(),
                 lemma: "hi".to_string(),
@@ -336,8 +306,8 @@ fn sentence_terminator_is_dropped_from_mor_output() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: ".".to_string(),
                 lemma: ".".to_string(),
@@ -348,7 +318,7 @@ fn sentence_terminator_is_dropped_from_mor_output() {
                 deprel: "punct".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let (mors, _gras) = map_ud_sentence(&sentence, &ctx).unwrap();
@@ -363,17 +333,19 @@ fn comma_kept_terminator_dropped_together() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let mk = |id: usize, text: &str, upos: UniversalPos, head: usize, deprel: &str| UdWord {
-        id: UdId::Single(id),
-        text: text.to_string(),
-        lemma: text.to_string(),
-        upos: UdPunctable::Value(upos),
-        xpos: None,
-        feats: None,
-        head,
-        deprel: deprel.to_string(),
-        deps: None,
-        misc: None,
+    let mk = |id: usize, text: &str, upos: UniversalPos, head: usize, deprel: &str| {
+        UdWord::from(UdWordAnalysis {
+            id: UdId::Single(id),
+            text: text.to_string(),
+            lemma: text.to_string(),
+            upos: UdPunctable::Value(upos),
+            xpos: None,
+            feats: None,
+            head,
+            deprel: deprel.to_string(),
+            deps: None,
+            misc: None,
+        })
     };
     let sentence = UdSentence {
         words: vec![

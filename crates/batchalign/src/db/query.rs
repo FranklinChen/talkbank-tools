@@ -2,10 +2,10 @@
 
 use crate::api::{
     CallerHost, CallerPid, CancelReason, CancelSource, CancellationRecord, CorrelationId,
-    DisplayPath, JobId, NodeId, UnixTimestamp,
+    DisplayPath, JobId, MachineTime, NodeId,
 };
 use crate::options::CommandOptions;
-use crate::scheduling::{AttemptId, AttemptRecord, FailureCategory, WorkUnitId};
+use crate::scheduling::{AttemptId, AttemptRecord, FailureCategory, LeaseRecord, WorkUnitId};
 use crate::worker::WorkerPid;
 use sqlx::Row;
 
@@ -46,6 +46,14 @@ impl JobDB {
             let paths_mode_int: i32 = row.try_get("paths_mode")?;
 
             let job_id: String = row.try_get("job_id")?;
+            // Read before `job_id` moves into the row, so the error can name
+            // the job without a clone of every id on every load.
+            let lease = read_lease(
+                &job_id,
+                row.try_get("leased_by_node")?,
+                row.try_get("lease_expires_at")?,
+                row.try_get("lease_heartbeat_at")?,
+            )?;
             let command: String = row.try_get("command")?;
             let options: CommandOptions = deserialize_job_field(&job_id, "options", &options_json)?;
             let filenames = deserialize_job_field(&job_id, "filenames", &filenames_json)?;
@@ -74,9 +82,7 @@ impl JobDB {
                 completed_at: row.try_get("completed_at")?,
                 num_workers: row.try_get("num_workers")?,
                 next_eligible_at: row.try_get("next_eligible_at")?,
-                leased_by_node: row.try_get("leased_by_node")?,
-                lease_expires_at: row.try_get("lease_expires_at")?,
-                lease_heartbeat_at: row.try_get("lease_heartbeat_at")?,
+                lease,
                 last_cancelled_at: row.try_get("last_cancelled_at")?,
                 last_cancelled_source: row.try_get("last_cancelled_source")?,
                 last_cancelled_host: row.try_get("last_cancelled_host")?,
@@ -91,39 +97,41 @@ impl JobDB {
 
         // Load file statuses for each job (N+1 pattern preserved)
         for job in &mut jobs {
-            let fs_rows = sqlx::query(
-                "SELECT filename, status, error, error_category,
-                        COALESCE(bug_report_id, '') as bug_report_id,
-                        content_type, started_at, finished_at, next_eligible_at
-                 FROM file_statuses
-                 WHERE job_id = ?",
-            )
-            .bind(&job.job_id)
-            .fetch_all(&self.pool)
-            .await?;
-
-            for fs_row in &fs_rows {
-                let bug_report_raw: String = fs_row.try_get("bug_report_id")?;
-                let bug_report_id = if bug_report_raw.is_empty() {
-                    None
-                } else {
-                    Some(bug_report_raw)
-                };
-                job.file_statuses.push(FileStatusRow {
-                    filename: fs_row.try_get("filename")?,
-                    status: fs_row.try_get("status")?,
-                    error: fs_row.try_get("error")?,
-                    error_category: fs_row.try_get("error_category")?,
-                    bug_report_id,
-                    content_type: fs_row.try_get("content_type")?,
-                    started_at: fs_row.try_get("started_at")?,
-                    finished_at: fs_row.try_get("finished_at")?,
-                    next_eligible_at: fs_row.try_get("next_eligible_at")?,
-                });
-            }
+            job.file_statuses = self.load_file_status_rows(&job.job_id).await?;
         }
 
         Ok(jobs)
+    }
+
+    /// Load one job's `file_statuses` rows as stored.
+    pub(crate) async fn load_file_status_rows(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<FileStatusRow>, ServerError> {
+        let fs_rows = sqlx::query(
+            "SELECT filename, status, error, error_category,
+                    content_type, started_at, finished_at, next_eligible_at
+             FROM file_statuses
+             WHERE job_id = ?",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut rows = Vec::with_capacity(fs_rows.len());
+        for fs_row in &fs_rows {
+            rows.push(FileStatusRow {
+                filename: fs_row.try_get("filename")?,
+                status: fs_row.try_get("status")?,
+                error: fs_row.try_get("error")?,
+                error_category: fs_row.try_get("error_category")?,
+                content_type: fs_row.try_get("content_type")?,
+                started_at: fs_row.try_get("started_at")?,
+                finished_at: fs_row.try_get("finished_at")?,
+                next_eligible_at: fs_row.try_get("next_eligible_at")?,
+            });
+        }
+        Ok(rows)
     }
 
     /// Load persisted attempts for one job, ordered by start time.
@@ -247,7 +255,7 @@ pub struct CancellationRow {
     /// Job this cancel was directed at.
     pub job_id: String,
     /// Server-side wall-clock timestamp when the cancel arrived.
-    pub requested_at: f64,
+    pub requested_at: MachineTime,
     /// Wire-format source string (`tui`, `api`, `signal`, ...).
     pub source: String,
     /// Caller-reported host (or peer-IP filled by the route handler).
@@ -278,7 +286,7 @@ impl TryFrom<CancellationRow> for CancellationRecord {
         Ok(CancellationRecord {
             id: row.id,
             job_id: JobId::from(row.job_id),
-            requested_at: UnixTimestamp(row.requested_at),
+            requested_at: row.requested_at,
             source,
             host: row.host.map(CallerHost::from),
             pid: row.pid.map(CallerPid),
@@ -330,14 +338,81 @@ impl TryFrom<AttemptRow> for AttemptRecord {
             work_unit_id: WorkUnitId(row.work_unit_id),
             work_unit_kind,
             attempt_number: row.attempt_number as u32,
-            started_at: UnixTimestamp(row.started_at),
-            finished_at: row.finished_at.map(UnixTimestamp),
+            started_at: row.started_at,
+            finished_at: row.finished_at,
             outcome,
             failure_category,
             disposition,
             worker_node_id: row.worker_node_id.map(NodeId),
             worker_pid: row.worker_pid.map(|pid| WorkerPid(pid as u32)),
         })
+    }
+}
+
+/// Why a job row's three lease columns name no lease.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoredLeaseError {
+    /// Some columns are set and some NULL. Never repaired by guessing.
+    #[error(
+        "job {job_id} holds part of a lease: leased_by_node {}, lease_expires_at {}, \
+         lease_heartbeat_at {}",
+        column(node.as_deref()),
+        column(expires_at.as_ref()),
+        column(heartbeat_at.as_ref())
+    )]
+    Partial {
+        /// The job whose row it is.
+        job_id: String,
+        /// The `leased_by_node` column.
+        node: Option<String>,
+        /// The `lease_expires_at` column.
+        expires_at: Option<MachineTime>,
+        /// The `lease_heartbeat_at` column.
+        heartbeat_at: Option<MachineTime>,
+    },
+    /// All three are set, but the expiry is not after the heartbeat.
+    #[error("job {job_id} holds a lease that cannot have been held: {source}")]
+    Unordered {
+        /// The job whose row it is.
+        job_id: String,
+        /// The two times that disagree.
+        source: crate::scheduling::LeaseExpiryNotAfterHeartbeat,
+    },
+}
+
+/// A nullable column for a diagnostic: its value, or `NULL`.
+fn column<T: std::fmt::Display>(value: Option<T>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "NULL".to_owned(),
+    }
+}
+
+/// A job row's three lease columns as one lease: all set and ordered, or all
+/// NULL. Anything else is refused with the job and the columns that disagree,
+/// through the same constructor deserialization uses.
+fn read_lease(
+    job_id: &str,
+    node: Option<String>,
+    expires_at: Option<MachineTime>,
+    heartbeat_at: Option<MachineTime>,
+) -> Result<Option<LeaseRecord>, StoredLeaseError> {
+    match (node, expires_at, heartbeat_at) {
+        (None, None, None) => Ok(None),
+        (Some(node), Some(expires_at), Some(heartbeat_at)) => {
+            LeaseRecord::new(NodeId(node), heartbeat_at, expires_at)
+                .map(Some)
+                .map_err(|source| StoredLeaseError::Unordered {
+                    job_id: job_id.to_owned(),
+                    source,
+                })
+        }
+        (node, expires_at, heartbeat_at) => Err(StoredLeaseError::Partial {
+            job_id: job_id.to_owned(),
+            node,
+            expires_at,
+            heartbeat_at,
+        }),
     }
 }
 

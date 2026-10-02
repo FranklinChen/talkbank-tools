@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::api::{DisplayPath, JobId, JobStatus, UnixTimestamp};
+use crate::api::{DisplayPath, JobId, JobStatus, MachineTime};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::{
     AttemptFinishRecord, CompletedFileOutput, FileFailureRecord, FileProgressRecord,
@@ -24,12 +24,22 @@ use super::FileStage;
 /// of reaching into the concrete store implementation directly.
 #[async_trait]
 pub(crate) trait RunnerEventSink: Send + Sync {
-    async fn mark_file_processing(&self, job_id: &JobId, filename: &str, started_at: UnixTimestamp);
+    /// Now, by the clock this sink records with, as the time of an event.
+    /// Every event method below takes an [`EventTime`](crate::store::EventTime),
+    /// which only the store's clock produces, so a caller cannot record an
+    /// event at a time it chose.
+    fn now(&self) -> crate::store::EventTime;
+    async fn mark_file_processing(
+        &self,
+        job_id: &JobId,
+        filename: &str,
+        started_at: crate::store::EventTime,
+    );
     async fn mark_file_done(
         &self,
         job_id: &JobId,
         filename: &str,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
         result: Option<CompletedFileOutput>,
     );
     async fn mark_file_error(
@@ -38,14 +48,14 @@ pub(crate) trait RunnerEventSink: Send + Sync {
         filename: &str,
         error: &str,
         category: FailureCategory,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
     );
     async fn start_file_attempt(
         &self,
         job_id: &JobId,
         filename: &str,
         work_unit_kind: WorkUnitKind,
-        started_at: UnixTimestamp,
+        started_at: crate::store::EventTime,
     );
     async fn finish_file_attempt(
         &self,
@@ -54,16 +64,16 @@ pub(crate) trait RunnerEventSink: Send + Sync {
         outcome: AttemptOutcome,
         failure_category: Option<FailureCategory>,
         disposition: RetryDisposition,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
     );
     async fn mark_file_retry_pending(
         &self,
         job_id: &JobId,
         filename: &str,
-        retry_at: UnixTimestamp,
+        retry_at: MachineTime,
         category: FailureCategory,
         message: &str,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
     );
     async fn clear_file_retry_state(&self, job_id: &JobId, filename: &str);
     async fn set_file_progress(
@@ -77,10 +87,11 @@ pub(crate) trait RunnerEventSink: Send + Sync {
     async fn unfinished_files(&self, job_id: &JobId) -> Vec<DisplayPath>;
     async fn file_status_label(&self, job_id: &JobId, filename: &str) -> Option<String>;
     async fn bump_forced_terminal_errors(&self, count: usize);
-    async fn fail_job(&self, job_id: &JobId, error: &str, failed_at: UnixTimestamp);
+    /// Fail the whole job, stamped now.
+    async fn fail_job(&self, job_id: &JobId, error: &str);
     async fn mark_job_running(&self, job_id: &JobId);
     async fn record_job_worker_count(&self, job_id: &JobId, worker_count: usize);
-    async fn requeue_job_after_memory_gate(&self, job_id: &JobId, retry_at: UnixTimestamp);
+    async fn requeue_job_after_memory_gate(&self, job_id: &JobId, retry_at: MachineTime);
     async fn bump_deferred_work_units(&self);
     async fn bump_memory_gate_aborts(&self);
     /// Finalize the job and return its job-level failure reason (the aggregated
@@ -91,7 +102,7 @@ pub(crate) trait RunnerEventSink: Send + Sync {
         job_id: &JobId,
         expected_generation: crate::store::RunGeneration,
         final_status: JobStatus,
-        completed_at: UnixTimestamp,
+        completed_at: crate::store::EventTime,
     ) -> Option<String>;
 }
 
@@ -114,11 +125,15 @@ impl StoreRunnerEventSink {
 
 #[async_trait]
 impl RunnerEventSink for StoreRunnerEventSink {
+    fn now(&self) -> crate::store::EventTime {
+        self.store.event_time()
+    }
+
     async fn mark_file_processing(
         &self,
         job_id: &JobId,
         filename: &str,
-        started_at: UnixTimestamp,
+        started_at: crate::store::EventTime,
     ) {
         self.store
             .mark_file_processing(job_id, filename, started_at)
@@ -129,7 +144,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
         &self,
         job_id: &JobId,
         filename: &str,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
         result: Option<CompletedFileOutput>,
     ) {
         self.store
@@ -143,7 +158,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
         filename: &str,
         error: &str,
         category: FailureCategory,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
     ) {
         self.store
             .mark_file_error(
@@ -163,7 +178,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
         job_id: &JobId,
         filename: &str,
         work_unit_kind: WorkUnitKind,
-        started_at: UnixTimestamp,
+        started_at: crate::store::EventTime,
     ) {
         self.store
             .start_file_attempt(job_id, filename, work_unit_kind, started_at)
@@ -177,7 +192,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
         outcome: AttemptOutcome,
         failure_category: Option<FailureCategory>,
         disposition: RetryDisposition,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
     ) {
         self.store
             .db_finish_attempt_for_file(
@@ -197,10 +212,10 @@ impl RunnerEventSink for StoreRunnerEventSink {
         &self,
         job_id: &JobId,
         filename: &str,
-        retry_at: UnixTimestamp,
+        retry_at: MachineTime,
         category: FailureCategory,
         message: &str,
-        finished_at: UnixTimestamp,
+        finished_at: crate::store::EventTime,
     ) {
         self.store
             .mark_file_retry_pending(
@@ -255,8 +270,10 @@ impl RunnerEventSink for StoreRunnerEventSink {
             .await;
     }
 
-    async fn fail_job(&self, job_id: &JobId, error: &str, failed_at: UnixTimestamp) {
-        self.store.fail_job(job_id, error, failed_at).await;
+    async fn fail_job(&self, job_id: &JobId, error: &str) {
+        self.store
+            .fail_job(job_id, error, self.store.event_time())
+            .await;
     }
 
     async fn mark_job_running(&self, job_id: &JobId) {
@@ -269,7 +286,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
             .await;
     }
 
-    async fn requeue_job_after_memory_gate(&self, job_id: &JobId, retry_at: UnixTimestamp) {
+    async fn requeue_job_after_memory_gate(&self, job_id: &JobId, retry_at: MachineTime) {
         self.store
             .requeue_job_after_memory_gate(job_id, retry_at)
             .await;
@@ -290,7 +307,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
         job_id: &JobId,
         expected_generation: crate::store::RunGeneration,
         final_status: JobStatus,
-        completed_at: UnixTimestamp,
+        completed_at: crate::store::EventTime,
     ) -> Option<String> {
         self.store
             .finalize_job(job_id, expected_generation, final_status, completed_at)

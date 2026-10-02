@@ -96,10 +96,103 @@ where
     Ok(opt.filter(|v| !v.is_zero()))
 }
 
+/// Serde deserializer for an optional operator override in seconds whose
+/// legacy `0` meant "the built-in default": absent, `null` and `0` are all
+/// `None`, and any other count is `Some`.
+///
+/// `PositiveSeconds` itself refuses `0`, so this is the one place the legacy
+/// spelling is still read, for `server.yaml` files written before these fields
+/// were typed. Pair with `#[serde(default, skip_serializing_if =
+/// "Option::is_none")]` so re-serialization writes the canonical form.
+pub fn zero_as_no_override<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::api::PositiveSeconds>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .and_then(std::num::NonZeroU64::new)
+        .map(crate::api::PositiveSeconds::new))
+}
+
+/// Serde deserializer for a required interval or timeout whose legacy `0`
+/// meant "the built-in default", which is `DEFAULT`. Any other count is kept.
+pub fn zero_as_default<'de, D, const DEFAULT: u64>(
+    deserializer: D,
+) -> Result<crate::api::PositiveSeconds, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match zero_as_no_override(deserializer)? {
+        Some(seconds) => Ok(seconds),
+        None => Ok(crate::api::PositiveSeconds::literal::<DEFAULT>()),
+    }
+}
+
+/// Serde deserializer for an optional path whose legacy empty string meant
+/// "the default location": absent, `null` and `""` are all `None`.
+pub fn empty_path_as_none<'de, D>(deserializer: D) -> Result<Option<std::path::PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<std::path::PathBuf>::deserialize(deserializer)?
+        .filter(|path| !path.as_os_str().is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::Serialize;
+
+    #[derive(Debug, Deserialize)]
+    struct OverrideCarrier {
+        #[serde(default, deserialize_with = "zero_as_no_override")]
+        value: Option<crate::api::PositiveSeconds>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DefaultedCarrier {
+        #[serde(deserialize_with = "zero_as_default::<_, 30>")]
+        value: crate::api::PositiveSeconds,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PathCarrier {
+        #[serde(default, deserialize_with = "empty_path_as_none")]
+        value: Option<std::path::PathBuf>,
+    }
+
+    /// The legacy `0` of a timeout override reads as no override, the same
+    /// as leaving the field out; a count is kept.
+    #[test]
+    fn a_legacy_zero_override_is_no_override() {
+        for yaml in ["value: 0\n", "{}", "value: null\n"] {
+            let parsed: OverrideCarrier = yaml_serde::from_str(yaml).expect("parse");
+            assert_eq!(parsed.value, None, "{yaml}");
+        }
+        let parsed: OverrideCarrier = yaml_serde::from_str("value: 3600\n").expect("parse");
+        assert_eq!(
+            parsed.value.map(crate::api::PositiveSeconds::get),
+            Some(3600)
+        );
+    }
+
+    /// A required interval's legacy `0` is the default it always meant.
+    #[test]
+    fn a_legacy_zero_interval_is_the_default() {
+        let parsed: DefaultedCarrier = yaml_serde::from_str("value: 0\n").expect("parse");
+        assert_eq!(parsed.value.get(), 30);
+        let parsed: DefaultedCarrier = yaml_serde::from_str("value: 15\n").expect("parse");
+        assert_eq!(parsed.value.get(), 15);
+    }
+
+    #[test]
+    fn a_legacy_empty_path_is_no_path() {
+        let parsed: PathCarrier = yaml_serde::from_str("value: \"\"\n").expect("parse");
+        assert_eq!(parsed.value, None);
+        let parsed: PathCarrier = yaml_serde::from_str("value: /tmp/w.json\n").expect("parse");
+        assert_eq!(parsed.value, Some(std::path::PathBuf::from("/tmp/w.json")));
+    }
 
     /// One round-trip carrier per integer type. The `default` plus
     /// `skip_serializing_if` attributes match the canonical migration
@@ -140,38 +233,38 @@ mod tests {
 
     #[test]
     fn u32_legacy_zero_deserializes_to_none() {
-        let parsed: CarrierU32 = serde_yaml::from_str("value: 0\n").expect("parse");
+        let parsed: CarrierU32 = yaml_serde::from_str("value: 0\n").expect("parse");
         assert_eq!(parsed.value, None);
     }
 
     #[test]
     fn u32_explicit_value_preserves_some() {
-        let parsed: CarrierU32 = serde_yaml::from_str("value: 4\n").expect("parse");
+        let parsed: CarrierU32 = yaml_serde::from_str("value: 4\n").expect("parse");
         assert_eq!(parsed.value, Some(4));
     }
 
     #[test]
     fn u32_field_absent_defaults_to_none() {
-        let parsed: CarrierU32 = serde_yaml::from_str("{}").expect("parse");
+        let parsed: CarrierU32 = yaml_serde::from_str("{}").expect("parse");
         assert_eq!(parsed.value, None);
     }
 
     #[test]
     fn u32_explicit_null_deserializes_to_none() {
-        let parsed: CarrierU32 = serde_yaml::from_str("value: null\n").expect("parse");
+        let parsed: CarrierU32 = yaml_serde::from_str("value: null\n").expect("parse");
         assert_eq!(parsed.value, None);
     }
 
     #[test]
     fn u32_some_value_serializes_as_bare_integer() {
-        let yaml = serde_yaml::to_string(&CarrierU32 { value: Some(4) }).expect("ser");
+        let yaml = yaml_serde::to_string(&CarrierU32 { value: Some(4) }).expect("ser");
         assert_eq!(yaml.trim(), "value: 4");
     }
 
     #[test]
     fn u32_none_serializes_as_omitted_field() {
-        let yaml = serde_yaml::to_string(&CarrierU32 { value: None }).expect("ser");
-        // Empty struct → "{}" with serde_yaml. The key is that the
+        let yaml = yaml_serde::to_string(&CarrierU32 { value: None }).expect("ser");
+        // Empty struct → "{}" with yaml_serde. The key is that the
         // field is omitted, not the precise empty-struct rendering.
         assert!(
             !yaml.contains("value"),
@@ -187,8 +280,8 @@ mod tests {
     fn u32_round_trip_canonical_form() {
         for v in [None, Some(1u32), Some(4), Some(8), Some(u32::MAX)] {
             let original = CarrierU32 { value: v };
-            let yaml = serde_yaml::to_string(&original).expect("ser");
-            let parsed: CarrierU32 = serde_yaml::from_str(&yaml).expect("parse");
+            let yaml = yaml_serde::to_string(&original).expect("ser");
+            let parsed: CarrierU32 = yaml_serde::from_str(&yaml).expect("parse");
             assert_eq!(parsed, original, "round-trip lost data for {v:?}");
         }
     }
@@ -198,9 +291,9 @@ mod tests {
     /// form is gone.
     #[test]
     fn u32_legacy_zero_collapses_after_one_round_trip() {
-        let parsed: CarrierU32 = serde_yaml::from_str("value: 0\n").expect("parse");
+        let parsed: CarrierU32 = yaml_serde::from_str("value: 0\n").expect("parse");
         assert_eq!(parsed.value, None);
-        let yaml = serde_yaml::to_string(&parsed).expect("ser");
+        let yaml = yaml_serde::to_string(&parsed).expect("ser");
         assert!(
             !yaml.contains("value"),
             "post-round-trip form must omit `value`; got: {yaml:?}"
@@ -214,13 +307,13 @@ mod tests {
 
     #[test]
     fn i32_legacy_zero_deserializes_to_none() {
-        let parsed: CarrierI32 = serde_yaml::from_str("value: 0\n").expect("parse");
+        let parsed: CarrierI32 = yaml_serde::from_str("value: 0\n").expect("parse");
         assert_eq!(parsed.value, None);
     }
 
     #[test]
     fn i32_explicit_value_preserves_some() {
-        let parsed: CarrierI32 = serde_yaml::from_str("value: 8\n").expect("parse");
+        let parsed: CarrierI32 = yaml_serde::from_str("value: 8\n").expect("parse");
         assert_eq!(parsed.value, Some(8));
     }
 
@@ -229,7 +322,7 @@ mod tests {
     /// these fields; validation is the EffectiveConfig layer's job.
     #[test]
     fn i32_negative_value_preserves_some() {
-        let parsed: CarrierI32 = serde_yaml::from_str("value: -1\n").expect("parse");
+        let parsed: CarrierI32 = yaml_serde::from_str("value: -1\n").expect("parse");
         assert_eq!(parsed.value, Some(-1));
     }
 
@@ -240,13 +333,13 @@ mod tests {
 
     #[test]
     fn u64_legacy_zero_deserializes_to_none() {
-        let parsed: CarrierU64 = serde_yaml::from_str("value: 0\n").expect("parse");
+        let parsed: CarrierU64 = yaml_serde::from_str("value: 0\n").expect("parse");
         assert_eq!(parsed.value, None);
     }
 
     #[test]
     fn u64_explicit_value_preserves_some() {
-        let parsed: CarrierU64 = serde_yaml::from_str("value: 8000\n").expect("parse");
+        let parsed: CarrierU64 = yaml_serde::from_str("value: 8000\n").expect("parse");
         assert_eq!(parsed.value, Some(8000));
     }
 
@@ -255,8 +348,8 @@ mod tests {
         let original = CarrierU64 {
             value: Some(u64::MAX),
         };
-        let yaml = serde_yaml::to_string(&original).expect("ser");
-        let parsed: CarrierU64 = serde_yaml::from_str(&yaml).expect("parse");
+        let yaml = yaml_serde::to_string(&original).expect("ser");
+        let parsed: CarrierU64 = yaml_serde::from_str(&yaml).expect("parse");
         assert_eq!(parsed, original);
     }
 

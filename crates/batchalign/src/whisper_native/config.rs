@@ -12,6 +12,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhisperModelSource {
     /// Fetched from the repository revision this build pins.
+    #[cfg(feature = "whisper-rs-backend")]
     PinnedDefault,
     /// A file the host named, through `BATCHALIGN_WHISPER_RS_MODEL` or an
     /// engine override. This build pins no revision for it.
@@ -68,6 +69,7 @@ impl WhisperNativeConfig {
     /// claims to be pinned. A public constructor would let any caller assert
     /// the pin over a file that never came from it, which is the weakest
     /// possible proof of a revision.
+    #[cfg(feature = "whisper-rs-backend")]
     fn pinned_default(model_path: PathBuf) -> Self {
         Self {
             model_path,
@@ -148,8 +150,10 @@ impl WhisperNativeConfig {
 }
 
 /// Upstream repo carrying whisper.cpp's official ggml conversions.
+#[cfg(feature = "whisper-rs-backend")]
 pub const DEFAULT_MODEL_REPO_OWNER: &str = "ggerganov";
 /// Repo name half of the default-model coordinates.
+#[cfg(feature = "whisper-rs-backend")]
 pub const DEFAULT_MODEL_REPO_NAME: &str = "whisper.cpp";
 /// Default model file: large-v3, matching the quality tier the Python
 /// whisper paths default to.
@@ -162,4 +166,5 @@ pub const DEFAULT_MODEL_REPO_NAME: &str = "whisper.cpp";
 /// `BATCHALIGN_WHISPER_RS_MODEL` pointing at a directory that carries
 /// both artifacts, or extend this to a `DefaultModel { repo, file,
 /// coreml_bundle }` set when CoreML prefetch lands.
+#[cfg(feature = "whisper-rs-backend")]
 pub const DEFAULT_MODEL_FILE: &str = "ggml-large-v3.bin";

@@ -387,8 +387,10 @@ impl ProvenanceComment {
     /// Format as the `[fc-ba3 ...]` comment string (without `@Comment:\t`
     /// prefix), under [`StampName::WRITTEN`], the only name this build writes.
     pub fn format(&self) -> String {
-        let timestamp = chrono::Local::now()
-            .format("%Y-%m-%dT%H:%M:%S%:z")
+        // The writing host's local time with its offset, whole seconds:
+        // the form these stamps have always had in the corpora.
+        let timestamp = jiff::Zoned::now()
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
             .to_string();
         StampCodec::write(
             StampName::WRITTEN.opening(),

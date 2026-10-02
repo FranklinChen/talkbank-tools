@@ -26,21 +26,14 @@ pub(super) struct FileErrorDetail {
     pub filename: DisplayPath,
     /// Human-readable failure explanation.
     pub message: String,
-    /// Optional persisted bug-report identifier for deeper inspection.
-    pub bug_report_id: Option<String>,
 }
 
 impl FileErrorDetail {
     /// Construct one failure detail from a file identity and message.
-    pub(super) fn new(
-        filename: impl Into<DisplayPath>,
-        message: impl Into<String>,
-        bug_report_id: Option<String>,
-    ) -> Self {
+    pub(super) fn new(filename: impl Into<DisplayPath>, message: impl Into<String>) -> Self {
         Self {
             filename: filename.into(),
             message: message.into(),
-            bug_report_id,
         }
     }
 }
@@ -97,7 +90,6 @@ pub(super) fn file_error_details(info: &JobInfo) -> Vec<FileErrorDetail> {
                     .error
                     .clone()
                     .unwrap_or_else(|| "unknown error".into()),
-                entry.bug_report_id.clone(),
             )
         })
         .collect()
@@ -173,31 +165,21 @@ pub(super) async fn poll_and_write_incrementally(
                                     Ok(false) => {
                                         let error_msg = result.error.unwrap_or_default();
                                         progress.log_error(fn_, &error_msg);
-                                        error_details.push(FileErrorDetail::new(
-                                            fn_.clone(),
-                                            error_msg,
-                                            entry.bug_report_id.clone(),
-                                        ));
+                                        error_details
+                                            .push(FileErrorDetail::new(fn_.clone(), error_msg));
                                     }
                                     Err(e) => {
                                         let error_msg = format!("{e}");
                                         progress.log_error(fn_, &error_msg);
-                                        error_details.push(FileErrorDetail::new(
-                                            fn_.clone(),
-                                            error_msg,
-                                            entry.bug_report_id.clone(),
-                                        ));
+                                        error_details
+                                            .push(FileErrorDetail::new(fn_.clone(), error_msg));
                                     }
                                 }
                             }
                             Err(e) => {
                                 let error_msg = format!("{e}");
                                 progress.log_error(fn_, &error_msg);
-                                error_details.push(FileErrorDetail::new(
-                                    fn_.clone(),
-                                    error_msg,
-                                    entry.bug_report_id.clone(),
-                                ));
+                                error_details.push(FileErrorDetail::new(fn_.clone(), error_msg));
                             }
                         }
                         written_files.insert(fn_.to_string());
@@ -208,11 +190,7 @@ pub(super) async fn poll_and_write_incrementally(
                             .clone()
                             .unwrap_or_else(|| "unknown error".into());
                         progress.log_error(fn_, &error_msg);
-                        error_details.push(FileErrorDetail::new(
-                            fn_.clone(),
-                            error_msg,
-                            entry.bug_report_id.clone(),
-                        ));
+                        error_details.push(FileErrorDetail::new(fn_.clone(), error_msg));
                     }
                 }
 
@@ -396,9 +374,10 @@ pub(super) fn finish_terminal_job(
 /// "yes you cancelled this" when the email comes in tomorrow.
 fn eprint_cancellation_receipt(receipt: &crate::cli::tui::app::CancelledReceipt) {
     let host = receipt.host.as_deref().unwrap_or("(unknown host)");
+    let at = receipt.at.local_display();
     eprintln!(
         "  CANCELLATION RECEIPT: source={}  host={}  at={}",
-        receipt.source, host, receipt.at_iso
+        receipt.source, host, at
     );
     if let Some(reason) = &receipt.reason {
         eprintln!("    reason: {reason}");
@@ -641,23 +620,13 @@ pub(super) fn cancelled_receipt_from(
     info: &JobInfo,
 ) -> Option<crate::cli::tui::app::CancelledReceipt> {
     let source = info.last_cancelled_source.clone()?;
-    let at_iso = format_unix_ts_iso(info.last_cancelled_at?.0);
+    let at = info.last_cancelled_at?;
     Some(crate::cli::tui::app::CancelledReceipt {
         source,
         host: info.last_cancelled_host.clone().filter(|s| !s.is_empty()),
         reason: info.last_cancelled_reason.clone().filter(|s| !s.is_empty()),
-        at_iso,
+        at,
     })
-}
-
-fn format_unix_ts_iso(ts_seconds: f64) -> String {
-    use chrono::DateTime;
-    if !ts_seconds.is_finite() {
-        return format!("invalid-unix-timestamp({ts_seconds})");
-    }
-    DateTime::from_timestamp_millis((ts_seconds * 1000.0).round() as i64)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| format!("invalid-unix-timestamp({ts_seconds})"))
 }
 
 /// Print a structured failure summary.
@@ -685,11 +654,7 @@ pub(super) fn print_failure_summary(
         let filename = error.filename.as_ref();
         let lines: Vec<&str> = error.message.lines().collect();
         let first_line = lines.first().copied().unwrap_or("unknown error");
-        if let Some(bug_report_id) = error.bug_report_id.as_deref() {
-            eprintln!("  \u{2717} {filename}: {first_line} (bug report: {bug_report_id})");
-        } else {
-            eprintln!("  \u{2717} {filename}: {first_line}");
-        }
+        eprintln!("  \u{2717} {filename}: {first_line}");
         // Show the last few lines of worker stderr when available (the
         // actual Python traceback or OOM message). Skip the first line
         // which is the header we already printed.
@@ -718,9 +683,6 @@ pub(super) fn print_job_debug_artifacts(artifacts: &JobDebugArtifacts) {
     eprintln!("debug artifacts dir: {}", artifacts.staging_dir.display());
     if let Some(trace_file) = artifacts.trace_file.as_ref() {
         eprintln!("debug traces: {}", trace_file.display());
-    }
-    for bug_report in &artifacts.bug_report_files {
-        eprintln!("debug bug report: {}", bug_report.display());
     }
 }
 
@@ -790,19 +752,17 @@ mod tests {
                 status: FileStatusKind::Error,
                 error: Some("worker failed".into()),
                 error_category: None,
-                error_codes: None,
-                error_line: None,
-                bug_report_id: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
+                duration_s: None,
                 next_eligible_at: None,
                 progress_current: None,
                 progress_total: None,
                 progress_stage: None,
                 progress_label: None,
             }],
-            submitted_at: None,
+            submitted_at: crate::unix_time(1_700_000_000.0),
             submitted_by: None,
             submitted_by_name: None,
             completed_at: None,
@@ -860,12 +820,10 @@ mod tests {
             status,
             error: None,
             error_category: None,
-            error_codes: None,
-            error_line: None,
-            bug_report_id: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
+            duration_s: None,
             next_eligible_at: None,
             progress_current: None,
             progress_total: None,
@@ -1182,11 +1140,7 @@ mod tests {
     fn finish_terminal_job_rejects_completed_job_with_file_errors() {
         let info = test_job_info(JobStatus::Completed, None);
         let out_dir = tempfile::tempdir().unwrap();
-        let errors = vec![FileErrorDetail::new(
-            "clip.cha",
-            "decoder failed\ntrace",
-            None,
-        )];
+        let errors = vec![FileErrorDetail::new("clip.cha", "decoder failed\ntrace")];
 
         let result = finish_terminal_job(&info, &errors, 1, out_dir.path());
 
@@ -1214,12 +1168,10 @@ mod tests {
             status: FileStatusKind::Processing,
             error: None,
             error_category: None,
-            error_codes: None,
-            error_line: None,
-            bug_report_id: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
+            duration_s: None,
             next_eligible_at: None,
             progress_current: Some(1),
             progress_total: Some(3),
@@ -1236,12 +1188,10 @@ mod tests {
                 status: FileStatusKind::Done,
                 error: None,
                 error_category: None,
-                error_codes: None,
-                error_line: None,
-                bug_report_id: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
+                duration_s: None,
                 next_eligible_at: None,
                 progress_current: None,
                 progress_total: None,
@@ -1253,12 +1203,10 @@ mod tests {
                 status: FileStatusKind::Error,
                 error: Some("decoder failed".into()),
                 error_category: None,
-                error_codes: None,
-                error_line: None,
-                bug_report_id: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
+                duration_s: None,
                 next_eligible_at: None,
                 progress_current: None,
                 progress_total: None,

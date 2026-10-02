@@ -9,19 +9,16 @@ from __future__ import annotations
 
 import configparser
 import logging
-import time
-
-from pydantic import ValidationError
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
-    InferResponse,
 )
 
 from ._asr_types import admit_provider_monologues
+from ._common import ProviderNotLoaded, answer_asr_batch
 from ._tencent_api import TencentRecognizer
 
 L = logging.getLogger("batchalign.hk.tencent")
@@ -72,51 +69,12 @@ def infer_tencent_asr(req: BatchInferRequest) -> BatchInferResponse:
     return that provider-shaped payload directly. Rust owns the shared
     token/timing normalization layer after worker deserialization.
     """
-    if _recognizer is None:
-        return BatchInferResponse(
-            results=[
-                InferResponse(error="Tencent ASR provider not loaded", elapsed_s=0.0)
-                for _ in req.items
-            ],
-        )
-
-    t0 = time.monotonic()
-    results: list[InferResponse] = []
-
-    for item_idx, raw_item in enumerate(req.items):
-        try:
-            item = AsrBatchItem.model_validate(raw_item)
-        except ValidationError:
-            results.append(InferResponse(error="Invalid AsrBatchItem", elapsed_s=0.0))
-            continue
-
-        try:
-            response = _transcribe_to_monologues(item)
-            results.append(
-                InferResponse(result=response.model_dump(), elapsed_s=0.0),
-            )
-        except Exception as exc:
-            L.warning(
-                "Tencent ASR failed for item %d: %s",
-                item_idx,
-                exc,
-                exc_info=True,
-            )
-            results.append(InferResponse(error=str(exc), elapsed_s=0.0))
-
-    elapsed = time.monotonic() - t0
-
-    # Stamp total elapsed time on the first result.
-    if results:
-        first = results[0]
-        results[0] = InferResponse(
-            result=first.result,
-            error=first.error,
-            elapsed_s=elapsed,
-        )
-
-    L.info("batch_infer tencent_asr: %d items, %.3fs", len(req.items), elapsed)
-    return BatchInferResponse(results=results)
+    transcribe = (
+        ProviderNotLoaded("Tencent ASR provider not loaded")
+        if _recognizer is None
+        else _transcribe_to_monologues
+    )
+    return answer_asr_batch("tencent_asr", req.items, transcribe)
 
 
 # ---------------------------------------------------------------------------

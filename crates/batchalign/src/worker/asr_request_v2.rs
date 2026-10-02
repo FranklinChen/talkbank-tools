@@ -104,7 +104,7 @@ pub struct AsrBuildInputV2<'a> {
     /// it already measured (`DecodeBudgetSeconds::for_duration_ms`), or `None`
     /// when the caller could not measure it: the honest "unknown to Rust" case,
     /// which reaches the wire as no budget and so falls back to the named
-    /// transport ceiling (see `TaskRequestV2::timeout_seconds_with_config`),
+    /// transport ceiling (see `TaskRequestV2::transport_timeout`),
     /// never a fabricated number.
     ///
     /// Consulted only by the provider-media backends. The prepared-audio

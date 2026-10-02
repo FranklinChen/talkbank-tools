@@ -56,9 +56,7 @@ pub struct StatusMessageResponse {
         crate::routes::jobs::delete_job,
         crate::routes::jobs::restart_job,
         crate::routes::jobs::stream_job,
-        crate::routes::media_list::list_media,
-        crate::routes::bug_reports::list_bug_reports,
-        crate::routes::bug_reports::get_bug_report
+        crate::routes::media_list::list_media
     ),
     components(
         schemas(
@@ -80,7 +78,6 @@ pub struct StatusMessageResponse {
         (name = "health", description = "Health and readiness endpoints"),
         (name = "jobs", description = "Job submission and lifecycle endpoints"),
         (name = "media", description = "Media bank and file discovery endpoints"),
-        (name = "bug-reports", description = "Bug report retrieval endpoints")
     )
 )]
 /// Utoipa-generated OpenAPI 3.0 document for the batchalign3 server API.

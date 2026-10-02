@@ -21,14 +21,13 @@ Error Hierarchy
     +-- SkipFileWarning                     # Graceful skip (file passes through unchanged)
 
 The :func:`classify_error` helper maps arbitrary exceptions to one of
-five user-facing categories (``validation``, ``input``, ``media``,
-``system``, ``processing``) for CLI progress display and server job
-status reporting.
+four user-facing categories (``input``, ``media``, ``system``,
+``processing``) for CLI progress display and server job status
+reporting.
 
 Attributes set on Rust-raised exceptions
 ----------------------------------------
-``CHATValidationException``: ``errors`` (list[ValidationErrorEntry]),
-``bug_report_id`` (str | None).
+``CHATValidationException``: ``errors`` (list[ValidationErrorEntry]).
 
 ``ConfigNotFoundError``: ``path`` (str).
 
@@ -88,16 +87,12 @@ def classify_error(exc: BaseException) -> str:
 
     Returns one of:
 
-    - ``"validation"`` -- pipeline-produced validation bug (a
-      ``CHATValidationException`` with a populated ``bug_report_id``).
     - ``"input"`` -- malformed CHAT input that the user should fix.
     - ``"media"`` -- missing audio/video file or filesystem path error.
     - ``"system"`` -- memory exhaustion or other infrastructure failure.
     - ``"processing"`` -- catch-all for all other processing failures.
     """
     if isinstance(exc, CHATValidationException):
-        if getattr(exc, "bug_report_id", None) is not None:
-            return "validation"
         return "input"
 
     if isinstance(exc, ValueError) and (

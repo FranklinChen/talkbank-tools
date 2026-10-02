@@ -1,7 +1,7 @@
 # Network and Transfer Costs
 
 **Status:** Current
-**Last updated:** 2026-09-22 14:00 EDT
+**Last updated:** 2026-10-01 13:28 EDT
 
 Batchalign moves bytes over a network in four distinct ways, and every
 command and engine combination decides which of them it uses. None of them
@@ -107,10 +107,10 @@ mono 16-bit WAV, which is about 115 MB per hour of audio.
 | `whisper` as `--utr-engine` | `align` | **Nothing.** Local inference over windows around the untimed utterances. | n/a | Per window |
 | Every engine not named above (`--help` lists them per task) | various | **Nothing.** Local inference, after a one-time model download. | n/a | Model cache |
 
-Two small requests happen regardless of engine: the CLI checks PyPI for a
-newer release once a day (disable with `BATCHALIGN_NO_UPDATE_CHECK=1`), and
-every language-processing worker refreshes Stanza's model catalog, about
-1 MB, when it starts.
+One small request happens regardless of engine: every language-processing
+worker refreshes Stanza's model catalog, about 1 MB, when it starts. (The CLI
+used to check PyPI for a newer release on every start; batchalign3 is not
+published there, so the request always failed, and it was removed.)
 
 ## Model downloads
 

@@ -1,7 +1,7 @@
 # Memory Safety: Preventing Kernel OOM Crashes
 
 **Status:** Current
-**Last updated:** 2026-09-05 03:20 EDT
+**Last updated:** 2026-10-01 15:09 EDT
 
 ## The Problem
 
@@ -125,6 +125,22 @@ The coordinator tracks three lease types:
 - **worker startup leases** for the model-loading spike,
 - **job execution leases** for in-flight file parallelism,
 - **machine-wide ML test locks** so real-model test runs do not stampede the host.
+
+Only a worker-startup lease occupies one of the host's startup slots
+(`max_concurrent_worker_startups`), and the record says so through its kind
+(`MemoryLeaseKind::holds_startup_slot`), not a second field. The ledger file
+keeps its form across builds: `startup_slot` is still written, from the kind,
+because older builds count slots by it, and is ignored on read. Owner and
+worker PIDs are `WorkerPid` and reservations are `MemoryMb` in memory; the
+JSON is unchanged. Admission projects the total with a requested lease by
+chaining the request's reservation onto the ledger's, rather than building a
+placeholder record.
+
+The ledger's lease ages are read from the host wall clock (`ledger_now`), on
+purpose, not from the job store's injected `Clock`: the file is shared by
+every batchalign3 process on the host, each with its own store clock, so an
+injected clock would let one process's test clock decide whether another
+process's lease had gone stale.
 
 The reserve/headroom policy comes from `ServerConfig.memory_gate_mb`, which now
 means "keep at least this much RAM free after reservations" rather than a

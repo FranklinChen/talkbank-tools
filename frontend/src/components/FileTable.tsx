@@ -15,8 +15,7 @@ const STATUS_RANK: Record<string, number> = {
 };
 
 function fileDuration(f: FileStatusEntry): number {
-  if (f.started_at != null && f.finished_at != null) return f.finished_at - f.started_at;
-  return 0;
+  return f.duration_s ?? 0;
 }
 
 function compareFiles(a: FileStatusEntry, b: FileStatusEntry, col: SortCol, dir: SortDir): number {
@@ -259,15 +258,11 @@ function FileRow({
   setExpandedErr: (v: string | null) => void;
 }) {
   const [, basename] = splitPath(f.filename);
-  const dur =
-    f.started_at != null && f.finished_at != null
-      ? `${(f.finished_at - f.started_at).toFixed(1)}s`
-      : "";
+  const dur = f.duration_s != null ? `${f.duration_s.toFixed(1)}s` : "";
   const hasErr = f.status === "error";
   const isLongError = hasErr && f.error != null && f.error.length > 80;
   const isExpanded = expandedErr === f.filename;
   const isProcessing = f.status === "processing";
-  const errorCodes = hasErr && f.error_codes ? f.error_codes : [];
   const progressLabel = displayProgressLabel(f.progress_stage, f.progress_label);
 
   return (
@@ -300,24 +295,6 @@ function FileRow({
                 }`}
               >
                 {CATEGORY_LABELS[f.error_category] ?? f.error_category}
-              </span>
-            )}
-            {errorCodes.map((code) => (
-              <a
-                key={code}
-                href={`https://talkbank.org/errors/${code}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="inline-flex items-center px-1 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-mono font-semibold hover:bg-red-200 transition-colors no-underline"
-                title={`View documentation for ${code}`}
-              >
-                {code}
-              </a>
-            ))}
-            {hasErr && f.error_line != null && (
-              <span className="text-[10px] font-mono text-zinc-400">
-                line {f.error_line}
               </span>
             )}
             {hasErr && (

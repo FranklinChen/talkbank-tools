@@ -19,7 +19,11 @@ from batchalign.worker._types import (
     InferRequest,
     InferResponse,
     InferTask,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
     _state,
+    sleep_test_delay,
 )
 
 
@@ -30,33 +34,34 @@ def _infer(req: InferRequest) -> InferResponse:
     task routing logic stays centralized in one place.
     """
     if _state.test_echo:
-        if _state.test_delay_ms > 0:
-            import time
+        # The configured delay stands in for the item's work, so it is what
+        # the echo reports as that work's time.
+        def _echo() -> ItemOutcome:
+            sleep_test_delay()
+            return ItemProduced(result=req.payload)
 
-            time.sleep(_state.test_delay_ms / 1000.0)
-        return InferResponse(result=req.payload, elapsed_s=0.0)
+        return InferResponse.timed(_echo)
 
     batch_req = BatchInferRequest(task=req.task, lang=req.lang, items=[req.payload])
     batch_resp = _batch_infer(batch_req)
     return (
         batch_resp.results[0]
         if batch_resp.results
-        else InferResponse(
-            error="Empty batch response",
-            elapsed_s=0.0,
-        )
+        else InferResponse.unexecuted(ItemFailed(error="Empty batch response"))
     )
 
 
 def _batch_infer(req: BatchInferRequest) -> BatchInferResponse:
     """Dispatch one batch request to the task-specific inference adapter."""
     if _state.test_echo:
-        if _state.test_delay_ms > 0:
-            import time
-
-            time.sleep(_state.test_delay_ms / 1000.0)
+        # One delay for the whole batch: it belongs to no single item, so no
+        # item reports it.
+        sleep_test_delay()
         return BatchInferResponse(
-            results=[InferResponse(result=item, elapsed_s=0.0) for item in req.items]
+            results=[
+                InferResponse.unexecuted(ItemProduced(result=item))
+                for item in req.items
+            ]
         )
 
     handler = _state.batch_infer_handler(req.task) or _STATIC_BATCH_INFER_DISPATCH.get(
@@ -65,7 +70,7 @@ def _batch_infer(req: BatchInferRequest) -> BatchInferResponse:
     if handler is None:
         return BatchInferResponse(
             results=[
-                InferResponse(error=f"Unknown task: {req.task}", elapsed_s=0.0)
+                InferResponse.unexecuted(ItemFailed(error=f"Unknown task: {req.task}"))
                 for _ in req.items
             ]
         )

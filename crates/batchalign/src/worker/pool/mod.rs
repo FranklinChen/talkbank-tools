@@ -64,10 +64,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::api::{ReleasedCommand, WorkerLanguage};
+use crate::api::{PositiveSeconds, ReleasedCommand, WorkerLanguage};
 use crate::host_facts::PerProfile;
 use crate::options::CommandOptions;
 use crate::types::engines::{EngineOverrides, FaEngineName, SelectableEngine};
+use crate::types::worker_v2::TaskTimeoutOverrides;
 use crate::worker::{WorkerBootstrapMode, WorkerCapabilities, WorkerProfile, WorkerTarget};
 use batchalign_types::worker::InferTask;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
@@ -466,10 +467,10 @@ const DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS: usize = 32;
 pub struct PoolConfig {
     /// Path to the Python executable.
     pub python_path: String,
-    /// Seconds between health checks.
-    pub health_check_interval_s: u64,
-    /// Maximum seconds to wait for a worker to become ready.
-    pub ready_timeout_s: u64,
+    /// Interval between health checks.
+    pub health_check_interval_s: PositiveSeconds,
+    /// Longest wait for a worker to become ready.
+    pub ready_timeout_s: PositiveSeconds,
     /// Use test-echo mode for all workers (no ML models).
     pub test_echo: bool,
     /// Maximum workers per `(profile, lang)` key, indexed by the
@@ -488,25 +489,22 @@ pub struct PoolConfig {
     /// nonzero value.
     pub max_total_workers: usize,
     /// Maximum seconds `checkout()` may park when the pool is saturated
-    /// and no idle worker is available to evict. 0 = use built-in
+    /// and no idle worker is available to evict. `None`: the built-in
     /// default (300s).
-    pub checkout_wait_timeout_s: u64,
+    pub checkout_wait_timeout: Option<PositiveSeconds>,
     /// Verbosity level forwarded to Python workers (0=warn, 1=info, 2=debug).
     pub verbose: u8,
     /// Runtime-owned worker launch inputs (device policy, injected creds).
     pub runtime: WorkerRuntimeConfig,
-    /// Timeout override for audio-heavy tasks (ASR, FA, speaker).
-    /// 0 = use built-in default (1800).
-    pub audio_task_timeout_s: u64,
-    /// Timeout override for lightweight analysis tasks (OpenSMILE, AVQI).
-    /// 0 = use built-in default (120).
-    pub analysis_task_timeout_s: u64,
-    /// Timeout in seconds for on-demand model loading via `ensure_task`.
-    /// 0 = use built-in default (120).
-    pub ensure_task_timeout_s: u64,
-    /// Path to the worker registry file. Empty = default
-    /// (`~/.batchalign3/workers.json`).
-    pub worker_registry_path: String,
+    /// The operator's transport-ceiling overrides for audio and analysis
+    /// tasks; each absent one leaves the built-in ceiling.
+    pub task_timeouts: TaskTimeoutOverrides,
+    /// Timeout for on-demand model loading via `ensure_task`. `None`: the
+    /// built-in default (120s).
+    pub ensure_task_timeout: Option<PositiveSeconds>,
+    /// Path to the worker registry file. `None`: the ambient default
+    /// (`BATCHALIGN_STATE_DIR`, else `~/.batchalign3/workers.json`).
+    pub worker_registry_path: Option<std::path::PathBuf>,
     /// Test-only: artificial delay in milliseconds before each worker response.
     /// 0 = no delay. Only effective when `test_echo` is also true. Plumbed to
     /// every spawned worker's `WorkerConfig.test_delay_ms`. Used by the
@@ -528,7 +526,7 @@ pub struct PoolConfig {
 }
 
 /// Built-in default for `ensure_task` timeout (seconds).
-const DEFAULT_ENSURE_TASK_TIMEOUT_S: u64 = 120;
+const DEFAULT_ENSURE_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<120>();
 
 /// Built-in default for `checkout_wait_timeout` (seconds).
 ///
@@ -536,24 +534,23 @@ const DEFAULT_ENSURE_TASK_TIMEOUT_S: u64 = 120;
 /// waited 5 minutes with the pool saturated and no idle worker to evict is
 /// operationally a stall, and failing here lets the orchestrator surface
 /// a per-file error instead of hanging indefinitely.
-const DEFAULT_CHECKOUT_WAIT_TIMEOUT_S: u64 = 300;
+const DEFAULT_CHECKOUT_WAIT_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<300>();
 
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             python_path: resolve_python_executable(),
-            health_check_interval_s: 30,
-            ready_timeout_s: 300,
+            health_check_interval_s: PositiveSeconds::literal::<30>(),
+            ready_timeout_s: PositiveSeconds::literal::<300>(),
             test_echo: false,
             max_workers_per_key: DEFAULT_MAX_WORKERS_PER_KEY,
             max_total_workers: DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS,
-            checkout_wait_timeout_s: 0, // 0 = use built-in default (300s)
+            checkout_wait_timeout: None,
             verbose: 0,
             runtime: WorkerRuntimeConfig::default(),
-            audio_task_timeout_s: 0,
-            analysis_task_timeout_s: 0,
-            ensure_task_timeout_s: 0,
-            worker_registry_path: String::new(),
+            task_timeouts: TaskTimeoutOverrides::NONE,
+            ensure_task_timeout: None,
+            worker_registry_path: None,
             test_delay_ms: 0,
             cpu_gate_threshold_override: None,
         }
@@ -569,24 +566,20 @@ impl PoolConfig {
         self.max_total_workers
     }
 
-    /// Resolved `ensure_task` timeout: uses the configured value if nonzero,
-    /// otherwise falls back to the built-in default (120s).
-    pub fn effective_ensure_task_timeout_s(&self) -> u64 {
-        if self.ensure_task_timeout_s > 0 {
-            self.ensure_task_timeout_s
-        } else {
-            DEFAULT_ENSURE_TASK_TIMEOUT_S
+    /// Resolved `ensure_task` timeout: the configured one, else the
+    /// built-in default (120s).
+    pub fn effective_ensure_task_timeout(&self) -> PositiveSeconds {
+        match self.ensure_task_timeout {
+            Some(seconds) => seconds,
+            None => DEFAULT_ENSURE_TASK_TIMEOUT,
         }
     }
 
-    /// Resolved checkout wait timeout as a `Duration`.
-    pub(super) fn checkout_wait_timeout(&self) -> std::time::Duration {
-        let secs = if self.checkout_wait_timeout_s > 0 {
-            self.checkout_wait_timeout_s
-        } else {
-            DEFAULT_CHECKOUT_WAIT_TIMEOUT_S
-        };
-        std::time::Duration::from_secs(secs)
+    /// Resolved checkout wait timeout: the configured one, else the built-in
+    /// default (300s).
+    pub(super) fn checkout_wait_timeout(&self) -> PositiveSeconds {
+        self.checkout_wait_timeout
+            .unwrap_or(DEFAULT_CHECKOUT_WAIT_TIMEOUT)
     }
 }
 
@@ -1303,7 +1296,7 @@ impl WorkerPool {
                 pid = %worker.pid(),
                 "GPU worker finished spawning during pool shutdown; retiring it"
             );
-            worker.shutdown().await;
+            worker.shutdown(shared_gpu::Retirement::PoolShutdown).await;
             return Err(WorkerError::PoolShuttingDown);
         }
 
@@ -1341,16 +1334,15 @@ impl WorkerPool {
     /// The server instance ID assigned at pool creation.
     /// Resolve the worker-registry file this pool reads and writes.
     ///
-    /// An empty configured path means "the ambient default"
+    /// No configured path means "the ambient default"
     /// (`BATCHALIGN_STATE_DIR`, else `~/.batchalign3/workers.json`). Resolved in
     /// one place because three callers need it (discovery, shutdown, and the
     /// Drop safety net) and a pool that discovers from one file while retiring
     /// daemons from another would leak exactly the daemons it started.
     pub(super) fn registry_path(&self) -> std::path::PathBuf {
-        if self.config.worker_registry_path.is_empty() {
-            crate::worker::registry::default_registry_path()
-        } else {
-            std::path::PathBuf::from(&self.config.worker_registry_path)
+        match &self.config.worker_registry_path {
+            Some(path) => path.clone(),
+            None => crate::worker::registry::default_registry_path(),
         }
     }
 

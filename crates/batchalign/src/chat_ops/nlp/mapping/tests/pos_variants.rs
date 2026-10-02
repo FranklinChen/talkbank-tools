@@ -7,17 +7,17 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 
 #[test]
-fn test_pron_mapping_no_subcategory() {
+fn a_pronoun_without_features_is_written_bare() {
     // Python uses "pron|lemma" with feature suffixes, NOT xpos-based subcategories
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "I".to_string(),
         lemma: "I".to_string(),
@@ -28,13 +28,13 @@ fn test_pron_mapping_no_subcategory() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // Python: pron|I-Int-S1 (PronType default "Int", Number default "S", Person default "1")
-    assert_eq!(out, "pron|I-Int-S1");
+    // No features, so nothing is written: BA2 invented `Int`, `S` and `1`.
+    assert_eq!(out, "pron|I");
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn test_pos_adp_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "in".into(),
         lemma: "in".into(),
@@ -53,8 +53,8 @@ fn test_pos_adp_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Python: adp|in (was "prep|in")
@@ -66,7 +66,7 @@ fn test_pos_intj_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "wow".into(),
         lemma: "wow".into(),
@@ -77,8 +77,8 @@ fn test_pos_intj_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Python: intj|wow (was "co|wow")
@@ -90,7 +90,7 @@ fn test_pos_cconj_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "and".into(),
         lemma: "and".into(),
@@ -101,8 +101,8 @@ fn test_pos_cconj_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Python: cconj|and (was "x|and")
@@ -114,7 +114,7 @@ fn test_pos_sconj_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "because".into(),
         lemma: "because".into(),
@@ -125,8 +125,8 @@ fn test_pos_sconj_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "sconj|because");
@@ -137,7 +137,7 @@ fn test_pos_propn_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "London".into(),
         lemma: "London".into(),
@@ -148,8 +148,8 @@ fn test_pos_propn_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Python: propn|London (was "n:prop|London")
@@ -161,7 +161,7 @@ fn test_verb_full_features() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "walks".into(),
         lemma: "walk".into(),
@@ -172,8 +172,8 @@ fn test_verb_full_features() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // VerbForm=Fin, Mood=Ind, Tense=Pres, Number=S, Person=3
@@ -185,7 +185,7 @@ fn test_verb_irregular_past() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "went".into(),
         lemma: "go".into(),
@@ -196,8 +196,8 @@ fn test_verb_irregular_past() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // "went" is irregular past of "go" → "-irr" suffix
@@ -209,7 +209,7 @@ fn test_pron_with_features() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "I".into(),
         lemma: "I".into(),
@@ -220,8 +220,8 @@ fn test_pron_with_features() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "pron|I-Prs-Nom-S1");
@@ -232,7 +232,7 @@ fn test_pron_that_no_number() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "that".into(),
         lemma: "that".into(),
@@ -243,8 +243,8 @@ fn test_pron_that_no_number() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // "that" and "who" get no NumberPerson string
@@ -252,11 +252,11 @@ fn test_pron_that_no_number() {
 }
 
 #[test]
-fn test_det_default_definite() {
+fn a_det_without_definite_gets_no_def() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "the".into(),
         lemma: "the".into(),
@@ -267,12 +267,12 @@ fn test_det_default_definite() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // Definite defaults to "Def"
-    assert_eq!(out, "det|the-Def");
+    // No `Definite` in the analysis, so no `Def` is invented.
+    assert_eq!(out, "det|the");
 }
 
 #[test]
@@ -280,7 +280,7 @@ fn test_det_with_article() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "the".into(),
         lemma: "the".into(),
@@ -291,8 +291,8 @@ fn test_det_with_article() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "det|the-Def-Art");
@@ -303,7 +303,7 @@ fn test_adj_default_degree() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "big".into(),
         lemma: "big".into(),
@@ -314,12 +314,12 @@ fn test_adj_default_degree() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // Degree "Pos" is cleared to empty
-    assert_eq!(out, "adj|big-S1");
+    // Degree "Pos" is not written, and no agreement is invented.
+    assert_eq!(out, "adj|big");
 }
 
 #[test]
@@ -327,7 +327,7 @@ fn test_adj_comparative() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "bigger".into(),
         lemma: "big".into(),
@@ -338,19 +338,19 @@ fn test_adj_comparative() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    assert_eq!(out, "adj|big-Cmp-S1");
+    assert_eq!(out, "adj|big-Cmp");
 }
 
 #[test]
-fn test_noun_obj_accusative() {
+fn an_object_noun_without_case_gets_no_acc() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "dog".into(),
         lemma: "dog".into(),
@@ -361,12 +361,12 @@ fn test_noun_obj_accusative() {
         deprel: "obj".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // deprel "obj" without Case → "Acc"
-    assert_eq!(out, "noun|dog-Acc");
+    // An object relation is not a case: without `Case`, nothing is written.
+    assert_eq!(out, "noun|dog");
 }
 
 #[test]
@@ -374,7 +374,7 @@ fn test_comma_lemma_early_return() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: ",".into(),
         lemma: ",".into(),
@@ -385,8 +385,8 @@ fn test_comma_lemma_early_return() {
         deprel: "punct".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "cm|cm");
@@ -432,7 +432,7 @@ fn test_irr_suffix_with_3letter_code() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("eng").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "went".into(),
         lemma: "go".into(),
@@ -443,8 +443,8 @@ fn test_irr_suffix_with_3letter_code() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert!(
@@ -460,7 +460,7 @@ fn test_multivalue_ud_features_preserve_commas() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("hr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "što".into(),
         lemma: "što".into(),
@@ -471,8 +471,8 @@ fn test_multivalue_ud_features_preserve_commas() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Must contain comma: we respect UD multi-value feature conventions

@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{JobId, NodeId, UnixTimestamp};
+use crate::api::{JobId, MachineTime, NodeId};
 // `batchalign_types`, not `crate::worker`. This said `use crate::worker::
 // WorkerPid` until 2026-07-30, which resolved through `worker/mod.rs`'s
 // `pub use crate::types::worker::*`, i.e. `types` imported its own re-export
@@ -331,10 +331,10 @@ pub struct AttemptRecord {
     pub work_unit_kind: WorkUnitKind,
     /// 1-based attempt number for this work unit.
     pub attempt_number: u32,
-    /// Start timestamp, unix seconds with fractional precision.
-    pub started_at: UnixTimestamp,
-    /// Finish timestamp, unix seconds with fractional precision.
-    pub finished_at: Option<UnixTimestamp>,
+    /// When the attempt started.
+    pub started_at: MachineTime,
+    /// When the attempt finished; `None` while it runs.
+    pub finished_at: Option<MachineTime>,
     /// Final outcome of the attempt.
     pub outcome: AttemptOutcome,
     /// Broad failure classification when the attempt did not succeed.
@@ -353,20 +353,151 @@ pub struct AttemptRecord {
 /// the local dispatcher claims a queued job for a node, records the lease, and
 /// later clears it when the runner exits. Fleet mode will extend the same shape
 /// with real cross-node renewal and expiry handling.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// A lease always expires strictly after its heartbeat.
+//
+// (A plain comment, not documentation: the doc text above is also the
+// OpenAPI description.) The fields are private and every route in keeps the
+// order: `taken` and `renew` compute the expiry from a `LeaseTtl`, which is
+// positive, and `new`, shared by the database read and deserialization,
+// refuses an expiry that is not after the heartbeat. The fields were public
+// until 2026-10-01, so `expires_at <= heartbeat_at` was constructible anywhere.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "LeaseRecordWire")]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct LeaseRecord {
     /// Identifier of the node that currently owns the lease.
-    pub leased_by_node: NodeId,
-    /// Unix timestamp when the lease was created or most recently renewed.
-    pub heartbeat_at: UnixTimestamp,
-    /// Unix timestamp when the lease should be considered expired if not renewed.
-    pub expires_at: UnixTimestamp,
+    leased_by_node: NodeId,
+    /// When the lease was taken or most recently renewed.
+    heartbeat_at: MachineTime,
+    /// When the lease expires if not renewed.
+    expires_at: MachineTime,
+}
+
+/// The unvalidated shape a [`LeaseRecord`] is deserialized through. Private:
+/// nothing outside this module can hold a lease whose order is unchecked.
+#[derive(Deserialize)]
+struct LeaseRecordWire {
+    leased_by_node: NodeId,
+    heartbeat_at: MachineTime,
+    expires_at: MachineTime,
+}
+
+impl TryFrom<LeaseRecordWire> for LeaseRecord {
+    type Error = LeaseExpiryNotAfterHeartbeat;
+
+    fn try_from(wire: LeaseRecordWire) -> Result<Self, Self::Error> {
+        Self::new(wire.leased_by_node, wire.heartbeat_at, wire.expires_at)
+    }
+}
+
+/// A lease whose expiry is not after its heartbeat names no lease that could
+/// ever have been held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a lease must expire after its heartbeat: heartbeat {heartbeat_at}, expiry {expires_at}")]
+pub struct LeaseExpiryNotAfterHeartbeat {
+    /// The heartbeat the lease named.
+    pub heartbeat_at: MachineTime,
+    /// The expiry the lease named.
+    pub expires_at: MachineTime,
+}
+
+impl LeaseRecord {
+    /// A lease read back from storage or the wire, refused unless it expires
+    /// strictly after its heartbeat.
+    pub fn new(
+        leased_by_node: NodeId,
+        heartbeat_at: MachineTime,
+        expires_at: MachineTime,
+    ) -> Result<Self, LeaseExpiryNotAfterHeartbeat> {
+        if expires_at > heartbeat_at {
+            Ok(Self {
+                leased_by_node,
+                heartbeat_at,
+                expires_at,
+            })
+        } else {
+            Err(LeaseExpiryNotAfterHeartbeat {
+                heartbeat_at,
+                expires_at,
+            })
+        }
+    }
+
+    /// The lease `node` takes at `now`: it expires `ttl` later. With
+    /// [`Self::renew`], the one place a lease's expiry is computed.
+    ///
+    /// `ttl` is positive, so the expiry is after `now`; the only exception
+    /// would be `MachineTime::plus` saturating at the last representable
+    /// instant, which no clock reaches.
+    pub(crate) fn taken(node: NodeId, now: MachineTime, ttl: crate::config::LeaseTtl) -> Self {
+        Self {
+            leased_by_node: node,
+            heartbeat_at: now,
+            expires_at: now.plus(ttl.get()),
+        }
+    }
+
+    /// Renew this lease in place at `now`: same owner, new heartbeat, and an
+    /// expiry `ttl` later.
+    pub(crate) fn renew(&mut self, now: MachineTime, ttl: crate::config::LeaseTtl) {
+        self.heartbeat_at = now;
+        self.expires_at = now.plus(ttl.get());
+    }
+
+    /// The node that holds the lease.
+    pub fn leased_by_node(&self) -> &NodeId {
+        &self.leased_by_node
+    }
+
+    /// When the lease was taken or last renewed.
+    pub fn heartbeat_at(&self) -> MachineTime {
+        self.heartbeat_at
+    }
+
+    /// When the lease lapses unless renewed; always after the heartbeat.
+    pub fn expires_at(&self) -> MachineTime {
+        self.expires_at
+    }
+
+    /// Whether the lease is still held at `now`. The one lease-held
+    /// predicate; today only the test-only local queue-claim path asks.
+    #[cfg(test)]
+    pub(crate) fn is_held_at(&self, now: MachineTime) -> bool {
+        self.expires_at > now
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The order is enforced by both routes a stored lease comes back by.
+    #[test]
+    fn a_lease_that_does_not_expire_after_its_heartbeat_is_refused() {
+        let at = crate::unix_time(100.0);
+        assert_eq!(
+            LeaseRecord::new(NodeId::from("n"), at, at),
+            Err(LeaseExpiryNotAfterHeartbeat {
+                heartbeat_at: at,
+                expires_at: at
+            })
+        );
+        assert!(LeaseRecord::new(NodeId::from("n"), at, crate::unix_time(99.0)).is_err());
+        let held = LeaseRecord::new(NodeId::from("n"), at, crate::unix_time(160.0))
+            .expect("an ordered lease");
+
+        let json = serde_json::to_string(&held).expect("serializes");
+        assert_eq!(
+            serde_json::from_str::<LeaseRecord>(&json).expect("round trips"),
+            held
+        );
+        let inverted = json
+            .replace("\"expires_at\"", "\"was_expires\"")
+            .replace("\"heartbeat_at\"", "\"expires_at\"")
+            .replace("\"was_expires\"", "\"heartbeat_at\"");
+        assert!(serde_json::from_str::<LeaseRecord>(&inverted).is_err());
+    }
 
     #[test]
     fn failure_category_roundtrip() {

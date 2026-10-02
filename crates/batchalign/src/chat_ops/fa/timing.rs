@@ -373,6 +373,9 @@ pub struct SpanRejections {
     pub outside_window: usize,
     /// How far the worst out-of-window report exceeded its audio.
     pub worst_overshoot: Ms,
+    /// The engine's two ends were refused as an interval for their range (a
+    /// bound past `AdmittedInterval::MAX_MS`, as an epoch timestamp is).
+    pub inadmissible: usize,
 }
 
 impl SpanRejections {
@@ -387,6 +390,20 @@ impl SpanRejections {
         }
     }
 
+    /// A pair of reported ends refused as an interval
+    /// (`AdmittedInterval::admit_positions`): an inverted pair counts with the
+    /// inverted spans, any other refusal as inadmissible.
+    pub fn record_refusal(&mut self, refusal: batchalign_types::interval::IntervalRefusal) {
+        use batchalign_types::interval::IntervalRefusal;
+        match refusal {
+            IntervalRefusal::Inverted { .. } => self.inverted += 1,
+            IntervalRefusal::NotFinite { .. }
+            | IntervalRefusal::Negative { .. }
+            | IntervalRefusal::OutOfRange { .. }
+            | IntervalRefusal::OffsetOverflow { .. } => self.inadmissible += 1,
+        }
+    }
+
     /// A report the engine placed outside the audio it was handed.
     pub fn record_outside(&mut self, fault: OutsideWindow) {
         self.outside_window += 1;
@@ -396,7 +413,7 @@ impl SpanRejections {
 
     /// How many timings were rejected, for any reason.
     pub fn total(self) -> usize {
-        self.no_extent + self.inverted + self.outside_window
+        self.no_extent + self.inverted + self.outside_window + self.inadmissible
     }
 
     /// Whether the engine reported about audio it was not given.

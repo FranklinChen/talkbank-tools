@@ -63,12 +63,7 @@ pub async fn start(
         cfg.max_workers_per_job = Some(workers as u32);
     }
     if let Some(timeout) = args.timeout {
-        cfg.audio_task_timeout_s = timeout;
-    }
-
-    let warnings = cfg.validate();
-    for w in &warnings {
-        eprintln!("warning: {w}");
+        cfg.audio_task_timeout_s = Some(timeout);
     }
 
     if cfg.media_roots.is_empty() && cfg.media_mappings.is_empty() {
@@ -134,11 +129,7 @@ pub async fn start(
         let pool_config = PoolConfig {
             python_path: worker_python.clone(),
             test_echo: args.test_echo,
-            health_check_interval_s: if cfg.worker_health_interval_s > 0 {
-                cfg.worker_health_interval_s
-            } else {
-                PoolConfig::default().health_check_interval_s
-            },
+            health_check_interval_s: cfg.worker_health_interval_s,
             verbose,
             // Children inherit the SAME state dir this server resolved. Do not
             // infer it from `worker_registry_path`: that is a free-form file
@@ -153,18 +144,13 @@ pub async fn start(
                 Some(n) => crate::host_facts::PerProfile::uniform(n as usize),
                 None => effective.max_workers_per_key_by_profile.map(|n| n as usize),
             },
-            ready_timeout_s: if cfg.worker_ready_timeout_s > 0 {
-                cfg.worker_ready_timeout_s
-            } else {
-                PoolConfig::default().ready_timeout_s
-            },
+            ready_timeout_s: cfg.worker_ready_timeout_s,
             // `recommend_max_total_workers` clamps to `[2, 32]` so the
             // `as usize` cast is always well-defined.
             max_total_workers: effective.max_total_workers as usize,
-            checkout_wait_timeout_s: 0, // 0 = use built-in default (300s)
-            audio_task_timeout_s: cfg.audio_task_timeout_s,
-            analysis_task_timeout_s: cfg.analysis_task_timeout_s,
-            ensure_task_timeout_s: cfg.ensure_task_timeout_s,
+            checkout_wait_timeout: None,
+            task_timeouts: cfg.task_timeouts(),
+            ensure_task_timeout: cfg.ensure_task_timeout_s,
             worker_registry_path: cfg.worker_registry_path.clone(),
             test_delay_ms: 0,
             // Production: live host CPU loadavg gate, not a test override.
@@ -184,8 +170,15 @@ pub async fn start(
 
         std::fs::create_dir_all(layout.state_dir())?;
 
-        // Stop any existing server
-        let _ = stop_server(&layout);
+        // Stop any existing server; whether one was running does not matter
+        // here, but a failure to stop it does, and so does a handshake that
+        // cannot be read: it may name a live server, and the new one would
+        // publish over it.
+        if let daemon::StopOutcome::Unreadable(unreadable) =
+            daemon::stop_manual_server(&layout).await?
+        {
+            return Err(unreadable.into());
+        }
 
         let log_path = layout.server_log_path();
         // Append mode: preserve previous server logs across restarts.
@@ -316,22 +309,32 @@ pub async fn start(
 pub async fn stop() -> Result<(), CliError> {
     let layout = RuntimeLayout::from_env();
 
-    // Stop daemon first
-    if daemon::stop_daemon().await? {
-        eprintln!("Local daemon stopped.");
+    // Daemons first, then the manually started server. Each outcome is
+    // reported as what it was; a record that cannot be read is named and left
+    // in place, and makes the command fail once everything else was tried.
+    let outcomes = [
+        ("Local daemon", daemon::stop_daemon().await?),
+        ("Sidecar daemon", daemon::stop_sidecar_daemon().await?),
+        ("Server", daemon::stop_manual_server(&layout).await?),
+    ];
+    let mut unreadable = None;
+    for (what, outcome) in outcomes {
+        match outcome {
+            daemon::StopOutcome::Stopped { pid } => eprintln!("{what} (PID {pid}) stopped."),
+            daemon::StopOutcome::AlreadyDead { pid } => {
+                eprintln!("{what} (PID {pid}) had already exited; its record was removed.")
+            }
+            daemon::StopOutcome::NotRunning => eprintln!("{what}: none recorded."),
+            daemon::StopOutcome::Unreadable(record) => {
+                eprintln!("{what}: {record}");
+                unreadable.get_or_insert(record);
+            }
+        }
     }
-    if daemon::stop_sidecar_daemon().await? {
-        eprintln!("Sidecar daemon stopped.");
+    match unreadable {
+        Some(record) => Err(record.into()),
+        None => Ok(()),
     }
-
-    let stopped = stop_server(&layout);
-    if stopped {
-        eprintln!("Server stopped.");
-    } else {
-        eprintln!("No server process found.");
-    }
-
-    Ok(())
 }
 
 /// `serve status`: check server health.
@@ -341,10 +344,7 @@ pub async fn status(args: &ServeStatusArgs) -> Result<(), CliError> {
     // `serve status` is a diagnostic command, so surfacing a bad config is part
     // of its job. The port is only a FALLBACK: this command wants to reach the
     // server actually running, which the published handshake names.
-    let (cfg, warnings) = config::load_validated_config_from_layout(&layout, None)?;
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
+    let cfg = config::load_config_from_layout(&layout, None)?;
 
     let server = if let Some(ref s) = args.server {
         s.trim_end_matches('/').to_string()
@@ -352,7 +352,16 @@ pub async fn status(args: &ServeStatusArgs) -> Result<(), CliError> {
         // Try local daemon first
         // The daemon's port comes from the handshake it published, not from
         // `daemon.json`, which no longer mirrors it.
-        let daemon_url = daemon::read_daemon_info().and_then(|info| {
+        let recorded = match daemon::read_daemon_info() {
+            Ok(recorded) => recorded,
+            // A diagnostic command: say so, then look for a server the other
+            // ways rather than stopping here.
+            Err(unreadable) => {
+                eprintln!("warning: {unreadable}");
+                None
+            }
+        };
+        let daemon_url = recorded.and_then(|info| {
             ServerHandshake::published_port(layout.state_dir(), HandshakeSlot::Main)
                 .map(|port| (info.pid, format!("http://127.0.0.1:{port}")))
         });
@@ -397,43 +406,4 @@ pub async fn status(args: &ServeStatusArgs) -> Result<(), CliError> {
     }
 
     Ok(())
-}
-
-/// Stop a server whose PID is recorded in the state directory.
-///
-/// Validates that the recorded PID actually belongs to a live process before
-/// sending signals, and removes the handshake afterwards, including when the
-/// process was already dead. The one record it leaves in place is one it could
-/// not read: that may still name a live server, and deleting it would strand
-/// the process with nothing recording it.
-fn stop_server(layout: &RuntimeLayout) -> bool {
-    let state_dir = layout.state_dir();
-    // `serve stop` stops the server a person started, which is the main slot;
-    // the sidecar is stopped through `stop_sidecar_daemon`.
-    let handshake = match ServerHandshake::read(state_dir, HandshakeSlot::Main) {
-        Ok(Some(handshake)) => handshake,
-        Ok(None) => return false,
-        Err(error) => {
-            // Left in place on purpose. A handshake we cannot read may still
-            // name a live server, and deleting it would strand that process
-            // with nothing recording it. Say so instead of silently tidying.
-            eprintln!("warning: {error}");
-            return false;
-        }
-    };
-
-    // Both states carry a PID, and stopping is the same act either way: a
-    // server that has spawned but not yet bound still needs killing.
-    let pid = handshake.pid();
-
-    // Check if the process is actually alive before signalling.
-    // Avoids sending signals to an unrelated process that reused the PID.
-    if !daemon::is_process_alive(pid) {
-        let _ = ServerHandshake::remove(state_dir, HandshakeSlot::Main);
-        return false;
-    }
-
-    let killed = daemon::stop_server_process(pid);
-    let _ = ServerHandshake::remove(state_dir, HandshakeSlot::Main);
-    killed
 }

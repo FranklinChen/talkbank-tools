@@ -89,7 +89,7 @@ struct Step {
     #[serde(default)]
     run: Option<String>,
     #[serde(default)]
-    with: BTreeMap<String, serde_yaml::Value>,
+    with: BTreeMap<String, yaml_serde::Value>,
 }
 
 /// Which artifact a download step asks for.
@@ -179,7 +179,7 @@ impl Step {
 
     /// The artifact a download step asks for.
     fn artifact_reference(&self) -> ArtifactReference {
-        let read = |key: &str| self.with.get(key).and_then(serde_yaml::Value::as_str);
+        let read = |key: &str| self.with.get(key).and_then(yaml_serde::Value::as_str);
         match (read("name"), read("pattern")) {
             (Some(raw), _) | (None, Some(raw)) if raw.contains("${{") => {
                 ArtifactReference::Unresolvable(raw.to_owned())
@@ -274,7 +274,7 @@ impl Bypass {
 
 /// Parse one workflow, or say why it could not be read.
 fn parse_workflow(text: &str) -> std::result::Result<Workflow, String> {
-    serde_yaml::from_str(text).map_err(|err| format!("cannot parse as a workflow: {err}"))
+    yaml_serde::from_str(text).map_err(|err| format!("cannot parse as a workflow: {err}"))
 }
 
 /// Whether this workflow publishes the CLI binary artifact.
@@ -324,7 +324,7 @@ fn check_action_definition(root: &Path) -> std::result::Result<(), String> {
     let path = root.join(CLI_BINARY_ACTION_FILE);
     let text = std::fs::read_to_string(&path)
         .map_err(|err| format!("cannot read {CLI_BINARY_ACTION_FILE}: {err}"))?;
-    let definition: ActionDefinition = serde_yaml::from_str(&text)
+    let definition: ActionDefinition = yaml_serde::from_str(&text)
         .map_err(|err| format!("cannot parse {CLI_BINARY_ACTION_FILE} as an action: {err}"))?;
 
     let mut missing = Vec::new();

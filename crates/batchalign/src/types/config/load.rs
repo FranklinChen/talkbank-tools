@@ -9,6 +9,10 @@ use super::{RuntimeLayout, ServerConfig};
 
 /// Load `ServerConfig` using an explicit runtime layout when no config path is
 /// passed.
+///
+/// The one loader. Every scalar is admitted as it is read (a value below its
+/// floor is a parse error naming the field), so there is no separate
+/// "validated" load whose warnings a caller could skip.
 pub fn load_config_from_layout(
     layout: &RuntimeLayout,
     path: Option<&Path>,
@@ -23,23 +27,9 @@ pub fn load_config_from_layout(
     }
 
     let contents = std::fs::read_to_string(&path).map_err(|e| ConfigError::Io(path.clone(), e))?;
-    let config: ServerConfig = serde_yaml::from_str(&contents)
+    let config: ServerConfig = yaml_serde::from_str(&contents)
         .map_err(|e| ConfigError::Parse(path.clone(), e.to_string()))?;
     Ok(config)
-}
-
-/// Load admitted [`ServerConfig`] and report non-fatal scalar corrections.
-///
-/// Returns the config plus any warning messages produced by
-/// [`ServerConfig::validate`]. Callers that need a working runtime config but
-/// still want to surface corrected input values should prefer this helper.
-pub fn load_validated_config_from_layout(
-    layout: &RuntimeLayout,
-    path: Option<&Path>,
-) -> Result<(ServerConfig, Vec<String>), ConfigError> {
-    let config = load_config_from_layout(layout, path)?;
-    let warnings = config.validate();
-    Ok((config, warnings))
 }
 
 /// Load ServerConfig from a YAML file. Falls back to defaults if the file

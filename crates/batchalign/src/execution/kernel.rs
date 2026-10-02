@@ -21,7 +21,7 @@ use crate::recipe_runner::work_unit::{CompareWorkUnit, PlannedWorkUnit};
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage, classify_server_error};
 use crate::scheduling::{FailureCategory, WorkUnitKind};
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 
 use super::worker_gateway::WorkerGateway;
 
@@ -86,7 +86,6 @@ impl ExecutionKernel {
             .map(|file| (file.filename.clone(), file.file_index))
             .collect();
         let sink = ctx.host.sink().clone();
-        let started_at = unix_now();
         let mut consolidated_rows = Vec::new();
 
         for file in &ctx.job.pending_files {
@@ -96,10 +95,10 @@ impl ExecutionKernel {
                 file.filename.as_ref(),
             );
             lifecycle
-                .begin_first_attempt(WorkUnitKind::BatchInfer, started_at, FileStage::Comparing)
+                .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Comparing)
                 .await;
             if is_gold_file(file.filename.as_ref()) {
-                lifecycle.complete_without_result(started_at).await;
+                lifecycle.complete_without_result().await;
             }
         }
 
@@ -124,11 +123,7 @@ impl ExecutionKernel {
             if let Err(error) = stage_result {
                 state
                     .lifecycle(ctx)
-                    .fail(
-                        &error.to_string(),
-                        classify_server_error(&error),
-                        unix_now(),
-                    )
+                    .fail(&error.to_string(), classify_server_error(&error))
                     .await;
             } else if let Some(row) = state.consolidated_metrics.take() {
                 consolidated_rows.push(row);
@@ -156,7 +151,6 @@ pub(crate) async fn dispatch_compare_job(
         Ok(plan) => plan,
         Err(error) => {
             let sink = host.sink().clone();
-            let failed_at = unix_now();
             for file in &job.pending_files {
                 let lifecycle = FileRunTracker::new(
                     sink.as_ref(),
@@ -164,14 +158,13 @@ pub(crate) async fn dispatch_compare_job(
                     file.filename.as_ref(),
                 );
                 if is_gold_file(file.filename.as_ref()) {
-                    lifecycle.complete_without_result(failed_at).await;
+                    lifecycle.complete_without_result().await;
                     continue;
                 }
                 lifecycle
                     .fail(
                         &format!("Compare planning failed: {error}"),
                         FailureCategory::Validation,
-                        failed_at,
                     )
                     .await;
             }
@@ -385,7 +378,6 @@ impl StageExecutor for CompareStageExecutor {
                         state.unit.main.display_path
                     )));
                 };
-                let finished_at = unix_now();
                 for artifact in &artifacts.files {
                     match artifact.role {
                         MaterializedArtifactRole::Primary => {
@@ -407,7 +399,6 @@ impl StageExecutor for CompareStageExecutor {
                                 .complete_with_result(
                                     artifact.display_path.clone(),
                                     artifact.content_type,
-                                    finished_at,
                                 )
                                 .await;
                         }
@@ -702,6 +693,7 @@ mod tests {
             crate::config::ServerConfig::default(),
             None,
             _tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
         ));
         let host = DispatchHostContext::from_store(store);
         // Built through the one constructor rather than assembled here, so the

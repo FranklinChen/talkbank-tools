@@ -1,130 +1,21 @@
-//! Per-file lifecycle tracker and free helper functions for file state
-//! mutations.
+//! Per-file lifecycle tracker.
 //!
-//! Dispatch code should prefer [`FileRunTracker`] over hand-sequencing raw
-//! store mutations. That keeps the per-file state machine explicit.
+//! Dispatch code records a file's lifecycle through [`FileRunTracker`], which
+//! stamps every event from the sink's clock. The free helpers that used to
+//! forward one sink call each, taking a time from their caller, are gone: a
+//! time-taking door beside the tracker was a way around it.
 
-use crate::api::{ContentType, DisplayPath, JobId, UnixTimestamp};
+use crate::api::{ContentType, DisplayPath, JobId};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::CompletedFileOutput;
 
 use super::{FileStage, RunnerEventSink};
 
-// ---------------------------------------------------------------------------
-// Free helper functions for individual file-state mutations
-// ---------------------------------------------------------------------------
-
-/// Mark a file as actively processing and persist the start timestamp.
-pub(crate) async fn mark_file_processing(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    filename: &str,
-    started_at: UnixTimestamp,
-) {
-    sink.mark_file_processing(job_id, filename, started_at)
-        .await;
-}
-
-/// Mark a file as successfully completed and attach one result entry.
-pub(crate) async fn mark_file_done(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    filename: &str,
-    result_filename: DisplayPath,
-    content_type: ContentType,
-    finished_at: UnixTimestamp,
-    stamp: crate::api::FileStampOutcome,
-) {
-    sink.mark_file_done(
-        job_id,
-        filename,
-        finished_at,
-        Some(CompletedFileOutput {
-            filename: result_filename,
-            content_type,
-            stamp,
-        }),
-    )
-    .await;
-}
-
-/// Mark a file as done without recording a downloadable result artifact.
-pub(crate) async fn mark_file_done_without_result(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    filename: &str,
-    finished_at: UnixTimestamp,
-) {
-    sink.mark_file_done(job_id, filename, finished_at, None)
-        .await;
-}
-
-/// Set a file to error status.
-pub(crate) async fn set_file_error(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    filename: &str,
-    error: &str,
-    category: FailureCategory,
-    finished_at: UnixTimestamp,
-) {
-    sink.mark_file_error(job_id, filename, error, category, finished_at)
-        .await;
-}
-
-/// Increment the control-plane counter for started work-unit attempts.
-pub(crate) async fn start_file_attempt(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    filename: &str,
-    work_unit_kind: WorkUnitKind,
-    started_at: UnixTimestamp,
-) {
-    sink.start_file_attempt(job_id, filename, work_unit_kind, started_at)
-        .await;
-}
-
-/// Finalize a successful file attempt after the output has been persisted.
-pub(crate) async fn finish_file_attempt_success(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    filename: &str,
-    finished_at: UnixTimestamp,
-) {
-    sink.finish_file_attempt(
-        job_id,
-        filename,
-        AttemptOutcome::Succeeded,
-        None,
-        RetryDisposition::Succeed,
-        finished_at,
-    )
-    .await;
-}
-
-/// Mark a file as waiting for a retry after a transient attempt failure.
-pub(crate) async fn set_file_retry_pending(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    filename: &str,
-    retry_at: UnixTimestamp,
-    category: FailureCategory,
-    message: &str,
-    finished_at: UnixTimestamp,
-) {
-    sink.mark_file_retry_pending(job_id, filename, retry_at, category, message, finished_at)
-        .await;
-}
-
-/// Clear transient retry state before a new attempt starts or succeeds.
-pub(crate) async fn clear_retry_state(sink: &dyn RunnerEventSink, job_id: &JobId, filename: &str) {
-    sink.clear_file_retry_state(job_id, filename).await;
-}
-
 /// Update ephemeral progress fields on a file and broadcast the update.
 ///
 /// Progress fields are never persisted to SQLite; they are purely for
-/// live display in the CLI/TUI/React dashboard.
+/// live display in the CLI/TUI/React dashboard. The one free helper left:
+/// progress carries no time, so a caller holding the sink cannot misdate it.
 pub(crate) async fn set_file_progress(
     sink: &dyn RunnerEventSink,
     job_id: &JobId,
@@ -168,8 +59,11 @@ pub(crate) enum FileTaskOutcome {
 
 /// Runner-side helper for one file's lifecycle and attempt bookkeeping.
 ///
-/// Dispatch code should prefer this helper over hand-sequencing raw store
-/// mutations. That keeps the per-file state machine explicit:
+/// Every event is stamped here, from the sink's clock, never by the caller:
+/// a pipeline cannot record a file finishing at a time it chose, and an event
+/// that writes two records (the file and its attempt) writes one instant to
+/// both. Dispatch code should prefer this helper over hand-sequencing raw
+/// store mutations. That keeps the per-file state machine explicit:
 ///
 /// - begin the first processing attempt
 /// - move between human-readable stages
@@ -193,67 +87,55 @@ impl<'a> FileRunTracker<'a> {
 
     /// Mark the file as processing, open the first durable attempt, and set the
     /// initial stage label shown to operators.
-    pub(crate) async fn begin_first_attempt(
-        &self,
-        work_unit_kind: WorkUnitKind,
-        started_at: UnixTimestamp,
-        stage: FileStage,
-    ) {
-        mark_file_processing(self.sink, self.job_id, self.filename, started_at).await;
-        clear_retry_state(self.sink, self.job_id, self.filename).await;
-        start_file_attempt(
-            self.sink,
-            self.job_id,
-            self.filename,
-            work_unit_kind,
-            started_at,
-        )
-        .await;
+    pub(crate) async fn begin_first_attempt(&self, work_unit_kind: WorkUnitKind, stage: FileStage) {
+        let started_at = self.sink.now();
+        self.sink
+            .mark_file_processing(self.job_id, self.filename, started_at)
+            .await;
+        self.sink
+            .clear_file_retry_state(self.job_id, self.filename)
+            .await;
+        self.sink
+            .start_file_attempt(self.job_id, self.filename, work_unit_kind, started_at)
+            .await;
         self.stage(stage).await;
     }
 
     /// Open a durable setup attempt that fails before the file ever enters the
-    /// normal processing pipeline.
+    /// normal processing pipeline. The attempt opens and fails at one instant,
+    /// since setup is refused before any work runs.
     ///
     /// This is used for preflight rejection paths such as missing or
-    /// incompatible media where we still want attempt history but should not
-    /// advertise the file as actively processing.
-    pub(crate) async fn record_setup_failure(
-        &self,
-        started_at: UnixTimestamp,
-        error: &str,
-        category: FailureCategory,
-        finished_at: UnixTimestamp,
-    ) {
-        clear_retry_state(self.sink, self.job_id, self.filename).await;
-        start_file_attempt(
-            self.sink,
-            self.job_id,
-            self.filename,
-            WorkUnitKind::FileSetup,
-            started_at,
-        )
-        .await;
-        self.fail(error, category, finished_at).await;
+    /// incompatible media, where attempt history is still wanted but the file
+    /// should not be advertised as actively processing.
+    pub(crate) async fn record_setup_failure(&self, error: &str, category: FailureCategory) {
+        let refused_at = self.sink.now();
+        self.sink
+            .clear_file_retry_state(self.job_id, self.filename)
+            .await;
+        self.sink
+            .start_file_attempt(
+                self.job_id,
+                self.filename,
+                WorkUnitKind::FileSetup,
+                refused_at,
+            )
+            .await;
+        self.sink
+            .mark_file_error(self.job_id, self.filename, error, category, refused_at)
+            .await;
     }
 
     /// Clear retry-only state, open the next attempt, and publish the stage
     /// label for the new run.
-    pub(crate) async fn restart_attempt(
-        &self,
-        work_unit_kind: WorkUnitKind,
-        started_at: UnixTimestamp,
-        stage: FileStage,
-    ) {
-        clear_retry_state(self.sink, self.job_id, self.filename).await;
-        start_file_attempt(
-            self.sink,
-            self.job_id,
-            self.filename,
-            work_unit_kind,
-            started_at,
-        )
-        .await;
+    pub(crate) async fn restart_attempt(&self, work_unit_kind: WorkUnitKind, stage: FileStage) {
+        let started_at = self.sink.now();
+        self.sink
+            .clear_file_retry_state(self.job_id, self.filename)
+            .await;
+        self.sink
+            .start_file_attempt(self.job_id, self.filename, work_unit_kind, started_at)
+            .await;
         self.stage(stage).await;
     }
 
@@ -262,42 +144,32 @@ impl<'a> FileRunTracker<'a> {
         set_file_progress(self.sink, self.job_id, self.filename, stage, None, None).await;
     }
 
-    /// Record a retryable failure and publish the retry deadline.
-    pub(crate) async fn retry(
+    /// Record a retryable failure now, eligible again after `backoff`.
+    pub(crate) async fn retry_after(
         &self,
-        retry_at: UnixTimestamp,
+        backoff: std::time::Duration,
         category: FailureCategory,
         message: &str,
-        finished_at: UnixTimestamp,
     ) {
-        set_file_retry_pending(
-            self.sink,
-            self.job_id,
-            self.filename,
-            retry_at,
-            category,
-            message,
-            finished_at,
-        )
-        .await;
+        let finished_at = self.sink.now();
+        self.sink
+            .mark_file_retry_pending(
+                self.job_id,
+                self.filename,
+                finished_at.deadline_after(backoff),
+                category,
+                message,
+                finished_at,
+            )
+            .await;
     }
 
     /// Record a terminal file failure.
-    pub(crate) async fn fail(
-        &self,
-        error: &str,
-        category: FailureCategory,
-        finished_at: UnixTimestamp,
-    ) {
-        set_file_error(
-            self.sink,
-            self.job_id,
-            self.filename,
-            error,
-            category,
-            finished_at,
-        )
-        .await;
+    pub(crate) async fn fail(&self, error: &str, category: FailureCategory) {
+        let finished_at = self.sink.now();
+        self.sink
+            .mark_file_error(self.job_id, self.filename, error, category, finished_at)
+            .await;
     }
 
     /// Mark the file as done with a downloadable result and close the active
@@ -310,12 +182,10 @@ impl<'a> FileRunTracker<'a> {
         &self,
         result_filename: DisplayPath,
         content_type: ContentType,
-        finished_at: UnixTimestamp,
     ) {
         self.complete_with_stamped_result(
             result_filename,
             content_type,
-            finished_at,
             crate::api::FileStampOutcome::Unrecorded,
         )
         .await;
@@ -327,27 +197,38 @@ impl<'a> FileRunTracker<'a> {
         &self,
         result_filename: DisplayPath,
         content_type: ContentType,
-        finished_at: UnixTimestamp,
         stamp: crate::api::FileStampOutcome,
     ) {
-        mark_file_done(
-            self.sink,
-            self.job_id,
-            self.filename,
-            result_filename,
+        self.complete(Some(CompletedFileOutput {
+            filename: result_filename,
             content_type,
-            finished_at,
             stamp,
-        )
+        }))
         .await;
-        finish_file_attempt_success(self.sink, self.job_id, self.filename, finished_at).await;
     }
 
     /// Mark the file as done without a downloadable artifact and close the
     /// active attempt as successful.
-    pub(crate) async fn complete_without_result(&self, finished_at: UnixTimestamp) {
-        mark_file_done_without_result(self.sink, self.job_id, self.filename, finished_at).await;
-        finish_file_attempt_success(self.sink, self.job_id, self.filename, finished_at).await;
+    pub(crate) async fn complete_without_result(&self) {
+        self.complete(None).await;
+    }
+
+    /// The file is done and its attempt succeeded, both at one instant.
+    async fn complete(&self, result: Option<CompletedFileOutput>) {
+        let finished_at = self.sink.now();
+        self.sink
+            .mark_file_done(self.job_id, self.filename, finished_at, result)
+            .await;
+        self.sink
+            .finish_file_attempt(
+                self.job_id,
+                self.filename,
+                AttemptOutcome::Succeeded,
+                None,
+                RetryDisposition::Succeed,
+                finished_at,
+            )
+            .await;
     }
 }
 

@@ -7,7 +7,7 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 
@@ -16,7 +16,7 @@ fn test_simple_noun_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "dog".to_string(),
         lemma: "dog".to_string(),
@@ -27,9 +27,9 @@ fn test_simple_noun_mapping() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Python: noun|dog (UPOS lowercased)
@@ -41,7 +41,7 @@ fn test_sanitization_prevents_corruption() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "bad|word".to_string(),
         lemma: "bad|word".to_string(), // Lemma contains a reserved CHAT character!
@@ -52,9 +52,9 @@ fn test_sanitization_prevents_corruption() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
 
@@ -73,7 +73,7 @@ fn test_mwt_assembly_english_dont() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "don't".to_string(),
                 lemma: "do not".to_string(),
@@ -84,8 +84,8 @@ fn test_mwt_assembly_english_dont() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "do".to_string(),
                 lemma: "do".to_string(),
@@ -96,8 +96,8 @@ fn test_mwt_assembly_english_dont() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "n't".to_string(),
                 lemma: "not".to_string(),
@@ -108,7 +108,7 @@ fn test_mwt_assembly_english_dont() {
                 deprel: "advmod".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
 
@@ -117,9 +117,9 @@ fn test_mwt_assembly_english_dont() {
     let mut out = String::new();
     mors[0].write_chat(&mut out).unwrap();
 
-    // AUX "do" has no features here, so no form is written (none is
-    // invented); PART "not" gets no suffixes.
-    assert_eq!(out, "aux|do-S~part|not");
+    // AUX "do" and PART "not" have no features here, so neither gets a
+    // suffix (see the POS Mapping table in the book's morphosyntax reference).
+    assert_eq!(out, "aux|do~part|not");
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn test_gra_index_shifting_with_mwt() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "don't".to_string(),
                 lemma: "do not".to_string(),
@@ -140,8 +140,8 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "do".to_string(),
                 lemma: "do".to_string(),
@@ -152,8 +152,8 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "n't".to_string(),
                 lemma: "not".to_string(),
@@ -164,8 +164,8 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "advmod".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "go".to_string(),
                 lemma: "go".to_string(),
@@ -176,7 +176,7 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "conj".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
 
@@ -212,7 +212,7 @@ fn test_feature_mapping_plural() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "dogs".to_string(),
         lemma: "dog".to_string(),
@@ -223,9 +223,9 @@ fn test_feature_mapping_plural() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Python: noun|dog-Plur (NOUN suffix: Number kept as-is)
@@ -237,7 +237,7 @@ fn test_feature_mapping_past_tense() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "walked".to_string(),
         lemma: "walk".to_string(),
@@ -248,14 +248,14 @@ fn test_feature_mapping_past_tense() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // No VerbForm in the analysis, so none is written (Batchalign 2 invented
-    // `Inf` here, an infinitive in the past tense).
-    assert_eq!(out, "verb|walk-Past-S");
+    // No VerbForm or Number in the analysis: only the observed `Past` is
+    // written.
+    assert_eq!(out, "verb|walk-Past");
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn test_english_gerund_fix() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "walking".to_string(),
         lemma: "walk".to_string(),
@@ -274,13 +274,14 @@ fn test_english_gerund_fix() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // Python: noun|walk-Ger (NOUN suffix for English -ing words)
-    assert_eq!(out, "noun|walk-Ger");
+    // No `Ger` by spelling: BA2 added one to any English noun ending in
+    // `-ing`; nothing in the analysis says so, so nothing is written.
+    assert_eq!(out, "noun|walk");
 }
 
 #[test]
@@ -454,7 +455,7 @@ fn test_gra_talkbank_conventions() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "the".to_string(),
                 lemma: "the".to_string(),
@@ -465,8 +466,8 @@ fn test_gra_talkbank_conventions() {
                 deprel: "det".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "dog".to_string(),
                 lemma: "dog".to_string(),
@@ -477,8 +478,8 @@ fn test_gra_talkbank_conventions() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "that".to_string(),
                 lemma: "that".to_string(),
@@ -489,8 +490,8 @@ fn test_gra_talkbank_conventions() {
                 deprel: "nsubj".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(4),
                 text: "barks".to_string(),
                 lemma: "bark".to_string(),
@@ -502,7 +503,7 @@ fn test_gra_talkbank_conventions() {
                 deprel: "acl:relcl".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
 

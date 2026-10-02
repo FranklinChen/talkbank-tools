@@ -1,7 +1,7 @@
 # Filesystem Paths Used by batchalign3
 
 **Status:** Current
-**Last updated:** 2026-08-05 22:40 EDT
+**Last updated:** 2026-10-01 18:40 EDT
 
 All current filesystem paths used by the public `batchalign3` runtime.
 
@@ -9,6 +9,30 @@ Unless otherwise noted, paths are rooted under
 `batchalign::types::config::layout::ba_state_dir()` (defined at
 `crates/batchalign/src/types/config/layout.rs:98`), which defaults
 to `~/.batchalign3` and can be overridden with `BATCHALIGN_STATE_DIR`.
+
+## File modes
+
+The state directory is per user. The state files batchalign3 writes there
+are owner-only: the daemon state files, the server handshakes and the worker
+registry (`workers.json`, from the Rust server and from the Python worker
+daemons alike) are written `0600`, as are debug artifacts (which hold
+transcript content). Not every file in the directory is: the lock files
+(empty) and the logs (`server.log`, `daemon.log`, `sidecar-daemon.log`) are
+created with the umask's default mode. Every reader of them is the same
+user's CLI, server or worker daemons; no documented reader runs under another
+account, so a setup that shares a state directory between accounts is not
+supported. Reports a command is asked to write elsewhere (`compare-runs`
+output, `eval utr-alignment` evidence) get the mode `std::fs::write` would
+give them, `0666` less the umask (`0644` under the usual `022`). The Rust
+writers go through `atomic_file::write_atomically`, whose `Audience` argument
+(`Owner` or `UmaskDefault`) states which.
+
+Every read-modify-write of a state file, and every single-writer slot, holds
+an exclusive OS lock on a dedicated `<file>.lock` beside it, through one
+primitive (`crate::file_lock::HeldFileLock`), never a lock on the state file
+itself, which each write replaces by rename. Taking a lock creates the
+directory if it is missing, and dropping it unlocks explicitly, so a
+release is immediate even while a forked child still shares the descriptor.
 
 ## Configuration
 
@@ -24,6 +48,8 @@ to `~/.batchalign3` and can be overridden with `BATCHALIGN_STATE_DIR`.
 | `~/.batchalign3/logs/` | Structured CLI run logs (`run-*.jsonl`) and exported log zips | `crates/batchalign/src/cli/logs_cmd.rs` |
 | `~/.batchalign3/server.pid` | Handshake for the main server: the PID and the port it actually bound, written by the server after its bind succeeds | `crates/batchalign/src/server_handshake.rs` |
 | `~/.batchalign3/sidecar-server.pid` | The same, for the transcribe sidecar daemon | `crates/batchalign/src/server_handshake.rs` |
+| `~/.batchalign3/server.pid.lock`, `sidecar-server.pid.lock` | Lock files serializing each handshake's publish and removal; never deleted | `crates/batchalign/src/server_handshake.rs` |
+| `~/.batchalign3/workers.json.lock` | Lock file serializing every read-modify-write of the worker registry, taken by the Rust server and the Python worker daemons alike | `crates/batchalign/src/worker/registry.rs`, `batchalign/worker/_registry.py` |
 | `~/.batchalign3/server.log` | stderr log for manual `batchalign3 serve start` | `crates/batchalign/src/cli/serve_cmd.rs` |
 | `~/.batchalign3/daemon.json` | main auto-daemon state | `crates/batchalign/src/cli/daemon.rs` |
 | `~/.batchalign3/daemon.lock` | main auto-daemon startup lock | `crates/batchalign/src/cli/daemon.rs` |

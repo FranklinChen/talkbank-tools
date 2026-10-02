@@ -744,25 +744,21 @@ fn validate_evidence_backend(
 }
 
 fn validate_segments(segments: &[SpeakerSegmentV2]) -> Result<(), SpeakerEvidenceCacheError> {
-    let mut previous_start = 0_u64;
+    let mut previous_start = 0_i64;
     for (index, segment) in segments.iter().enumerate() {
         if segment.speaker.trim().is_empty() {
             return Err(SpeakerEvidenceCacheError::InvalidCachedEvidence(format!(
                 "segment {index} has an empty speaker label"
             )));
         }
-        if segment.end_ms.0 < segment.start_ms.0 {
-            return Err(SpeakerEvidenceCacheError::InvalidCachedEvidence(format!(
-                "segment {index} has an inverted interval {}..{}",
-                segment.start_ms.0, segment.end_ms.0
-            )));
-        }
-        if index > 0 && segment.start_ms.0 < previous_start {
+        // Each segment's own order is its interval's type; only the order
+        // between segments is checked here.
+        if index > 0 && segment.interval.start_ms() < previous_start {
             return Err(SpeakerEvidenceCacheError::InvalidCachedEvidence(format!(
                 "segment {index} starts before the preceding segment"
             )));
         }
-        previous_start = segment.start_ms.0;
+        previous_start = segment.interval.start_ms();
     }
     Ok(())
 }

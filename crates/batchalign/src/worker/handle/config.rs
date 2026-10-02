@@ -140,20 +140,17 @@ pub struct WorkerConfig {
     pub engine_overrides: String,
     /// Use test-echo mode (no ML models).
     pub test_echo: bool,
-    /// Maximum seconds to wait for the worker to become ready.
-    pub ready_timeout_s: u64,
+    /// Longest wait for the worker to become ready.
+    pub ready_timeout_s: crate::api::PositiveSeconds,
     /// Verbosity level (0=warn, 1=info, 2=debug, 3+=trace).
     /// Forwarded to the Python worker via `--verbose N` to control its logging
     /// level, enabling end-to-end verbosity from a single CLI `-v` flag.
     pub verbose: u8,
     /// Runtime-owned launch inputs resolved before this spawn boundary.
     pub runtime: WorkerRuntimeConfig,
-    /// Timeout override for audio-heavy tasks (ASR, FA, speaker).
-    /// 0 = use built-in default (1800).
-    pub audio_task_timeout_s: u64,
-    /// Timeout override for lightweight analysis tasks (OpenSMILE, AVQI).
-    /// 0 = use built-in default (120).
-    pub analysis_task_timeout_s: u64,
+    /// The operator's transport-ceiling overrides; each absent one leaves the
+    /// task's built-in ceiling.
+    pub task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides,
     /// Test-only: artificial delay in milliseconds before each response.
     /// 0 = no delay. Only effective when `test_echo` is true.
     pub test_delay_ms: u64,
@@ -169,11 +166,10 @@ impl Default for WorkerConfig {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: 300,
+            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
             runtime: WorkerRuntimeConfig::default(),
-            audio_task_timeout_s: 0,
-            analysis_task_timeout_s: 0,
+            task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
             test_delay_ms: 0,
         }
     }

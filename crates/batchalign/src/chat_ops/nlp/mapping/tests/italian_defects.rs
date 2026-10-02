@@ -7,7 +7,7 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 

@@ -1,6 +1,7 @@
 use super::super::fixtures::{ENG_SIMPLE_SERVER, ENG_SPA_L2, ENG_SPA_PRECODE, ENG_XYZ_L2};
-use super::super::helpers::{count_mor_lines, find_mor_line_for};
+use super::super::helpers::count_mor_lines;
 use crate::common::{LiveServerJobClient, require_live_server};
+use crate::ml_golden::golden::helpers::find_mor_line_for;
 use batchalign::api::{FilePayload, JobStatus, LanguageSpec, ReleasedCommand};
 use batchalign::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use batchalign::worker::InferTask;

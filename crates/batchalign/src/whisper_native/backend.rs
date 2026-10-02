@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use batchalign_types::api::{LanguageCode3, NonNegativeSeconds};
+use batchalign_types::api::{AudioPositionSeconds, LanguageCode3};
 use batchalign_types::worker_v2::requests::WhisperChunkSpanV2;
 use batchalign_types::worker_v2::responses::WhisperChunkResultV2;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -16,9 +16,9 @@ use super::cache::PathKeyedCache;
 use super::config::WhisperNativeConfig;
 use super::error::WhisperNativeError;
 
-/// One whisper.cpp segment timestamp (centiseconds) as a proven time.
-fn segment_seconds(centiseconds: i64) -> Result<NonNegativeSeconds, WhisperNativeError> {
-    NonNegativeSeconds::try_from(centiseconds as f64 / 100.0)
+/// One whisper.cpp segment timestamp (centiseconds) as a proven position.
+fn segment_seconds(centiseconds: i64) -> Result<AudioPositionSeconds, WhisperNativeError> {
+    AudioPositionSeconds::try_from(centiseconds as f64 / 100.0)
         .map_err(|_| WhisperNativeError::SegmentTimestampNegative { centiseconds })
 }
 

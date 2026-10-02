@@ -19,13 +19,14 @@
 //! `book/src/batchalign/reference/languages/italian.md`
 //! (§"Reconciler hacks").
 
+use super::mor_word::map_ud_mor_word;
 use crate::morphosyntax::UdId;
+use crate::morphosyntax::alignment::{AlignedUd, WalkedUdToken};
 use crate::morphosyntax::{
-    ChunkHead, ChunkProvenance, MappingContext, MappingError, MorProvenance, UdPunctable, UdWord,
-    UniversalPos, assemble_mors, map_ud_word_to_mor, normalize_deprel, provenance_for_ud_word,
+    ChunkHead, ChunkProvenance, CuratedFeats, MappedItem, MappingContext, MappingError,
+    UdPunctable, UdWord, UdWordId, UniversalPos, assemble_mors, normalize_deprel,
+    provenance_for_ud_word,
 };
-use smallvec::{SmallVec, smallvec};
-use talkbank_model::model::dependent_tier::mor::Mor;
 
 /// One entry in the Italian Defect-6/7 mis-split allowlist.
 ///
@@ -34,7 +35,7 @@ use talkbank_model::model::dependent_tier::mor::Mor;
 /// article+suffix) analysis. When the reconciler matches an entry,
 /// it synthesizes a single-word `UdWord` with the overridden POS /
 /// lemma / feats and runs it through the normal
-/// `map_ud_word_to_mor` pipeline to produce a correct `Mor`.
+/// `map_ud_word` pipeline to produce a correct `Mor`.
 #[derive(Debug, Clone)]
 pub(crate) struct MisSplitOverride {
     /// The input token text that Stanza mis-analyzes. Matched
@@ -46,10 +47,8 @@ pub(crate) struct MisSplitOverride {
     /// Lemma for the reconciled Mor (the correct lexical root
     /// for the word, ignoring Stanza's nonsense component lemma).
     pub lemma: &'static str,
-    /// UD feats for the reconciled Mor. `None` produces a Mor with
-    /// no morphological suffixes beyond what the POS-specific
-    /// feature dispatch computes from an empty feature string.
-    pub feats: Option<&'static str>,
+    /// UD feats for the reconciled Mor.
+    pub feats: CuratedFeats,
 }
 
 /// Table of known Italian mis-splits (Defect 6 + Defect 7 family).
@@ -68,7 +67,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "parla",
         pos: UniversalPos::Verb,
         lemma: "parlare",
-        feats: Some("Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin"),
+        feats: CuratedFeats::new("Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin"),
     },
     // Defect 6: noun: `arancione → arancio + ne`. Source:
     // childes-romance-germanic-data/Romance/Italian/Burgato/23.
@@ -76,7 +75,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "arancione",
         pos: UniversalPos::Noun,
         lemma: "arancione",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     // Defect 6: adjective: `piccolo → picco + lo`. Source:
     // childes-romance-germanic-data/Romance/Italian/Calambrone/Martina/020322.
@@ -84,7 +83,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "piccolo",
         pos: UniversalPos::Adj,
         lemma: "piccolo",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     // Defect 6: noun: `gomitolo → gomito + lo`. Source:
     // childes-romance-germanic-data/Romance/Italian/Tonelli/Marco/011026.
@@ -92,7 +91,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "gomitolo",
         pos: UniversalPos::Noun,
         lemma: "gomitolo",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     // Defect 6: noun: `divano → diva + no`. Note that `no` is not
     // even a valid Italian enclitic ending, yet Stanza tags the
@@ -102,7 +101,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "divano",
         pos: UniversalPos::Noun,
         lemma: "divano",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     // Defect 6 non-verb entries surfaced by the 2026-04-24 CHILDES-ita
     // scan + direct probe. All four mis-splits share the shape
@@ -114,19 +113,19 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "pallone",
         pos: UniversalPos::Noun,
         lemma: "pallone",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     MisSplitOverride {
         joined_text: "bastone",
         pos: UniversalPos::Noun,
         lemma: "bastone",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     MisSplitOverride {
         joined_text: "cappello",
         pos: UniversalPos::Noun,
         lemma: "cappello",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     // `difficile` is an adjective rather than a noun, the `-le`
     // ending masquerades as the pronoun `le` to Stanza's splitter.
@@ -134,7 +133,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "difficile",
         pos: UniversalPos::Adj,
         lemma: "difficile",
-        feats: Some("Number=Sing"),
+        feats: CuratedFeats::new("Number=Sing"),
     },
     // Defect 6 non-verb entries surfaced by the 2026-04-24
     // audit_italian_mor_content.py run against a pre-parsed JSON
@@ -147,7 +146,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "seggiola",
         pos: UniversalPos::Noun,
         lemma: "seggiola",
-        feats: Some("Gender=Fem|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Fem|Number=Sing"),
     },
     // `piccola` is the feminine of already-handled `piccolo`;
     // Stanza splits it as `picco + la` (distinct from `picco + lo`
@@ -156,19 +155,19 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "piccola",
         pos: UniversalPos::Adj,
         lemma: "piccolo",
-        feats: Some("Gender=Fem|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Fem|Number=Sing"),
     },
     MisSplitOverride {
         joined_text: "trottola",
         pos: UniversalPos::Noun,
         lemma: "trottola",
-        feats: Some("Gender=Fem|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Fem|Number=Sing"),
     },
     MisSplitOverride {
         joined_text: "bottone",
         pos: UniversalPos::Noun,
         lemma: "bottone",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     // Singleton audit hits (2026-04-24), each appeared exactly
     // once in the committed-corpus audit, but each is a common
@@ -181,7 +180,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "cielo",
         pos: UniversalPos::Noun,
         lemma: "cielo",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     // Italian UD tags consonant-final adjectives without gender
     // (the form is gender-invariant); only Number is marked.
@@ -189,7 +188,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "normale",
         pos: UniversalPos::Adj,
         lemma: "normale",
-        feats: Some("Number=Sing"),
+        feats: CuratedFeats::new("Number=Sing"),
     },
     // Augmentative of the common noun `cavallo`; Stanza tags
     // `cavallo` itself correctly but splits the `-one`
@@ -200,13 +199,13 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "cavallone",
         pos: UniversalPos::Noun,
         lemma: "cavallone",
-        feats: Some("Gender=Masc|Number=Sing"),
+        feats: CuratedFeats::new("Gender=Masc|Number=Sing"),
     },
     MisSplitOverride {
         joined_text: "coccole",
         pos: UniversalPos::Noun,
         lemma: "coccole",
-        feats: Some("Gender=Fem|Number=Plur"),
+        feats: CuratedFeats::new("Gender=Fem|Number=Plur"),
     },
     // Defect 7: sentence-initial article `la → il + i`. Stanza
     // expands the feminine singular article into a masculine
@@ -217,7 +216,7 @@ pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
         joined_text: "la",
         pos: UniversalPos::Det,
         lemma: "il",
-        feats: Some("Definite=Def|Gender=Fem|Number=Sing|PronType=Art"),
+        feats: CuratedFeats::new("Definite=Def|Gender=Fem|Number=Sing|PronType=Art"),
     },
 ];
 
@@ -242,52 +241,54 @@ fn check_italian_mis_split(range_parent_text: &str) -> Option<&'static MisSplitO
 
 /// Apply a mis-split override by synthesizing a single-word
 /// `UdWord` with the overridden POS/lemma/feats and mapping it
-/// through the normal `map_ud_word_to_mor` pipeline.
+/// through the normal `map_ud_word` pipeline.
 ///
-/// Head and deprel are taken from a sample (typically the first
-/// component word Stanza emitted) so the GRA relation that will
-/// later be built for this chunk preserves the sentence's
-/// dependency structure.
+/// The one chunk keeps the attachment of the producer-selected
+/// representative, through `main`, so the GRA
+/// relation built for it preserves the sentence's dependency structure.
 fn apply_mis_split_override(
     over: &MisSplitOverride,
-    sample_head: usize,
-    sample_deprel: &str,
+    attachment: &UdWord,
+    main: ChunkProvenance,
     ctx: &MappingContext,
-) -> Result<Mor, MappingError> {
-    let synthetic = UdWord::synthetic(
+) -> Result<MappedItem, MappingError> {
+    let synthetic = UdWord::curated_reading(
+        attachment,
         over.joined_text,
         over.lemma,
         over.pos,
         over.feats,
-        sample_head,
-        sample_deprel,
     );
-    map_ud_word_to_mor(&synthetic, ctx)
+    Ok(MappedItem::word(map_ud_mor_word(&synthetic, ctx)?, main))
 }
 
 /// Handle Italian Range-token reconciler cases if the parent token is in one of
 /// the known Stanza mis-split allowlists.
 pub fn try_handle_italian_range_override(
-    ud: &UdWord,
-    components: &[UdWord],
+    token: WalkedUdToken<'_, '_>,
     ctx: &MappingContext,
-) -> Result<Option<(Mor, MorProvenance)>, MappingError> {
+) -> Result<Option<MappedItem>, MappingError> {
+    let AlignedUd::Mwt {
+        range: ud,
+        components,
+    } = token.ud()
+    else {
+        return Ok(None);
+    };
+    let attachment = token.representative();
     if let Some(over) = check_italian_mis_split(&ud.text) {
-        let head_comp = components.first().unwrap_or(ud);
-        let mor = apply_mis_split_override(over, head_comp.head, &head_comp.deprel, ctx)?;
-        let UdId::Range(start, end) = &ud.id else {
+        let UdId::Range(start, end) = ud.id else {
             return Ok(None);
         };
-        let source_ud_ids: SmallVec<[usize; 1]> = (*start..=*end).collect();
-        let deprel = normalize_deprel(&head_comp.deprel, || {
+        let deprel = normalize_deprel(&attachment.deprel, || {
             format!("collapsed Range {:?}", ud.text)
         })?;
-        let provenance = smallvec![ChunkProvenance::collapsed_range(
-            source_ud_ids,
-            ChunkHead::from_ud_head(head_comp.head),
+        let main = ChunkProvenance::collapsed_range(
+            UdWordId::range(start, end),
+            ChunkHead::of_word(attachment),
             deprel,
-        )];
-        return Ok(Some((mor, provenance)));
+        );
+        return apply_mis_split_override(over, attachment, main, ctx).map(Some);
     }
 
     // A known compound imperative that Stanza split: the curated analysis
@@ -298,21 +299,15 @@ pub fn try_handle_italian_range_override(
         let UdId::Range(start, end) = ud.id else {
             return Ok(None);
         };
-        let (head, deprel) = range_attachment(components, start, end);
-        let mor = apply_compound_imperative_override(over, head, deprel, ctx)?;
-        let main_deprel = normalize_deprel(deprel, || format!("collapsed Range {:?}", ud.text))?;
-        let mut provenance: MorProvenance = smallvec![ChunkProvenance::collapsed_range(
-            (start..=end).collect(),
-            ChunkHead::from_ud_head(head),
-            main_deprel,
-        )];
-        for clitic in over.clitics {
-            let deprel = normalize_deprel(clitic.deprel, || {
-                format!("synthesized clitic {:?} in {:?}", clitic.text, over.surface)
-            })?;
-            provenance.push(ChunkProvenance::synthetic_post_clitic(deprel));
-        }
-        return Ok(Some((mor, provenance)));
+        let deprel = normalize_deprel(&attachment.deprel, || {
+            format!("collapsed Range {:?}", ud.text)
+        })?;
+        let main = ChunkProvenance::collapsed_range(
+            UdWordId::range(start, end),
+            ChunkHead::of_word(attachment),
+            deprel,
+        );
+        return apply_compound_imperative_override(over, ud, main, ctx).map(Some);
     }
 
     if let Some(rewrite) = check_italian_component_rewrite(&ud.text) {
@@ -347,7 +342,7 @@ pub fn try_handle_italian_range_override(
 ///
 /// Each entry in `IT_COMPOUND_IMPERATIVES` carries a static list
 /// of post-clitics; the reconciler synthesizes one `MorWord` per
-/// clitic via `map_ud_word_to_mor` and attaches it to the main
+/// clitic via `map_ud_word` and attaches it to the main
 /// verb `Mor` via `with_post_clitic`. This produces the full
 /// multi-chunk `verb|LEMMA~pron|X~pron|Y` output that matches
 /// Stanza's native analysis for the bare-compound case.
@@ -366,9 +361,8 @@ pub(crate) struct CliticSpec {
     /// UD POS. Typically `Pron`; `Adv` only for `ne` in some
     /// analyses.
     pub upos: UniversalPos,
-    /// UD feats string for the clitic, number, person, gender,
-    /// PronType, etc.
-    pub feats: &'static str,
+    /// UD feats for the clitic: number, person, gender, PronType, etc.
+    pub feats: CuratedFeats,
     /// UD dependency relation from this clitic to the main verb:
     /// `obj` for direct-object clitics (`la`, `lo`, `le`, `li`),
     /// `iobj` for indirect-object clitics (`me`, `mi`, `ti`,
@@ -401,7 +395,7 @@ pub(crate) struct CompoundImperativeOverride {
     pub verb_lemma: &'static str,
     /// UD feats for the reconciled verb Mor. Encodes imperative
     /// 2sg (or 2pl) by default.
-    pub verb_feats: &'static str,
+    pub verb_feats: CuratedFeats,
     /// Post-clitics stacked on the main verb, in serialization
     /// order. Empty slice means "emit main verb only"
     /// single-chunk mode preserved for allowlist entries where
@@ -416,35 +410,35 @@ const CLITIC_ME: CliticSpec = CliticSpec {
     text: "me",
     lemma: "me",
     upos: UniversalPos::Pron,
-    feats: "Number=Sing|Person=1|PronType=Prs",
+    feats: CuratedFeats::new("Number=Sing|Person=1|PronType=Prs"),
     deprel: "iobj",
 };
 const CLITIC_LA: CliticSpec = CliticSpec {
     text: "la",
     lemma: "la",
     upos: UniversalPos::Pron,
-    feats: "Gender=Fem|Number=Sing|Person=3|PronType=Prs",
+    feats: CuratedFeats::new("Gender=Fem|Number=Sing|Person=3|PronType=Prs"),
     deprel: "obj",
 };
 const CLITIC_LO: CliticSpec = CliticSpec {
     text: "lo",
     lemma: "lo",
     upos: UniversalPos::Pron,
-    feats: "Gender=Masc|Number=Sing|Person=3|PronType=Prs",
+    feats: CuratedFeats::new("Gender=Masc|Number=Sing|Person=3|PronType=Prs"),
     deprel: "obj",
 };
 const CLITIC_LI: CliticSpec = CliticSpec {
     text: "li",
     lemma: "li",
     upos: UniversalPos::Pron,
-    feats: "Gender=Masc|Number=Plur|Person=3|PronType=Prs",
+    feats: CuratedFeats::new("Gender=Masc|Number=Plur|Person=3|PronType=Prs"),
     deprel: "obj",
 };
 const CLITIC_LE: CliticSpec = CliticSpec {
     text: "le",
     lemma: "le",
     upos: UniversalPos::Pron,
-    feats: "Gender=Fem|Number=Plur|Person=3|PronType=Prs",
+    feats: CuratedFeats::new("Gender=Fem|Number=Plur|Person=3|PronType=Prs"),
     deprel: "obj",
 };
 
@@ -458,13 +452,13 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
     CompoundImperativeOverride {
         surface: "dammela",
         verb_lemma: "dare",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_ME, CLITIC_LA],
     },
     CompoundImperativeOverride {
         surface: "dammelo",
         verb_lemma: "dare",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_ME, CLITIC_LO],
     },
     // prendilo / prendila / prendili / prendile
@@ -478,25 +472,25 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
     CompoundImperativeOverride {
         surface: "prendilo",
         verb_lemma: "prendere",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LO],
     },
     CompoundImperativeOverride {
         surface: "prendila",
         verb_lemma: "prendere",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LA],
     },
     CompoundImperativeOverride {
         surface: "prendili",
         verb_lemma: "prendere",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LI],
     },
     CompoundImperativeOverride {
         surface: "prendile",
         verb_lemma: "prendere",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LE],
     },
     // `-ire` family surfaces where Stanza fails to detect the MWT
@@ -511,19 +505,19 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
     CompoundImperativeOverride {
         surface: "aprila",
         verb_lemma: "aprire",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LA],
     },
     CompoundImperativeOverride {
         surface: "aprili",
         verb_lemma: "aprire",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LI],
     },
     CompoundImperativeOverride {
         surface: "finila",
         verb_lemma: "finire",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LA],
     },
     // Defect 12: `aprilo`: Stanza tags it as single-word VERB
@@ -533,7 +527,7 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
     CompoundImperativeOverride {
         surface: "aprilo",
         verb_lemma: "aprire",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LO],
     },
     // Defect 13: `leggila`: Stanza tags it as single-word VERB
@@ -543,7 +537,7 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
     CompoundImperativeOverride {
         surface: "leggila",
         verb_lemma: "leggere",
-        verb_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        verb_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
         clitics: &[CLITIC_LA],
     },
 ];
@@ -555,7 +549,7 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
 /// a POS we have seen indicate mis-classification (ADJ, NOUN, or
 /// VERB with missing MWT expansion) AND the text must appear in
 /// the allowlist. Returns `None` when either fails, leaving the
-/// normal `map_ud_word_to_mor` path in charge.
+/// normal `map_ud_word` path in charge.
 ///
 /// Gate rationale for accepting ADJ, NOUN, and VERB:
 /// - ADJ: the original Defect 8 signature (`dammela`, `prendilo`,
@@ -601,20 +595,9 @@ fn compound_imperative_for_surface(text: &str) -> Option<&'static CompoundImpera
         .find(|o| o.surface.eq_ignore_ascii_case(text))
 }
 
-/// Where a split word as a whole attaches in the sentence: the head and
-/// relation of its first component whose head lies outside the split, so the
-/// word's own internal arcs are not mistaken for its place in the clause.
-/// A split with no such component is the clause root.
-fn range_attachment(components: &[UdWord], start: usize, end: usize) -> (usize, &str) {
-    components
-        .iter()
-        .find(|c| c.head == 0 || !(start..=end).contains(&c.head))
-        .map_or((0, "root"), |c| (c.head, c.deprel.as_str()))
-}
-
 /// Apply a compound-imperative override by synthesizing the main
 /// verb UdWord plus one UdWord per post-clitic, mapping each
-/// through `map_ud_word_to_mor`, and stacking the clitics onto
+/// through `map_ud_word`, and stacking the clitics onto
 /// the main `Mor`.
 ///
 /// The result is a multi-chunk `Mor` of shape
@@ -624,37 +607,33 @@ fn range_attachment(components: &[UdWord], start: usize, end: usize) -> (usize, 
 /// single-chunk Mor: that mode is still available but not used
 /// by any current allowlist entry.
 ///
-/// Preserves the original UdWord's head and deprel for the main
-/// chunk; GRA relations for the post-clitics point back to the
-/// main chunk via the caller (`build_gra_and_validate`).
+/// The main chunk takes its attachment from `main`; each post-clitic
+/// depends on the main chunk (`ChunkHead::OwningMorMain`).
 fn apply_compound_imperative_override(
     over: &CompoundImperativeOverride,
-    original_head: usize,
-    original_deprel: &str,
+    row: &UdWord,
+    main: ChunkProvenance,
     ctx: &MappingContext,
-) -> Result<Mor, MappingError> {
-    let main_ud = UdWord::synthetic(
+) -> Result<MappedItem, MappingError> {
+    let main_ud = UdWord::curated_reading(
+        row,
         over.surface,
         over.verb_lemma,
         UniversalPos::Verb,
-        Some(over.verb_feats),
-        original_head,
-        original_deprel,
+        over.verb_feats,
     );
-    let mut mor = map_ud_word_to_mor(&main_ud, ctx)?;
-    for clitic in over.clitics {
-        let clitic_ud = UdWord::synthetic(
-            clitic.text,
-            clitic.lemma,
-            clitic.upos,
-            Some(clitic.feats),
-            0,
-            clitic.deprel,
-        );
-        let clitic_mor = map_ud_word_to_mor(&clitic_ud, ctx)?;
-        mor = mor.with_post_clitic(clitic_mor.main);
-    }
-    Ok(mor)
+    let item = MappedItem::word(map_ud_mor_word(&main_ud, ctx)?, main);
+    over.clitics.iter().try_fold(item, |item, clitic| {
+        let clitic_ud =
+            UdWord::curated_reading(row, clitic.text, clitic.lemma, clitic.upos, clitic.feats);
+        let deprel = normalize_deprel(clitic.deprel, || {
+            format!("synthesized clitic {:?} in {:?}", clitic.text, over.surface)
+        })?;
+        Ok(item.with_post_clitic(
+            map_ud_mor_word(&clitic_ud, ctx)?,
+            ChunkProvenance::synthetic_post_clitic(deprel),
+        ))
+    })
 }
 
 /// Handle Italian single-token compound-imperative reconciler cases if the
@@ -662,21 +641,13 @@ fn apply_compound_imperative_override(
 pub fn try_handle_italian_single_override(
     ud: &UdWord,
     ctx: &MappingContext,
-) -> Result<Option<(Mor, MorProvenance)>, MappingError> {
-    if let Some(over) = check_italian_compound_imperative(&ud.text, &ud.upos) {
-        let mor = apply_compound_imperative_override(over, ud.head, &ud.deprel, ctx)?;
-        let mut provenance: MorProvenance = SmallVec::new();
-        provenance.push(provenance_for_ud_word(ud)?);
-        for clitic in over.clitics {
-            let deprel = normalize_deprel(clitic.deprel, || {
-                format!("synthesized clitic {:?} in {:?}", clitic.text, over.surface)
-            })?;
-            provenance.push(ChunkProvenance::synthetic_post_clitic(deprel));
+) -> Result<Option<MappedItem>, MappingError> {
+    match check_italian_compound_imperative(&ud.text, &ud.upos) {
+        Some(over) => {
+            apply_compound_imperative_override(over, ud, provenance_for_ud_word(ud)?, ctx).map(Some)
         }
-        return Ok(Some((mor, provenance)));
+        None => Ok(None),
     }
-
-    Ok(None)
 }
 
 // ─── Defect 9: Range-expansion with wrong head POS ──────────────
@@ -717,7 +688,7 @@ pub(crate) struct ComponentRewriteOverride {
     /// Lemma for component 0 (the correct lexical root).
     pub head_lemma: &'static str,
     /// UD feats string for component 0 (e.g. imperative 2sg).
-    pub head_feats: &'static str,
+    pub head_feats: CuratedFeats,
 }
 
 /// Table of known Italian Defect-9 component rewrites. Closed
@@ -738,7 +709,7 @@ pub(crate) const IT_COMPONENT_REWRITES: &[ComponentRewriteOverride] = &[
         joined_text: "dagliela",
         head_pos: UniversalPos::Verb,
         head_lemma: "dare",
-        head_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        head_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
     },
     // Defect 10: `posala` / `posalo` (imperative `posare` +
     // `la`/`lo`): Stanza emits `posa/VERB/posa + la/PRON`, shape
@@ -760,13 +731,13 @@ pub(crate) const IT_COMPONENT_REWRITES: &[ComponentRewriteOverride] = &[
         joined_text: "posala",
         head_pos: UniversalPos::Verb,
         head_lemma: "posare",
-        head_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        head_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
     },
     ComponentRewriteOverride {
         joined_text: "posalo",
         head_pos: UniversalPos::Verb,
         head_lemma: "posare",
-        head_feats: "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin",
+        head_feats: CuratedFeats::new("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
     },
 ];
 
@@ -799,7 +770,7 @@ fn apply_component_rewrite(over: &ComponentRewriteOverride, components: &[UdWord
     if let Some(head) = rewritten.first_mut() {
         head.upos = UdPunctable::Value(over.head_pos);
         head.lemma = over.head_lemma.to_string();
-        head.feats = Some(over.head_feats.to_string());
+        head.apply_curated(over.head_feats);
     }
     rewritten
 }
@@ -807,6 +778,7 @@ fn apply_component_rewrite(over: &ComponentRewriteOverride, components: &[UdWord
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::morphosyntax::UdWordAnalysis;
 
     #[test]
     fn check_returns_some_for_allowlist_entries() {
@@ -870,7 +842,7 @@ mod tests {
     fn apply_component_rewrite_only_touches_head() {
         let over = &IT_COMPONENT_REWRITES[0];
         let components = vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "da".into(),
                 lemma: "da".into(),
@@ -881,8 +853,8 @@ mod tests {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "glie".into(),
                 lemma: "gli".into(),
@@ -893,7 +865,7 @@ mod tests {
                 deprel: "iobj".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ];
         let rewritten = apply_component_rewrite(over, &components);
         assert_eq!(rewritten.len(), 2);
@@ -904,8 +876,15 @@ mod tests {
         ));
         assert_eq!(rewritten[0].lemma, "dare");
         assert_eq!(
-            rewritten[0].feats.as_deref(),
-            Some("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin")
+            rewritten[0].features().to_string(),
+            "Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"
+        );
+        // The table's values, and they say so.
+        assert!(
+            rewritten[0]
+                .features()
+                .iter()
+                .all(|(_, value)| value.source() == crate::morphosyntax::FeatSource::Curated)
         );
         // Head text / id / head / deprel preserved so GRA reindexing
         // stays consistent.

@@ -39,6 +39,7 @@ from batchalign.worker._protocol import (
     _serve_stdio_concurrent,
     _serve_tcp,
     _serve_tcp_concurrent,
+    claim_protocol_stdout,
 )
 from batchalign.worker._stanza_capabilities import (
     refresh_resources_manifest_if_present,
@@ -195,6 +196,11 @@ def main() -> None:
     """
     parser = build_arg_parser()
     args = parser.parse_args()
+    # A stdio worker's stdout is its protocol stream: claim it before any
+    # library can print into it (see `claim_protocol_stdout`). A TCP daemon
+    # speaks on its sockets and keeps its stdout.
+    if args.transport == "stdio":
+        claim_protocol_stdout()
 
     log_level = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}.get(
         args.verbose, logging.DEBUG

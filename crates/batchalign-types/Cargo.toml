@@ -8,14 +8,22 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+jiff = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Optional: lets `MachineTime` be a SQLite column (the job store), so a
+# stored time is validated where it is read. Only `batchalign` enables it.
+sqlx = { workspace = true, optional = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 utoipa = { workspace = true }
 
+[features]
+sqlx = ["dep:sqlx"]
+
 [dev-dependencies]
+proptest = { workspace = true }
 serde_json = { workspace = true }
 static_assertions = "1.1.0"
 

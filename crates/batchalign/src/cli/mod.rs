@@ -148,14 +148,8 @@
 //! | [`models_cmd`]| `batchalign3 models` -- forward to Python model training           |
 //! | [`bench_cmd`] | `batchalign3 bench` -- repeated performance runs                   |
 //!
-//! ## Lifecycle
-//!
-//! | Module           | Responsibility                                                  |
-//! |------------------|-----------------------------------------------------------------|
-//! | [`update_check`] | Non-blocking PyPI version check with 24h file cache             |
-//!
-//! Binary-only concerns such as OTLP export and the update-check task are kept
-//! behind the `binary-entry` feature. The embedded PyO3 CLI bridge depends on
+//! Binary-only concerns such as OTLP export are kept behind the
+//! `binary-entry` feature. The embedded PyO3 CLI bridge depends on
 //! this crate with `default-features = false`, so the native extension no
 //! longer pulls the standalone binary's telemetry stack into its dependency
 //! graph.
@@ -188,15 +182,13 @@ pub mod serve_cmd;
 pub mod setup_cmd;
 pub mod tui;
 #[cfg(feature = "binary-entry")]
-pub mod update_check;
 pub mod worker_cmd;
 
 /// Run the embedded CLI entry path from an explicit `argv` vector.
 ///
 /// This is used by the PyO3 console-script bridge. Unlike the standalone
-/// binary entry, it does not spawn the background update check or initialize
-/// OTLP tracing; it only sets up basic stderr logging and then delegates to
-/// [`run_command`].
+/// binary entry, it does not initialize OTLP tracing; it only sets up basic
+/// stderr logging and then delegates to [`run_command`].
 pub fn run_embedded_cli_from_argv(argv: Vec<String>) -> Result<(), i32> {
     let cli = args::Cli::parse_from(argv);
     init_embedded_cli_tracing(cli.global.verbose);

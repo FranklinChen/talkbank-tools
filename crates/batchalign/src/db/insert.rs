@@ -2,8 +2,10 @@
 
 use std::time::Duration;
 
+use crate::api::MachineTime;
 use crate::options::CommandOptions;
 use crate::scheduling::{AttemptOutcome, RetryDisposition, WorkUnitKind};
+use crate::store::{FilePhase, Submitter};
 
 use crate::error::ServerError;
 use tracing::warn;
@@ -28,8 +30,8 @@ pub struct NewJobRecord {
     pub lang: String,
     /// Speaker count.
     pub num_speakers: u32,
-    /// Initial persisted status.
-    pub status: String,
+    /// The job's status at submission.
+    pub status: crate::api::JobStatus,
     /// Staging directory path.
     pub staging_dir: String,
     /// Ordered filenames.
@@ -44,12 +46,11 @@ pub struct NewJobRecord {
     pub media_subdir: String,
     /// User-facing source directory.
     pub source_dir: String,
-    /// Submitting client address.
-    pub submitted_by: String,
-    /// Human-readable submitter name.
-    pub submitted_by_name: String,
+    /// Who submitted the job, if anyone was recorded. Spelled as the
+    /// columns' `''` only where it is bound, by [`Submitter::columns`].
+    pub submitter: Option<Submitter>,
     /// Submission timestamp.
-    pub submitted_at: f64,
+    pub submitted_at: MachineTime,
     /// Whether the job uses direct filesystem paths.
     pub paths_mode: bool,
     /// Absolute source paths for paths mode.
@@ -77,6 +78,7 @@ impl JobDB {
         let output_paths_json =
             serialize_job_field(&job.job_id, "output_paths", &job.output_paths)?;
         let paths_mode_int = job.paths_mode as i32;
+        let (submitted_by, submitted_by_name) = Submitter::columns(job.submitter.as_ref());
 
         let mut tx = self.pool.begin().await?;
 
@@ -95,7 +97,7 @@ impl JobDB {
         .bind(&job.command)
         .bind(&job.lang)
         .bind(job.num_speakers)
-        .bind(&job.status)
+        .bind(job.status.to_string())
         .bind(&job.staging_dir)
         .bind(&filenames_json)
         .bind(&has_chat_json)
@@ -104,8 +106,8 @@ impl JobDB {
         .bind(&job.media_mapping)
         .bind(&job.media_subdir)
         .bind(&job.source_dir)
-        .bind(&job.submitted_by)
-        .bind(&job.submitted_by_name)
+        .bind(submitted_by)
+        .bind(submitted_by_name)
         .bind(job.submitted_at)
         .bind(paths_mode_int)
         .bind(&source_paths_json)
@@ -114,9 +116,18 @@ impl JobDB {
         .execute(&mut *tx)
         .await?;
 
+        // A new file is `FilePhase::Queued`, written whole through its
+        // column image like every later write of the row.
+        let queued = FilePhase::Queued;
         for filename in &job.filenames {
-            sqlx::query(
-                "INSERT INTO file_statuses (job_id, filename, status) VALUES (?, ?, 'queued')",
+            super::update::bind_phase_columns(
+                sqlx::query(
+                    "INSERT INTO file_statuses
+                         (status, error, error_category, started_at, finished_at,
+                          next_eligible_at, job_id, filename)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ),
+                queued.columns(),
             )
             .bind(&job.job_id)
             .bind(filename)
@@ -138,7 +149,7 @@ impl JobDB {
         job_id: &str,
         work_unit_id: &str,
         work_unit_kind: WorkUnitKind,
-        started_at: f64,
+        started_at: MachineTime,
         worker_node_id: Option<&str>,
         worker_pid: Option<u32>,
     ) -> Result<(String, u32), ServerError> {
@@ -225,7 +236,7 @@ impl JobDB {
     pub async fn insert_cancellation(
         &self,
         job_id: &str,
-        requested_at: f64,
+        requested_at: MachineTime,
         source: &str,
         host: Option<&str>,
         pid: Option<u32>,

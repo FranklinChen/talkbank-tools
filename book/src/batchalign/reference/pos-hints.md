@@ -1,7 +1,7 @@
 # Transcriber `$POS` Hints
 
 **Status:** Reference, default on; opt out via `--no-pos-hints`
-**Last updated:** 2026-09-05 05:21 EDT
+**Last updated:** 2026-10-01 17:40 EDT
 
 CHAT main-tier words may carry a `$POS` suffix that encodes the
 transcriber's part-of-speech annotation in CLAN-MOR conventions
@@ -51,7 +51,7 @@ flowchart TD
     D --> E{"L2 @s words present?"}
     E -->|yes| F["Dispatch secondary language Stanza\n(dispatch_secondary_l2)"]
     E -->|no| G["Skip L2 dispatch"]
-    F --> H["Merge primary+secondary UD\n(resolve_merged_pos_with_context)"]
+    F --> H["Merge each span with its secondary analysis\n(merge_planned_secondary_span)"]
     H --> I["Splice merged Mor into ChatFile\n(splice_l2_into_chat)"]
     G --> J{"--no-pos-hints set?"}
     I --> J

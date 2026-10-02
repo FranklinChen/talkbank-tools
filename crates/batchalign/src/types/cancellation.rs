@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::domain::{
     CallerHost, CallerPid, CancelReason, CancelSource, CorrelationId, DisplayPath, JobId,
-    UnixTimestamp,
+    MachineTime,
 };
 
 /// Optional metadata accompanying a `POST /jobs/{id}/cancel` request body.
@@ -70,7 +70,7 @@ pub struct CancellationRecord {
     /// Job that was the target of this cancel.
     pub job_id: JobId,
     /// Server-side timestamp when the cancel POST hit the route handler.
-    pub requested_at: UnixTimestamp,
+    pub requested_at: MachineTime,
     /// Caller-reported source (or `Api` when the body was empty).
     pub source: CancelSource,
     /// Caller-reported host (may be empty / null).
@@ -105,7 +105,7 @@ impl CancellationRecord {
         Self {
             id: 0,
             job_id: JobId::from("test-job"),
-            requested_at: UnixTimestamp(0.0),
+            requested_at: crate::unix_time(0.0),
             source: CancelSource::Api,
             host: None,
             pid: None,

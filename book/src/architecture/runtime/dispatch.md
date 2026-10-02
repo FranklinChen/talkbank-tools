@@ -1,7 +1,7 @@
 # Dispatch and Execution
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 How a job moves from the CLI to a running command: the four CLI
 dispatch targets, the workflow families that organize commands, the
@@ -194,9 +194,9 @@ The server runs three validation gates before writing CHAT output:
    E701/E704 temporal, header correctness). Only blocks on errors,
    not warnings.
 
-Validation failures trigger bug reports to
-`~/.batchalign3/bug-reports/` and self-correcting cache purges
-(deleting entries that produced invalid output).
+A validation failure fails the file, with the validation errors as its
+error; no output is written for it. Nothing is filed and no cache entry is
+deleted: the file's error is the report.
 
 ## Batched Inference
 

@@ -1,3 +1,5 @@
+use batchalign_types::domain::AudioPositionSeconds;
+
 use super::cantonese::{AlignedNormalization, NormalizationChangedLength};
 use super::{
     AsrElement, AsrNormalizedText, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, cleanup,
@@ -156,7 +158,7 @@ pub(super) fn extract_timed_words(elements: &[AsrElement]) -> Vec<AsrWord> {
         if value.starts_with('<') && value.ends_with('>') {
             continue;
         }
-        let (start_ms, end_ms) = normalized_timing_range(elem.ts.as_f64(), elem.end_ts.as_f64());
+        let (start_ms, end_ms) = normalized_timing_range(elem.ts, elem.end_ts);
         words.push(AsrWord::new(value, start_ms, end_ms));
     }
     words
@@ -242,7 +244,7 @@ pub(super) fn split_multiword_tokens(words: Vec<AsrWord>, lang: &str) -> Vec<Asr
     result
 }
 
-/// Convert one element's provider seconds into the pipeline's millisecond
+/// Convert one element's audio positions into the pipeline's millisecond
 /// pair, through the one owner of rounding and range admission.
 ///
 /// This function used to do the conversion itself, with `(seconds *
@@ -250,13 +252,18 @@ pub(super) fn split_multiword_tokens(words: Vec<AsrWord>, lang: &str) -> Vec<Asr
 /// every input the old expression handled correctly produces the same numbers.
 /// What changed is the inputs it handled INCORRECTLY: a negative bound with a
 /// later end used to reach a word as a negative millisecond time, and a value
-/// beyond `i64` saturated into a plausible one. Both are now refused by
-/// [`WordTiming`], and because this stage sits inside a total transform with no
-/// error channel, the refusal is recorded as a named untimed cause rather than
-/// a fabricated number. Absent, zero-width and inverted spans behave exactly as
-/// before: the word carries no timing.
-fn normalized_timing_range(start_s: Option<f64>, end_s: Option<f64>) -> (Option<i64>, Option<i64>) {
-    super::WordTiming::admit_seconds_or_untimed(start_s, end_s).into_optional_millis()
+/// beyond `i64` saturated into a plausible one. A negative or non-finite bound
+/// can no longer reach this function at all, because an element time is an
+/// `AudioPositionSeconds`, refused where it is born. A value beyond the
+/// admitted range is refused by [`WordTiming`], and because this stage sits
+/// inside a total transform with no error channel, the refusal is recorded as
+/// a named untimed cause rather than a fabricated number. Absent, zero-width
+/// and inverted spans behave exactly as before: the word carries no timing.
+fn normalized_timing_range(
+    start: Option<AudioPositionSeconds>,
+    end: Option<AudioPositionSeconds>,
+) -> (Option<i64>, Option<i64>) {
+    super::WordTiming::admit_positions_or_untimed(start, end).into_optional_millis()
 }
 
 fn split_chunk_word(word: AsrWord, lang: &str) -> Vec<AsrWord> {

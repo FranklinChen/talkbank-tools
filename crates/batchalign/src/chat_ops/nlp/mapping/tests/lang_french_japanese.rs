@@ -7,7 +7,7 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 
@@ -16,7 +16,7 @@ fn test_japanese_punctuation_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "\u{3002}".to_string(),
         lemma: "\u{3002}".to_string(),
@@ -27,9 +27,9 @@ fn test_japanese_punctuation_mapping() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "cm|\u{3002}");
@@ -42,7 +42,7 @@ fn test_mwt_assembly_french_elision() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "l'".to_string(),
                 lemma: "le".to_string(),
@@ -53,8 +53,8 @@ fn test_mwt_assembly_french_elision() {
                 deprel: "det".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "ami".to_string(),
                 lemma: "ami".to_string(),
@@ -65,7 +65,7 @@ fn test_mwt_assembly_french_elision() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
 
@@ -81,7 +81,7 @@ fn test_french_pron_case() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "je".into(),
         lemma: "je".into(),
@@ -92,8 +92,8 @@ fn test_french_pron_case() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // French "je" gets Case=Nom from word-level lookup
@@ -101,12 +101,13 @@ fn test_french_pron_case() {
 }
 
 #[test]
-fn test_french_det_singular_gender_default_masc() {
-    // ba2: DET gender defaults to "Masc" for French singular
+fn a_french_det_without_gender_gets_no_masc() {
+    // BA2 wrote an invented `Masc` on a French singular DET without Gender;
+    // nothing is written for a gender the analysis does not give.
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "le".into(),
         lemma: "le".into(),
@@ -117,12 +118,11 @@ fn test_french_det_singular_gender_default_masc() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
-    // French singular DET without Gender → defaults to "Masc"
-    assert_eq!(out, "det|le-Masc-Def-Art");
+    assert_eq!(out, "det|le-Def-Art");
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn test_french_det_plural_no_gender_default() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "les".into(),
         lemma: "le".into(),
@@ -142,8 +142,8 @@ fn test_french_det_plural_no_gender_default() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // French plural DET: no gender default, Number=Plur present
@@ -155,7 +155,7 @@ fn test_french_det_explicit_fem_gender() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "la".into(),
         lemma: "le".into(),
@@ -166,8 +166,8 @@ fn test_french_det_explicit_fem_gender() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "det|le-Fem-Def-Art-Sing");
@@ -179,7 +179,7 @@ fn test_french_noun_apm_plural() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "chevaux".into(),
         lemma: "cheval".into(),
@@ -190,8 +190,8 @@ fn test_french_noun_apm_plural() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // French APM: cheval→chevaux, Masc gender + Plur + Apm
@@ -204,7 +204,7 @@ fn test_french_noun_non_apm_plural() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "maisons".into(),
         lemma: "maison".into(),
@@ -215,8 +215,8 @@ fn test_french_noun_non_apm_plural() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "noun|maison-Fem-Plur");
@@ -228,7 +228,7 @@ fn test_french_pron_accusative() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "me".into(),
         lemma: "me".into(),
@@ -239,8 +239,8 @@ fn test_french_pron_accusative() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "pron|me-Prs-Acc-S1");
@@ -252,7 +252,7 @@ fn test_french_pron_no_case_lookup() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "nous".into(),
         lemma: "nous".into(),
@@ -263,8 +263,8 @@ fn test_french_pron_no_case_lookup() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // "nous" is not in fr/case.py → no Case field
@@ -279,7 +279,7 @@ fn test_french_mwt_contraction_du() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "du".into(),
                 lemma: "du".into(),
@@ -290,8 +290,8 @@ fn test_french_mwt_contraction_du() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "de".into(),
                 lemma: "de".into(),
@@ -302,8 +302,8 @@ fn test_french_mwt_contraction_du() {
                 deprel: "case".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "le".into(),
                 lemma: "le".into(),
@@ -314,8 +314,8 @@ fn test_french_mwt_contraction_du() {
                 deprel: "det".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "pain".into(),
                 lemma: "pain".into(),
@@ -326,7 +326,7 @@ fn test_french_mwt_contraction_du() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let mors = map_ud_sentence_to_mors(&sentence, &ctx);
@@ -352,7 +352,7 @@ fn test_japanese_verb_override_full_output() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "食べちゃう".into(),
         lemma: "食べる".into(),
@@ -363,8 +363,8 @@ fn test_japanese_verb_override_full_output() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Override changes POS to sconj → no verb features emitted
@@ -377,7 +377,7 @@ fn test_japanese_intj_override_hai() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "はい".into(),
         lemma: "はい".into(),
@@ -388,8 +388,8 @@ fn test_japanese_intj_override_hai() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Override: intj|はい (noun features suppressed because dispatch uses original UPOS)
@@ -408,7 +408,7 @@ fn test_japanese_aux_override_nai() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "ない".into(),
         lemma: "無い".into(),
@@ -419,8 +419,8 @@ fn test_japanese_aux_override_nai() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Override: aux|ない, then verb features (original UPOS = AUX)
@@ -438,7 +438,7 @@ fn test_japanese_comma_lemma_becomes_cm() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "、".into(),
         lemma: "、".into(),
@@ -449,8 +449,8 @@ fn test_japanese_comma_lemma_becomes_cm() {
         deprel: "punct".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert_eq!(out, "cm|、");
@@ -462,7 +462,7 @@ fn test_japanese_all_punct_is_cm() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "…".into(),
         lemma: "…".into(),
@@ -473,8 +473,8 @@ fn test_japanese_all_punct_is_cm() {
         deprel: "punct".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Japanese PUNCT → POS becomes "cm"
@@ -490,7 +490,7 @@ fn test_japanese_verb_no_irr_suffix() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "行った".into(),
         lemma: "行く".into(),
@@ -501,8 +501,8 @@ fn test_japanese_verb_no_irr_suffix() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert!(
@@ -517,7 +517,7 @@ fn test_french_3letter_code_works() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fra").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "je".into(),
         lemma: "je".into(),
@@ -528,8 +528,8 @@ fn test_french_3letter_code_works() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Must get French pronoun case even with "fra" code
@@ -542,7 +542,7 @@ fn test_japanese_3letter_code_works() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("jpn").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "はい".into(),
         lemma: "はい".into(),
@@ -553,8 +553,8 @@ fn test_japanese_3letter_code_works() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // "jpn" must trigger Japanese verbform overrides

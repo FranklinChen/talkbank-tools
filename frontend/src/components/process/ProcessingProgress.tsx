@@ -329,9 +329,9 @@ export function ProcessingProgress({
                   <span className="text-xs text-gray-400 flex-shrink-0">
                     {displayProgressLabel(f.progress_stage, f.progress_label)}
                   </span>
-                  {f.finished_at && f.started_at && (
+                  {f.duration_s != null && (
                     <span className="text-xs text-gray-400 flex-shrink-0 w-12 text-right tabular-nums">
-                      {formatDuration(f.finished_at - f.started_at)}
+                      {formatDuration(f.duration_s)}
                     </span>
                   )}
                 </div>

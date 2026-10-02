@@ -156,12 +156,10 @@ fn snapshot_job_info() {
                 status: FileStatusKind::Done,
                 error: None,
                 error_category: None,
-                error_codes: None,
-                error_line: None,
-                bug_report_id: None,
                 stamp: batchalign::api::FileStampOutcome::Unrecorded,
-                started_at: Some(UnixTimestamp(1700000000.0)),
-                finished_at: Some(UnixTimestamp(1700000005.0)),
+                started_at: Some(MachineTime::from_unix_seconds(1700000000.0).unwrap()),
+                finished_at: Some(MachineTime::from_unix_seconds(1700000005.0).unwrap()),
+                duration_s: None,
                 next_eligible_at: None,
                 progress_current: None,
                 progress_total: None,
@@ -173,12 +171,10 @@ fn snapshot_job_info() {
                 status: FileStatusKind::Processing,
                 error: None,
                 error_category: None,
-                error_codes: None,
-                error_line: None,
-                bug_report_id: None,
                 stamp: batchalign::api::FileStampOutcome::Unrecorded,
-                started_at: Some(UnixTimestamp(1700000005.0)),
+                started_at: Some(MachineTime::from_unix_seconds(1700000005.0).unwrap()),
                 finished_at: None,
+                duration_s: None,
                 next_eligible_at: None,
                 progress_current: Some(2),
                 progress_total: Some(5),
@@ -186,7 +182,7 @@ fn snapshot_job_info() {
                 progress_label: Some("Analyzing morphosyntax".into()),
             },
         ],
-        submitted_at: Some("2026-01-15T10:00:00Z".into()),
+        submitted_at: "2026-01-15T10:00:00Z".parse().unwrap(),
         submitted_by: Some("192.168.1.1".into()),
         submitted_by_name: Some("Lab-Mac-1".into()),
         completed_at: None,
@@ -243,11 +239,11 @@ fn snapshot_job_list_item() {
         completed_files: 10,
         error_files: 1,
         error: None,
-        submitted_at: Some("2026-01-15T10:00:00Z".into()),
+        submitted_at: "2026-01-15T10:00:00Z".parse().unwrap(),
         submitted_by: Some("192.168.1.1".into()),
         submitted_by_name: Some("Lab-Mac-1".into()),
-        completed_at: Some("2026-01-15T10:05:00Z".into()),
-        duration_s: Some(DurationSeconds(300.0)),
+        completed_at: "2026-01-15T10:05:00Z".parse().ok(),
+        duration_s: Some(batchalign::api::NonNegativeSeconds::try_from(300.0).unwrap()),
         next_eligible_at: None,
         num_workers: Some(4),
         active_lease: None,
@@ -350,10 +346,10 @@ fn snapshot_server_config_full() {
         port: batchalign::config::PortRequest::from_u16(9000),
         host: "0.0.0.0".into(),
         max_workers_per_job: Some(2),
-        job_ttl_days: batchalign::config::JobTtlDays::new(14),
+        job_ttl_days: batchalign::config::JobTtlDays::literal::<14>(),
         auto_daemon: true,
         memory_gate_mb: Some(MemoryMb(2048)),
-        worker_health_interval_s: 15,
+        worker_health_interval_s: batchalign::api::PositiveSeconds::literal::<15>(),
         allow_mps: Some(true),
         ..Default::default()
     };
@@ -371,7 +367,7 @@ fn snapshot_worker_health() {
         command: "infer:morphosyntax".into(),
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         pid: WorkerPid(12345),
-        uptime_s: DurationSeconds(120.5),
+        uptime_s: NonNegativeSeconds::try_from(120.5).expect("fixture uptime"),
     };
     insta::assert_json_snapshot!("worker_health", health);
 }
@@ -482,7 +478,7 @@ auto_daemon: false
 "#;
 
     use batchalign_types::paths::{MediaMappingKey, ServerPath};
-    let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str(yaml).unwrap();
     assert_eq!(
         cfg.media_roots,
         vec![ServerPath::new("/Volumes/Media/talkbank")]
@@ -516,15 +512,24 @@ fn infer_ipc_roundtrip() {
 
     // Simulate what Python worker responds with
     let resp_json = r#"{
-        "result": {"mor": "det|the n|dog v|run-3S", "gra": "1|2|DET 2|3|SUBJ 3|0|ROOT"},
-        "error": null,
+        "outcome": {
+            "kind": "produced",
+            "result": {"mor": "det|the n|dog v|run-3S", "gra": "1|2|DET 2|3|SUBJ 3|0|ROOT"}
+        },
         "elapsed_s": 0.123
     }"#;
 
     let resp: InferResponse = serde_json::from_str(resp_json).unwrap();
-    assert!(resp.result.is_some());
-    assert!(resp.error.is_none());
-    assert_eq!(resp.elapsed_s, 0.123);
+    assert!(resp.outcome.result().is_some());
+    assert!(resp.outcome.error().is_none());
+    match resp.elapsed_s {
+        batchalign::types::worker::ItemElapsed::Measured(seconds) => {
+            assert_eq!(seconds.get(), 0.123)
+        }
+        batchalign::types::worker::ItemElapsed::NotExecuted => {
+            panic!("a timed item must read as measured")
+        }
+    }
 }
 
 /// Verify BatchInferRequest/BatchInferResponse roundtrip.
@@ -549,17 +554,29 @@ fn batch_infer_ipc_roundtrip() {
     // Simulate Python response
     let resp_json = r#"{
         "results": [
-            {"result": {"mor": "n|hello"}, "error": null, "elapsed_s": 0.05},
-            {"result": null, "error": "failed for testing", "elapsed_s": 0.0}
+            {"outcome": {"kind": "produced", "result": {"mor": "n|hello"}}, "elapsed_s": 0.05},
+            {"outcome": {"kind": "failed", "error": "failed for testing"}, "elapsed_s": null}
         ]
     }"#;
 
     let resp: BatchInferResponse = serde_json::from_str(resp_json).unwrap();
     assert_eq!(resp.results.len(), 2);
-    assert!(resp.results[0].result.is_some());
-    assert!(resp.results[0].error.is_none());
-    assert!(resp.results[1].result.is_none());
-    assert_eq!(resp.results[1].error.as_deref(), Some("failed for testing"));
+    assert!(resp.results[0].outcome.result().is_some());
+    assert!(resp.results[0].outcome.error().is_none());
+    assert!(resp.results[1].outcome.result().is_none());
+    assert_eq!(resp.results[1].outcome.error(), Some("failed for testing"));
+
+    // A response holding both, or neither, is malformed: the old shape with
+    // two optional fields admitted both and made every reader decide.
+    for malformed in [
+        r#"{"result": {"mor": "n|x"}, "error": "also failed", "elapsed_s": null}"#,
+        r#"{"elapsed_s": null}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<InferResponse>(malformed).is_err(),
+            "{malformed}"
+        );
+    }
 }
 
 /// Verify Python CapabilitiesResponse with infer fields parses in Rust.

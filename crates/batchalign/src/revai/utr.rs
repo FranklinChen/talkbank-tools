@@ -7,7 +7,7 @@
 #[cfg(test)]
 use crate::revai::FetchedRevAsrEvidence;
 
-use crate::api::DurationSeconds;
+use crate::api::AudioPositionSeconds;
 use crate::transcribe::{AsrResponse, AsrToken};
 
 use super::{CompletedRevAsrEvidence, extract_timed_words};
@@ -19,8 +19,8 @@ pub(crate) fn rev_evidence_to_utr_asr_response(evidence: &CompletedRevAsrEvidenc
             .into_iter()
             .map(|word| AsrToken {
                 text: word.word,
-                start_s: Some(DurationSeconds(word.start_ms as f64 / 1000.0)),
-                end_s: Some(DurationSeconds(word.end_ms as f64 / 1000.0)),
+                start_s: Some(AudioPositionSeconds::from_millis(word.start_ms)),
+                end_s: Some(AudioPositionSeconds::from_millis(word.end_ms)),
                 speaker: None,
                 confidence: None,
             })
@@ -35,6 +35,11 @@ pub(crate) fn rev_evidence_to_utr_asr_response(evidence: &CompletedRevAsrEvidenc
 mod tests {
     use super::*;
     use crate::api::LanguageCode3;
+
+    /// A fixture position; every literal in this module is a valid one.
+    fn at(seconds: f64) -> Option<AudioPositionSeconds> {
+        Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
+    }
 
     #[test]
     fn transcript_projection_discards_blank_rev_tokens() {
@@ -66,8 +71,8 @@ mod tests {
         ));
         assert_eq!(response.tokens.len(), 2);
         assert_eq!(response.tokens[0].text, "hello");
-        assert_eq!(response.tokens[0].start_s, Some(DurationSeconds(0.1)));
+        assert_eq!(response.tokens[0].start_s, at(0.1));
         assert_eq!(response.tokens[1].text, "world");
-        assert_eq!(response.tokens[1].end_s, Some(DurationSeconds(1.2)));
+        assert_eq!(response.tokens[1].end_s, at(1.2));
     }
 }

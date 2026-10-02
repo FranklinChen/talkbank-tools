@@ -1,7 +1,7 @@
 //! ASR response conversion and speaker-track admission.
 
 use batchalign_transform::asr_postprocess::{
-    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs, SpeakerIndex,
+    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, SpeakerIndex,
 };
 use tracing::warn;
 
@@ -46,8 +46,8 @@ pub(crate) fn convert_asr_response(response: &AsrResponse) -> AsrOutput {
 
         current_elements.push(AsrElement {
             value: AsrRawText::new(token.text.clone()),
-            ts: AsrTimestampSecs::from(token.start_s.map(|s| s.0)),
-            end_ts: AsrTimestampSecs::from(token.end_s.map(|s| s.0)),
+            ts: token.start_s,
+            end_ts: token.end_s,
             kind: AsrElementKind::Text,
         });
     }

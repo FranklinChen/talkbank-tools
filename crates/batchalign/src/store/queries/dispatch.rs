@@ -3,9 +3,10 @@
 use crate::api::JobId;
 #[cfg(test)]
 use crate::store::registry::QueuePoll;
-use tracing::warn;
 
-use super::super::{JobStore, unix_now};
+use super::db_helpers::LeaseWrite;
+
+use super::super::JobStore;
 
 /// Result of attempting to renew the local queue lease heartbeat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,25 +28,15 @@ impl JobStore {
     /// Currently exercised only by the local queue-claim tests.
     #[cfg(test)]
     pub(crate) async fn claim_ready_queued_jobs(&self) -> QueuePoll {
-        let now = unix_now();
+        let now = self.now();
         let claimed = self
             .registry
-            .claim_ready_queued_jobs(now, self.node_id(), self.local_lease_ttl_s())
+            .claim_ready_queued_jobs(now, self.node_id(), self.local_lease_ttl())
             .await;
 
         for claimed in &claimed.claimed_leases {
-            if let Some(db) = &self.db
-                && let Err(e) = db
-                    .update_job_lease(
-                        &claimed.job_id,
-                        Some(claimed.lease.leased_by_node.as_ref()),
-                        Some(claimed.lease.expires_at.0),
-                        Some(claimed.lease.heartbeat_at.0),
-                    )
-                    .await
-            {
-                warn!(job_id = %claimed.job_id, error = %e, "DB update_job_lease failed on claim");
-            }
+            self.db_persist_lease(&claimed.job_id, Some(&claimed.lease), LeaseWrite::Claim)
+                .await;
         }
 
         claimed.poll
@@ -57,24 +48,15 @@ impl JobStore {
         &self,
         job_id: &JobId,
     ) -> Option<crate::store::BeginRunnerOutcome> {
-        let now = unix_now();
+        let now = self.now();
         let outcome = self
             .registry
-            .begin_runner(job_id, self.node_id(), now, self.local_lease_ttl_s())
+            .begin_runner(job_id, self.node_id(), now, self.local_lease_ttl())
             .await;
 
-        if matches!(outcome, Some(crate::store::BeginRunnerOutcome::Started(_)))
-            && let Some(db) = &self.db
-            && let Err(e) = db
-                .update_job_lease(
-                    job_id,
-                    Some(self.node_id().as_ref()),
-                    Some(now.0 + self.local_lease_ttl_s()),
-                    Some(now.0),
-                )
-                .await
-        {
-            warn!(job_id = %job_id, error = %e, "DB update_job_lease failed on runner claim");
+        if let Some(crate::store::BeginRunnerOutcome::Started { lease, .. }) = &outcome {
+            self.db_persist_lease(job_id, Some(lease), LeaseWrite::RunnerClaim)
+                .await;
         }
 
         outcome
@@ -84,7 +66,7 @@ impl JobStore {
     pub(crate) async fn last_file_activity_at(
         &self,
         job_id: &JobId,
-    ) -> Option<crate::api::UnixTimestamp> {
+    ) -> Option<crate::api::MachineTime> {
         self.registry.last_file_activity_at(job_id).await
     }
 
@@ -105,11 +87,8 @@ impl JobStore {
             return;
         }
 
-        if let Some(db) = &self.db
-            && let Err(e) = db.update_job_lease(job_id, None, None, None).await
-        {
-            warn!(job_id = %job_id, error = %e, "DB update_job_lease failed on release");
-        }
+        self.db_persist_lease(job_id, None, LeaseWrite::Release)
+            .await;
     }
 
     /// Renew the local lease for a currently claimed job.
@@ -117,30 +96,19 @@ impl JobStore {
     /// Returns [`LeaseRenewalOutcome::Renewed`] while the local claim is still
     /// active, or [`LeaseRenewalOutcome::Stop`] when the heartbeat loop should exit.
     pub(crate) async fn renew_job_lease(&self, job_id: &JobId) -> LeaseRenewalOutcome {
-        let now = unix_now();
+        let now = self.now();
         let renewed_lease = self
             .registry
-            .renew_job_lease(job_id, self.node_id(), now, self.local_lease_ttl_s())
+            .renew_job_lease(job_id, self.node_id(), now, self.local_lease_ttl())
             .await;
 
-        if let Some(lease) = renewed_lease.clone()
-            && let Some(db) = &self.db
-            && let Err(e) = db
-                .update_job_lease(
-                    job_id,
-                    Some(lease.leased_by_node.as_ref()),
-                    Some(lease.expires_at.0),
-                    Some(lease.heartbeat_at.0),
-                )
-                .await
-        {
-            warn!(job_id = %job_id, error = %e, "DB update_job_lease failed on renew");
-        }
-
-        if renewed_lease.is_some() {
-            LeaseRenewalOutcome::Renewed
-        } else {
-            LeaseRenewalOutcome::Stop
+        match &renewed_lease {
+            Some(lease) => {
+                self.db_persist_lease(job_id, Some(lease), LeaseWrite::Renew)
+                    .await;
+                LeaseRenewalOutcome::Renewed
+            }
+            None => LeaseRenewalOutcome::Stop,
         }
     }
 }

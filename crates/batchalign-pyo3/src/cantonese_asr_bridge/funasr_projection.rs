@@ -503,8 +503,9 @@ mod tests {
         );
         let last = projection.monologues[0].elements.last();
         assert_eq!(
-            last.map(|element| (element.ts, element.end_ts)),
-            Some((Some(9.1), Some(9.2)))
+            last.and_then(HkAsrElement::bounds)
+                .map(|(start, end)| (start.get(), end.get())),
+            Some((9.1, 9.2))
         );
         assert_eq!(projection.timed_words.len(), 6);
         Ok(())
@@ -523,7 +524,12 @@ mod tests {
         )])?;
 
         assert_eq!(values(&projection), vec!["I", "ok"]);
-        assert_eq!(projection.monologues[0].elements[1].ts, Some(0.2));
+        assert_eq!(
+            projection.monologues[0].elements[1]
+                .bounds()
+                .map(|(start, _)| start.get()),
+            Some(0.2)
+        );
         Ok(())
     }
 
@@ -544,7 +550,12 @@ mod tests {
         )])?;
 
         assert_eq!(values(&projection), vec!["真", "系", "ok"]);
-        assert_eq!(projection.monologues[0].elements[1].ts, Some(0.1));
+        assert_eq!(
+            projection.monologues[0].elements[1]
+                .bounds()
+                .map(|(start, _)| start.get()),
+            Some(0.1)
+        );
         Ok(())
     }
 
@@ -691,7 +702,7 @@ mod tests {
             cantonese.monologues[0]
                 .elements
                 .iter()
-                .all(|element| element.ts.is_none())
+                .all(|element| element.bounds().is_none())
         );
         assert!(cantonese.timed_words.is_empty());
 
@@ -730,7 +741,7 @@ mod tests {
 
         assert_eq!(values(&projection), vec!["hello"]);
         let element = &projection.monologues[0].elements[0];
-        assert_eq!((element.ts, element.end_ts), (None, None));
+        assert_eq!(element.bounds(), None);
         assert!(projection.timed_words.is_empty());
         Ok(())
     }

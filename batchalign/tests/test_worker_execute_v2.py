@@ -39,6 +39,7 @@ from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
+    ItemProduced,
     _state,
 )
 from batchalign.worker._types_v2 import (
@@ -673,45 +674,46 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
             text=TextExecutionHostV2(
                 morphosyntax_runner=lambda req: BatchInferResponse(
                     results=[
-                        InferResponse(
-                            result={
-                                "kind": "analyzed",
-                                "raw_sentences": [
-                                    [
-                                        {
-                                            "id": 1,
-                                            "text": "I",
-                                            "lemma": "I",
-                                            "upos": "PRON",
-                                            "head": 2,
-                                            "deprel": "nsubj",
-                                        },
-                                        {
-                                            "id": 2,
-                                            "text": "saw",
-                                            "lemma": "see",
-                                            "upos": "VERB",
-                                            "head": 0,
-                                            "deprel": "root",
-                                        },
-                                        {
-                                            "id": 3,
-                                            "text": "it",
-                                            "lemma": "it",
-                                            "upos": "PRON",
-                                            "head": 2,
-                                            "deprel": "obj",
-                                        },
-                                    ]
-                                ],
-                                "model": {
-                                    "stanza_version": "1.99.0",
-                                    "lang": "eng",
-                                    "pipeline": "standard",
-                                },
-                                "repairs": [],
-                            },
-                            elapsed_s=0.0,
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={
+                                    "kind": "analyzed",
+                                    "raw_sentences": [
+                                        [
+                                            {
+                                                "id": 1,
+                                                "text": "I",
+                                                "lemma": "I",
+                                                "upos": "PRON",
+                                                "head": 2,
+                                                "deprel": "nsubj",
+                                            },
+                                            {
+                                                "id": 2,
+                                                "text": "saw",
+                                                "lemma": "see",
+                                                "upos": "VERB",
+                                                "head": 0,
+                                                "deprel": "root",
+                                            },
+                                            {
+                                                "id": 3,
+                                                "text": "it",
+                                                "lemma": "it",
+                                                "upos": "PRON",
+                                                "head": 2,
+                                                "deprel": "obj",
+                                            },
+                                        ]
+                                    ],
+                                    "model": {
+                                        "stanza_version": "1.99.0",
+                                        "lang": "eng",
+                                        "pipeline": "standard",
+                                    },
+                                    "repairs": [],
+                                }
+                            )
                         )
                     ]
                 )
@@ -759,45 +761,46 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
         captured["mwt"] = req.mwt
         return BatchInferResponse(
             results=[
-                InferResponse(
-                    result={
-                        "kind": "analyzed",
-                        "raw_sentences": [
-                            [
-                                {
-                                    "id": 1,
-                                    "text": "我",
-                                    "lemma": "我",
-                                    "upos": "PRON",
-                                    "head": 2,
-                                    "deprel": "nsubj",
-                                },
-                                {
-                                    "id": 2,
-                                    "text": "食緊",
-                                    "lemma": "食緊",
-                                    "upos": "VERB",
-                                    "head": 0,
-                                    "deprel": "root",
-                                },
-                                {
-                                    "id": 3,
-                                    "text": "飯",
-                                    "lemma": "飯",
-                                    "upos": "NOUN",
-                                    "head": 2,
-                                    "deprel": "obj",
-                                },
-                            ]
-                        ],
-                        "model": {
-                            "stanza_version": "1.99.0",
-                            "lang": "yue",
-                            "pipeline": "cantonese_pycantonese_pos",
-                        },
-                        "repairs": [],
-                    },
-                    elapsed_s=0.0,
+                InferResponse.timed(
+                    lambda: ItemProduced(
+                        result={
+                            "kind": "analyzed",
+                            "raw_sentences": [
+                                [
+                                    {
+                                        "id": 1,
+                                        "text": "我",
+                                        "lemma": "我",
+                                        "upos": "PRON",
+                                        "head": 2,
+                                        "deprel": "nsubj",
+                                    },
+                                    {
+                                        "id": 2,
+                                        "text": "食緊",
+                                        "lemma": "食緊",
+                                        "upos": "VERB",
+                                        "head": 0,
+                                        "deprel": "root",
+                                    },
+                                    {
+                                        "id": 3,
+                                        "text": "飯",
+                                        "lemma": "飯",
+                                        "upos": "NOUN",
+                                        "head": 2,
+                                        "deprel": "obj",
+                                    },
+                                ]
+                            ],
+                            "model": {
+                                "stanza_version": "1.99.0",
+                                "lang": "yue",
+                                "pipeline": "cantonese_pycantonese_pos",
+                            },
+                            "repairs": [],
+                        }
+                    )
                 )
             ]
         )
@@ -878,7 +881,9 @@ def test_invalid_morphosyntax_host_item_fails_only_that_item(
             text=TextExecutionHostV2(
                 morphosyntax_runner=lambda _req: BatchInferResponse(
                     results=[
-                        InferResponse(result={"raw_sentences": "bad"}, elapsed_s=0.0)
+                        InferResponse.timed(
+                            lambda: ItemProduced(result={"raw_sentences": "bad"})
+                        )
                     ]
                 )
             ),
@@ -1095,8 +1100,13 @@ def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
             text=TextExecutionHostV2(
                 utseg_runner=lambda req: BatchInferResponse(
                     results=[
-                        InferResponse(
-                            result={"trees": ["(ROOT (S hello world))"]}, elapsed_s=0.0
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={
+                                    "kind": "constituency",
+                                    "trees": ["(ROOT (S hello world))"],
+                                }
+                            )
                         )
                     ]
                 )
@@ -1106,7 +1116,9 @@ def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, UtsegResultV2)
-    assert response.result.items[0].trees == ["(ROOT (S hello world))"]
+    item = response.result.items[0]
+    assert item.kind == "constituency"
+    assert item.trees == ["(ROOT (S hello world))"]
 
 
 def test_routes_utseg_execute_v2_request_with_assignments(tmp_path: Path) -> None:
@@ -1141,7 +1153,11 @@ def test_routes_utseg_execute_v2_request_with_assignments(tmp_path: Path) -> Non
             text=TextExecutionHostV2(
                 utseg_runner=lambda req: BatchInferResponse(
                     results=[
-                        InferResponse(result={"assignments": [0, 1]}, elapsed_s=0.0)
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={"kind": "unattributed", "assignments": [0, 1]}
+                            )
+                        )
                     ]
                 )
             ),
@@ -1150,7 +1166,9 @@ def test_routes_utseg_execute_v2_request_with_assignments(tmp_path: Path) -> Non
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, UtsegResultV2)
-    assert response.result.items[0].assignments == [0, 1]
+    item = response.result.items[0]
+    assert item.kind == "unattributed"
+    assert item.assignments == [0, 1]
 
 
 def test_routes_utseg_execute_v2_request_with_boundary_evidence(tmp_path: Path) -> None:
@@ -1213,12 +1231,14 @@ def test_routes_utseg_execute_v2_request_with_boundary_evidence(tmp_path: Path) 
             text=TextExecutionHostV2(
                 utseg_runner=lambda _req: BatchInferResponse(
                     results=[
-                        InferResponse(
-                            result={
-                                "assignments": [0, 1, 1],
-                                "boundary_model_evidence": evidence,
-                            },
-                            elapsed_s=0.0,
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={
+                                    "kind": "boundary_model",
+                                    "assignments": [0, 1, 1],
+                                    "boundary_model_evidence": evidence,
+                                }
+                            )
                         )
                     ]
                 )
@@ -1228,13 +1248,13 @@ def test_routes_utseg_execute_v2_request_with_boundary_evidence(tmp_path: Path) 
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, UtsegResultV2)
-    boundary_model_evidence = response.result.items[0].boundary_model_evidence
-    assert boundary_model_evidence is not None
-    assert boundary_model_evidence.model_dump(mode="json") == evidence
+    item = response.result.items[0]
+    assert item.kind == "boundary_model"
+    assert item.boundary_model_evidence.model_dump(mode="json") == evidence
 
 
-def test_invalid_utseg_host_output_becomes_runtime_failure(tmp_path: Path) -> None:
-    """Malformed utseg host output should be classified as runtime failure."""
+def test_invalid_utseg_host_output_fails_its_item(tmp_path: Path) -> None:
+    """Malformed utseg host output is that item's failure, not the batch's."""
 
     payload_path = tmp_path / "utseg-invalid-batch.json"
     _write_json_payload(
@@ -1263,19 +1283,25 @@ def test_invalid_utseg_host_output_becomes_runtime_failure(tmp_path: Path) -> No
         host=WorkerExecutionHostV2(
             text=TextExecutionHostV2(
                 utseg_runner=lambda _req: BatchInferResponse(
-                    results=[InferResponse(result={"trees": [1, 2]}, elapsed_s=0.0)]
+                    results=[
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={"kind": "constituency", "trees": [1, 2]}
+                            )
+                        )
+                    ]
                 )
             ),
         ),
     )
 
-    _assert_runtime_failure_response(response, "invalid utseg host output")
+    _assert_item_failure(response, "invalid utseg host item")
 
 
-def test_invalid_utseg_assignment_host_output_becomes_runtime_failure(
+def test_invalid_utseg_assignment_host_output_fails_its_item(
     tmp_path: Path,
 ) -> None:
-    """Malformed utseg assignments should be classified as runtime failure."""
+    """Malformed utseg assignments are that item's failure, not the batch's."""
 
     payload_path = tmp_path / "utseg-invalid-assignments-batch.json"
     _write_json_payload(
@@ -1305,14 +1331,18 @@ def test_invalid_utseg_assignment_host_output_becomes_runtime_failure(
             text=TextExecutionHostV2(
                 utseg_runner=lambda _req: BatchInferResponse(
                     results=[
-                        InferResponse(result={"assignments": ["bad"]}, elapsed_s=0.0)
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={"kind": "unattributed", "assignments": ["bad"]}
+                            )
+                        )
                     ]
                 )
             ),
         ),
     )
 
-    _assert_runtime_failure_response(response, "invalid utseg host output")
+    _assert_item_failure(response, "invalid utseg host item")
 
 
 def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
@@ -1349,13 +1379,14 @@ def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
             text=TextExecutionHostV2(
                 translate_runner=lambda req: BatchInferResponse(
                     results=[
-                        InferResponse(
-                            result={
-                                "kind": "translated",
-                                "raw_translation": "hola",
-                                "engine": "googletrans-v1",
-                            },
-                            elapsed_s=0.0,
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={
+                                    "kind": "translated",
+                                    "raw_translation": "hola",
+                                    "engine": "googletrans-v1",
+                                }
+                            )
                         )
                     ]
                 )
@@ -1399,8 +1430,8 @@ def test_invalid_translate_host_item_fails_only_that_item(tmp_path: Path) -> Non
             text=TextExecutionHostV2(
                 translate_runner=lambda _req: BatchInferResponse(
                     results=[
-                        InferResponse(
-                            result={"raw_translation": ["hola"]}, elapsed_s=0.0
+                        InferResponse.timed(
+                            lambda: ItemProduced(result={"raw_translation": ["hola"]})
                         )
                     ]
                 )
@@ -1443,26 +1474,27 @@ def test_routes_coref_execute_v2_request(tmp_path: Path) -> None:
             text=TextExecutionHostV2(
                 coref_runner=lambda req: BatchInferResponse(
                     results=[
-                        InferResponse(
-                            result={
-                                "kind": "resolved",
-                                "engine": "stanza-1.99.0",
-                                "annotations": [
-                                    {
-                                        "sentence_idx": 0,
-                                        "words": [
-                                            [
-                                                {
-                                                    "chain_id": 0,
-                                                    "is_start": True,
-                                                    "is_end": True,
-                                                }
-                                            ]
-                                        ],
-                                    }
-                                ],
-                            },
-                            elapsed_s=0.0,
+                        InferResponse.timed(
+                            lambda: ItemProduced(
+                                result={
+                                    "kind": "resolved",
+                                    "engine": "stanza-1.99.0",
+                                    "annotations": [
+                                        {
+                                            "sentence_idx": 0,
+                                            "words": [
+                                                [
+                                                    {
+                                                        "chain_id": 0,
+                                                        "is_start": True,
+                                                        "is_end": True,
+                                                    }
+                                                ]
+                                            ],
+                                        }
+                                    ],
+                                }
+                            )
                         )
                     ]
                 )
@@ -1505,7 +1537,9 @@ def test_invalid_coref_host_item_fails_only_that_item(tmp_path: Path) -> None:
             text=TextExecutionHostV2(
                 coref_runner=lambda _req: BatchInferResponse(
                     results=[
-                        InferResponse(result={"annotations": "bad"}, elapsed_s=0.0)
+                        InferResponse.timed(
+                            lambda: ItemProduced(result={"annotations": "bad"})
+                        )
                     ]
                 )
             ),

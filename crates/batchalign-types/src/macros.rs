@@ -180,26 +180,33 @@ macro_rules! validated_string_id {
 ///
 /// The field is private and the only route in is `TryFrom<inner>`, which
 /// serde also deserializes through, so an out-of-range number is refused at
-/// the boundary rather than checked downstream. The JSON Schema is written
-/// by hand because the derive reads the schema off the `try_from` type and
-/// drops the range, which would leave the Python conformance check blind to
-/// the bound the constructor enforces.
+/// the boundary rather than checked downstream. The schemas are written from
+/// the `schema(..)` clause because the derives read the schema off the
+/// `try_from` type and drop the range, which would leave the Python
+/// conformance check and the OpenAPI document blind to the bound the
+/// constructor enforces. One clause feeds both the JSON Schema (schemars, for
+/// the worker IPC schema) and the OpenAPI schema (utoipa), so the two cannot
+/// disagree; `NonNegativeSeconds` used to restate its schema by hand for
+/// utoipa.
 ///
 /// ```ignore
 /// validated_numeric!(
 ///     /// docs
 ///     pub NonNegativeSeconds(f64 = "f64"), InvalidSeconds,
 ///     |v| v.is_finite() && v >= 0.0, "seconds must be finite and non-negative",
-///     { "type": "number", "format": "double", "minimum": 0.0 }
+///     schema(number, "double", minimum 0.0, description "A finite, non-negative number of seconds.")
 /// );
 /// ```
 /// The inner type is written twice, as a type and as the string serde's
-/// `try_from`/`into` attributes require. Append `[Eq]` after the schema for
+/// `try_from`/`into` attributes require. The schema type is `number` or
+/// `integer`; `maximum` is optional. Append `[Eq]` after the schema for
 /// integer types that also need `Eq` and `Hash`.
 macro_rules! validated_numeric {
     ($(#[$meta:meta])* $vis:vis $name:ident($inner:ty = $inner_str:literal), $error:ident,
-     |$v:ident| $pred:expr, $msg:literal, { $($schema:tt)* } [Eq]) => {
-        validated_numeric!(@base $(#[$meta])* $vis $name($inner = $inner_str), $error, |$v| $pred, $msg, { $($schema)* });
+     |$v:ident| $pred:expr, $msg:literal,
+     schema($ty:ident, $format:literal, minimum $min:literal $(, maximum $max:literal)?, description $desc:literal) [Eq]) => {
+        validated_numeric!(@base $(#[$meta])* $vis $name($inner = $inner_str), $error, |$v| $pred, $msg,
+            schema($ty, $format, minimum $min $(, maximum $max)?, description $desc));
 
         impl Eq for $name {}
 
@@ -210,11 +217,16 @@ macro_rules! validated_numeric {
         }
     };
     ($(#[$meta:meta])* $vis:vis $name:ident($inner:ty = $inner_str:literal), $error:ident,
-     |$v:ident| $pred:expr, $msg:literal, { $($schema:tt)* }) => {
-        validated_numeric!(@base $(#[$meta])* $vis $name($inner = $inner_str), $error, |$v| $pred, $msg, { $($schema)* });
+     |$v:ident| $pred:expr, $msg:literal,
+     schema($ty:ident, $format:literal, minimum $min:literal $(, maximum $max:literal)?, description $desc:literal)) => {
+        validated_numeric!(@base $(#[$meta])* $vis $name($inner = $inner_str), $error, |$v| $pred, $msg,
+            schema($ty, $format, minimum $min $(, maximum $max)?, description $desc));
     };
+    (@utoipa_type number) => { utoipa::openapi::schema::Type::Number };
+    (@utoipa_type integer) => { utoipa::openapi::schema::Type::Integer };
     (@base $(#[$meta:meta])* $vis:vis $name:ident($inner:ty = $inner_str:literal), $error:ident,
-     |$v:ident| $pred:expr, $msg:literal, { $($schema:tt)* }) => {
+     |$v:ident| $pred:expr, $msg:literal,
+     schema($ty:ident, $format:literal, minimum $min:literal $(, maximum $max:literal)?, description $desc:literal)) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
         #[serde(try_from = $inner_str, into = $inner_str)]
@@ -252,7 +264,31 @@ macro_rules! validated_numeric {
             }
 
             fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-                schemars::json_schema!({ $($schema)* })
+                schemars::json_schema!({
+                    "type": stringify!($ty),
+                    "format": $format,
+                    "minimum": $min,
+                    $("maximum": $max,)?
+                    "description": $desc
+                })
+            }
+        }
+
+        impl utoipa::PartialSchema for $name {
+            fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+                utoipa::openapi::ObjectBuilder::new()
+                    .schema_type(validated_numeric!(@utoipa_type $ty))
+                    .format(Some(utoipa::openapi::SchemaFormat::Custom($format.to_owned())))
+                    .minimum(Some($min))
+                    $(.maximum(Some($max)))?
+                    .description(Some($desc))
+                    .into()
+            }
+        }
+
+        impl utoipa::ToSchema for $name {
+            fn name() -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed(stringify!($name))
             }
         }
     };

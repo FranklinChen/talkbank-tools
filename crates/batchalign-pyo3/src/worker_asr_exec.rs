@@ -4,12 +4,12 @@
 //! - Python caller: `batchalign/worker/_asr_v2.py::execute_asr_request_v2()`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
-use batchalign_types::api::{LanguageCode3, NonNegativeSeconds};
+use batchalign_types::api::{AudioPositionSeconds, LanguageCode3};
 use batchalign_types::worker_v2::{
-    AsrBackendV2, AsrElementKindV2, AsrElementV2, AsrInputV2, AsrModelIdentityV2, AsrMonologueV2,
-    AsrRequestV2, ExecuteRequestV2, MonologueAsrResultV2, ProviderDiarizationV2,
-    ProviderSpeakerLabelV2, SpeakerAttributionV2, TaskRequestV2, TaskResultV2,
-    WhisperChunkResultV2,
+    AsrBackendV2, AsrElementKindV2, AsrElementTimingV2, AsrElementV2, AsrInputV2,
+    AsrModelIdentityV2, AsrMonologueV2, AsrRequestV2, ExecuteRequestV2, MonologueAsrResultV2,
+    ProviderDiarizationV2, ProviderSpeakerLabelV2, SpeakerAttributionV2, TaskRequestV2,
+    TaskResultV2, WhisperChunkResultV2,
 };
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
@@ -40,12 +40,12 @@ enum ProviderSpeakerInput {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ProviderAsrElementInput {
     value: String,
-    /// A finite non-negative time by type: a negative or non-finite bound is
+    /// A finite non-negative position by type: a negative or non-finite bound is
     /// refused where the host output is parsed.
     #[serde(default)]
-    ts: Option<NonNegativeSeconds>,
+    ts: Option<AudioPositionSeconds>,
     #[serde(default)]
-    end_ts: Option<NonNegativeSeconds>,
+    end_ts: Option<AudioPositionSeconds>,
     #[serde(default = "default_provider_element_type", rename = "type")]
     type_name: String,
     #[serde(default)]
@@ -181,29 +181,7 @@ fn parse_provider_result(
     for (monologue_index, monologue) in parsed.monologues.into_iter().enumerate() {
         let mut elements = Vec::with_capacity(monologue.elements.len());
         for element in monologue.elements {
-            // Each bound is a finite non-negative time by type; only their
-            // order is left to check here.
-            if let (Some(start_s), Some(end_s)) = (element.ts, element.end_ts)
-                && end_s < start_s
-            {
-                return Err(ExecuteFailure::Runtime(
-                    "invalid ASR host output: ASR element end_s must be >= start_s".to_owned(),
-                ));
-            }
-
-            let kind = if element.type_name == "punctuation" {
-                AsrElementKindV2::Punctuation
-            } else {
-                AsrElementKindV2::Text
-            };
-
-            elements.push(AsrElementV2 {
-                value: element.value,
-                start_s: element.ts,
-                end_s: element.end_ts,
-                kind,
-                confidence: element.confidence,
-            });
+            elements.push(admit_element(element)?);
         }
 
         monologues.push(AsrMonologueV2 {
@@ -216,6 +194,32 @@ fn parse_provider_result(
         lang: parsed.lang,
         monologues,
         model,
+    })
+}
+
+/// One provider element on the wire, its timing admitted once
+/// ([`AsrElementTimingV2::admit_positions`]): a pair of bounds that is not an
+/// admissible interval (inverted, or past the admissible range, as an epoch
+/// timestamp would be) refuses the whole response, naming the element, as the
+/// provider bridges refuse it.
+fn admit_element(element: ProviderAsrElementInput) -> Result<AsrElementV2, ExecuteFailure> {
+    let timing =
+        AsrElementTimingV2::admit_positions(element.ts, element.end_ts).map_err(|refusal| {
+            ExecuteFailure::Runtime(format!(
+                "invalid ASR host output: element {:?}: {refusal}",
+                element.value
+            ))
+        })?;
+    let kind = if element.type_name == "punctuation" {
+        AsrElementKindV2::Punctuation
+    } else {
+        AsrElementKindV2::Text
+    };
+    Ok(AsrElementV2 {
+        value: element.value,
+        timing,
+        kind,
+        confidence: element.confidence,
     })
 }
 
@@ -449,6 +453,7 @@ pub(crate) fn execute_asr_request_v2(
 mod tests {
     use super::*;
     use batchalign_types::api::NumSpeakers;
+    use batchalign_types::interval::UntimedCause;
 
     /// A request that asked the provider to separate speakers, with a real
     /// count. One is not a shape this can take: submission refuses it.
@@ -538,5 +543,61 @@ mod tests {
         ));
 
         assert!(message.contains("monologue 1"), "{message}");
+    }
+
+    /// A provider element with these bounds, as the host returns it.
+    fn element(ts: Option<f64>, end_ts: Option<f64>) -> ProviderAsrElementInput {
+        let mut fields = serde_json::json!({"value": "hello"});
+        if let Some(ts) = ts {
+            fields["ts"] = serde_json::json!(ts);
+        }
+        if let Some(end_ts) = end_ts {
+            fields["end_ts"] = serde_json::json!(end_ts);
+        }
+        serde_json::from_value(fields).expect("a provider element")
+    }
+
+    /// The timing an admitted element carries, or the refusal message.
+    fn timing(element: ProviderAsrElementInput) -> Result<AsrElementTimingV2, String> {
+        match admit_element(element) {
+            Ok(element) => Ok(element.timing),
+            Err(ExecuteFailure::Runtime(message)) => Err(message),
+            Err(_) => panic!("an inadmissible element is a runtime failure"),
+        }
+    }
+
+    /// Both bounds are admitted as one interval: an inverted pair, and a
+    /// pair past the admissible range (an epoch timestamp in seconds), refuse
+    /// the response, naming the element.
+    #[test]
+    fn element_bounds_are_admitted_as_one_interval() {
+        let timed = timing(element(Some(0.5), Some(1.25)))
+            .expect("an ordered pair in range")
+            .interval()
+            .expect("is timed");
+        assert_eq!((timed.start_ms(), timed.end_ms()), (500, 1250));
+        assert!(timing(element(Some(2.0), Some(1.0))).is_err());
+        let epoch = 1_700_000_000.0;
+        let refusal = timing(element(Some(epoch), Some(epoch + 1.0)))
+            .expect_err("an epoch timestamp is not a media position");
+        assert!(refusal.contains("hello"), "{refusal}");
+    }
+
+    /// One bound or none is the provider's own report, named as the cause.
+    #[test]
+    fn a_partial_or_absent_span_is_untimed_with_its_cause() {
+        let untimed = |cause| Ok(AsrElementTimingV2::Untimed { cause });
+        assert_eq!(
+            timing(element(Some(0.5), None)),
+            untimed(UntimedCause::ProviderReportedNoEnd)
+        );
+        assert_eq!(
+            timing(element(None, Some(0.5))),
+            untimed(UntimedCause::ProviderReportedNoStart)
+        );
+        assert_eq!(
+            timing(element(None, None)),
+            untimed(UntimedCause::ProviderReportedNoTiming)
+        );
     }
 }

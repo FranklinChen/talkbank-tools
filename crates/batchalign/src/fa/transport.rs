@@ -767,7 +767,7 @@ mod tests {
     use crate::fa::units::test_support::{anchored_group, plan_for};
 
     use super::*;
-    use crate::api::DurationSeconds;
+    use crate::api::NonNegativeSeconds;
     use crate::types::worker_v2::{
         ExecuteResponseV2, TaskResultV2, TranslationItemResultV2, TranslationResultV2,
         WorkerRequestIdV2,
@@ -950,7 +950,7 @@ mod tests {
             TaskResultV2::TranslationResult(TranslationResultV2 {
                 items: vec![TranslationItemResultV2::BlankInput],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let unit = plan.units().next().expect("one request");

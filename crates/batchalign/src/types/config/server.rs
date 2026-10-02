@@ -8,16 +8,21 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::serde_helpers::zero_as_none;
-use super::{JobTtlDays, MemoryGatePollSeconds, WorkerStartupLimit};
-use crate::api::{LanguageCode3, MemoryMb};
+use super::serde_helpers::{
+    empty_path_as_none, zero_as_default, zero_as_no_override, zero_as_none,
+};
+use super::{JobTtlDays, LeaseTtl, MemoryGatePollSeconds, WorkerStartupLimit};
+use crate::api::{LanguageCode3, MemoryMb, PositiveSeconds};
+use crate::types::worker_v2::TaskTimeoutOverrides;
 
 /// Configuration for the Batchalign processing server.
 ///
 /// Deserialized from the runtime-owned `server.yaml`. All fields have sensible
 /// defaults so an empty YAML file (or a missing file) produces a working
-/// configuration.  Scalar constructors clamp out-of-range values;
-/// [`validate`](Self::validate) reports those corrections without I/O.
+/// configuration. A scalar below its floor (`job_ttl_days`,
+/// `memory_gate_poll_s`, `max_concurrent_worker_startups`,
+/// `local_lease_ttl_s`) is refused where the file is read, naming the field;
+/// nothing is corrected silently.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -51,9 +56,8 @@ pub struct ServerConfig {
     /// the host-facts migration replaces that helper with
     /// `EffectiveConfig::max_concurrent_jobs`. The `zero_as_none`
     /// shim collapses pre-migration `max_concurrent_jobs: 0` to
-    /// `None`, and `validate()` no longer clamps negative values
-    /// because the field is now unsigned and the legacy sentinel
-    /// has migrated to the type system.
+    /// `None`; the field is unsigned, so the legacy sentinel has
+    /// migrated to the type system.
     #[serde(
         default,
         deserialize_with = "zero_as_none",
@@ -108,8 +112,8 @@ pub struct ServerConfig {
     )]
     pub max_workers_per_job: Option<u32>,
     /// Number of days to retain completed/failed job metadata in SQLite
-    /// before automatic purge.  Must be >= 1; values < 1 are clamped to 1
-    /// during admission.  Default: 7.
+    /// before automatic purge. Must be >= 1; a smaller value is refused
+    /// where `server.yaml` is read. Default: 7.
     #[serde(default = "default_job_ttl_days")]
     pub job_ttl_days: JobTtlDays,
     /// Whether the CLI should auto-spawn a local daemon when no explicit
@@ -133,9 +137,13 @@ pub struct ServerConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub memory_gate_mb: Option<MemoryMb>,
-    /// Seconds between worker health checks. 0 = use pool default (30).
-    #[serde(default = "default_worker_health_interval_s")]
-    pub worker_health_interval_s: u64,
+    /// Seconds between worker health checks. Default: 30. Never zero; a
+    /// legacy `0`, which meant the default, is read as the default.
+    #[serde(
+        default = "default_worker_health_interval_s",
+        deserialize_with = "zero_as_default::<_, DEFAULT_WORKER_HEALTH_INTERVAL_S>"
+    )]
+    pub worker_health_interval_s: PositiveSeconds,
 
     /// Maximum number of local worker/model startups allowed at once across all
     /// participating batchalign3 processes on the host. Default: 1.
@@ -182,18 +190,23 @@ pub struct ServerConfig {
     pub max_total_workers: Option<u32>,
 
     /// Seconds to wait for a Python worker to become ready after spawn.
-    /// Default: 120.
-    #[serde(default = "default_worker_ready_timeout_s")]
-    pub worker_ready_timeout_s: u64,
+    /// Default: 300. Never zero; a legacy `0`, which meant the default, is
+    /// read as the default.
+    #[serde(
+        default = "default_worker_ready_timeout_s",
+        deserialize_with = "zero_as_default::<_, DEFAULT_WORKER_READY_TIMEOUT_S>"
+    )]
+    pub worker_ready_timeout_s: PositiveSeconds,
 
     /// Maximum HTTP request body size in megabytes. Default: 100.
     #[serde(default = "default_max_body_bytes_mb")]
     pub max_body_bytes_mb: MemoryMb,
 
     /// Seconds to wait for host-memory reservations to fit before rejecting or
-    /// deferring a job. Default: 120. 0 = reject immediately if no plan fits.
+    /// deferring a job. Default: 120. Never zero: a configured `0` is refused
+    /// when the configuration is read.
     #[serde(default = "default_memory_gate_timeout_s")]
-    pub memory_gate_timeout_s: u64,
+    pub memory_gate_timeout_s: PositiveSeconds,
 
     /// Seconds between host-memory reservation polling checks. Default: 5.
     #[serde(default = "default_memory_gate_poll_s")]
@@ -220,31 +233,54 @@ pub struct ServerConfig {
     )]
     pub gpu_thread_pool_size: Option<u32>,
 
-    /// Seconds before a locally-dispatched file lease is considered orphaned.
-    /// Default: 300.
-    #[serde(default = "default_local_lease_ttl_s")]
-    pub local_lease_ttl_s: u64,
+    /// How long a locally-dispatched lease lives without renewal before it
+    /// is considered orphaned; written as `local_lease_ttl_s` (whole seconds,
+    /// default 300) and refused unless longer than the lease heartbeat.
+    #[serde(default = "default_local_lease_ttl", rename = "local_lease_ttl_s")]
+    pub local_lease_ttl: LeaseTtl,
 
-    /// Timeout in seconds for audio-heavy worker tasks (ASR, FA, speaker).
-    /// 0 = use built-in default (1800). Increase for very long recordings.
-    #[serde(default)]
-    pub audio_task_timeout_s: u64,
+    /// Override, in seconds, of the transport ceiling for audio-heavy worker
+    /// tasks (ASR, FA, speaker). Absent: the built-in ceiling (1800 for FA
+    /// and speaker; ASR's scales with the audio and an override can only
+    /// raise it). Increase for very long recordings. A legacy `0`, which
+    /// meant "absent", is read as absent.
+    #[serde(
+        default,
+        deserialize_with = "zero_as_no_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audio_task_timeout_s: Option<PositiveSeconds>,
 
-    /// Timeout in seconds for lightweight analysis tasks (OpenSMILE, AVQI).
-    /// 0 = use built-in default (120).
-    #[serde(default)]
-    pub analysis_task_timeout_s: u64,
+    /// Override, in seconds, of the transport ceiling for lightweight
+    /// analysis tasks (OpenSMILE, AVQI). Absent: 120. A legacy `0` is read as
+    /// absent.
+    #[serde(
+        default,
+        deserialize_with = "zero_as_no_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub analysis_task_timeout_s: Option<PositiveSeconds>,
 
-    /// Timeout in seconds for on-demand model loading via `ensure_task` IPC.
-    /// 0 = use built-in default (120). Increase on slow networks where
-    /// first-time model downloads (Stanza, Whisper) may take longer.
-    #[serde(default)]
-    pub ensure_task_timeout_s: u64,
+    /// Override, in seconds, of the timeout for on-demand model loading via
+    /// `ensure_task` IPC. Absent: 120. Increase on slow networks where
+    /// first-time model downloads (Stanza, Whisper) may take longer. A legacy
+    /// `0` is read as absent.
+    #[serde(
+        default,
+        deserialize_with = "zero_as_no_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ensure_task_timeout_s: Option<PositiveSeconds>,
 
     /// Path to the worker registry file for discovering pre-started TCP
-    /// workers. Empty string (default) uses `~/.batchalign3/workers.json`.
-    #[serde(default)]
-    pub worker_registry_path: String,
+    /// workers. Absent: `workers.json` in the state directory. A legacy empty
+    /// string, which meant "absent", is read as absent.
+    #[serde(
+        default,
+        deserialize_with = "empty_path_as_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub worker_registry_path: Option<std::path::PathBuf>,
 
     /// Override the auto-detected memory tier. When absent, the tier is
     /// detected from total system RAM. This overrides all tier-derived
@@ -324,19 +360,25 @@ pub(crate) fn default_true() -> bool {
 }
 
 pub(crate) fn default_job_ttl_days() -> JobTtlDays {
-    JobTtlDays::new(7)
+    JobTtlDays::literal::<7>()
 }
 
-pub(crate) fn default_worker_health_interval_s() -> u64 {
-    30
+/// Default seconds between worker health checks.
+pub(crate) const DEFAULT_WORKER_HEALTH_INTERVAL_S: u64 = 30;
+
+/// Default seconds to wait for a spawned worker to become ready.
+pub(crate) const DEFAULT_WORKER_READY_TIMEOUT_S: u64 = 300;
+
+pub(crate) fn default_worker_health_interval_s() -> PositiveSeconds {
+    PositiveSeconds::literal::<DEFAULT_WORKER_HEALTH_INTERVAL_S>()
 }
 
 pub(crate) fn default_max_concurrent_worker_startups() -> WorkerStartupLimit {
-    WorkerStartupLimit::new(1)
+    WorkerStartupLimit::literal::<1>()
 }
 
-pub(crate) fn default_worker_ready_timeout_s() -> u64 {
-    300
+pub(crate) fn default_worker_ready_timeout_s() -> PositiveSeconds {
+    PositiveSeconds::literal::<DEFAULT_WORKER_READY_TIMEOUT_S>()
 }
 
 pub(crate) fn default_max_body_bytes_mb() -> MemoryMb {
@@ -348,20 +390,20 @@ pub(crate) fn default_max_body_bytes_mb() -> MemoryMb {
     MemoryMb(512)
 }
 
-pub(crate) fn default_memory_gate_timeout_s() -> u64 {
-    120
+pub(crate) fn default_memory_gate_timeout_s() -> PositiveSeconds {
+    PositiveSeconds::literal::<120>()
 }
 
 pub(crate) fn default_memory_gate_poll_s() -> MemoryGatePollSeconds {
-    MemoryGatePollSeconds::new(5)
+    MemoryGatePollSeconds::literal::<5>()
 }
 
 pub(crate) fn default_memory_warning_mb() -> MemoryMb {
     MemoryMb(4096)
 }
 
-pub(crate) fn default_local_lease_ttl_s() -> u64 {
-    300
+pub(crate) fn default_local_lease_ttl() -> LeaseTtl {
+    LeaseTtl::DEFAULT
 }
 
 impl Default for ServerConfig {
@@ -390,16 +432,27 @@ impl Default for ServerConfig {
             memory_gate_poll_s: default_memory_gate_poll_s(),
             memory_warning_mb: default_memory_warning_mb(),
             gpu_thread_pool_size: None,
-            local_lease_ttl_s: default_local_lease_ttl_s(),
-            audio_task_timeout_s: 0,
-            analysis_task_timeout_s: 0,
-            ensure_task_timeout_s: 0,
-            worker_registry_path: String::new(),
+            local_lease_ttl: default_local_lease_ttl(),
+            audio_task_timeout_s: None,
+            analysis_task_timeout_s: None,
+            ensure_task_timeout_s: None,
+            worker_registry_path: None,
             memory_tier: None,
             gpu_startup_mb: None,
             stanza_startup_mb: None,
             io_startup_mb: None,
             fleet_target: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// The operator's transport-ceiling overrides, as the worker layer reads
+    /// them.
+    pub fn task_timeouts(&self) -> TaskTimeoutOverrides {
+        TaskTimeoutOverrides {
+            audio: self.audio_task_timeout_s,
+            analysis: self.analysis_task_timeout_s,
         }
     }
 }

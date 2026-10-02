@@ -11,7 +11,11 @@
 //! change.
 
 use crate::morphosyntax::lexicon::{LexiconVerdict, LexiconVerdicts, NounNumber};
-use crate::morphosyntax::{UdId, UdPunctable, UdSentence, UniversalPos};
+use crate::morphosyntax::{CuratedFeats, UdId, UdPunctable, UdSentence, UniversalPos};
+
+/// The number a lexicon noun verdict fixes, as the word's features.
+const SINGULAR: CuratedFeats = CuratedFeats::new("Number=Sing");
+const PLURAL: CuratedFeats = CuratedFeats::new("Number=Plur");
 
 /// CHAT main tiers are lowercase, so a capitalized word is the transcriber
 /// marking a proper name (`Gin (.) look at Momma !`): evidence the lexicon
@@ -60,7 +64,7 @@ pub fn constrain_to_lexicon(mut sentence: UdSentence, verdicts: &LexiconVerdicts
                 word.upos = UdPunctable::Value(UniversalPos::Intj);
                 word.lemma = word.text.to_lowercase();
                 word.xpos = Some("UH".to_string());
-                word.feats = None;
+                word.clear_features();
             }
             LexiconVerdict::Noun(noun) => {
                 // A proper noun is a noun; case is evidence the lexicon does
@@ -73,11 +77,11 @@ pub fn constrain_to_lexicon(mut sentence: UdSentence, verdicts: &LexiconVerdicts
                 word.upos = UdPunctable::Value(UniversalPos::Noun);
                 word.lemma = noun.lemma.clone();
                 let (xpos, feats) = match noun.number {
-                    NounNumber::Singular => ("NN", "Number=Sing"),
-                    NounNumber::Plural => ("NNS", "Number=Plur"),
+                    NounNumber::Singular => ("NN", SINGULAR),
+                    NounNumber::Plural => ("NNS", PLURAL),
                 };
                 word.xpos = Some(xpos.to_string());
-                word.feats = Some(feats.to_string());
+                word.apply_curated(feats);
             }
         }
     }
@@ -135,7 +139,7 @@ mod tests {
     }
 
     fn range_parent(start: usize, end: usize, text: &str) -> UdWord {
-        let mut w = UdWord::synthetic(text, "", UniversalPos::X, None, 0, "");
+        let mut w = word(0, text, "", UniversalPos::X, None, 0, "");
         w.id = UdId::Range(start, end);
         w
     }
@@ -221,7 +225,7 @@ mod tests {
         };
         assert_eq!(
             mor_texts(&sentence, UtteranceEvidence::none(0)),
-            vec!["adj|doggy-S1"]
+            vec!["adj|doggy"]
         );
     }
 
@@ -232,9 +236,9 @@ mod tests {
         assert_eq!(w.upos, UdPunctable::Value(UniversalPos::Intj));
         assert_eq!(w.lemma, "whoops");
         assert_eq!(w.xpos.as_deref(), Some("UH"));
-        assert_eq!(w.feats, None);
+        assert!(w.features().is_empty());
         // The parse is kept.
-        assert_eq!((w.head, w.deprel.as_str()), (0, "root"));
+        assert_eq!((w.head.conllu(), w.deprel.as_str()), (0, "root"));
     }
 
     /// `gonna` arrives as a range parent plus the components `gon` and `na`.
@@ -306,7 +310,14 @@ mod tests {
         let w = &out.words[0];
         assert_eq!(w.upos, UdPunctable::Value(UniversalPos::Noun));
         assert_eq!(w.lemma, "child");
-        assert_eq!(w.feats.as_deref(), Some("Number=Plur"));
+        assert_eq!(w.features().to_string(), "Number=Plur");
+        // The lexicon supplied the number, not the analysis.
+        assert_eq!(
+            w.features()
+                .get(crate::morphosyntax::FeatName::Number)
+                .map(crate::morphosyntax::FeatValue::source),
+            Some(crate::morphosyntax::FeatSource::Curated)
+        );
         assert_eq!(w.xpos.as_deref(), Some("NNS"));
     }
 

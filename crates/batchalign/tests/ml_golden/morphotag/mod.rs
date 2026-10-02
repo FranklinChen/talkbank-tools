@@ -11,5 +11,4 @@ mod golden;
 mod golden_l2;
 pub mod helpers;
 pub mod options;
-pub mod parity;
 pub mod server_behavior;

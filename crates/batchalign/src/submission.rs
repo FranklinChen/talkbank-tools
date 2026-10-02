@@ -10,7 +10,7 @@ use crate::api::{CorrelationId, DisplayPath, JobId, JobStatus, JobSubmission};
 use crate::error::ServerError;
 use crate::store::{
     FileStatus, Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
-    JobLeaseState, JobRuntimeControl, JobScheduleState, JobSourceContext, unix_now,
+    JobRuntimeControl, JobScheduleState, JobSourceContext, Submitter,
 };
 
 /// Trusted host-side context needed to materialize one job from a submission.
@@ -21,10 +21,11 @@ pub(crate) struct SubmissionContext {
     pub correlation_id: CorrelationId,
     /// Host-owned runtime jobs directory.
     pub jobs_dir: PathBuf,
-    /// Submitter identity used for conflict detection and display.
-    pub submitted_by: String,
-    /// Human-readable submitter name used for display.
-    pub submitted_by_name: String,
+    /// Who is submitting, used for conflict detection and display.
+    pub submitter: Submitter,
+    /// When the job was submitted, read from the store's clock: an
+    /// [`EventTime`](crate::store::EventTime), so a caller cannot choose it.
+    pub submitted_at: crate::store::EventTime,
 }
 
 fn path_mode_filename_from_source(source_path: &str) -> Result<DisplayPath, ServerError> {
@@ -157,8 +158,7 @@ pub(crate) async fn materialize_submission_job(
             debug_traces: submission.debug_traces,
         },
         source: JobSourceContext {
-            submitted_by: context.submitted_by.clone(),
-            submitted_by_name: context.submitted_by_name.clone(),
+            submitter: Some(context.submitter.clone()),
             source_dir: submission.source_dir.clone(),
         },
         filesystem: JobFilesystemConfig {
@@ -185,15 +185,11 @@ pub(crate) async fn materialize_submission_job(
             completed_files: 0,
         },
         schedule: JobScheduleState {
-            submitted_at: unix_now(),
+            submitted_at: context.submitted_at.instant(),
             completed_at: None,
             next_eligible_at: None,
             num_workers: None,
-            lease: JobLeaseState {
-                leased_by_node: None,
-                expires_at: None,
-                heartbeat_at: None,
-            },
+            lease: None,
             last_cancel: None,
         },
         runtime: JobRuntimeControl {
@@ -253,8 +249,11 @@ mod tests {
             job_id: "job-paths".into(),
             correlation_id: "corr-paths".into(),
             jobs_dir: tempdir.path().join("jobs"),
-            submitted_by: "127.0.0.1".into(),
-            submitted_by_name: "localhost".into(),
+            submitter: crate::store::Submitter::client(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                "localhost".into(),
+            ),
+            submitted_at: crate::store::EventTime::fixed(crate::unix_time(1_700_000_000.0)),
         };
 
         let job = materialize_submission_job(&submission, &context)
@@ -291,8 +290,11 @@ mod tests {
             job_id: "job-content".into(),
             correlation_id: "corr-content".into(),
             jobs_dir: tempdir.path().join("jobs"),
-            submitted_by: "127.0.0.1".into(),
-            submitted_by_name: "localhost".into(),
+            submitter: crate::store::Submitter::client(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                "localhost".into(),
+            ),
+            submitted_at: crate::store::EventTime::fixed(crate::unix_time(1_700_000_000.0)),
         };
 
         let job = materialize_submission_job(&submission, &context)

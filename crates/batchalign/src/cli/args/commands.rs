@@ -1341,9 +1341,10 @@ pub struct ServeStartArgs {
     pub workers: Option<usize>,
 
     /// Inference timeout in seconds for audio tasks (ASR, FA, speaker).
-    /// Increase for very long recordings. Default: 1800 (30 minutes).
+    /// Increase for very long recordings. Default: 1800 (30 minutes). Must be
+    /// positive; leave it out for the built-in ceiling.
     #[arg(long)]
-    pub timeout: Option<u64>,
+    pub timeout: Option<crate::api::PositiveSeconds>,
 }
 
 /// Arguments for `serve status`.

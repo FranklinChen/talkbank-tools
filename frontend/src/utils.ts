@@ -59,6 +59,15 @@ const PROGRESS_STAGE_LABELS: Record<FileProgressStage, string> = {
   retry_scheduled: "Retry scheduled",
 };
 
+/**
+ * Newest first, for two server times. Server times are RFC 3339 UTC with
+ * exactly three fractional digits (`MachineTime`), so string order is time
+ * order and a plain comparison suffices.
+ */
+export function compareTimesNewestFirst(a: string, b: string): number {
+  return a < b ? 1 : a > b ? -1 : 0;
+}
+
 export function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || seconds < 0) return "";
   if (seconds < 60) return `${seconds.toFixed(1)}s`;

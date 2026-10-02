@@ -11,7 +11,7 @@
 //! - **Identity**: full streamed BLAKE3 of source bytes in a versioned PCM
 //!   recipe namespace. Legacy sampled-fingerprint entries remain on disk but
 //!   are not silently admitted as complete-content matches.
-//! - **Locking**: per-fingerprint `.lock` file via `fs2` exclusive lock prevents
+//! - **Locking**: per-fingerprint `.lock` file via std `File::lock` (exclusive) prevents
 //!   concurrent ffmpeg invocations for the same source file (important for
 //!   parallel FA groups).
 //! - **Atomic writes**: convert to a temp file, then `rename()` into the cache.
@@ -24,7 +24,6 @@
 
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use thiserror::Error;
 use tracing::{debug, info};
 
@@ -85,19 +84,14 @@ enum CacheSlot {
 /// Private fields enforce the boundary outside this module; filesystem
 /// mutation by unrelated processes remains outside this guarantee.
 ///
-/// It used to be exactly that, and the comment above it said the opposite: "the
-/// lock must be held across the conversion", four lines before
-/// `lock_file.unlock()` and eight before the `rename` that actually publishes.
-/// The window was real. Two callers converting the same fingerprint share one
-/// `{key}.tmp.wav`: A unlocks, B takes the lock, B's re-check sees no cached
-/// file because A has not renamed yet, B begins writing that same temp path,
-/// and A renames B's half-written file into the cache. The fingerprinted cache
-/// then serves it forever, because the fast path never looks inside.
-///
-/// Predates the `Transcode` work; present at `origin/main`.
+/// The lock is held from the re-check through the rename that publishes:
+/// two callers converting the same fingerprint share one `{key}.tmp.wav`,
+/// and a lock released before the rename would let the second write that
+/// temp path while the first renames it into the cache, which the
+/// fingerprinted fast path would then serve forever.
 struct LockedCacheSlot {
     /// Dropping this releases the lock, which is why `commit` renames first.
-    lock_file: std::fs::File,
+    lock: crate::file_lock::HeldFileLock,
     tmp_path: PathBuf,
     cached_path: PathBuf,
 }
@@ -106,8 +100,8 @@ impl LockedCacheSlot {
     /// Take the lock for `key`, or report that someone else got there first.
     fn acquire(cache_dir: &Path, key: &str) -> Result<CacheSlot, std::io::Error> {
         let cached_path = cache_dir.join(format!("{key}.wav"));
-        let lock_file = std::fs::File::create(cache_dir.join(format!("{key}.wav.lock")))?;
-        lock_file.lock_exclusive()?;
+        let lock =
+            crate::file_lock::HeldFileLock::acquire(cache_dir.join(format!("{key}.wav.lock")))?;
         // Re-check under the lock: another writer may have finished while we
         // waited. Now that publishing happens under the lock too, this answer
         // cannot go stale between the check and the caller acting on it.
@@ -115,7 +109,7 @@ impl LockedCacheSlot {
             return Ok(CacheSlot::AlreadyPublished(cached_path));
         }
         Ok(CacheSlot::Ours(Self {
-            lock_file,
+            lock,
             tmp_path: cache_dir.join(format!("{key}.tmp.wav")),
             cached_path,
         }))
@@ -137,14 +131,14 @@ impl ProducedCacheSlot {
     /// Publish atomically before releasing the lock.
     fn commit(self) -> Result<PathBuf, std::io::Error> {
         let LockedCacheSlot {
-            lock_file,
+            lock,
             tmp_path,
             cached_path,
         } = self.slot;
         std::fs::rename(&tmp_path, &cached_path)?;
         // Explicit, and AFTER the rename: this order is the entire point of the
         // type, so it is stated rather than left to end-of-scope drop order.
-        drop(lock_file);
+        drop(lock);
         Ok(cached_path)
     }
 }
@@ -169,7 +163,7 @@ pub async fn ensure_wav(
         return Ok(source_path.to_path_buf());
     }
 
-    // Move all blocking I/O (fingerprint, fs2 lock, ffmpeg subprocess,
+    // Move all blocking I/O (fingerprint, file lock, ffmpeg subprocess,
     // rename) onto a dedicated thread so we don't starve the tokio executor.
     let source_path = source_path.to_path_buf();
     let cache_dir = cache_dir.map(Path::to_path_buf);

@@ -62,7 +62,7 @@ flowchart TD
     wire --> rust
     rust --> kind
     kind -->|"bootstrap"| we_b
-    kind -->|"runtime (default)"| we_r
+    kind -->|"runtime"| we_r
     we_b --> classifyRust
     we_r --> classifyRust
     classifyRust -->|"Bootstrap"| cat_b
@@ -157,12 +157,21 @@ Defined by `WorkerResponse` in the same file. Same tagged-union shape:
 {"op": "health", "response": {...}}
 {"op": "capabilities", "response": {...}}
 {"op": "shutdown"}
-{"op": "error", "error": "<message>", "kind": "runtime" | "bootstrap"}
+{"op": "error", "error": "<message>", "kind": "runtime" | "bootstrap" | "invalid_request",
+ "request_id": "<id>"}   // request_id present when the failure answers a V2 dispatch
 ```
 
-The `error` op is the focus of this chapter. The `kind` field was added
-2026-05-06; legacy workers that don't emit it default to `runtime` on
-the Rust side, which preserves the pre-fix retry behavior exactly.
+The `error` op is the focus of this chapter. `kind` is required: every
+reader (the sequential stdio and TCP handles and the shared GPU reader)
+refuses an envelope without it as a protocol violation, so no emitter can
+make a deterministic refusal look retryable by leaving it out. The wire
+vocabulary is `batchalign_types::worker_v2::WorkerErrorKind`, and every
+envelope is built by one function, `error_payload` in
+`crates/batchalign-pyo3/src/worker_protocol.rs`: the Rust-owned request
+dispatcher calls it for its own refusals (`invalid_request`), and the Python
+request loops reach it through `batchalign_core.error_envelope`, which raises
+`ValueError` on any other spelling. Python types the argument as the
+`WorkerErrorKind` `Literal` in `batchalign/worker/_protocol.py`.
 
 #### Why `kind` and not a separate `bootstrap_error` op?
 
@@ -172,9 +181,9 @@ Two reasons:
    "bootstrap_error", ...}`) would double the number of match arms at
    every consumer of `WorkerResponse`, plus add a serializer surface. A
    discriminator field is cheaper.
-2. **Backward compatibility.** A new op breaks legacy workers; an
-   optional field with a default does not. Rolling out a wire change to
-   the fleet must not require lockstep daemon redeploys.
+2. **One builder.** A discriminator is one more argument to the one
+   envelope builder; a sibling op would be a second builder whose shape
+   could drift from the first.
 
 ## The Python side: `_serve_stdio` and exception handling
 
@@ -299,8 +308,9 @@ Source files:
 | Concern | File |
 |---|---|
 | `WorkerError` enum | `crates/batchalign/src/worker/error.rs` |
-| Wire `WorkerResponse` decoder | `crates/batchalign/src/worker/handle/protocol.rs` |
-| TCP variant decoder | `crates/batchalign/src/worker/tcp_handle.rs` |
+| Wire `WorkerResponse` decoder and `ReportedFailure` mapping (stdio and TCP) | `crates/batchalign/src/worker/handle/protocol.rs` |
+| Wire `WorkerErrorKind` | `crates/batchalign-types/src/worker_v2/error_envelope.rs` |
+| The one `op=error` envelope builder | `crates/batchalign-pyo3/src/worker_protocol.rs::error_payload` |
 | `FailureCategory` enum | `crates/batchalign/src/types/scheduling.rs` |
 | Classifier (`classify_worker_error`, `is_retryable_worker_failure`) | `crates/batchalign/src/runner/util/error_classification.rs` |
 | Retry loop | `crates/batchalign/src/infer_retry.rs` |
@@ -317,16 +327,19 @@ Each variant has a documented retryability class.
 | `ReadyParseFailed(String)` | Worker emitted invalid ready signal | **Terminal**: version mismatch |
 | `HealthCheckFailed(String)` | Periodic health probe failed | Retryable, pool replaces worker |
 | `ProcessExited { code, stderr }` | Worker died unexpectedly mid-job | Retryable, but if deterministic, replacement will die too |
-| `Protocol(String)` | IPC framing or response shape was wrong | Terminal-for-this-request, protocol desync |
+| `Timeout { waited_for, limit }` | A wait on the worker ran past its limit: a reply (`WorkerWait` names which op), a model load or a TCP connection | Retryable (`WorkerTimeout`). A sequential worker is retired (its late reply could still arrive), and so is a spawned shared GPU worker (the thread serving the request may still hold one of its slots); a shared GPU daemon connection is kept (replies are routed by request id, and the daemon is not this server's to restart) |
+| `Protocol(String)` | IPC framing or response shape was wrong (on either worker path: a sequential reply that fails to decode, or a shared GPU `execute_v2` line the protocol refuses) | Terminal-for-this-request, protocol desync |
 | `WorkerResponse(String)` | Worker returned `{"op":"error", "kind":"runtime"}` | Retryable, per-request failure |
 | **`Bootstrap(String)`** | Worker returned `{"op":"error", "kind":"bootstrap"}` | **Terminal**: deterministic |
+| `RequestRefused(String)` | Worker returned `{"op":"error", "kind":"invalid_request"}`: the line was not JSON, the op or its `request` mapping was missing, or the payload failed the request model | **Terminal** (`WorkerProtocol`): the same request is refused again; the worker stays in service |
 | `Io(io::Error)` | Pipe-level I/O failure (broken pipe, etc.) | Retryable, pool replaces worker |
 | `MemoryGuard(MemoryGuardError)` | Memory-guard refused to admit the worker (insufficient headroom under the configured budget) | **Not retried** by `is_retryable_worker_failure`: classified as `FailureCategory::MemoryPressure`, which is outside the retry set; the scheduler re-admits later once memory frees |
 | `NoWorker { command, lang }` | Reserved variant; unused today | Terminal |
+| `PoolShuttingDown` | The pool is shutting down; dispatch, task loading and a shared worker's in-flight requests are refused | **Terminal** (`System`): nothing will serve the request; the job is recovered at the next start |
+| `WorkerRetired` | The pool retired the shared worker a request was in flight on (its capability report was refused, or it is being replaced) and keeps serving | Retryable (`WorkerCrash`): the retry reaches another worker |
+| `OutputNoise { last_line }` | The worker wrote `MAX_RESPONSE_STDOUT_NOISE_LINES` consecutive lines that are not protocol messages (a stdio worker writes its protocol on a private descriptor, so something wrote into it anyway) | Retryable (`WorkerCrash`): the worker is retired and the request runs on another |
 
-The `Bootstrap` variant added 2026-05-06 is the one this chapter is
-about. Every existing variant kept its prior retryability class to
-preserve behavior on already-debugged paths.
+The `Bootstrap` variant is the one this chapter is about.
 
 ### `FailureCategory` and the retry decision
 
@@ -376,7 +389,7 @@ sequenceDiagram
     participant Py as Python worker
     participant Wire as JSON wire
     participant Decoder as WorkerResponse<br/>decoder
-    participant Mapper as WorkerErrorKind<br/>::into_worker_error
+    participant Mapper as ReportedFailure<br/>::into_worker_error
     participant Classifier as classify_<br/>worker_error
     participant Retry as is_retryable_<br/>worker_failure
 
@@ -387,37 +400,47 @@ sequenceDiagram
     Classifier->>Retry: FailureCategory::WorkerBootstrap
     Retry-->>Mapper: false (do not retry)
 
-    Note over Py,Wire: Legacy workers omit "kind"
-    Py->>Wire: {"op":"error", "error":"Y"}
-    Wire->>Decoder: deserialize (kind defaults to Runtime)
+    Py->>Wire: {"op":"error", "error":"Y", "kind":"runtime"}
+    Wire->>Decoder: deserialize
     Decoder->>Mapper: WorkerErrorKind::Runtime, "Y"
     Mapper->>Classifier: WorkerError::WorkerResponse("Y")
     Classifier->>Retry: FailureCategory::ProviderTransient
     Retry-->>Mapper: true (retry up to 3×)
+
+    Py->>Wire: {"op":"error", "error":"Z"}
+    Wire->>Decoder: deserialize fails: kind is required
+    Decoder->>Classifier: WorkerError::Protocol("... missing field kind ...")
+    Classifier->>Retry: FailureCategory::WorkerProtocol
+    Retry-->>Decoder: false (do not retry)
 ```
 
-The `WorkerErrorKind::into_worker_error(message)` helper in
-`handle/protocol.rs` is the single dispatch point, every wire decoder
-goes through it. Eleven call sites in `handle/ipc.rs` and
-`tcp_handle.rs` were updated as part of the the bootstrap-retry defect fix; they all share
-this helper.
+`ReportedFailure` in `handle/protocol.rs` is the decoded `op=error` line
+(`WorkerResponse::Error(ReportedFailure)`), and its three methods are the only
+mapping from a reported failure to a `WorkerError`: `into_worker_error` for an
+admitted request, `into_ensure_task_error` for the model load, and
+`into_health_error` for a health probe. The sequential stdio and TCP handles
+share the one `WorkerResponse` envelope, and the shared GPU reader
+(`worker/pool/shared_gpu/reader.rs`) decodes the same `ReportedFailure`, so a
+shared GPU dispatch reaches the same category, and the same retry decision, as
+a sequential one; the table is in the worker-protocol-v2 page under "Failure
+replies on the two worker paths".
 
 ### One specialization: `ensure_task` errors are forced bootstrap
 
 ```rust,ignore
-WorkerResponse::Error { error, kind } => {
-    // ``ensure_task`` is the on-demand model-loading IPC; any error
-    // here is by definition a bootstrap-class failure regardless
-    // of the wire ``kind`` field. Default to ``Bootstrap`` …
-    match kind {
-        WorkerErrorKind::Bootstrap | WorkerErrorKind::Runtime => {
-            Err(WorkerError::Bootstrap(format!("ensure_task failed: {error}")))
+pub(crate) fn into_ensure_task_error(self) -> WorkerError {
+    match self.kind {
+        WorkerErrorKind::Runtime | WorkerErrorKind::Bootstrap => {
+            WorkerError::Bootstrap(format!("ensure_task failed: {}", self.message))
+        }
+        WorkerErrorKind::InvalidRequest => {
+            WorkerError::RequestRefused(format!("ensure_task refused: {}", self.message))
         }
     }
 }
 ```
 
-Why force-bootstrap regardless of the wire kind? Because `ensure_task`
+Why force-bootstrap regardless of a `runtime` kind? Because `ensure_task`
 is the on-demand model-loading IPC, its sole purpose is to bootstrap a
 task into a worker's runtime state. A failure during that operation is
 *always* deterministic across retries, even if the worker's
@@ -514,16 +537,14 @@ for attempt_number in 1..=retry_policy.max_attempts {
 }
 ```
 
-The fix lands transparently here: `is_retryable_worker_failure(category)`
-returns `false` for `WorkerBootstrap`, the `if` falls through, the
-function returns the error immediately. Pre-fix, the `category` was
-`WorkerCrash`, the `if` was true, and the loop spun three times.
+Here `is_retryable_worker_failure(category)` returns `false` for
+`WorkerBootstrap`, the `if` falls through, and the function returns the
+error immediately.
 
 Future enhancement (not yet landed): emit a `progress_v2` event before
 each retry sleep so the UI shows "Retrying after worker error
 (attempt 2/3)…". This is a clean fit with the
-[time-transparency principle](time-transparency.md) but is out of scope
-for the the bootstrap-retry defect fix.
+[time-transparency principle](time-transparency.md).
 
 ## Adding a new bootstrap-class error type
 

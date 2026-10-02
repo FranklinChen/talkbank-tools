@@ -183,11 +183,6 @@ export function ErrorRecovery({ errorFiles }: ErrorRecoveryProps) {
                   {f.error && (
                     <span className="text-red-500 ml-1">: {f.error}</span>
                   )}
-                  {f.error_codes && f.error_codes.length > 0 && (
-                    <span className="text-red-400 ml-1">
-                      ({f.error_codes.join(", ")})
-                    </span>
-                  )}
                 </div>
               ))}
             </div>

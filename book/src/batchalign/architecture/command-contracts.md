@@ -1,7 +1,7 @@
 # Command Contracts: Input Preconditions and Output Guarantees
 
 **Status:** Current
-**Last updated:** 2026-09-30 10:16 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 This document specifies, for each batchalign3 command that operates
 on CHAT files, the minimum input validity required, what the command
@@ -349,7 +349,8 @@ present (they're used for audio window grouping).
 **Output guarantees:**
 - Output is a complete, valid CHAT file
 - Pre-serialization validation runs both alignment and semantic gates
-- If validation fails, the file is not written and a bug report is filed
+- If validation fails, the file is not written; its error names the
+  validation errors
 
 ---
 
@@ -425,8 +426,8 @@ When a file fails pre-validation:
    on line 15", "E233: Empty compound trailing part on line 22")
 3. Processing continues with the next file in the job (partial job completion)
 4. No compute is wasted on the invalid file
-5. A bug report is filed if the errors suggest a parser/pipeline bug rather
-   than input data quality
+5. The validation errors are the file's error, whether they come from the
+   input or from a pipeline defect; nothing else is filed
 
 ### Lenient vs Strict Parsing
 
@@ -459,8 +460,8 @@ Call sites: `crates/batchalign/src/coref.rs:193`, `:371`;
 functions (`validate_to_level`, `validate_output`) live in
 `../chatter/crates/talkbank-transform/src/validate.rs`.
 
-On failure: file a bug report, mark the file as error, return the original
-input file unchanged (do not write corrupt output).
+On failure: mark the file as error with the validation errors, and write no
+output for it (never corrupt output).
 
 ---
 

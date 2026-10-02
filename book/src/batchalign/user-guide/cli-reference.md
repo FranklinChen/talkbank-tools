@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-09-23 23:31 EDT
+**Last updated:** 2026-10-01 14:25 EDT
 
 This page documents the current public `batchalign3` CLI surface. For anything
 you are scripting against, confirm with `batchalign3 <command> --help`.
@@ -30,7 +30,7 @@ Global options go before the command name.
 | `--override-media-cache-tasks TASKS` | Bypass only named audio-evidence caches (comma-separated: `forced_alignment`, `utr_asr`, `rev_asr_evidence`, `speaker_diarization_raw_evidence`) |
 | `--debug-dir PATH` | Directory for pipeline debug artifacts (CHAT/JSON fixtures for offline replay). Env fallback: `BATCHALIGN_DEBUG_DIR` |
 | `--memory-tier {small,medium,large,fleet}` | Override the auto-detected memory tier (forces worker bootstrap and memory budgets for that tier regardless of actual system RAM) |
-| `--timeout SECONDS` | Operator override for the audio-task transport timeout. For ASR, the default is DERIVED per request from the audio's own duration (`DecodeBudgetSeconds`, `crates/batchalign-types/src/worker_v2/requests.rs`) plus a fixed margin, not a flat number; `--timeout` can only RAISE that derived ceiling, never lower it below what the request's own decode budget needs. Forced alignment and speaker diarization still use a flat default (1800 = 30 min) unless overridden. |
+| `--timeout SECONDS` | Operator override for the audio-task transport timeout. For ASR, the default is DERIVED per request from the audio's own duration (`DecodeBudgetSeconds`, `crates/batchalign-types/src/worker_v2/requests.rs`) plus a fixed margin, not a flat number; `--timeout` can only RAISE that derived ceiling, never lower it below what the request's own decode budget needs. Forced alignment and speaker diarization still use a flat default (1800 = 30 min) unless overridden. A positive whole number of seconds: `--timeout 0` is refused; leave the flag out for the built-in ceiling. |
 | `--tui` / `--no-tui` | Toggle full-screen TUI for server-backed jobs (`DirectHost` local runs stay on terminal progress bars) |
 | `--open-dashboard` / `--no-open-dashboard` | Toggle browser auto-open for submitted server job pages (macOS only, interactive TTY only) |
 | `--engine-overrides JSON` | Per-engine PARAMETERS, as a `{string:string}` JSON object, e.g. `{"qwen_model":"Qwen/Qwen3-ASR-0.6B-hf","qwen_device":"cpu"}`. Forwarded to the worker as opaque knobs. The `asr` / `fa` / `utr` / `translate` keys additionally select an engine and beat the per-command flags; see "Engine selection" below. The payload is parsed once, while the command line is parsed, so an invalid one is rejected before anything runs. A bare engine name (`--engine-overrides whisper`) is reported as the wrong-flag mistake it is, naming `--asr-engine` and its siblings, rather than as malformed JSON. |

@@ -1,7 +1,7 @@
 # Morphosyntax Pipeline
 
 **Status:** Current
-**Last updated:** 2026-05-23 23:52 EDT
+**Last updated:** 2026-10-01 21:15 EDT
 
 ## 1. Overview
 
@@ -77,10 +77,14 @@ Rust entry point: `crates/batchalign/src/morphosyntax/mod.rs::run_morphosyntax_i
   ├── clear_morphosyntax(): strip existing %mor/%gra tiers
   │     (talkbank-transform::morphosyntax::payload)
   │
-  ├── collect_payloads(): extract utterance word lists globally
+  ├── collect_payloads(): extract utterance word lists globally, one
+  │     CollectedUtterance each (its line, its ordinal, the item sent and
+  │     the words its analysis is injected into)
   │     (talkbank-transform::morphosyntax::payload)
   │
-  ├── Batch infer (all utterances pool → one Stanza call per language)
+  ├── Batch infer (all utterances pool → one Stanza call per language;
+  │     the inference layer sees only the items sent, so secondary `@s`
+  │     spans dispatch bare items, with no utterance position to invent)
   │     ├── Group by language, dispatch concurrently
   │     ├── Python worker (batchalign/inference/morphosyntax.py)
   │     │     • Replace special forms with "xbxxx"
@@ -124,8 +128,9 @@ handle CHAT-side extraction, UD→CHAT mapping, and injection. The
 | `extract.rs` | `ExtractedWord` struct + word extraction from AST for morphosyntax input |
 | `inject.rs` | `inject_morphosyntax()`: primary AST injection of %mor / %gra tiers |
 | `morphosyntax/injection.rs` | `inject_results()`: orchestration helper called by the batch pipeline |
-| `morphosyntax/payload.rs` | `clear_morphosyntax()`, `collect_payloads()`, `dispatch_secondary_l2()` host adapter |
-| `morphosyntax/sentence_mapping.rs` | `map_ud_sentence()`, `map_ud_sentence_expanded()`, shared `build_gra_and_validate()` |
+| `morphosyntax/payload.rs` | `clear_morphosyntax()`, `collect_payloads()` and its `CollectedUtterance` records |
+| `morphosyntax/alignment.rs` | `UdTokens::walk()` (the one walk of a sentence), `UdAlignment` |
+| `morphosyntax/sentence_mapping.rs` | `map_tokens()` over the walk, `map_ud_sentence()`, `map_ud_sentence_expanded()`, shared `build_gra_and_validate()` |
 | `morphosyntax/gra_validate.rs` | `validate_generated_gra()`: single-root, cycle-free, valid-heads checks |
 | `morphosyntax/mapping_helpers.rs` | `assemble_mors()` (clitic merge), `is_clitic()`, `map_relation()` |
 | `morphosyntax/stanza_raw.rs` | Parse raw Stanza JSON output, supply defaults for Range token annotation fields |
@@ -296,8 +301,10 @@ Stanza NLP (Python worker, `worker/_infer_hosts.py` → `inference/morphosyntax.
     ↓  produces UdSentence { words: Vec<UdWord> }
     ↓  each UdWord has: id, text, lemma, upos, feats, head, deprel
     ↓
-map_ud_sentence() (Rust, talkbank-transform::morphosyntax::sentence_mapping)
-    ↓  produces (Vec<Mor>, Vec<GrammaticalRelation>)
+UdTokens::walk() (Rust, talkbank-transform::morphosyntax::alignment)
+    ↓  the one walk of the sentence: top-level tokens, validated
+map_tokens() (talkbank-transform::morphosyntax::sentence_mapping)
+    ↓  produces %mor items and their %gra relations, with each token's items
     ↓
 Post-construction validation (gra_validate.rs::validate_generated_gra)
     ↓  rejects if chunk count != gra count, single-root violated, or cycle detected
@@ -311,16 +318,20 @@ CHAT serialization
 
 ### MOR Generation: Two Mapping Variants
 
-The mapping layer provides two functions that differ only in how MWT Range
-tokens are handled. Both share identical GRA/validation logic via the
-internal `build_gra_and_validate()` helper.
+The mapper, `map_tokens`, consumes the walked tokens (`UdTokens`) in one of
+two layouts (`ItemLayout`) that differ only in how a multi-word token becomes
+items; `map_ud_sentence()` and `map_ud_sentence_expanded()` are the two
+layouts applied to a sentence they walk. Both share identical GRA/validation
+logic via the internal `build_gra_and_validate()` helper, and the result
+(`MappedTokens`) records which items each token produced, so a CHAT word
+aligned to a token finds its items without counting.
 
 ```mermaid
 flowchart LR
     ud["UdSentence\n(from Stanza)"]
     mode{"Mapping\nvariant?"}
     merged["map_ud_sentence()\nassemble_mors() merges\nRange → 1 clitic MOR"]
-    expanded["map_ud_sentence_expanded()\nmap_ud_word_to_mor() per component\nRange → N individual MORs"]
+    expanded["map_ud_sentence_expanded()\nmap_ud_word() per component\nRange → N individual MORs"]
     gra["build_gra_and_validate()\nchunk indexing, GRA relations,\nroot check, terminator, validation"]
     out["(Vec&lt;Mor&gt;, Vec&lt;GrammaticalRelation&gt;)"]
 
@@ -343,7 +354,7 @@ via `assemble_mors()`:
 
 **`map_ud_sentence_expanded()`**: Retokenize mode. Produces one `Mor`
 per component word. Range parent tokens are skipped; each component gets
-its own MOR via `map_ud_word_to_mor()`:
+its own MOR via `map_ud_word()`:
 
 ```text
 "gonna" → Range(1,2): ["gon", "na"]
@@ -402,20 +413,60 @@ corpus data which used concatenation (`IntRel`, `AccNom`).  The tree-sitter gram
 
 ### POS Mapping
 
-POS categories use lowercased UPOS tags:
+POS categories use lowercased UPOS tags. Suffixes come from the UD features
+in this order (`crates/batchalign-transform/src/morphosyntax/features.rs`,
+dispatched by `mor_word.rs::compute_features`). A feature the analysis does
+not contain is not written.
 
-| UPOS | CHAT POS | Suffix features |
-|------|----------|-----------------|
-| NOUN | `noun\|` | Gender, Number, Case, Ger |
-| VERB/AUX | `verb\|`/`aux\|` | VerbForm, Tense, Person, -irr |
-| PRON | `pron\|` | PronType, Case, Reflex, Number, Person |
-| DET | `det\|` | Gender, Definite, PronType |
-| ADJ | `adj\|` | Degree, Case |
-| ADP | `adp\|` | (none) |
-| PROPN | `propn\|` | (none) |
-| INTJ | `intj\|` | (none) |
-| CCONJ | `cconj\|` | (none) |
-| SCONJ | `sconj\|` | (none) |
+| UPOS | CHAT POS | Suffixes, in order |
+|------|----------|--------------------|
+| VERB, AUX | `verb\|`, `aux\|` | VerbForm, Aspect, Mood, Tense, Polarity, Polite, HebBinyan, HebExistential, then number and person joined (`S3`, `P1`, or either alone), English irregular past `irr` |
+| PRON | `pron\|` | PronType, Case (French: from the word), `reflx`, then number and person (not for `that`, `who`) |
+| DET | `det\|` | Gender, Definite, PronType, Number, possessor number and person |
+| ADJ | `adj\|` | Degree unless `Pos`, Case, then number and person |
+| NOUN, PROPN | `noun\|`, `propn\|` | Gender (not `Com`), Number unless `Sing`, Case, PronType, French `Apm` |
+| others | `adp\|`, `intj\|`, `cconj\|`, `sconj\|`, ... | (none) |
+
+A feature handler emits `Suffix` values, and a `Suffix` is one of: a feature
+value as the word holds it (`Suffix::Feature`), a fixed rendering of one
+(`reflx`, a lowercased Hebrew binyan), a mark from a curated word table
+(`LexicalMark`: French pronoun case, `Apm`, irregular `irr`), or number and
+person joined. Nothing else: there is no variant that could carry a value
+neither the analysis nor a table contains.
+
+A feature value carries where it came from (`FeatSource`): the analysis that
+returned the word, or one of our curated tables. A UD word's features are a
+private, typed `WordFeatures`, with two ways in:
+
+- `UdWordAnalysis`, the record the worker sends (and the route deserialization
+  takes), admits the FEATS column as the analysis's;
+- `UdWord::apply_curated` writes a curated table's `CuratedFeats` (a FEATS
+  string compiled into the binary; its `const` constructor refuses a malformed
+  pair at compile time), replacing the word's features whole. It is the only
+  writer of curated values. The English contraction expansions, the Italian
+  reconcilers (mis-split overrides, compound imperatives and their clitics,
+  component rewrites), the copula-progressive rescue and the lexicon category
+  constraint all write through it.
+
+The one exception to "replaced whole" is the finite part of an expanded
+English contraction, which keeps the `Person` and `Number` Stanza read off the
+subject for the whole token (`UdWord::adopt_observed`), as the analysis's
+values, where the table does not fix them. UD's MISC column carries what the
+worker sends beside the analysis (`VerbReadingLemma`), never provenance.
+Curated and analysed values render identically. Feature names are a closed
+`FeatName`, and the feature values the renderer distinguishes (`Fin`, `Pres`,
+`Sing`, `Com`, `Pos`, ...) are classified in one place each.
+
+Number joined with person is the number's initial on every category: `Sing`
+is `S`, `Plur` is `P`, `Dual` is `D`.
+
+CLAN's DSS rule files match some values BA3 does not write, for example
+`aux|do*-S`, `verb|*-Ger-S` and `noun|*-Ger` in `lib/dss/engu.cut`, and
+`aux|た-Inf-S` and `adj|*-Pos-S1` in `lib/dss/jpn.cut`, so DSS scores on BA3
+output differ until those rules are updated. The rule files are not ours;
+their change goes through CLAN's maintainers. CLAN's MLU does not depend on
+these values: it counts a bound morpheme only for `-Plur`, regular `-Past`,
+verb `-S3`, `-Part` with `-Pres`, `~part|s`, `~aux` and `~part|not`.
 
 Language-specific rules live in dedicated modules under
 `crates/batchalign-transform/src/morphosyntax/`: `lang_en.rs` (English
@@ -447,24 +498,19 @@ On failure, `validate_generated_gra` (in
 invalid structure. The caller (morphosyntax orchestrator) logs the
 error and skips the utterance, no corrupted %gra is written to disk.
 
-The mapper uses `HashMap<usize, usize>` to translate UD word IDs to
-CHAT chunk indices. Missing keys fall through to `unwrap_or(&0)` and
-are caught by the valid-heads check, so a wild UD response cannot
-silently produce a malformed `%gra` line.
+The GRA builder translates UD word ids (`UdWordId`) to CHAT chunk
+indices through a map built from each chunk's provenance. A head that
+names no mapped word is `MappingError::InvalidHeadReference`, so a wild
+UD response cannot silently produce a malformed `%gra` line.
 
 ### Chunk Count Alignment
 
-The critical guard added after the MWT/GRA bug:
-
-```rust,ignore
-let mor_chunk_count = mors.iter().map(|m| m.count_chunks()).sum::<usize>() + 1;
-if gras.len() != mor_chunk_count {
-    return Err(MappingError::ChunkCountMismatch { ... });
-}
-```
-
-This catches any mismatch at generation time, preventing corrupted data from ever being
-written to CHAT files.
+`%mor` chunks and `%gra` relations cannot disagree in number. Every
+mapped item is a `MappedItem`, built a chunk at a time
+(`MappedItem::word`, then `with_post_clitic`), each chunk with its
+`ChunkProvenance`; its fields are private. The builder writes one
+relation per provenance entry, then the terminator's, so the counts
+match by construction rather than by a check after the fact.
 
 ## 7. Module Details
 
@@ -595,16 +641,19 @@ them as a JSON array.  Each element:
 {
   "words": ["I", "eat", "cookies"],
   "terminator": ".",
-  "special_forms": [null, null, null]
+  "special_forms": [[null, null], [null, null], [null, null]],
+  "lang": "eng"
 }
 ```
 
-With special forms (e.g., `gumma@c`):
+With a special form (e.g., `gumma@c`), the model receives the placeholder
+`xbxxx` in its place, and the pair names the form type:
 ```json
 {
-  "words": ["gumma", "is", "yummy"],
+  "words": ["xbxxx", "is", "yummy"],
   "terminator": ".",
-  "special_forms": [["gumma", "c"], null, null]
+  "special_forms": [["c", null], [null, null], [null, null]],
+  "lang": "eng"
 }
 ```
 
@@ -631,6 +680,19 @@ UD-to-CHAT mapping happens in Rust (section 5 above).
   ]
 }
 ```
+
+Two things the worker adds to Stanza's sentences, both at the worker boundary
+and both documented with their defects in
+[Stanza limitations](stanza-limitations.md):
+
+- **Feature names are respelled** where Stanza misspells them
+  (`UD_FEATURE_NAME_ALIASES`; Italian `Verbform` becomes `VerbForm`). Only the
+  name changes, never the value, and it is not reported as a repair.
+- **English `-ing` nouns carry their verb reading** in UD MISC as
+  `VerbReadingLemma=<lemma>`, from Stanza's own lemmatizer asked for the VERB
+  reading (`_english_verb_reading.py`). The Rust copula rescue (Defect 1) reads
+  it through a parsed `VerbLemma` and refuses to promote a noun to a verb
+  without one.
 
 The other two kinds carry no analysis: `{"kind": "no_words"}` for an utterance
 with no words (no model ran, so it names none), and `{"kind": "failed",
@@ -722,37 +784,48 @@ sequenceDiagram
     participant L2 as L2 Module<br/>(morphosyntax/l2/)
 
     R->>P1: morphotag all utterances<br/>(primary language)
-    P1-->>R: UdResponse with L2|xxx<br/>for @s positions
-    R->>L2: extract_l2_deferred_positions()
-    L2-->>R: deferred positions + target lang
-    R->>L2: plan_secondary_dispatch()
-    L2-->>R: contiguous spans + host attachments
-    R->>P2: infer_batch(retokenize=true)<br/>contiguous @s spans
+    P1-->>R: UdResponse per utterance
+    R->>R: inject primary results<br/>(@s words get L2|xxx; one walk per utterance)
+    R->>L2: InjectionResult::l2<br/>(positions read from the same walk)
+    R->>L2: plan_dispatch_spans(positions)
+    L2-->>R: L2SpanPlan per span<br/>(owns its positions + L2Attachment)
+    R->>P2: infer_batch(retokenize=true)<br/>one sentence per span
     P2-->>R: UdResponse with<br/>Range tokens for contractions
-    R->>L2: merge_planned_secondary_span()<br/>planned structural + lexical merge
-    L2-->>R: merged Mor items
-    R->>R: splice_l2_into_chat()<br/>replace L2|xxx with real MOR
+    R->>L2: merge_planned_secondary_span(span, sentence)
+    L2-->>R: MergedL2Span
+    R->>L2: splice_l2_into_chat(merged spans)<br/>replace L2|xxx, validate, roll back
 ```
 
 ### How It Works
 
-1. **Primary pass** produces %mor/%gra for the entire utterance. @s words
-   get `L2|xxx` placeholders via the special form handler in `inject.rs`.
-2. **Extract deferred positions** identifies which words have `L2|xxx` and
-   their target languages (from `@s:spa`, `@s:eng`, or bare `@s` resolved
-   via `@Languages`).
-3. **Plan dispatch spans** creates contiguous per-utterance spans of same-language
-   @s words and computes the host attachment for each span root
-   (e.g., `los@s:spa niños@s:spa` → one span of 2 words with an explicit
-   external-anchor plan).
-4. **Secondary dispatch** sends each planned span to a Stanza worker for the target
-   language with `retokenize=true`. MWT contractions (`it's`, `don't`) are
-   expanded via Range tokens, `map_ud_sentence()` merges them into clitics.
-5. **Merge** combines secondary lexical output (lemma, features) with primary
-   structural info (deprel, head) plus the planned host attachment using a
-   6-level POS resolution priority.
-6. **Splice** replaces `L2|xxx` with the merged MOR items and corrects GRA
-   relations where the resolved POS contradicts the primary deprel.
+1. **Extract deferred positions** before injection: each utterance with a
+   dispatchable `@s` word is aligned to its primary UD sentence once
+   (`UdAlignment`), and each `@s` word records its target language (from
+   `@s:spa`, `@s:eng`, or bare `@s` resolved via `@Languages`) and the
+   primary's relation and head for it, read by UD id. An utterance that
+   does not align is reported and its `@s` words stay `L2|xxx`.
+2. **Primary injection** writes `%mor`/`%gra` for the whole utterance; `@s`
+   words get `L2|xxx` placeholders.
+3. **Plan dispatch spans** groups contiguous same-language `@s` words into
+   spans that own their positions, and decides each span's attachment from
+   its attachment source, the span word whose primary head lies outside
+   the span (e.g. `los@s:spa niños@s:spa` is one span attached through
+   `los`).
+4. **Secondary dispatch** sends each span to a Stanza worker for its
+   language with `retokenize=true`. MWT contractions (`it's`, `don't`)
+   come back as Range tokens, which `map_ud_sentence()` assembles into
+   clitics.
+5. **Merge** keeps the secondary's `%mor` items (category, lemma,
+   features) and its relations inside the span, writes a phrasal-verb
+   particle PART, and checks the source's primary relation against the
+   category of the secondary root that carries it, correcting the
+   relation (never the category) where they contradict.
+6. **Splice** replaces the span's `L2|xxx` items and relations, attaches
+   the span root to the host, validates the result, and rolls the span
+   back to `L2|xxx` if it breaks a `%gra` invariant.
+
+The design, index spaces and limitations are in
+[L2 Morphotag](l2-morphotag.md).
 
 ### Validation and repair policy
 

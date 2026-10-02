@@ -50,16 +50,4 @@ impl ServerConfig {
             None => batchalign_types::memory::MIN_FREE_MEMORY_MB,
         }
     }
-
-    /// Report admission corrections without mutation or filesystem access.
-    pub fn validate(&self) -> Vec<String> {
-        [
-            self.job_ttl_days.warning(),
-            self.memory_gate_poll_s.warning(),
-            self.max_concurrent_worker_startups.warning(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
 }

@@ -1,7 +1,7 @@
 # Tracing and Debugging
 
 **Status:** Current
-**Last updated:** 2026-09-30 18:56 EDT
+**Last updated:** 2026-10-01 14:49 EDT
 
 This document describes the tracing and debugging strategy across the
 batchalign3 stack: Rust (batchalign-core PyO3 bridge), Rust (CLI and server
@@ -386,7 +386,9 @@ path is connected.
 
 The fail-closed FA evidence and same-job speaker-turn artifacts are fully
 materialized before a temporary file is opened, synchronized, and atomically
-renamed into place. On Unix, the containing directory is synchronized too.
+renamed into place, through the crate's one atomic writer
+(`crate::atomic_file::write_atomically`). On Unix, the containing directory is
+synchronized too.
 When the submitted filename includes directories, the evidence filename adds
 a short digest of that full identity after `sample`; this keeps equal basenames
 from distinct corpus branches separate.

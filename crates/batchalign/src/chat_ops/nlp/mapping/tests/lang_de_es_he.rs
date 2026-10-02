@@ -7,7 +7,7 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 
@@ -17,7 +17,7 @@ fn test_hebrew_verb_hebbinyan() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("he").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "כתב".into(),
         lemma: "כתב".into(),
@@ -28,13 +28,13 @@ fn test_hebrew_verb_hebbinyan() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // HebBinyan=PAAL → lowercased "paal" in suffix
     assert!(
-        out.contains("-paal-"),
+        out.contains("-paal"),
         "Hebrew HebBinyan must be lowercased in suffix, got: {out}"
     );
     // No -irr (Hebrew, not English)
@@ -47,7 +47,7 @@ fn test_hebrew_verb_hebexistential() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("he").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "יש".into(),
         lemma: "יש".into(),
@@ -58,8 +58,8 @@ fn test_hebrew_verb_hebexistential() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // HebExistential=True → lowercased "true"
@@ -77,7 +77,7 @@ fn test_german_mwt_contraction_im() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "im".into(),
                 lemma: "im".into(),
@@ -88,8 +88,8 @@ fn test_german_mwt_contraction_im() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "in".into(),
                 lemma: "in".into(),
@@ -100,8 +100,8 @@ fn test_german_mwt_contraction_im() {
                 deprel: "case".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "dem".into(),
                 lemma: "der".into(),
@@ -112,8 +112,8 @@ fn test_german_mwt_contraction_im() {
                 deprel: "det".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "Haus".into(),
                 lemma: "Haus".into(),
@@ -124,7 +124,7 @@ fn test_german_mwt_contraction_im() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let mors = map_ud_sentence_to_mors(&sentence, &ctx);
@@ -145,7 +145,7 @@ fn test_german_verb_no_irr_suffix() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("de").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "ging".into(),
         lemma: "gehen".into(),
@@ -156,8 +156,8 @@ fn test_german_verb_no_irr_suffix() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     assert!(
@@ -175,7 +175,7 @@ fn test_spanish_mwt_contraction_del() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "del".into(),
                 lemma: "del".into(),
@@ -186,8 +186,8 @@ fn test_spanish_mwt_contraction_del() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "de".into(),
                 lemma: "de".into(),
@@ -198,8 +198,8 @@ fn test_spanish_mwt_contraction_del() {
                 deprel: "case".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "el".into(),
                 lemma: "el".into(),
@@ -210,8 +210,8 @@ fn test_spanish_mwt_contraction_del() {
                 deprel: "det".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "parque".into(),
                 lemma: "parque".into(),
@@ -222,7 +222,7 @@ fn test_spanish_mwt_contraction_del() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let mors = map_ud_sentence_to_mors(&sentence, &ctx);
@@ -242,7 +242,7 @@ fn test_spanish_verb_person0_becomes_4() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("es").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "llueve".into(),
         lemma: "llover".into(),
@@ -253,8 +253,8 @@ fn test_spanish_verb_person0_becomes_4() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // Person=0 → "4" (ba2 convention for impersonal verbs)
@@ -270,7 +270,7 @@ fn test_hebrew_3letter_code_works() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("heb").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "כתב".into(),
         lemma: "כתב".into(),
@@ -281,13 +281,13 @@ fn test_hebrew_3letter_code_works() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    };
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    });
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
     // "heb" must still process HebBinyan
     assert!(
-        out.contains("-paal-"),
+        out.contains("-paal"),
         "3-letter 'heb' must process HebBinyan, got: {out}"
     );
 }

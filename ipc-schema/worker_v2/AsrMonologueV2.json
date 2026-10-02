@@ -36,8 +36,60 @@
         }
       ]
     },
+    "AsrElementTimingV2": {
+      "description": "When one ASR element happened, admitted once where the provider's numbers\nwere read: on the wire `{\"kind\": \"timed\", \"start_ms\", \"end_ms\"}` or\n`{\"kind\": \"untimed\", \"cause\"}`.\n\nOne policy for every ASR route: a pair of bounds that is not an admissible\ninterval (inverted, or past the admissible range, as an epoch timestamp\nwould be) refuses the response the element came in, naming the element, as\nthe provider bridges refuse it; an absent bound is the provider's own\nreport and makes the element untimed with that cause.",
+      "oneOf": [
+        {
+          "description": "The provider timed the element, and the interval was admitted.",
+          "type": "object",
+          "properties": {
+            "end_ms": {
+              "description": "The end, in milliseconds; never before the start.",
+              "type": "integer",
+              "format": "int64",
+              "maximum": 1000000000000,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "timed"
+            },
+            "start_ms": {
+              "description": "The start, in milliseconds from the start of the media.",
+              "type": "integer",
+              "format": "int64",
+              "maximum": 1000000000000,
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "start_ms",
+            "end_ms"
+          ]
+        },
+        {
+          "description": "The element has no interval, for this reason.",
+          "type": "object",
+          "properties": {
+            "cause": {
+              "description": "Why.",
+              "$ref": "#/$defs/UntimedCause"
+            },
+            "kind": {
+              "type": "string",
+              "const": "untimed"
+            }
+          },
+          "required": [
+            "kind",
+            "cause"
+          ]
+        }
+      ]
+    },
     "AsrElementV2": {
-      "description": "One raw ASR element inside a speaker monologue.\n\nEach bound, when present, is a finite non-negative time by type; their\norder is checked where the element is admitted.",
+      "description": "One raw ASR element inside a speaker monologue.",
       "type": "object",
       "properties": {
         "confidence": {
@@ -49,33 +101,13 @@
           "format": "double",
           "default": null
         },
-        "end_s": {
-          "description": "End timestamp in seconds when the provider exposes one.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonNegativeSeconds"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "kind": {
           "description": "Stable element kind selected by the worker adapter.",
           "$ref": "#/$defs/AsrElementKindV2"
         },
-        "start_s": {
-          "description": "Start timestamp in seconds when the provider exposes one.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NonNegativeSeconds"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "timing": {
+          "description": "When the element happened, or why that is not known.",
+          "$ref": "#/$defs/AsrElementTimingV2"
         },
         "value": {
           "description": "Surface token or punctuation value.",
@@ -84,14 +116,9 @@
       },
       "required": [
         "value",
+        "timing",
         "kind"
       ]
-    },
-    "NonNegativeSeconds": {
-      "description": "A finite, non-negative number of seconds.",
-      "type": "number",
-      "format": "double",
-      "minimum": 0.0
     },
     "ProviderSpeakerLabelV2": {
       "description": "A provider's own label for one speaker: non-empty, with no surrounding whitespace.",
@@ -131,6 +158,41 @@
           "required": [
             "kind"
           ]
+        }
+      ]
+    },
+    "UntimedCause": {
+      "description": "Why an ASR word or element carries no interval.\n\nA closed set, because \"untimed\" with no reason is how a fabricated zero got\nin: once the reason has to be named, there is nowhere to hide a default.",
+      "oneOf": [
+        {
+          "description": "The provider reported neither bound.",
+          "type": "string",
+          "const": "provider_reported_no_timing"
+        },
+        {
+          "description": "The provider reported an end but no start.",
+          "type": "string",
+          "const": "provider_reported_no_start"
+        },
+        {
+          "description": "The provider reported a start but no end.",
+          "type": "string",
+          "const": "provider_reported_no_end"
+        },
+        {
+          "description": "The enclosing segment carried no start, so the word's offsets cannot be\nmade absolute. Tencent's `StartMs` is the field in question; before this\nstate existed, an absent one became the start of the recording.",
+          "type": "string",
+          "const": "segment_start_absent"
+        },
+        {
+          "description": "The provider reported a zero-width span, which locates nothing.",
+          "type": "string",
+          "const": "zero_length_span"
+        },
+        {
+          "description": "The bounds were present but not admissible (inverted, or past\n[`AdmittedInterval::MAX_MS`]). The refusal itself is logged where the\nbounds were read; the word carries no time and says so.",
+          "type": "string",
+          "const": "refused_by_admission"
         }
       ]
     }

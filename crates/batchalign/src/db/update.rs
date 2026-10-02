@@ -1,53 +1,130 @@
 //! Update and delete operations on the `jobs` and `file_statuses` tables.
 
-use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition};
+use crate::api::MachineTime;
+use crate::scheduling::{AttemptOutcome, FailureCategory, LeaseRecord, RetryDisposition};
+use crate::store::{FilePhase, JobStatusColumns};
 
 use crate::error::ServerError;
 
 use super::JobDB;
 
+/// [`JobDB::write_job_status`] on any connection, so a caller can make it
+/// part of a transaction.
+pub(super) async fn write_job_status_on<'e, E>(
+    executor: E,
+    job_id: &str,
+    columns: &JobStatusColumns,
+) -> Result<(), ServerError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(
+        "UPDATE jobs
+         SET status = ?,
+             error = ?,
+             completed_at = ?,
+             num_workers = ?,
+             next_eligible_at = ?
+         WHERE job_id = ?",
+    )
+    .bind(columns.status().to_string())
+    .bind(columns.error())
+    .bind(columns.completed_at())
+    .bind(columns.num_workers())
+    .bind(columns.next_eligible_at())
+    .bind(job_id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// [`JobDB::update_file_status`] on any connection, so a caller can make it
+/// part of a transaction.
+pub(super) async fn write_file_phase_on<'e, E>(
+    executor: E,
+    job_id: &str,
+    filename: &str,
+    phase: &FilePhase,
+    content_type: Option<&str>,
+) -> Result<(), ServerError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    bind_phase_columns(
+        sqlx::query(
+            "UPDATE file_statuses
+             SET status = ?,
+                 error = ?,
+                 error_category = ?,
+                 started_at = ?,
+                 finished_at = ?,
+                 next_eligible_at = ?,
+                 content_type = COALESCE(?, content_type)
+             WHERE job_id = ? AND filename = ?",
+        ),
+        phase.columns(),
+    )
+    .bind(content_type)
+    .bind(job_id)
+    .bind(filename)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Bind a phase's six `file_statuses` columns, in the order every phase
+/// writer's SQL names them: `status, error, error_category, started_at,
+/// finished_at, next_eligible_at`.
+pub(super) fn bind_phase_columns<'q>(
+    query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
+    columns: crate::store::FilePhaseColumns<'q>,
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
+    query
+        .bind(columns.status.to_string())
+        .bind(columns.error)
+        .bind(columns.error_category.map(|category| category.to_string()))
+        .bind(columns.started_at)
+        .bind(columns.finished_at)
+        .bind(columns.next_eligible_at)
+}
+
 impl JobDB {
-    /// Update job-level status fields in the `jobs` table.
+    /// Write a job's status columns, every one of them, NULLs included.
     ///
-    /// Uses `COALESCE` so that `None` parameters leave the existing column
-    /// value unchanged.  Called by the runner at each job state transition
-    /// (Queued -> Running -> Completed/Failed/Cancelled).
-    pub async fn update_job_status(
+    /// Takes the job's whole status image ([`JobStatusColumns`], built only
+    /// by its owners), so nothing an earlier status wrote survives a
+    /// transition that does not own it.
+    pub(crate) async fn write_job_status(
         &self,
         job_id: &str,
-        status: &str,
-        error: Option<&str>,
-        completed_at: Option<f64>,
-        num_workers: Option<i32>,
-        next_eligible_at: Option<f64>,
+        columns: &JobStatusColumns,
     ) -> Result<(), ServerError> {
-        sqlx::query(
-            "UPDATE jobs
-             SET status = ?,
-                 error = COALESCE(?, error),
-                 completed_at = COALESCE(?, completed_at),
-                 num_workers = COALESCE(?, num_workers),
-                 next_eligible_at = ?
-             WHERE job_id = ?",
-        )
-        .bind(status)
-        .bind(error)
-        .bind(completed_at)
-        .bind(num_workers)
-        .bind(next_eligible_at)
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
+        write_job_status_on(&self.pool, job_id, columns).await
+    }
+
+    /// Write a job's submitter columns, `None` as the columns' empty
+    /// spelling of no submitter.
+    pub(crate) async fn write_job_submitter(
+        &self,
+        job_id: &str,
+        submitter: Option<&crate::store::Submitter>,
+    ) -> Result<(), ServerError> {
+        let (address, name) = crate::store::Submitter::columns(submitter);
+        sqlx::query("UPDATE jobs SET submitted_by = ?, submitted_by_name = ? WHERE job_id = ?")
+            .bind(address)
+            .bind(name)
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    /// Update job-level lease ownership fields in the `jobs` table.
+    /// Write a job's lease, or clear it with `None`. The three columns are
+    /// written together, so a row never holds part of a lease.
     pub async fn update_job_lease(
         &self,
         job_id: &str,
-        leased_by_node: Option<&str>,
-        lease_expires_at: Option<f64>,
-        lease_heartbeat_at: Option<f64>,
+        lease: Option<&LeaseRecord>,
     ) -> Result<(), ServerError> {
         sqlx::query(
             "UPDATE jobs
@@ -56,49 +133,80 @@ impl JobDB {
                  lease_heartbeat_at = ?
              WHERE job_id = ?",
         )
-        .bind(leased_by_node)
-        .bind(lease_expires_at)
-        .bind(lease_heartbeat_at)
+        .bind(lease.map(|lease| lease.leased_by_node().as_ref()))
+        .bind(lease.map(LeaseRecord::expires_at))
+        .bind(lease.map(LeaseRecord::heartbeat_at))
         .bind(job_id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Update a single row in the `file_statuses` table.
+    /// Write one file's phase to its `file_statuses` row.
     ///
-    /// Uses `COALESCE` so that `None` parameters preserve existing column
-    /// values.
-    #[allow(clippy::too_many_arguments)]
+    /// Every column the phase owns is written from [`FilePhase::columns`],
+    /// NULLs included, so nothing an earlier phase wrote survives into a phase
+    /// that does not own it. `content_type` is not a phase column (it is
+    /// `NOT NULL` with a default) and is written only when given.
     pub async fn update_file_status(
+        &self,
+        job_id: &str,
+        filename: &str,
+        phase: &FilePhase,
+        content_type: Option<&str>,
+    ) -> Result<(), ServerError> {
+        write_file_phase_on(&self.pool, job_id, filename, phase, content_type).await
+    }
+
+    /// Seed a job row's submitter columns with raw values, for tests that
+    /// stand in for a row another build (or a hand edit) wrote.
+    #[cfg(test)]
+    pub(crate) async fn seed_job_submitter_columns(
+        &self,
+        job_id: &str,
+        address: &str,
+        name: &str,
+    ) -> Result<(), ServerError> {
+        sqlx::query("UPDATE jobs SET submitted_by = ?, submitted_by_name = ? WHERE job_id = ?")
+            .bind(address)
+            .bind(name)
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Seed a `file_statuses` row with raw column values, for tests that
+    /// stand in for a row another build (or a hand edit) wrote. Production
+    /// writes go through [`Self::update_file_status`].
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn seed_file_status_row(
         &self,
         job_id: &str,
         filename: &str,
         status: &str,
         error: Option<&str>,
         error_category: Option<&str>,
-        bug_report_id: Option<&str>,
         content_type: Option<&str>,
-        started_at: Option<f64>,
-        finished_at: Option<f64>,
-        next_eligible_at: Option<f64>,
+        started_at: Option<MachineTime>,
+        finished_at: Option<MachineTime>,
+        next_eligible_at: Option<MachineTime>,
     ) -> Result<(), ServerError> {
         sqlx::query(
             "UPDATE file_statuses
              SET status = ?,
-                 error = COALESCE(?, error),
-                 error_category = COALESCE(?, error_category),
-                 bug_report_id = COALESCE(?, bug_report_id),
+                 error = ?,
+                 error_category = ?,
                  content_type = COALESCE(?, content_type),
-                 started_at = COALESCE(?, started_at),
-                 finished_at = COALESCE(?, finished_at),
+                 started_at = ?,
+                 finished_at = ?,
                  next_eligible_at = ?
              WHERE job_id = ? AND filename = ?",
         )
         .bind(status)
         .bind(error)
         .bind(error_category)
-        .bind(bug_report_id)
         .bind(content_type)
         .bind(started_at)
         .bind(finished_at)
@@ -110,29 +218,30 @@ impl JobDB {
         Ok(())
     }
 
-    /// Reset one recovered file back to a clean queued state.
-    ///
-    /// This is used during startup recovery after an interrupted job is
-    /// reconciled back to `Queued`. Unlike [`Self::update_file_status`], this
-    /// method clears stale timestamps instead of preserving them.
-    pub async fn reset_recovered_file_to_queued(
+    /// Seed a job row's `status` column with a raw value, for tests that
+    /// stand in for a row another build wrote.
+    #[cfg(test)]
+    pub(crate) async fn seed_job_status_column(
         &self,
         job_id: &str,
-        filename: &str,
+        status: &str,
     ) -> Result<(), ServerError> {
+        sqlx::query("UPDATE jobs SET status = ? WHERE job_id = ?")
+            .bind(status)
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Make every later `file_statuses` update fail, for tests of a write
+    /// that fails (a full disk, a locked database).
+    #[cfg(test)]
+    pub(crate) async fn fail_file_status_updates(&self) -> Result<(), ServerError> {
         sqlx::query(
-            "UPDATE file_statuses
-             SET status = 'queued',
-                 error = NULL,
-                 error_category = NULL,
-                 bug_report_id = NULL,
-                 started_at = NULL,
-                 finished_at = NULL,
-                 next_eligible_at = NULL
-             WHERE job_id = ? AND filename = ?",
+            "CREATE TRIGGER fail_file_status_updates BEFORE UPDATE ON file_statuses
+             BEGIN SELECT RAISE(ABORT, 'file_statuses updates fail in this test'); END",
         )
-        .bind(job_id)
-        .bind(filename)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -156,7 +265,7 @@ impl JobDB {
         outcome: AttemptOutcome,
         failure_category: Option<FailureCategory>,
         disposition: RetryDisposition,
-        finished_at: f64,
+        finished_at: MachineTime,
     ) -> Result<(), ServerError> {
         sqlx::query(
             "UPDATE attempts

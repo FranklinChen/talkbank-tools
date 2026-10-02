@@ -13,11 +13,11 @@ serde_json = { workspace = true }
 # The CI artifact-flow check reads the workflows as workflows rather than
 # searching their text, so a step it flags is a step, not a line that looks
 # like one.
-serde_yaml = { workspace = true }
+yaml_serde = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
 blake3 = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 # `audit-docs` writes a SQLite catalog. sqlx (the same crate the
 # batchalign server uses) replaces the previous sync rusqlite binding
 # so the workspace links a single libsqlite3-sys version. A small

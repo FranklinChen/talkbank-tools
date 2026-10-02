@@ -129,7 +129,7 @@ to load.
 If a job fails with `MemoryPressure` or logs say "job deferred due to memory
 pressure", the server's memory gate detected insufficient RAM. The gate
 polls available memory for up to `memory_gate_timeout_s` seconds before
-giving up (default 120; see `default_memory_gate_timeout_s` in
+giving up (default 120, never 0; see `default_memory_gate_timeout_s` in
 `crates/batchalign/src/types/config/server.rs`).
 
 **Common causes:**

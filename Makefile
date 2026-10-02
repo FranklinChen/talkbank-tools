@@ -502,12 +502,11 @@ ci-full:
 	@# clean worktree removed frontend/dist.
 	@$(MAKE) batchalign-dashboard-build
 	@# `batchalign-ci-rust` below owns clippy and check for the imported BA3
-	@# crates. Run clippy only for the two remaining workspace members here;
+	@# crates. Run clippy only for the remaining workspace member here;
 	@# the former workspace-wide clippy + check compiled the BA3 graph twice
 	@# before running the same gate again.
 	@echo "==> clippy (remaining workspace members)"
-	cargo clippy -p batchalign-dashboard-desktop -p batchalign-whisper-pilot \
-		--all-targets -- -D warnings
+	cargo clippy -p batchalign-dashboard-desktop --all-targets -- -D warnings
 	@echo "==> runtime_constants.toml drift check"
 	@cargo run -p xtask --quiet -- gen-runtime-toml --check
 	@# The gate owns Rust/PyO3 verification plus shell, Python-source, schema

@@ -384,10 +384,10 @@ pub async fn start_live_server(
     let pool_config = PoolConfig {
         python_path: python_path.into(),
         test_echo: false,
-        health_check_interval_s: 3_600,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<3_600>(),
         // One number buys both winning a host-wide startup slot and this
         // worker's own startup; see `HarnessBudget::FixtureWorkerReady`.
-        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_secs(),
+        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_positive_seconds(),
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
         runtime: Default::default(),
@@ -400,6 +400,7 @@ pub async fn start_live_server(
         Some(jobs_dir.to_string_lossy().into()),
         Some(db_dir),
         Some(batchalign::build_hash().into()),
+        std::sync::Arc::new(batchalign::clock::SystemClock),
     )
     .await
     .map_err(|error| format!("could not create live server app: {error}"))?;

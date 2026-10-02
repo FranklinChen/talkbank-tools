@@ -258,6 +258,13 @@ pub enum ServerError {
     #[error("persistence error: {0}")]
     Persistence(String),
 
+    /// A stored job lease names no lease that could have been held: part of
+    /// one, or one that does not expire after its heartbeat.
+    ///
+    /// **HTTP 500.** Corrupt stored state, refused where it is read.
+    #[error("persistence error: {0}")]
+    StoredLease(#[from] crate::db::StoredLeaseError),
+
     /// Typed ASR-to-CHAT assembly failure, including requested diagnostics.
     #[error(transparent)]
     TranscriptBuild(#[from] batchalign_transform::build_chat::TranscriptBuildError),
@@ -560,7 +567,7 @@ impl ServerError {
                 }
             }
             Self::Database(_) | Self::Migration(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Persistence(_) | Self::StoredLease(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::MediaTiming(_) | Self::OutputParse(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::RequiredEvidenceUnavailable(_) => StatusCode::PRECONDITION_FAILED,
             // The request was fine and the server worked; the submitted media

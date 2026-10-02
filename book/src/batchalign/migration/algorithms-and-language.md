@@ -1,7 +1,7 @@
 # Algorithms, Language, and Alignment Migration
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:56 EDT
+**Last updated:** 2026-10-01 17:34 EDT
 
 Comparison anchors:
 
@@ -444,7 +444,7 @@ Mitigation strategy:
 
 Algorithmic migrations are now defended by:
 
-- golden test matrices (`batchalign/tests/golden/`),
+- the ML golden snapshot tests (`crates/batchalign/tests/ml_golden/`),
 - no-DP-runtime allowlist tests at
   `batchalign/tests/test_dp_allowlist.py::test_chat_ops_dp_calls_are_allowlisted`,
   which fingerprints every `dp_align::align(...)` call site against an

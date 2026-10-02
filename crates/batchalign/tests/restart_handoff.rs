@@ -117,6 +117,7 @@ async fn cancel_restart_while_running_hands_off_to_one_runner() {
         Some(jobs_dir.to_string_lossy().into()),
         Some(db_dir),
         Some("restart-handoff-test".into()),
+        std::sync::Arc::new(batchalign::clock::SystemClock),
     )
     .await
     .expect("create test app");

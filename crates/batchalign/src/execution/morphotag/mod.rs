@@ -22,7 +22,7 @@ use crate::planning;
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage};
 use crate::scheduling::WorkUnitKind;
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::text_batch::TextBatchFileResult;
 
 use super::worker_gateway::{MorphotagRuntimeOptions, WorkerGateway};
@@ -127,7 +127,7 @@ pub(crate) async fn dispatch_morphotag_job(
                 // large file's parse is not instant and it is genuinely a phase
                 // distinct from the inference that follows.
                 lifecycle
-                    .begin_first_attempt(WorkUnitKind::BatchInfer, unix_now(), FileStage::Parsing)
+                    .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Parsing)
                     .await;
 
                 // Resolve language per-file from the CHAT file's own
@@ -159,7 +159,6 @@ pub(crate) async fn dispatch_morphotag_job(
                                 .fail(
                                     &err.to_string(),
                                     crate::scheduling::FailureCategory::Validation,
-                                    unix_now(),
                                 )
                                 .await;
                             return;

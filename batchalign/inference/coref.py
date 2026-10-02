@@ -10,15 +10,18 @@ worker-wide report taken before dispatch.
 from __future__ import annotations
 
 import logging
-import time
+from functools import partial
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from batchalign.providers import (
     BatchInferRequest,
     BatchInferResponse,
-    InferResponse,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
 )
+from batchalign.worker._batch import ItemWork, Unexecuted, answer_batch
 from batchalign.worker._types import reported_engine_name
 
 L = logging.getLogger("batchalign.worker")
@@ -104,9 +107,6 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
       genuinely has no coreference chains, so the file was written without
       its ``%xcoref`` tiers and reported as a success.
     """
-    t0 = time.monotonic()
-    n = len(req.items)
-    results: list[InferResponse] = []
 
     import stanza
 
@@ -117,23 +117,13 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
 
     pipeline: stanza.Pipeline | None = None
 
-    for item_idx, raw_item in enumerate(req.items):
-        try:
-            item = CorefBatchItem.model_validate(raw_item)
-        except ValidationError:
-            results.append(InferResponse(error="Invalid CorefBatchItem", elapsed_s=0.0))
-            continue
+    def _resolve(item_idx: int, item: CorefBatchItem, engine: str) -> ItemOutcome:
+        """Resolve one item's coreference, building the pipeline on first use.
 
-        if not item.sentences:
-            results.append(
-                InferResponse(result={"kind": "no_sentences"}, elapsed_s=0.0)
-            )
-            continue
-
-        if engine is None:
-            results.append(InferResponse(error=_NO_COREF_ENGINE_ERROR, elapsed_s=0.0))
-            continue
-
+        The pipeline build lands inside the first resolved item's time: that
+        item's call is the one that waited for it.
+        """
+        nonlocal pipeline
         try:
             if pipeline is None:
                 # Coref pipeline downloads its own model files (RoBERTa-large
@@ -157,7 +147,6 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
                 )
 
             text = "\n\n".join(" ".join(s) for s in item.sentences)
-            assert pipeline is not None
             result = pipeline(text)
 
             annotations: list[CorefRawAnnotation] = []
@@ -194,26 +183,22 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
 
                 sent_idx += 1
 
-            results.append(
-                InferResponse(
-                    result={
-                        "kind": "resolved",
-                        **CorefRawResponse(annotations=annotations).model_dump(),
-                        "engine": engine,
-                    },
-                    elapsed_s=0.0,
-                )
+            return ItemProduced(
+                result={
+                    "kind": "resolved",
+                    **CorefRawResponse(annotations=annotations).model_dump(),
+                    "engine": engine,
+                }
             )
         except Exception as e:
             L.warning("Coref infer failed for item %d: %s", item_idx, e)
-            results.append(InferResponse(error=f"Coref failed: {e}", elapsed_s=0.0))
+            return ItemFailed(error=f"Coref failed: {e}")
 
-    elapsed = time.monotonic() - t0
-    if results:
-        first = results[0]
-        results[0] = InferResponse(
-            result=first.result, error=first.error, elapsed_s=elapsed
-        )
+    def work_for(item_idx: int, item: CorefBatchItem) -> ItemWork:
+        if not item.sentences:
+            return Unexecuted(ItemProduced(result={"kind": "no_sentences"}))
+        if engine is None:
+            return Unexecuted(ItemFailed(error=_NO_COREF_ENGINE_ERROR))
+        return partial(_resolve, item_idx, item, engine)
 
-    L.info("batch_infer coref: %d items, %.3fs", n, elapsed)
-    return BatchInferResponse(results=results)
+    return answer_batch("coref", req.items, CorefBatchItem, work_for)

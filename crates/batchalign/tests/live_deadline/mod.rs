@@ -560,16 +560,17 @@ pub enum HarnessBudget {
 impl HarnessBudget {
     /// The wall-clock budget for this operation.
     pub fn as_duration(self) -> Duration {
-        match self {
-            Self::SessionShutdown => Duration::from_secs(5),
-            Self::OversubscribedEchoDispatch => Duration::from_secs(60),
-            Self::FixtureWorkerReady => Duration::from_secs(300),
-        }
+        self.as_positive_seconds().duration()
     }
 
-    /// The same budget in whole seconds, for the config fields that take one.
-    pub fn as_secs(self) -> u64 {
-        self.as_duration().as_secs()
+    /// The same budget as the non-zero whole seconds the worker config
+    /// fields take.
+    pub fn as_positive_seconds(self) -> batchalign::api::PositiveSeconds {
+        match self {
+            Self::SessionShutdown => batchalign::api::PositiveSeconds::literal::<5>(),
+            Self::OversubscribedEchoDispatch => batchalign::api::PositiveSeconds::literal::<60>(),
+            Self::FixtureWorkerReady => batchalign::api::PositiveSeconds::literal::<300>(),
+        }
     }
 }
 

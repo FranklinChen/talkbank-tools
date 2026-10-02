@@ -1,7 +1,7 @@
 //! ASR response types, backend selection, and transcribe options.
 
 use crate::api::{
-    AsrLanguageRequest, DurationSeconds, LanguageCode3, LanguagePair, LanguageSpec,
+    AsrLanguageRequest, AudioPositionSeconds, LanguageCode3, LanguagePair, LanguageSpec,
     PerFileHasNoAsrLanguage, WorkerLanguage,
 };
 use crate::types::revai_language::{RevLanguage, RevLanguageRefusal};
@@ -41,10 +41,10 @@ impl TranscribeCachePolicies {
 pub struct AsrToken {
     /// Word text.
     pub text: String,
-    /// Start time in seconds.
-    pub start_s: Option<DurationSeconds>,
-    /// End time in seconds.
-    pub end_s: Option<DurationSeconds>,
+    /// Start of the token, as a position in the audio.
+    pub start_s: Option<AudioPositionSeconds>,
+    /// End of the token, as a position in the audio.
+    pub end_s: Option<AudioPositionSeconds>,
     /// Speaker label (e.g. "0", "1") from diarization.
     pub speaker: Option<String>,
     /// Confidence score (0.0-1.0).

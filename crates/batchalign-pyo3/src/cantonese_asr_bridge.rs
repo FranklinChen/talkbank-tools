@@ -49,6 +49,7 @@ use crate::error::BatchalignBoundaryError;
 use crate::py_json_bridge::py_to_json_value;
 use batchalign_transform::asr_postprocess::cantonese as cantonese_ops;
 use batchalign_transform::asr_postprocess::{AdmittedInterval, UntimedCause, WordTiming};
+use batchalign_types::domain::AudioPositionSeconds;
 use funasr_projection::{FunasrSegmentWire, project_funasr_segments};
 use provider_admission::{
     FieldRead, ProviderAdmissionError, ProviderFault, ProviderId, ProviderLocus,
@@ -112,16 +113,15 @@ struct HkAsrMonologue {
 }
 
 /// One token entry in a projected HK ASR monologue.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+///
+/// On the wire `{"type", "ts", "end_ts", "value"}`, where `ts` and `end_ts`
+/// are both present or both null: they are written from one optional
+/// admitted interval, so a timed element with one bound cannot be built.
+#[derive(Debug, Clone, PartialEq)]
 struct HkAsrElement {
-    /// Token kind for the shared worker contract.
-    #[serde(rename = "type")]
-    element_type: &'static str,
-    /// Start time in seconds when known. `None` means the provider reported
-    /// none, never "zero".
-    ts: Option<f64>,
-    /// End time in seconds when known.
-    end_ts: Option<f64>,
+    /// The element's span, when the provider timed it. `None` means the
+    /// provider reported none, never "zero".
+    interval: Option<AdmittedInterval>,
     /// Surface token value after provider-boundary normalization.
     value: String,
 }
@@ -129,19 +129,28 @@ struct HkAsrElement {
 impl HkAsrElement {
     /// Build one text element from an admitted timing.
     fn text(value: String, timing: WordTiming) -> Self {
-        let (ts, end_ts) = match timing.interval() {
-            Some(interval) => {
-                let (start_s, end_s) = interval.as_seconds();
-                (Some(start_s), Some(end_s))
-            }
-            None => (None, None),
-        };
         Self {
-            element_type: "text",
-            ts,
-            end_ts,
+            interval: timing.interval(),
             value,
         }
+    }
+
+    /// The element's start and end positions, when it is timed.
+    fn bounds(&self) -> Option<(AudioPositionSeconds, AudioPositionSeconds)> {
+        self.interval.map(AdmittedInterval::as_positions)
+    }
+}
+
+impl Serialize for HkAsrElement {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let bounds = self.bounds();
+        let mut element = serializer.serialize_struct("HkAsrElement", 4)?;
+        element.serialize_field("type", "text")?;
+        element.serialize_field("ts", &bounds.map(|(start, _)| start))?;
+        element.serialize_field("end_ts", &bounds.map(|(_, end)| end))?;
+        element.serialize_field("value", &self.value)?;
+        element.end()
     }
 }
 
@@ -652,9 +661,11 @@ mod tests {
         }]);
 
         let elements = &projection.monologues[0].elements;
-        assert_eq!(elements[0].ts, None);
-        assert_eq!(elements[0].end_ts, None);
-        assert_eq!(elements[1].ts, Some(4.85));
+        assert_eq!(elements[0].bounds(), None);
+        assert_eq!(
+            elements[1].bounds().map(|(start, _)| start.get()),
+            Some(4.85)
+        );
         assert_eq!(
             projection
                 .timed_words
@@ -734,8 +745,7 @@ mod tests {
         )?;
 
         let elements = &projection.monologues[0].elements;
-        assert!(elements.iter().all(|element| element.ts.is_none()));
-        assert!(elements.iter().all(|element| element.end_ts.is_none()));
+        assert!(elements.iter().all(|element| element.bounds().is_none()));
         assert!(projection.timed_words.is_empty());
         Ok(())
     }

@@ -39,8 +39,8 @@ pub fn echo_pool_config(
         max_workers_per_key,
         test_echo: true,
         test_delay_ms,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     }
 }

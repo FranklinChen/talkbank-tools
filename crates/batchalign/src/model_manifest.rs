@@ -162,28 +162,6 @@ const QWEN_ALIGNER: ManifestEntry = ManifestEntry {
     revision: ManifestRevision::Commit("c07281df297b9905d24a508279258cccf987a064"),
 };
 
-/// The engine-override key naming a ggml weights file for native Whisper.
-///
-/// Only ever reported, never resolved here: the file is chosen by the host, so
-/// the manifest pins nothing for it.
-const WHISPER_RS_MODEL_KEY: &str = "whisper_rs_model";
-
-/// The default ggml weights whisper.cpp loads in process, named as repository
-/// plus file.
-///
-/// Both halves, because a repository commit alone would not say which of that
-/// repository's many weight files ran, and a file name alone would not say
-/// which revision of it.
-const NATIVE_WHISPER_ID: &str = "ggerganov/whisper.cpp/ggml-large-v3.bin";
-
-/// The repository commit this build fetches those weights at.
-///
-/// Read by `whisper_native::config`, which owns the owner/name/file coordinates
-/// its hf-hub call needs and passes this to `.revision(...)`. The coordinates
-/// live with the fetch and the revision lives here, so every pinned revision in
-/// this build has exactly one home.
-pub(crate) const NATIVE_WHISPER_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
-
 /// Aliyun's identity: the service, never the appkey.
 ///
 /// An appkey identifies an ACCOUNT, not a model, so recording it would leak a
@@ -384,6 +362,7 @@ pub(crate) enum ModelPlanError {
          {requested}. Clear the Hugging Face cache entry for those weights, or name \
          the file explicitly with BATCHALIGN_WHISPER_RS_MODEL to run it unpinned."
     )]
+    #[cfg(feature = "whisper-rs-backend")]
     NativeWhisperRevisionMismatch {
         /// The commit this build pins.
         requested: String,
@@ -588,89 +567,6 @@ pub(crate) fn rev_loaded_identity() -> AsrModelIdentityV2 {
     }
 }
 
-/// The models the Rust-owned native Whisper path loads.
-///
-/// Separate from [`resolve_asr_models`] because whisper.cpp is not a worker
-/// backend: it has no [`AsrBackendV2`] variant, and its weights are a file
-/// rather than a repository.
-pub(crate) fn native_whisper_identity(
-    model_path: &std::path::Path,
-    source: crate::whisper_native::WhisperModelSource,
-) -> Result<AsrModelIdentityV2, ModelPlanError> {
-    let ggml = match source {
-        // Fetched at a pinned repository revision, so it is named exactly as
-        // every other Hugging Face model in this manifest is.
-        crate::whisper_native::WhisperModelSource::PinnedDefault => {
-            let malformed = |detail: String| ModelPlanError::MalformedManifestEntry {
-                id: NATIVE_WHISPER_ID,
-                detail,
-            };
-            let requested = HubCommitV2::try_from(NATIVE_WHISPER_REVISION)
-                .map_err(|error| malformed(error.to_string()))?;
-            let observed = observed_native_commit(model_path, &requested)?;
-            LoadedModelV2 {
-                id: ModelIdV2::try_from(NATIVE_WHISPER_ID)
-                    .map_err(|error| malformed(error.to_string()))?,
-                requested: RequestedRevisionV2::Commit { commit: requested },
-                observed: ObservedRevisionV2::Commit { commit: observed },
-            }
-        }
-        // A file the host put there. This build pins nothing for it and can
-        // observe nothing about it, and saying so is honest rather than a gap:
-        // an invented revision would be worse than an admitted absence.
-        crate::whisper_native::WhisperModelSource::HostChosen => {
-            // The file's own name, which is the only part of a host path safe
-            // to record: a full path is machine-local and would carry a user's
-            // directory layout into every transcript this build stamps.
-            let name = model_path
-                .file_name()
-                .map_or_else(
-                    || model_path.to_string_lossy(),
-                    |name| name.to_string_lossy(),
-                )
-                .into_owned();
-            LoadedModelV2 {
-                id: ModelIdV2::try_from(name.as_str()).map_err(|error| {
-                    ModelPlanError::UnrecordableOverride {
-                        key: WHISPER_RS_MODEL_KEY,
-                        value: name.clone(),
-                        detail: error.to_string(),
-                    }
-                })?,
-                requested: RequestedRevisionV2::Unpinned,
-                observed: ObservedRevisionV2::NotExposed,
-            }
-        }
-    };
-    Ok(AsrModelIdentityV2::NativeWhisper { ggml })
-}
-
-/// What commit the weights on disk attest to, cross-checked against the pin.
-///
-/// hf-hub lays its cache out as `.../snapshots/<commit>/<file>`. Where that
-/// segment is present it is an INDEPENDENT reading of what actually landed, so
-/// it is preferred and a disagreement is refused by name. Where it is absent
-/// the observation is the pinned fetch itself: `.revision(sha)` either serves
-/// that revision or fails, so a returned file is evidence for that commit and
-/// for no other. Neither branch invents a value, and neither echoes a request
-/// that was never honoured.
-fn observed_native_commit(
-    model_path: &std::path::Path,
-    requested: &HubCommitV2,
-) -> Result<HubCommitV2, ModelPlanError> {
-    let seen = model_path
-        .components()
-        .find_map(|component| HubCommitV2::try_from(component.as_os_str().to_str()?).ok());
-    match seen {
-        Some(seen) if seen != *requested => Err(ModelPlanError::NativeWhisperRevisionMismatch {
-            requested: requested.as_str().to_owned(),
-            observed: seen.as_str().to_owned(),
-        }),
-        Some(seen) => Ok(seen),
-        None => Ok(requested.clone()),
-    }
-}
-
 /// The `whisper_hub` fine-tune for one language.
 fn whisper_hub_model(
     lang: Option<&LanguageCode3>,
@@ -753,6 +649,126 @@ fn qwen_model(
     }
 }
 
+/// The in-process whisper.cpp model's identity: its pinned default weights
+/// (repository, file and revision) and how a loaded file is named in a
+/// transcript's provenance. Only builds with the whisper.cpp backend have
+/// one, so the whole of it is compiled with that feature, in one place: a
+/// new item here is gated by being here.
+#[cfg(feature = "whisper-rs-backend")]
+mod native_whisper {
+    use super::*;
+
+    /// The engine-override key naming a ggml weights file for native Whisper.
+    ///
+    /// Only ever reported, never resolved here: the file is chosen by the host, so
+    /// the manifest pins nothing for it.
+    const WHISPER_RS_MODEL_KEY: &str = "whisper_rs_model";
+
+    /// The default ggml weights whisper.cpp loads in process, named as repository
+    /// plus file.
+    ///
+    /// Both halves, because a repository commit alone would not say which of that
+    /// repository's many weight files ran, and a file name alone would not say
+    /// which revision of it.
+    const NATIVE_WHISPER_ID: &str = "ggerganov/whisper.cpp/ggml-large-v3.bin";
+
+    /// The repository commit this build fetches those weights at.
+    ///
+    /// Read by `whisper_native::config`, which owns the owner/name/file coordinates
+    /// its hf-hub call needs and passes this to `.revision(...)`. The coordinates
+    /// live with the fetch and the revision lives here, so every pinned revision in
+    /// this build has exactly one home.
+    pub(crate) const NATIVE_WHISPER_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+
+    /// The models the Rust-owned native Whisper path loads.
+    ///
+    /// Separate from [`resolve_asr_models`] because whisper.cpp is not a worker
+    /// backend: it has no [`AsrBackendV2`] variant, and its weights are a file
+    /// rather than a repository.
+    pub(crate) fn native_whisper_identity(
+        model_path: &std::path::Path,
+        source: crate::whisper_native::WhisperModelSource,
+    ) -> Result<AsrModelIdentityV2, ModelPlanError> {
+        let ggml = match source {
+            // Fetched at a pinned repository revision, so it is named exactly as
+            // every other Hugging Face model in this manifest is.
+            crate::whisper_native::WhisperModelSource::PinnedDefault => {
+                let malformed = |detail: String| ModelPlanError::MalformedManifestEntry {
+                    id: NATIVE_WHISPER_ID,
+                    detail,
+                };
+                let requested = HubCommitV2::try_from(NATIVE_WHISPER_REVISION)
+                    .map_err(|error| malformed(error.to_string()))?;
+                let observed = observed_native_commit(model_path, &requested)?;
+                LoadedModelV2 {
+                    id: ModelIdV2::try_from(NATIVE_WHISPER_ID)
+                        .map_err(|error| malformed(error.to_string()))?,
+                    requested: RequestedRevisionV2::Commit { commit: requested },
+                    observed: ObservedRevisionV2::Commit { commit: observed },
+                }
+            }
+            // A file the host put there. This build pins nothing for it and can
+            // observe nothing about it, and saying so is honest rather than a gap:
+            // an invented revision would be worse than an admitted absence.
+            crate::whisper_native::WhisperModelSource::HostChosen => {
+                // The file's own name, which is the only part of a host path safe
+                // to record: a full path is machine-local and would carry a user's
+                // directory layout into every transcript this build stamps.
+                let name = model_path
+                    .file_name()
+                    .map_or_else(
+                        || model_path.to_string_lossy(),
+                        |name| name.to_string_lossy(),
+                    )
+                    .into_owned();
+                LoadedModelV2 {
+                    id: ModelIdV2::try_from(name.as_str()).map_err(|error| {
+                        ModelPlanError::UnrecordableOverride {
+                            key: WHISPER_RS_MODEL_KEY,
+                            value: name.clone(),
+                            detail: error.to_string(),
+                        }
+                    })?,
+                    requested: RequestedRevisionV2::Unpinned,
+                    observed: ObservedRevisionV2::NotExposed,
+                }
+            }
+        };
+        Ok(AsrModelIdentityV2::NativeWhisper { ggml })
+    }
+
+    /// What commit the weights on disk attest to, cross-checked against the pin.
+    ///
+    /// hf-hub lays its cache out as `.../snapshots/<commit>/<file>`. Where that
+    /// segment is present it is an INDEPENDENT reading of what actually landed, so
+    /// it is preferred and a disagreement is refused by name. Where it is absent
+    /// the observation is the pinned fetch itself: `.revision(sha)` either serves
+    /// that revision or fails, so a returned file is evidence for that commit and
+    /// for no other. Neither branch invents a value, and neither echoes a request
+    /// that was never honoured.
+    fn observed_native_commit(
+        model_path: &std::path::Path,
+        requested: &HubCommitV2,
+    ) -> Result<HubCommitV2, ModelPlanError> {
+        let seen = model_path
+            .components()
+            .find_map(|component| HubCommitV2::try_from(component.as_os_str().to_str()?).ok());
+        match seen {
+            Some(seen) if seen != *requested => {
+                Err(ModelPlanError::NativeWhisperRevisionMismatch {
+                    requested: requested.as_str().to_owned(),
+                    observed: seen.as_str().to_owned(),
+                })
+            }
+            Some(seen) => Ok(seen),
+            None => Ok(requested.clone()),
+        }
+    }
+}
+
+#[cfg(feature = "whisper-rs-backend")]
+pub(crate) use native_whisper::{NATIVE_WHISPER_REVISION, native_whisper_identity};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,6 +797,13 @@ mod tests {
             };
             resolved.unwrap_or_else(|error| panic!("{backend:?} must resolve: {error}"));
         }
+    }
+
+    /// The native Whisper identities admit: a host-chosen file and the
+    /// pinned default.
+    #[cfg(feature = "whisper-rs-backend")]
+    #[test]
+    fn native_whisper_identities_admit() {
         native_whisper_identity(
             std::path::Path::new("/models/ggml-large-v3.bin"),
             crate::whisper_native::WhisperModelSource::HostChosen,

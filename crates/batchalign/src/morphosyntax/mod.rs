@@ -40,7 +40,7 @@ mod worker;
 
 use crate::chat_ops::LanguageCode;
 use crate::chat_ops::morphosyntax_ops::{
-    BatchItemWithPosition, TokenizationMode, apply_pos_hint_evidence, clear_morphosyntax_selective,
+    CollectedUtterance, TokenizationMode, apply_pos_hint_evidence, clear_morphosyntax_selective,
     collect_payloads, collect_pos_hints, declared_languages, inject_results,
     validate_mor_alignment,
 };
@@ -297,9 +297,9 @@ pub(crate) async fn process_morphosyntax_incremental(
     .batch_items;
 
     // Filter to only the utterances that need reprocessing
-    let filtered_payloads: Vec<BatchItemWithPosition> = all_payloads
+    let filtered_payloads: Vec<CollectedUtterance> = all_payloads
         .into_iter()
-        .filter(|(_, utt_ordinal, _, _)| needs_set.contains(utt_ordinal))
+        .filter(|collected| needs_set.contains(&collected.utt_ordinal()))
         .collect();
 
     if filtered_payloads.is_empty() {
@@ -317,12 +317,12 @@ pub(crate) async fn process_morphosyntax_incremental(
     if !retokenize && params.lang.as_ref() == "yue" {
         let per_char_count = filtered_payloads
             .iter()
-            .flat_map(|(_, _, item, _)| item.words.iter())
+            .flat_map(|collected| collected.item().words().iter().map(|word| word.text()))
             .filter(|w| w.chars().count() == 1 && w.chars().all(|c| c > '\u{2E80}'))
             .count();
         let total_words: usize = filtered_payloads
             .iter()
-            .map(|(_, _, item, _)| item.words.len())
+            .map(|collected| collected.item().words().len())
             .sum();
         if total_words > 0 && per_char_count * 100 / total_words > 80 {
             warn!(
@@ -363,16 +363,6 @@ pub(crate) async fn process_morphosyntax_incremental(
                 // relations they repaired are what it counts.
                 let (responses, reanalyzed) = identity::AppliedAnalyses::take_applied(admitted);
                 applied.extend(reanalyzed);
-                // Extract L2 deferred positions before inject_results
-                // takes ownership of misses/responses.
-                let l2_deferred = if params.policy.l2.should_analyze() {
-                    crate::chat_ops::morphosyntax_ops::l2::extract_l2_deferred_positions(
-                        &misses, &responses,
-                    )
-                } else {
-                    Vec::new()
-                };
-
                 match inject_results(
                     &parser,
                     &mut after_file,
@@ -383,12 +373,18 @@ pub(crate) async fn process_morphosyntax_incremental(
                     params.mwt,
                 ) {
                     Ok(injection_result) => {
-                        // Secondary L2 dispatch for @s words.
+                        // Secondary L2 dispatch for @s words, at the
+                        // positions read from the analysis injection mapped.
+                        let l2_deferred = if params.policy.l2.should_analyze() {
+                            injection_result.l2.into_reported_positions()
+                        } else {
+                            Vec::new()
+                        };
                         if !l2_deferred.is_empty() {
                             applied.extend(
                                 dispatch_secondary_l2(
                                     &mut after_file,
-                                    &l2_deferred,
+                                    l2_deferred,
                                     services,
                                     "incremental",
                                 )

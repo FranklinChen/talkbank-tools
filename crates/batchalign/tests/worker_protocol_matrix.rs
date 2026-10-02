@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use batchalign::api::{DurationSeconds, NumSpeakers};
+use batchalign::api::NumSpeakers;
 use batchalign::types::worker_v2::{
     ArtifactRefV2, AsrBackendV2, AsrInputV2, AsrRequestV2, ExecuteOutcomeRef, ExecuteRequestV2,
     ExecuteResponseV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2, InferenceTaskV2,
@@ -619,20 +619,13 @@ fn validate_execute_response_invariants(
     file: &str,
     response: &ExecuteResponseV2,
 ) -> Result<(), String> {
-    if response.elapsed_s().0 < 0.0 {
-        return Err(format!(
-            "response fixture {file} had negative elapsed_s {}",
-            response.elapsed_s().0
-        ));
-    }
-
     // The outcome/result pairing itself is now structural: a success fixture
     // with no result, or an error fixture carrying one, fails DESERIALIZATION
     // in `load_execute_response`, so those two arms stopped being writable
     // here. What remains are the invariants the schema alone cannot encode.
     match response.read() {
         ExecuteOutcomeRef::Success(result) => {
-            if response.elapsed_s().0 <= 0.0 {
+            if response.elapsed().get() <= 0.0 {
                 return Err(format!(
                     "success response fixture {file} must record elapsed_s > 0"
                 ));
@@ -697,15 +690,13 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
             if value.tokens.is_empty() {
                 return Err("whisper token timing result must contain at least one token".into());
             }
-            let mut previous_time = DurationSeconds(0.0);
-            for (index, token) in value.tokens.iter().enumerate() {
-                if !token.time_s.0.is_finite() {
-                    return Err(format!("whisper token {index} had a non-finite timestamp"));
+            // Each onset is a finite, non-negative position by type (the
+            // fixture would not have deserialized otherwise); what the type
+            // cannot hold is their order.
+            for (index, pair) in value.tokens.windows(2).enumerate() {
+                if pair[1].time_s < pair[0].time_s {
+                    return Err(format!("whisper token {} regressed in time", index + 1));
                 }
-                if index > 0 && token.time_s < previous_time {
-                    return Err(format!("whisper token {index} regressed in time"));
-                }
-                previous_time = token.time_s;
             }
             Ok(())
         }
@@ -731,15 +722,11 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
             Ok(())
         }
         TaskResultV2::UtsegResult(value) => {
+            // Every item is a tagged outcome (boundary model, unattributed,
+            // constituency trees, or failed), so "neither data nor an error"
+            // is not representable.
             if value.items.is_empty() {
                 return Err("utseg result must contain at least one item".into());
-            }
-            if value
-                .items
-                .iter()
-                .all(|item| item.trees.is_none() && item.error.is_none())
-            {
-                return Err("utseg result items must contain trees or an error".into());
             }
             Ok(())
         }
@@ -780,7 +767,12 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
                 SpeakerInferenceEvidenceV2::Pyannote { segments }
                 | SpeakerInferenceEvidenceV2::Nemo { segments } => segments
                     .iter()
-                    .map(|segment| (segment.start_ms.0 as f64, segment.end_ms.0 as f64))
+                    .map(|segment| {
+                        (
+                            segment.interval.start_ms() as f64,
+                            segment.interval.end_ms() as f64,
+                        )
+                    })
                     .collect(),
             };
             if segments.is_empty() {
@@ -1073,7 +1065,7 @@ async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_mat
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 

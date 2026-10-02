@@ -13,6 +13,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
 from pydantic import BaseModel, ValidationError
 
@@ -21,6 +22,9 @@ from batchalign.providers import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
 )
 from batchalign.worker._types import reported_engine_name
 from batchalign.worker._types_v2 import (
@@ -96,53 +100,59 @@ def batch_infer_translate(
         try:
             item = TranslateBatchItem.model_validate(raw_item)
         except ValidationError:
-            results.append(InferResponse(error="Invalid batch item", elapsed_s=0.0))
+            results.append(
+                InferResponse.unexecuted(ItemFailed(error="Invalid batch item"))
+            )
             continue
 
         if not item.text.strip():
             # Its own outcome rather than an empty translation: nothing was
-            # translated, so there is no engine to name.
-            results.append(_item(TranslationBlankInputItemV2()))
+            # translated, so there is no engine to name and no time to report.
+            results.append(
+                InferResponse.unexecuted(_produced(TranslationBlankInputItemV2()))
+            )
             continue
 
-        try:
-            # Text arrives pre-processed from Rust (Chinese space removal etc.).
-            # Return raw translation output, Rust handles post-processing.
-            translated = translation.translate(item.text, src_lang)
-            results.append(
-                _item(
-                    TranslationTranslatedItemV2(
-                        raw_translation=translated, engine=translation.engine
-                    )
-                )
-            )
-        except ProviderRefusal as refusal:
-            L.warning("Translation refused for item: %s", refusal)
-            results.append(_item(_refusal_item(refusal)))
-        except Exception as e:
-            L.warning("Translation failed for item: %s", e, exc_info=True)
-            results.append(
-                InferResponse(error=f"Translation failed: {e}", elapsed_s=0.0)
-            )
-
-    elapsed = time.monotonic() - t0
-    if results:
-        first = results[0]
-        results[0] = InferResponse(
-            result=first.result, error=first.error, elapsed_s=elapsed
+        # Each item reports the time of its own translation call only.
+        results.append(
+            InferResponse.timed(partial(_translate_one, item, src_lang, translation))
         )
 
+    # The batch total is a fact about the batch, so it goes to the log, never
+    # onto an item.
+    elapsed = time.monotonic() - t0
     # Debug, not info: this runs once per utterance now, and the worker's
     # stderr is retained by the control plane for failure dumps.
     L.debug("batch_infer translate: %d items, %.3fs", len(req.items), elapsed)
     return BatchInferResponse(results=results)
 
 
-def _item(outcome: TranslationItemResultV2) -> InferResponse:
+def _translate_one(
+    item: TranslateBatchItem,
+    src_lang: str,
+    translation: LoadedTranslation,
+) -> ItemOutcome:
+    """Translate one item, folding every engine answer into its outcome."""
+    try:
+        # Text arrives pre-processed from Rust (Chinese space removal etc.).
+        # Return raw translation output, Rust handles post-processing.
+        translated = translation.translate(item.text, src_lang)
+        return _produced(
+            TranslationTranslatedItemV2(
+                raw_translation=translated, engine=translation.engine
+            )
+        )
+    except ProviderRefusal as refusal:
+        L.warning("Translation refused for item: %s", refusal)
+        return _produced(_refusal_item(refusal))
+    except Exception as e:
+        L.warning("Translation failed for item: %s", e, exc_info=True)
+        return ItemFailed(error=f"Translation failed: {e}")
+
+
+def _produced(outcome: TranslationItemResultV2) -> ItemProduced:
     """One item outcome, serialized through its own wire model."""
-    return InferResponse(
-        result=outcome.model_dump(mode="json", exclude_none=True), elapsed_s=0.0
-    )
+    return ItemProduced(result=outcome.model_dump(mode="json", exclude_none=True))
 
 
 def _refusal_item(refusal: ProviderRefusal) -> TranslationItemResultV2:

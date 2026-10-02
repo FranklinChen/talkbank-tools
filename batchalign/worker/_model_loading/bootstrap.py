@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -28,6 +29,7 @@ from batchalign.worker._progress import emit_download_event
 from batchalign.worker._stanza_loading import load_stanza_models, load_utseg_builder
 from batchalign.worker._types import (
     PROFILE_TASKS,
+    FiniteNonNegativeFloat,
     InferTask,
     WorkerBootstrapRuntime,
     _state,
@@ -148,9 +150,14 @@ class EnsureTaskResponse(BaseModel):
     over the worker protocol.
     """
 
-    status: str
+    status: Literal["loaded", "already_loaded"]
     task: str
-    elapsed_s: float
+    elapsed_s: FiniteNonNegativeFloat
+    """Seconds the worker spent answering, as it measured them.
+
+    ``loaded``: the model load. ``already_loaded``: the check, including any
+    wait for another thread's load of the same task. Never a constant.
+    """
 
 
 # Valid task names for ensure_task. Includes InferTask values plus the
@@ -177,7 +184,7 @@ def ensure_task_loaded(
     Raises ``ValueError`` if *task* is not a recognized ``InferTask`` value
     (or the legacy ``"utterance"`` alias).
     """
-    import time as _time
+    started_at = time.monotonic()
 
     if task not in _VALID_ENSURE_TASKS:
         raise ValueError(
@@ -186,12 +193,20 @@ def ensure_task_loaded(
         )
 
     if task in _state.loaded_tasks:
-        return EnsureTaskResponse(status="already_loaded", task=task, elapsed_s=0.0)
+        return EnsureTaskResponse(
+            status="already_loaded",
+            task=task,
+            elapsed_s=time.monotonic() - started_at,
+        )
 
     with _state.loading_lock:
         # Double-check after acquiring lock (another thread may have loaded it).
         if task in _state.loaded_tasks:
-            return EnsureTaskResponse(status="already_loaded", task=task, elapsed_s=0.0)
+            return EnsureTaskResponse(
+                status="already_loaded",
+                task=task,
+                elapsed_s=time.monotonic() - started_at,
+            )
 
         bootstrap = _state.bootstrap
         if bootstrap is None:
@@ -213,7 +228,7 @@ def ensure_task_loaded(
             revai_api_key=bootstrap.revai_api_key,
         )
 
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
         L.info(
             "Loading task on demand: task=%s engine_overrides=%s pid=%d",
             task,
@@ -222,7 +237,7 @@ def ensure_task_loaded(
         )
         _load_single_task(task, task_bootstrap)
 
-        elapsed = _time.monotonic() - t0
+        elapsed = time.monotonic() - t0
         _state.loaded_tasks.add(task)
         L.info("Task loaded: task=%s elapsed=%.1fs pid=%d", task, elapsed, os.getpid())
         return EnsureTaskResponse(status="loaded", task=task, elapsed_s=elapsed)

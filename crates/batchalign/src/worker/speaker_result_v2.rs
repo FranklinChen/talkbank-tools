@@ -6,12 +6,13 @@
 
 use serde::Deserialize;
 
-use crate::api::DurationMs;
+use crate::api::AudioPositionSeconds;
 use crate::types::worker_v2::{
     ExecuteResponseV2, ProtocolErrorCodeV2, SpeakerInferenceEvidenceV2, SpeakerResultV2,
     SpeakerSegmentV2, TaskResultV2,
 };
 use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
+use batchalign_types::interval::AdmittedInterval;
 
 /// Why a V2 speaker execute response could not be read as speaker evidence.
 ///
@@ -104,10 +105,15 @@ pub fn parse_speaker_result_v2(
     }
 }
 
+/// One segment of a pyannoteAI job's output, as the provider wrote it.
+///
+/// `start` and `end` are POSITIONS in the recording, in seconds: reading them
+/// as [`AudioPositionSeconds`] refuses a non-finite or negative bound at
+/// deserialization, where a hand-written check after the fact used to.
 #[derive(Debug, Deserialize)]
 struct PyannoteAiSegment {
-    start: f64,
-    end: f64,
+    start: AudioPositionSeconds,
+    end: AudioPositionSeconds,
     speaker: String,
 }
 
@@ -148,16 +154,15 @@ pub(crate) fn normalize_speaker_evidence_v2(
                             "pyannoteAI segment {index} has an empty speaker label"
                         ));
                     }
-                    let start_ms = seconds_to_ms(parsed.start, index, "start")?;
-                    let end_ms = seconds_to_ms(parsed.end, index, "end")?;
-                    if end_ms < start_ms {
-                        return Err(format!(
-                            "pyannoteAI segment {index} has an inverted interval"
-                        ));
-                    }
+                    // Admitted like every provider interval: rounded once,
+                    // refused when inverted or beyond the media range (an
+                    // epoch timestamp in seconds is not a media offset).
+                    let interval = AdmittedInterval::admit_positions(parsed.start, parsed.end)
+                        .map_err(|refusal| {
+                            format!("pyannoteAI segment {index} is not an interval: {refusal}")
+                        })?;
                     Ok(SpeakerSegmentV2 {
-                        start_ms,
-                        end_ms,
+                        interval,
                         speaker: parsed.speaker,
                     })
                 })
@@ -167,28 +172,15 @@ pub(crate) fn normalize_speaker_evidence_v2(
         | SpeakerInferenceEvidenceV2::Nemo { segments } => segments.clone(),
     };
     segments.sort_by(|left, right| {
-        (left.start_ms.0, left.end_ms.0, left.speaker.as_str()).cmp(&(
-            right.start_ms.0,
-            right.end_ms.0,
-            right.speaker.as_str(),
-        ))
+        (left.interval, left.speaker.as_str()).cmp(&(right.interval, right.speaker.as_str()))
     });
     Ok(segments)
-}
-
-fn seconds_to_ms(value: f64, index: usize, field: &str) -> Result<DurationMs, String> {
-    if !value.is_finite() || value < 0.0 || value > (u64::MAX as f64 / 1000.0) {
-        return Err(format!(
-            "pyannoteAI segment {index} has invalid {field} seconds"
-        ));
-    }
-    Ok(DurationMs((value * 1000.0).round() as u64))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::DurationSeconds;
+    use crate::api::NonNegativeSeconds;
     use crate::types::worker_v2::{
         ExecuteResponseV2, SpeakerInferenceEvidenceV2, SpeakerProviderJobIdV2, SpeakerResultV2,
         SpeakerSegmentV2, WorkerRequestIdV2,
@@ -201,20 +193,19 @@ mod tests {
             TaskResultV2::SpeakerResult(SpeakerResultV2 {
                 evidence: SpeakerInferenceEvidenceV2::Pyannote {
                     segments: vec![SpeakerSegmentV2 {
-                        start_ms: DurationMs(0),
-                        end_ms: DurationMs(900),
+                        interval: AdmittedInterval::admit_millis(0, 900).expect("ordered"),
                         speaker: "SPEAKER_1".into(),
                     }],
                 },
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let parsed = parse_speaker_result_v2(&response).expect("speaker result should parse");
         let segments = normalize_speaker_evidence_v2(&parsed.evidence)
             .expect("speaker evidence should normalize");
         assert_eq!(segments[0].speaker, "SPEAKER_1");
-        assert_eq!(segments[0].end_ms, DurationMs(900));
+        assert_eq!(segments[0].interval.end_ms(), 900);
     }
 
     #[test]
@@ -232,8 +223,47 @@ mod tests {
         };
 
         let segments = normalize_speaker_evidence_v2(&evidence).expect("normalize");
-        assert_eq!(segments[0].start_ms, DurationMs(0));
-        assert_eq!(segments[1].end_ms, DurationMs(1500));
+        assert_eq!(segments[0].interval.start_ms(), 0);
+        assert_eq!(segments[1].interval.end_ms(), 1500);
+    }
+
+    /// A pyannoteAI bound far past any recording (an epoch time in seconds)
+    /// is refused, not saturated into a millisecond count; an inverted pair
+    /// is refused by the same admission.
+    #[test]
+    fn a_pyannote_ai_bound_beyond_the_media_range_is_refused() {
+        for (start, end) in [(1.7e9, 1.7e9 + 1.0), (2.0, 1.0)] {
+            let evidence = SpeakerInferenceEvidenceV2::PyannoteAi {
+                job_id: SpeakerProviderJobIdV2::from("job-3"),
+                output: serde_json::from_value(serde_json::json!({
+                    "diarization": [{"start": start, "end": end, "speaker": "SPEAKER_00"}]
+                }))
+                .expect("provider output object"),
+                warning: None,
+            };
+            let error = normalize_speaker_evidence_v2(&evidence).expect_err("refused");
+            assert!(error.contains("segment 0 is not an interval"), "{error}");
+        }
+    }
+
+    /// A bound that is not a position (negative here) is refused when the
+    /// segment is read, naming the segment, not converted into a time.
+    #[test]
+    fn a_pyannote_ai_bound_that_is_not_a_position_is_refused() {
+        let evidence = SpeakerInferenceEvidenceV2::PyannoteAi {
+            job_id: SpeakerProviderJobIdV2::from("job-2"),
+            output: serde_json::from_value(serde_json::json!({
+                "diarization": [
+                    {"start": 0.5, "end": 1.0, "speaker": "SPEAKER_00"},
+                    {"start": -0.25, "end": 1.0, "speaker": "SPEAKER_01"}
+                ]
+            }))
+            .expect("provider output object"),
+            warning: None,
+        };
+
+        let error = normalize_speaker_evidence_v2(&evidence).expect_err("negative start");
+        assert!(error.contains("segment 1 has invalid data"), "{error}");
     }
 
     #[test]
@@ -243,7 +273,7 @@ mod tests {
             TaskResultV2::TranslationResult(crate::types::worker_v2::TranslationResultV2 {
                 items: vec![crate::types::worker_v2::TranslationItemResultV2::BlankInput],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let error =
@@ -267,7 +297,7 @@ mod tests {
             "could not download the Hugging Face model at \
              pyannote/speaker-diarization-community-1: its repository is gated"
                 .to_owned(),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let error = parse_speaker_result_v2(&response)

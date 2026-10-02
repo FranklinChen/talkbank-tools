@@ -1,6 +1,6 @@
 """The stock Whisper CPU precision is a per-job selection, float32 by default.
 
-Houjun's Batchalign loads float16 on Apple Silicon CPUs to cut memory. Ours
+The upstream implementation loads float16 on Apple Silicon CPUs to cut memory. Ours
 keeps float32 until the WER comparison is in; the knob exists so that
 comparison can be run through the production wrappers
 (``--engine-overrides '{"asr":"whisper","whisper_cpu_dtype":"float16"}'``).

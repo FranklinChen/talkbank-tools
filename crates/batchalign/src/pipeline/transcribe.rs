@@ -559,7 +559,7 @@ async fn stage_asr_infer<'a>(
             // The evidence says what language its transcript is in; that is
             // the transcript's language, not a second reading of the request.
             evidence_language = Some(evidence.resolved_language().clone());
-            rev_evidence_to_asr_response(&evidence)
+            rev_evidence_to_asr_response(&evidence)?
         }
     };
     let filename = ctx
@@ -749,8 +749,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
         let segments: Vec<ChatSpeakerSegment> = segments
             .iter()
             .map(|segment| ChatSpeakerSegment {
-                start_ms: segment.start_ms.0,
-                end_ms: segment.end_ms.0,
+                interval: segment.interval,
                 speaker: segment.speaker.clone(),
             })
             .collect();
@@ -1328,7 +1327,7 @@ async fn stage_run_morphosyntax<P: TranscribePlan>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::DurationSeconds;
+    use crate::api::AudioPositionSeconds;
     use crate::cache::UtteranceCache;
     use crate::revai::{
         AuthorizedRevEvidenceRun, RevAsrEvidenceCacheOutcome, RevAsrEvidenceInference,
@@ -1342,6 +1341,11 @@ mod tests {
     use crate::types::worker_v2::SpeakerBackendV2;
     use crate::worker::pool::{PoolConfig, WorkerPool};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A fixture position; every literal in this module is a valid one.
+    fn at(seconds: f64) -> Option<AudioPositionSeconds> {
+        Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
+    }
 
     #[test]
     fn transcribe_stage_progress_labels_are_stable() {
@@ -1588,22 +1592,22 @@ mod tests {
                 tokens: vec![
                     AsrToken {
                         text: "quiero".into(),
-                        start_s: Some(DurationSeconds(0.1)),
-                        end_s: Some(DurationSeconds(0.4)),
+                        start_s: at(0.1),
+                        end_s: at(0.4),
                         speaker: Some("ASR_0".into()),
                         confidence: Some(0.9),
                     },
                     AsrToken {
                         text: "water".into(),
-                        start_s: Some(DurationSeconds(0.5)),
-                        end_s: Some(DurationSeconds(0.9)),
+                        start_s: at(0.5),
+                        end_s: at(0.9),
                         speaker: Some("ASR_0".into()),
                         confidence: Some(0.8),
                     },
                     AsrToken {
                         text: "25".into(),
-                        start_s: Some(DurationSeconds(0.9)),
-                        end_s: Some(DurationSeconds(1.2)),
+                        start_s: at(0.9),
+                        end_s: at(1.2),
                         speaker: Some("ASR_0".into()),
                         confidence: Some(0.8),
                     },
@@ -1703,15 +1707,15 @@ mod tests {
                 tokens: vec![
                     AsrToken {
                         text: "bonjour".into(),
-                        start_s: Some(DurationSeconds(0.0)),
-                        end_s: Some(DurationSeconds(0.5)),
+                        start_s: at(0.0),
+                        end_s: at(0.5),
                         speaker: Some("ASR_0".into()),
                         confidence: Some(0.9),
                     },
                     AsrToken {
                         text: "oui".into(),
-                        start_s: Some(DurationSeconds(0.5)),
-                        end_s: Some(DurationSeconds(1.0)),
+                        start_s: at(0.5),
+                        end_s: at(1.0),
                         speaker: Some("ASR_0".into()),
                         confidence: Some(0.8),
                     },
@@ -1792,8 +1796,8 @@ mod tests {
         let response = AsrResponse {
             tokens: vec![AsrToken {
                 text: "hello".into(),
-                start_s: Some(DurationSeconds(0.0)),
-                end_s: Some(DurationSeconds(0.5)),
+                start_s: at(0.0),
+                end_s: at(0.5),
                 speaker: Some("SPEAKER_1".into()),
                 confidence: None,
             }],
@@ -1845,8 +1849,8 @@ mod tests {
             .admit_response(AsrResponse {
                 tokens: vec![AsrToken {
                     text: "hello".into(),
-                    start_s: Some(DurationSeconds(0.0)),
-                    end_s: Some(DurationSeconds(0.5)),
+                    start_s: at(0.0),
+                    end_s: at(0.5),
                     speaker: None,
                     confidence: None,
                 }],
@@ -1894,15 +1898,15 @@ mod tests {
                 tokens: vec![
                     AsrToken {
                         text: "hello".into(),
-                        start_s: Some(DurationSeconds(0.0)),
-                        end_s: Some(DurationSeconds(0.5)),
+                        start_s: at(0.0),
+                        end_s: at(0.5),
                         speaker: None,
                         confidence: None,
                     },
                     AsrToken {
                         text: "there".into(),
-                        start_s: Some(DurationSeconds(0.5)),
-                        end_s: Some(DurationSeconds(1.0)),
+                        start_s: at(0.5),
+                        end_s: at(1.0),
                         speaker: None,
                         confidence: None,
                     },
@@ -1951,15 +1955,15 @@ mod tests {
                 tokens: vec![
                     AsrToken {
                         text: "bonjour".into(),
-                        start_s: Some(DurationSeconds(0.0)),
-                        end_s: Some(DurationSeconds(0.5)),
+                        start_s: at(0.0),
+                        end_s: at(0.5),
                         speaker: Some("ASR_0".into()),
                         confidence: None,
                     },
                     AsrToken {
                         text: "oui".into(),
-                        start_s: Some(DurationSeconds(0.5)),
-                        end_s: Some(DurationSeconds(1.0)),
+                        start_s: at(0.5),
+                        end_s: at(1.0),
                         speaker: Some("ASR_0".into()),
                         confidence: None,
                     },
@@ -1978,13 +1982,13 @@ mod tests {
             .expect("resolved ASR response");
         ctx.speaker_segments = Some(vec![
             SpeakerSegmentV2 {
-                start_ms: crate::api::DurationMs(0),
-                end_ms: crate::api::DurationMs(500),
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(0, 500)
+                    .expect("an ordered fixture"),
                 speaker: "HUMAN_A".into(),
             },
             SpeakerSegmentV2 {
-                start_ms: crate::api::DurationMs(500),
-                end_ms: crate::api::DurationMs(1_000),
+                interval: batchalign_types::interval::AdmittedInterval::admit_millis(500, 1_000)
+                    .expect("an ordered fixture"),
                 speaker: "HUMAN_B".into(),
             },
         ]);
@@ -2006,15 +2010,15 @@ mod tests {
     /// a token that expanded without one would diverge silently.
     #[test]
     fn snapshot_and_plain_preparation_agree() {
+        use crate::api::AudioPositionSeconds;
         use batchalign_transform::asr_postprocess::{
-            AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs,
-            SpeakerIndex,
+            AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, SpeakerIndex,
         };
 
         let element = |value: &str, ts: f64, end_ts: f64| AsrElement {
             value: AsrRawText::new(value),
-            ts: AsrTimestampSecs::from(Some(ts)),
-            end_ts: AsrTimestampSecs::from(Some(end_ts)),
+            ts: Some(AudioPositionSeconds::try_from(ts).expect("fixture position")),
+            end_ts: Some(AudioPositionSeconds::try_from(end_ts).expect("fixture position")),
             kind: AsrElementKind::Text,
         };
         let output = AsrOutput {
@@ -2099,8 +2103,8 @@ mod tests {
             .admit_response(AsrResponse {
                 tokens: vec![AsrToken {
                     text: "hola".into(),
-                    start_s: Some(DurationSeconds(0.0)),
-                    end_s: Some(DurationSeconds(0.5)),
+                    start_s: at(0.0),
+                    end_s: at(0.5),
                     speaker: None,
                     confidence: None,
                 }],
@@ -2158,8 +2162,8 @@ mod tests {
             .admit_response(AsrResponse {
                 tokens: vec![AsrToken {
                     text: "hola".into(),
-                    start_s: Some(DurationSeconds(0.0)),
-                    end_s: Some(DurationSeconds(0.5)),
+                    start_s: at(0.0),
+                    end_s: at(0.5),
                     speaker: None,
                     confidence: None,
                 }],

@@ -89,16 +89,6 @@ pub(crate) struct DiarizedTurnsFile {
 /// Errors while converting worker speaker segments to the turns artifact.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnsBuildError {
-    /// A worker segment ended before it started; defective engine output
-    /// must fail the file, not be silently reordered or dropped.
-    #[error("diarizer returned an inverted segment: start_ms {start_ms} > end_ms {end_ms}")]
-    InvertedSegment {
-        /// Reported segment start (ms).
-        start_ms: u64,
-        /// Reported segment end (ms).
-        end_ms: u64,
-    },
-
     /// The typed model failed to serialize (indicates a programming error,
     /// surfaced rather than panicking per the no-panic policy).
     #[error("failed to serialize turns JSON: {0}")]
@@ -120,10 +110,11 @@ pub(crate) fn format_turns_json(
 
     let mut turns = Vec::with_capacity(segments.len());
     for segment in segments {
-        let (start_ms, end_ms) = (segment.start_ms.0, segment.end_ms.0);
-        if start_ms > end_ms {
-            return Err(TurnsBuildError::InvertedSegment { start_ms, end_ms });
-        }
+        // Ordered by its type: the segment's interval was admitted at parse.
+        let (start_ms, end_ms) = (
+            segment.interval.start_millis(),
+            segment.interval.end_millis(),
+        );
         // Map-lookup invariant: every segment label was inserted into
         // `track_by_label` by the collection pass above.
         #[allow(clippy::expect_used)]
@@ -150,12 +141,11 @@ pub(crate) fn format_turns_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::DurationMs;
 
-    fn segment(speaker: &str, start_ms: u64, end_ms: u64) -> SpeakerSegmentV2 {
+    fn segment(speaker: &str, start_ms: i64, end_ms: i64) -> SpeakerSegmentV2 {
         SpeakerSegmentV2 {
-            start_ms: DurationMs(start_ms),
-            end_ms: DurationMs(end_ms),
+            interval: batchalign_types::interval::AdmittedInterval::admit_millis(start_ms, end_ms)
+                .expect("an ordered fixture"),
             speaker: speaker.to_owned(),
         }
     }
@@ -188,16 +178,14 @@ mod tests {
         assert_eq!(value["turns"].as_array().map(Vec::len), Some(0));
     }
 
+    /// An inverted worker segment never reaches turn building: the segment
+    /// is refused where it is parsed.
     #[test]
-    fn inverted_segment_is_a_typed_error() {
-        let result = format_turns_json(
-            SpeakerTurnsSource::Pyannote,
-            &[segment("SPEAKER_00", 2000, 1000)],
+    fn an_inverted_segment_is_refused_where_it_is_parsed() {
+        let refused = serde_json::from_str::<SpeakerSegmentV2>(
+            r#"{"start_ms":2000,"end_ms":1000,"speaker":"SPEAKER_00"}"#,
         );
-        assert!(matches!(
-            result,
-            Err(TurnsBuildError::InvertedSegment { .. })
-        ));
+        assert!(refused.is_err(), "{refused:?}");
     }
 
     #[test]

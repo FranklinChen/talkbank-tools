@@ -27,8 +27,9 @@
 //! that fails to expand them gets the same treatment; the rewrite never
 //! touches a token Stanza already expanded.
 
-use crate::morphosyntax::mor_word::parse_feats;
-use crate::morphosyntax::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
+use crate::morphosyntax::{
+    CuratedFeats, FeatName, UdHead, UdId, UdSentence, UdWord, UdWordId, UniversalPos,
+};
 
 /// How one component of an expanded contraction attaches in the parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,8 +68,8 @@ struct Part {
     upos: UniversalPos,
     /// UD features the form itself spells. The finite part (`VerbForm=Fin`)
     /// also carries the `Person` and `Number` Stanza read off the subject
-    /// for the whole token.
-    feats: &'static str,
+    /// for the whole token, where the table does not fix them.
+    feats: CuratedFeats,
     attach: Attachment,
 }
 
@@ -77,7 +78,7 @@ const fn to() -> Part {
         text: "to",
         lemma: "to",
         upos: UniversalPos::Part,
-        feats: "",
+        feats: CuratedFeats::NONE,
         attach: Attachment::Marker,
     }
 }
@@ -87,7 +88,7 @@ const fn me() -> Part {
         text: "me",
         lemma: "I",
         upos: UniversalPos::Pron,
-        feats: "Case=Acc|Number=Sing|Person=1|PronType=Prs",
+        feats: CuratedFeats::new("Case=Acc|Number=Sing|Person=1|PronType=Prs"),
         attach: Attachment::Object,
     }
 }
@@ -102,7 +103,7 @@ const fn host(
         text,
         lemma,
         upos,
-        feats,
+        feats: CuratedFeats::new(feats),
         attach: Attachment::Host,
     }
 }
@@ -206,14 +207,14 @@ const CONTRACTIONS: &[Contraction] = &[
                 text: "do",
                 lemma: "do",
                 upos: UniversalPos::Aux,
-                feats: PRESENT,
+                feats: CuratedFeats::new(PRESENT),
                 attach: Attachment::Auxiliary,
             },
             Part {
                 text: "n't",
                 lemma: "not",
                 upos: UniversalPos::Part,
-                feats: "Polarity=Neg",
+                feats: CuratedFeats::new("Polarity=Neg"),
                 attach: Attachment::Negation,
             },
             host("know", "know", UniversalPos::Verb, "VerbForm=Inf"),
@@ -248,11 +249,13 @@ pub fn expand_english_contractions(mut sentence: UdSentence) -> UdSentence {
             i += 1;
             continue;
         }
-        let Some(contraction) = expansion_of(&word.text) else {
+        // Id 0 is reserved; the alignment walk rejects a sentence using it.
+        let (Some(contraction), Some(word_id)) = (expansion_of(&word.text), UdWordId::of_row(word))
+        else {
             i += 1;
             continue;
         };
-        let inserted = expand_at(&mut sentence, i, id, contraction);
+        let inserted = expand_at(&mut sentence, i, word_id, contraction);
         let shift = inserted - 2;
         for range in &mut components {
             if *range.start() > id {
@@ -304,7 +307,12 @@ fn moves_to_host(word: &UdWord, precedes_host: bool) -> bool {
 
 /// Replace the single word at index `i` (UD id `id`) by a range parent and
 /// the contraction's components; returns how many words now occupy that slot.
-fn expand_at(sentence: &mut UdSentence, i: usize, id: usize, contraction: &Contraction) -> usize {
+fn expand_at(
+    sentence: &mut UdSentence,
+    i: usize,
+    id: UdWordId,
+    contraction: &Contraction,
+) -> usize {
     let parts = contraction.parts;
     let shift = parts.len() - 1;
     // Every table entry has a host (`every_contraction_has_one_host` checks
@@ -313,24 +321,26 @@ fn expand_at(sentence: &mut UdSentence, i: usize, id: usize, contraction: &Contr
     let Some(host_offset) = parts.iter().position(|p| p.attach == Attachment::Host) else {
         return 1;
     };
-    let host_id = id + host_offset;
+    let host_id = id.after(host_offset);
     let original = sentence.words[i].clone();
     let governed = governed_verb(sentence, &original, id, contraction.complement);
     let host_already_has_object = sentence
         .words
         .iter()
-        .any(|w| w.head == id && w.deprel == "obj");
+        .any(|w| w.head.is(id) && w.deprel == "obj");
 
     renumber(sentence, id, shift, host_id);
-    let shifted = |head: usize| if head > id { head + shift } else { head };
+    let shifted = |word: UdWordId| if word > id { word.after(shift) } else { word };
     let governed = governed.map(shifted);
     let attachment = match governed {
         // Raised when Stanza made the token a dependent of the very verb it
         // governs.
-        Some(verb) if verb == shifted(original.head) => raise_host(sentence, verb, host_id),
+        Some(verb) if original.head.map_word(shifted).is(verb) => {
+            raise_host(sentence, verb, host_id)
+        }
         _ => None,
     }
-    .unwrap_or_else(|| (shifted(original.head), original.deprel.clone()));
+    .unwrap_or_else(|| (original.head.map_word(shifted), original.deprel.clone()));
 
     let replacement = build_parts(
         parts,
@@ -348,18 +358,18 @@ fn expand_at(sentence: &mut UdSentence, i: usize, id: usize, contraction: &Contr
 
 /// Move every id and head after the token down by `shift`; what depended on
 /// the token now depends on the host.
-fn renumber(sentence: &mut UdSentence, id: usize, shift: usize, host_id: usize) {
+fn renumber(sentence: &mut UdSentence, id: UdWordId, shift: usize, host_id: UdWordId) {
     for word in &mut sentence.words {
         word.id = match &word.id {
-            UdId::Single(n) if *n > id => UdId::Single(n + shift),
-            UdId::Range(s, e) if *s > id => UdId::Range(s + shift, e + shift),
+            UdId::Single(n) if *n > id.get() => UdId::Single(n + shift),
+            UdId::Range(s, e) if *s > id.get() => UdId::Range(s + shift, e + shift),
             other => other.clone(),
         };
-        if word.head == id {
-            word.head = host_id;
-        } else if word.head > id {
-            word.head += shift;
-        }
+        word.head = word.head.map_word(|head| match head.cmp(&id) {
+            std::cmp::Ordering::Equal => host_id,
+            std::cmp::Ordering::Greater => head.after(shift),
+            std::cmp::Ordering::Less => head,
+        });
     }
 }
 
@@ -367,18 +377,22 @@ fn renumber(sentence: &mut UdSentence, id: usize, shift: usize, host_id: usize) 
 /// host's `xcomp` and its clause-level dependents move to the host. Returns
 /// the head and relation the host takes, or `None` when `verb` names no
 /// word (malformed input: nothing is reshaped).
-fn raise_host(sentence: &mut UdSentence, verb: usize, host_id: usize) -> Option<(usize, String)> {
+fn raise_host(
+    sentence: &mut UdSentence,
+    verb: UdWordId,
+    host_id: UdWordId,
+) -> Option<(UdHead, String)> {
     let verb_word = sentence
         .words
         .iter_mut()
-        .find(|w| w.id == UdId::Single(verb))?;
+        .find(|w| w.id == UdId::Single(verb.get()))?;
     let taken = (verb_word.head, std::mem::take(&mut verb_word.deprel));
-    verb_word.head = host_id;
+    verb_word.head = UdHead::Word(host_id);
     verb_word.deprel = "xcomp".to_string();
     for w in &mut sentence.words {
-        let precedes_host = matches!(w.id, UdId::Single(n) if n < host_id);
-        if w.head == verb && w.id != UdId::Single(verb) && moves_to_host(w, precedes_host) {
-            w.head = host_id;
+        let precedes_host = matches!(w.id, UdId::Single(n) if n < host_id.get());
+        if w.head.is(verb) && w.id != UdId::Single(verb.get()) && moves_to_host(w, precedes_host) {
+            w.head = UdHead::Word(host_id);
         }
     }
     Some(taken)
@@ -388,32 +402,34 @@ fn raise_host(sentence: &mut UdSentence, verb: usize, host_id: usize) -> Option<
 fn build_parts(
     parts: &[Part],
     original: &UdWord,
-    id: usize,
-    host_id: usize,
-    (host_head, host_deprel): (usize, String),
-    governed: Option<usize>,
+    id: UdWordId,
+    host_id: UdWordId,
+    (host_head, host_deprel): (UdHead, String),
+    governed: Option<UdWordId>,
     host_already_has_object: bool,
 ) -> Vec<UdWord> {
     let shift = parts.len() - 1;
     let mut replacement = Vec::with_capacity(parts.len() + 1);
-    replacement.push(UdWord {
-        id: UdId::Range(id, id + shift),
-        text: original.text.clone(),
-        lemma: String::new(),
-        upos: UdPunctable::Value(UniversalPos::X),
-        xpos: None,
-        feats: None,
-        head: 0,
-        deprel: String::new(),
-        deps: None,
-        misc: None,
-    });
+    // The range row carries no analysis of its own; its head is the root,
+    // as on every range row the analysis sends.
+    replacement.push(UdWord::synthetic(
+        UdId::Range(id.get(), id.get() + shift),
+        original.text.clone(),
+        String::new(),
+        UniversalPos::X,
+        CuratedFeats::NONE,
+        UdHead::Root,
+        String::new(),
+    ));
     for (offset, part) in parts.iter().enumerate() {
         let (head, deprel) = match part.attach {
             Attachment::Host => (host_head, host_deprel.clone()),
-            Attachment::Marker => (governed.unwrap_or(host_id), "mark".to_string()),
+            Attachment::Marker => (
+                UdHead::Word(governed.unwrap_or(host_id)),
+                "mark".to_string(),
+            ),
             Attachment::Object => (
-                host_id,
+                UdHead::Word(host_id),
                 if host_already_has_object {
                     "iobj"
                 } else {
@@ -421,26 +437,28 @@ fn build_parts(
                 }
                 .to_string(),
             ),
-            Attachment::Auxiliary => (host_id, "aux".to_string()),
-            Attachment::Negation => (host_id, "advmod".to_string()),
+            Attachment::Auxiliary => (UdHead::Word(host_id), "aux".to_string()),
+            Attachment::Negation => (UdHead::Word(host_id), "advmod".to_string()),
         };
-        let feats = merge_agreement(part.feats, original.feats.as_deref());
-        // The table's category, always: `gotta` renders as
+        // The table's category and features, always: `gotta` renders as
         // `verb|get~part|to` from Stanza's own expansion, and `hafta` must
         // render the same way whether Stanza read the whole token as an
         // auxiliary, an adverb or an interjection.
-        replacement.push(UdWord {
-            id: UdId::Single(id + offset),
-            text: part.text.to_string(),
-            lemma: part.lemma.to_string(),
-            upos: UdPunctable::Value(part.upos),
-            xpos: None,
-            feats: if feats.is_empty() { None } else { Some(feats) },
+        let mut word = UdWord::synthetic(
+            UdId::Single(id.get() + offset),
+            part.text,
+            part.lemma,
+            part.upos,
+            part.feats,
             head,
             deprel,
-            deps: None,
-            misc: None,
-        });
+        );
+        // The finite part keeps the person and number Stanza read off the
+        // subject for the whole token, as the analysis's values.
+        if word.has_finite_verb_form() {
+            word.adopt_observed(original.features(), &[FeatName::Person, FeatName::Number]);
+        }
+        replacement.push(word);
     }
     replacement
 }
@@ -452,39 +470,18 @@ fn build_parts(
 fn governed_verb(
     sentence: &UdSentence,
     original: &UdWord,
-    id: usize,
+    id: UdWordId,
     complement: Complement,
-) -> Option<usize> {
+) -> Option<UdWordId> {
     match complement {
         Complement::None => return None,
         Complement::Infinitive | Complement::BareInfinitive => {}
     }
     let xcomp_child = sentence.words.iter().find_map(|w| match w.id {
-        UdId::Single(n) if w.head == id && w.deprel == "xcomp" => Some(n),
-        _ => None,
+        UdId::Single(_) if w.head.is(id) && w.deprel == "xcomp" => UdWordId::of_row(w),
+        UdId::Single(_) | UdId::Range(..) | UdId::Decimal(_) => None,
     });
-    xcomp_child.or((original.head != 0).then_some(original.head))
-}
-
-/// The table's features for a part; for the finite part, plus the `Person`
-/// and `Number` Stanza read off the subject for the whole token, when the
-/// table does not fix them itself.
-fn merge_agreement(table_feats: &str, original: Option<&str>) -> String {
-    let mut feats = parse_feats(Some(table_feats));
-    if feats.get("VerbForm").is_some_and(|v| v == "Fin") {
-        for (k, v) in parse_feats(original) {
-            if matches!(k.as_str(), "Person" | "Number") {
-                feats.entry(k).or_insert(v);
-            }
-        }
-    }
-    let mut pairs: Vec<(String, String)> = feats.into_iter().collect();
-    pairs.sort();
-    pairs
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("|")
+    xcomp_child.or(original.head.word())
 }
 
 #[cfg(test)]
@@ -492,6 +489,7 @@ mod tests {
     use super::*;
     use crate::morphosyntax::evidence::UtteranceEvidence;
     use crate::morphosyntax::invariants::test_support::{english, mor_texts, punct, word};
+    use crate::morphosyntax::{FeatSource, FeatValue, UdPunctable};
     use crate::morphosyntax::{apply_grammatical_invariants, map_ud_sentence};
     use talkbank_model::WriteChat;
 
@@ -558,11 +556,11 @@ mod tests {
         assert_eq!(
             mors,
             vec![
-                "pron|you-Prs-Nom-S2",
+                "pron|you-Prs-Nom-2",
                 "verb|have-Fin-Ind-Pres-S2~part|to",
-                "verb|put-Inf-S",
-                "det|that-Def-Dem-Sing",
-                "noun|one-Acc",
+                "verb|put-Inf",
+                "det|that-Dem-Sing",
+                "noun|one",
                 "adp|in",
             ]
         );
@@ -592,19 +590,24 @@ mod tests {
         let have = &out.words[2];
         assert_eq!((have.text.as_str(), have.lemma.as_str()), ("have", "have"));
         assert_eq!(have.upos, UdPunctable::Value(UniversalPos::Verb));
-        assert_eq!((have.head, have.deprel.as_str()), (0, "root"));
+        assert_eq!((have.head.conllu(), have.deprel.as_str()), (0, "root"));
         assert_eq!(
-            have.feats.as_deref(),
-            Some("Mood=Ind|Number=Sing|Person=2|Tense=Pres|VerbForm=Fin")
+            have.features().to_string(),
+            "Mood=Ind|Number=Sing|Person=2|Tense=Pres|VerbForm=Fin"
         );
+        // The table spelled the tense; the person and number are the ones
+        // Stanza read off the subject, and say so.
+        let source = |name| have.features().get(name).map(FeatValue::source);
+        assert_eq!(source(FeatName::Tense), Some(FeatSource::Curated));
+        assert_eq!(source(FeatName::Person), Some(FeatSource::Analysis));
         let to = &out.words[3];
         assert_eq!(
-            (to.text.as_str(), to.head, to.deprel.as_str()),
+            (to.text.as_str(), to.head.conllu(), to.deprel.as_str()),
             ("to", 4, "mark")
         );
         let heads: Vec<(&str, usize, &str)> = out.words[4..]
             .iter()
-            .map(|w| (w.text.as_str(), w.head, w.deprel.as_str()))
+            .map(|w| (w.text.as_str(), w.head.conllu(), w.deprel.as_str()))
             .collect();
         assert_eq!(
             heads,
@@ -618,7 +621,7 @@ mod tests {
         );
         // The subject moved to the clause head.
         assert_eq!(
-            (out.words[0].head, out.words[0].deprel.as_str()),
+            (out.words[0].head.conllu(), out.words[0].deprel.as_str()),
             (2, "nsubj")
         );
     }
@@ -685,8 +688,8 @@ mod tests {
         assert_eq!(had.upos, UdPunctable::Value(UniversalPos::Verb));
         assert_eq!(had.lemma, "have");
         assert_eq!(
-            had.feats.as_deref(),
-            Some("Mood=Ind|Tense=Past|VerbForm=Fin")
+            had.features().to_string(),
+            "Mood=Ind|Tense=Past|VerbForm=Fin"
         );
     }
 
@@ -720,19 +723,19 @@ mod tests {
         assert_eq!(out.words[2].text, "to");
         // `going` takes the root, `call` becomes its xcomp, `to` marks `call`.
         assert_eq!(
-            (out.words[2].head, out.words[2].deprel.as_str()),
+            (out.words[2].head.conllu(), out.words[2].deprel.as_str()),
             (3, "mark")
         );
         assert_eq!(
-            (out.words[1].head, out.words[1].deprel.as_str()),
+            (out.words[1].head.conllu(), out.words[1].deprel.as_str()),
             (0, "root")
         );
         assert_eq!(
-            (out.words[3].head, out.words[3].deprel.as_str()),
+            (out.words[3].head.conllu(), out.words[3].deprel.as_str()),
             (1, "xcomp")
         );
         assert_eq!(
-            (out.words[4].head, out.words[4].deprel.as_str()),
+            (out.words[4].head.conllu(), out.words[4].deprel.as_str()),
             (3, "obj")
         );
         assert_eq!(out.words[1].upos, UdPunctable::Value(UniversalPos::Verb));
@@ -768,15 +771,15 @@ mod tests {
         };
         let out = expand_english_contractions(sentence);
         assert_eq!(
-            (out.words[2].head, out.words[2].deprel.as_str()),
+            (out.words[2].head.conllu(), out.words[2].deprel.as_str()),
             (0, "root")
         );
         assert_eq!(
-            (out.words[3].head, out.words[3].deprel.as_str()),
+            (out.words[3].head.conllu(), out.words[3].deprel.as_str()),
             (4, "mark")
         );
         assert_eq!(
-            (out.words[4].head, out.words[4].deprel.as_str()),
+            (out.words[4].head.conllu(), out.words[4].deprel.as_str()),
             (2, "xcomp")
         );
     }
@@ -812,13 +815,13 @@ mod tests {
         assert_eq!(
             (
                 out.words[2].text.as_str(),
-                out.words[2].head,
+                out.words[2].head.conllu(),
                 out.words[2].deprel.as_str()
             ),
             ("me", 1, "iobj")
         );
         assert_eq!(
-            (out.words[3].head, out.words[3].deprel.as_str()),
+            (out.words[3].head.conllu(), out.words[3].deprel.as_str()),
             (1, "obj")
         );
     }
@@ -853,7 +856,7 @@ mod tests {
         let out = expand_english_contractions(sentence);
         let shape: Vec<(&str, usize, &str)> = out.words[1..]
             .iter()
-            .map(|w| (w.text.as_str(), w.head, w.deprel.as_str()))
+            .map(|w| (w.text.as_str(), w.head.conllu(), w.deprel.as_str()))
             .collect();
         assert_eq!(
             shape,
@@ -893,7 +896,7 @@ mod tests {
             .words
             .iter()
             .filter(|w| matches!(w.id, UdId::Single(_)))
-            .map(|w| (w.text.as_str(), w.head, w.deprel.as_str()))
+            .map(|w| (w.text.as_str(), w.head.conllu(), w.deprel.as_str()))
             .collect();
         assert_eq!(
             shape,
@@ -906,15 +909,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            out.words[2].feats.as_deref(),
-            Some("Mood=Ind|Number=Sing|Person=1|Tense=Pres|VerbForm=Fin")
+            out.words[2].features().to_string(),
+            "Mood=Ind|Number=Sing|Person=1|Tense=Pres|VerbForm=Fin"
         );
         assert_eq!(out.words[5].id, UdId::Single(5));
     }
 
     #[test]
     fn tokens_stanza_already_expanded_are_untouched() {
-        let mut parent = UdWord::synthetic("gonna", "", UniversalPos::X, None, 0, "");
+        let mut parent = word(0, "gonna", "", UniversalPos::X, None, 0, "");
         parent.id = UdId::Range(1, 2);
         let sentence = UdSentence {
             words: vec![
@@ -1005,7 +1008,7 @@ mod tests {
             .words
             .iter()
             .filter(|w| matches!(w.id, UdId::Single(_)))
-            .map(|w| (w.text.as_str(), w.head, w.deprel.as_str()))
+            .map(|w| (w.text.as_str(), w.head.conllu(), w.deprel.as_str()))
             .collect();
         assert_eq!(
             shape,
@@ -1066,7 +1069,7 @@ mod tests {
             .words
             .iter()
             .filter(|w| matches!(w.id, UdId::Single(_)))
-            .map(|w| (w.text.as_str(), w.head, w.deprel.as_str()))
+            .map(|w| (w.text.as_str(), w.head.conllu(), w.deprel.as_str()))
             .collect();
         assert_eq!(
             shape,
@@ -1124,7 +1127,7 @@ mod tests {
             .words
             .iter()
             .filter(|w| matches!(w.id, UdId::Single(_)))
-            .map(|w| (w.text.as_str(), w.head, w.deprel.as_str()))
+            .map(|w| (w.text.as_str(), w.head.conllu(), w.deprel.as_str()))
             .collect();
         assert_eq!(
             shape,

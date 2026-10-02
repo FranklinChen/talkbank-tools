@@ -5,11 +5,14 @@
 //! work onto `spawn_blocking` threads. That keeps the client simple while still
 //! fitting both host runtimes cleanly.
 
+use batchalign_types::interval::AdmittedInterval;
 use std::thread;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+
+use crate::api::AudioPositionSeconds;
 
 use super::types::{
     Job, JobStatus, LangIdJob, LangIdJobStatus, LangIdResult, RevTranscriptEvidence, SubmitOptions,
@@ -563,8 +566,8 @@ fn read_error_body(resp: reqwest::blocking::Response) -> String {
 pub fn extract_timed_words(transcript: &Transcript) -> Vec<TimedWord> {
     struct TimedElement<'a> {
         value: &'a str,
-        start_s: f64,
-        end_s: f64,
+        start_s: AudioPositionSeconds,
+        end_s: AudioPositionSeconds,
     }
 
     let mut raw: Vec<TimedElement<'_>> = Vec::new();
@@ -580,11 +583,8 @@ pub fn extract_timed_words(transcript: &Transcript) -> Vec<TimedWord> {
         }
     }
 
-    raw.sort_by(|a, b| {
-        a.start_s
-            .partial_cmp(&b.start_s)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Positions are totally ordered, so no incomparable pair needs a fallback.
+    raw.sort_by(|a, b| a.start_s.order(b.start_s));
 
     let mut result = Vec::with_capacity(raw.len());
     let mut prev_end_ms: f64 = 0.0;
@@ -594,13 +594,26 @@ pub fn extract_timed_words(transcript: &Transcript) -> Vec<TimedWord> {
         if cleaned.is_empty() {
             continue;
         }
-        let start_ms = (elem.start_s * 1000.0).round() as u64;
-        let end_ms = (elem.end_s * 1000.0).round() as u64;
+        // The pair is admitted once as an interval (rounded to the nearest
+        // millisecond, ordered, in range); a pair that is not one is no
+        // timing, and the word is left out of the timed words like a word
+        // the transcript gave no times.
+        let interval = match AdmittedInterval::admit_positions(elem.start_s, elem.end_s) {
+            Ok(interval) => interval,
+            Err(refusal) => {
+                tracing::warn!(word = cleaned, %refusal, "Rev.ai word's times are not an interval; left untimed");
+                continue;
+            }
+        };
+        let start_ms = interval.start_millis();
+        let end_ms = interval.end_millis();
 
         if (start_ms as f64) < prev_end_ms * 0.5 && prev_end_ms > 2000.0 {
-            eprintln!(
-                "talkbank-revai: timestamp regression at word {:?} (start={}ms after prev_end={}ms)",
-                cleaned, start_ms, prev_end_ms as u64,
+            tracing::warn!(
+                word = cleaned,
+                start_ms,
+                prev_end_ms = prev_end_ms as u64,
+                "Rev.ai timestamp regression"
             );
         }
 

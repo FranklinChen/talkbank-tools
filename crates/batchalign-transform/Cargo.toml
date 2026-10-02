@@ -13,6 +13,8 @@ readme = "README.md"
 
 [dependencies]
 aho-corasick = { workspace = true }
+# Shared domain newtypes: ASR element times are `AudioPositionSeconds`.
+batchalign-types = { workspace = true }
 blake3 = { workspace = true }
 csv = { workspace = true }
 schemars = { workspace = true }

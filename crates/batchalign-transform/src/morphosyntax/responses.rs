@@ -1,6 +1,6 @@
 //! Admission of utterance-level worker responses before any CHAT mutation.
 
-use super::{BatchItemWithPosition, UdResponse};
+use super::{CollectedUtterance, UdResponse};
 
 /// A worker returned a different number of utterance responses than requested.
 #[derive(Debug, thiserror::Error)]
@@ -19,14 +19,14 @@ pub struct ResponseCountMismatch {
 /// Cardinality does not prove linguistic correctness or response ordering;
 /// those remain worker-contract and per-utterance validation responsibilities.
 pub struct MatchedMorphosyntaxResponses {
-    items: Vec<BatchItemWithPosition>,
+    items: Vec<CollectedUtterance>,
     responses: Vec<UdResponse>,
 }
 
 impl MatchedMorphosyntaxResponses {
     /// Admit the complete batch before an injector can alter any CHAT data.
     pub fn new(
-        items: Vec<BatchItemWithPosition>,
+        items: Vec<CollectedUtterance>,
         responses: Vec<UdResponse>,
     ) -> Result<Self, ResponseCountMismatch> {
         if items.len() != responses.len() {
@@ -39,7 +39,7 @@ impl MatchedMorphosyntaxResponses {
     }
 
     /// Submitted items, for downstream planning such as secondary-language work.
-    pub fn items(&self) -> &[BatchItemWithPosition] {
+    pub fn items(&self) -> &[CollectedUtterance] {
         &self.items
     }
 
@@ -52,7 +52,7 @@ impl MatchedMorphosyntaxResponses {
     /// once and cannot change through this type's public surface.
     pub(super) fn into_pairs(
         self,
-    ) -> impl ExactSizeIterator<Item = (UdResponse, BatchItemWithPosition)> {
+    ) -> impl ExactSizeIterator<Item = (UdResponse, CollectedUtterance)> {
         self.responses.into_iter().zip(self.items)
     }
 }
@@ -75,12 +75,13 @@ impl MatchedMorphosyntaxResponses {
         self,
         chat: &mut talkbank_model::ChatFile,
     ) -> Result<BoundMorphosyntaxResponses<'_>, InvalidInjectionPosition> {
-        for (index, ..) in &self.items {
+        for item in &self.items {
+            let index = item.line().raw();
             if !matches!(
-                chat.lines.get(*index),
+                chat.lines.get(index),
                 Some(talkbank_model::Line::Utterance(_))
             ) {
-                return Err(InvalidInjectionPosition { index: *index });
+                return Err(InvalidInjectionPosition { index });
             }
         }
         Ok(BoundMorphosyntaxResponses { chat, batch: self })

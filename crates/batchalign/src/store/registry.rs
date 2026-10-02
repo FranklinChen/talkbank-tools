@@ -13,14 +13,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 
 use crate::api::{
-    DisplayPath, FileStatusEntry, JobId, JobInfo, JobListItem, JobStatus, NodeId, UnixTimestamp,
+    DisplayPath, FileStatusEntry, JobId, JobInfo, JobListItem, JobStatus, MachineTime, NodeId,
 };
 use crate::error::ServerError;
 use crate::scheduling::LeaseRecord;
 
 use super::JobDetail;
-#[cfg(test)]
-use super::job::JobLeaseState;
 use super::job::{
     CompletedFileOutput, FileFailureRecord, FileProgressRecord, FileRetryRecord, Job,
     RunnerJobSnapshot, find_conflicts,
@@ -51,7 +49,7 @@ pub(crate) struct QueuePoll {
     /// Job IDs that are ready to run now and have been claimed by the backend.
     pub ready_job_ids: Vec<JobId>,
     /// Earliest future eligibility timestamp among still-queued jobs.
-    pub next_wake_at: Option<UnixTimestamp>,
+    pub next_wake_at: Option<MachineTime>,
 }
 
 /// Result of claiming all currently runnable queued jobs.
@@ -97,6 +95,8 @@ pub(crate) struct FileUpdateProjection {
     pub job_id: JobId,
     /// Current API-facing file status entry.
     pub file: FileStatusEntry,
+    /// The file's phase after the update: what is written to its row.
+    pub phase: crate::store::FilePhase,
     /// Running total of terminal files for the parent job.
     pub completed_files: i64,
 }
@@ -276,10 +276,11 @@ impl JobRegistry {
     /// modules can talk in terms of `FileUpdateProjection` rather than holding a
     /// borrowed `Job` just to serialize one nested field.
     fn file_update_projection(job: &Job, filename: &str) -> Option<FileUpdateProjection> {
-        let file = job.execution.file_statuses.get(filename)?.to_entry();
+        let status = job.execution.file_statuses.get(filename)?;
         Some(FileUpdateProjection {
             job_id: job.identity.job_id.clone(),
-            file,
+            file: status.to_entry(),
+            phase: status.phase.clone(),
             completed_files: job.execution.completed_files,
         })
     }
@@ -326,11 +327,9 @@ impl JobRegistry {
     pub(crate) async fn list_items(&self) -> Vec<JobListItem> {
         self.inspect_all(|jobs| {
             let mut items: Vec<JobListItem> = jobs.values().map(|job| job.to_list_item()).collect();
-            items.sort_by(|a, b| {
-                let ta = a.submitted_at.as_deref().unwrap_or("");
-                let tb = b.submitted_at.as_deref().unwrap_or("");
-                tb.cmp(ta)
-            });
+            // Newest first, comparing instants (a job whose time names no
+            // instant sorts last), not their spellings.
+            items.sort_by_key(|item| std::cmp::Reverse(item.submitted_at));
             items
         })
         .await
@@ -341,8 +340,8 @@ impl JobRegistry {
     pub(crate) async fn request_cancellation(
         &self,
         job_id: &JobId,
-        cancelled_at: UnixTimestamp,
-    ) -> Option<Option<UnixTimestamp>> {
+        cancelled_at: MachineTime,
+    ) -> Option<Option<MachineTime>> {
         self.update_job(job_id.clone(), move |job| {
             job.request_cancellation(cancelled_at)
         })
@@ -401,6 +400,16 @@ impl JobRegistry {
         .await
     }
 
+    /// One job's status columns as they are now: what the database row for
+    /// the job's status is written from.
+    pub(crate) async fn status_columns(
+        &self,
+        job_id: &JobId,
+    ) -> Option<crate::store::JobStatusColumns> {
+        self.project_job(job_id.clone(), |job| job.status_columns())
+            .await
+    }
+
     /// Return whether one job is currently running.
     pub(crate) async fn is_running(&self, job_id: &JobId) -> Option<bool> {
         self.project_job(job_id.clone(), |job| {
@@ -418,7 +427,10 @@ impl JobRegistry {
 
     /// Return a cloned snapshot of the current lease state for one job.
     #[cfg(test)]
-    pub(crate) async fn lease_state(&self, job_id: &JobId) -> Option<JobLeaseState> {
+    pub(crate) async fn lease_state(
+        &self,
+        job_id: &JobId,
+    ) -> Option<Option<crate::scheduling::LeaseRecord>> {
         self.project_job(job_id.clone(), |job| job.schedule.lease.clone())
             .await
     }
@@ -447,7 +459,7 @@ impl JobRegistry {
     pub(crate) async fn requeue_after_memory_gate(
         &self,
         job_id: &JobId,
-        retry_at: UnixTimestamp,
+        retry_at: MachineTime,
     ) -> Option<JobListItem> {
         self.update_job(job_id.clone(), move |job| {
             job.requeue_after_memory_gate(retry_at)
@@ -470,22 +482,14 @@ impl JobRegistry {
         .flatten()
     }
 
-    /// Record the runner worker-count choice for one job.
-    /// Record the runner's worker-count choice and report the job's status.
-    ///
-    /// Returns the status AFTER recording, so the caller persists what the job
-    /// actually is rather than asserting a status of its own. `None` means no
-    /// such job.
-    pub(crate) async fn record_job_worker_count(
-        &self,
-        job_id: &JobId,
-        num_workers: usize,
-    ) -> Option<JobStatus> {
+    /// Record the runner's worker-count choice for one job; `false` when
+    /// there is no such job.
+    pub(crate) async fn record_job_worker_count(&self, job_id: &JobId, num_workers: usize) -> bool {
         self.update_job(job_id.clone(), move |job| {
             job.record_worker_count(num_workers);
-            job.execution.status
         })
         .await
+        .is_some()
     }
 
     /// Fail one job immediately and return the summary row for notifications.
@@ -497,7 +501,7 @@ impl JobRegistry {
         &self,
         job_id: &JobId,
         error: &str,
-        completed_at: UnixTimestamp,
+        completed_at: MachineTime,
     ) -> Option<JobListItem> {
         let error = error.to_string();
         self.update_job(job_id.clone(), move |job| {
@@ -530,8 +534,8 @@ impl JobRegistry {
         job_id: &JobId,
         expected_generation: crate::store::RunGeneration,
         final_status: JobStatus,
-        completed_at: UnixTimestamp,
-    ) -> Option<(JobListItem, bool)> {
+        completed_at: MachineTime,
+    ) -> Option<JobListItem> {
         self.update_job(job_id.clone(), move |job| {
             // Stale-runner guard: a restart moves the job to a new run
             // generation; a runner still finishing under the old one must
@@ -546,8 +550,14 @@ impl JobRegistry {
                 );
                 return None;
             }
-            let applied = job.finalize(final_status, completed_at);
-            Some((job.to_list_item(), applied))
+            if !job.finalize(final_status, completed_at) {
+                tracing::debug!(
+                    job_id = %job.identity.job_id,
+                    status = %job.execution.status,
+                    "finalization declined; the job keeps the status it reached"
+                );
+            }
+            Some(job.to_list_item())
         })
         .await
         .flatten()
@@ -564,8 +574,8 @@ impl JobRegistry {
         &self,
         job_id: &JobId,
         node_id: &NodeId,
-        now: UnixTimestamp,
-        lease_ttl_s: f64,
+        now: MachineTime,
+        lease_ttl: crate::config::LeaseTtl,
     ) -> Option<crate::store::BeginRunnerOutcome> {
         use crate::store::BeginRunnerOutcome;
         let node_id = node_id.clone();
@@ -578,10 +588,12 @@ impl JobRegistry {
                 // heartbeat loop has something to renew; before this,
                 // production runners never held a lease and the heartbeat
                 // loop silently stopped on its first tick.
-                job.schedule.lease.leased_by_node = Some(node_id.clone());
-                job.schedule.lease.heartbeat_at = Some(now);
-                job.schedule.lease.expires_at = Some(UnixTimestamp(now.0 + lease_ttl_s));
-                BeginRunnerOutcome::Started(job.runtime.run_generation)
+                let lease = crate::scheduling::LeaseRecord::taken(node_id.clone(), now, lease_ttl);
+                job.schedule.lease = Some(lease.clone());
+                BeginRunnerOutcome::Started {
+                    generation: job.runtime.run_generation,
+                    lease,
+                }
             }
         })
         .await
@@ -590,19 +602,14 @@ impl JobRegistry {
     /// Return the most recent file-activity timestamp for one job: the
     /// latest per-file attempt start/finish, falling back to submission
     /// time when no file has moved yet. Drives the runner's stall alarm.
-    pub(crate) async fn last_file_activity_at(&self, job_id: &JobId) -> Option<UnixTimestamp> {
+    pub(crate) async fn last_file_activity_at(&self, job_id: &JobId) -> Option<MachineTime> {
         self.project_job(job_id.clone(), |job| {
             job.execution
                 .file_statuses
                 .values()
-                .flat_map(|file_status| {
-                    file_status
-                        .started_at
-                        .into_iter()
-                        .chain(file_status.finished_at)
-                })
+                .filter_map(|file_status| file_status.phase.last_activity_at())
                 .chain(std::iter::once(job.schedule.submitted_at))
-                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .max()
         })
         .await
         .flatten()
@@ -646,7 +653,7 @@ impl JobRegistry {
     /// (resumable via the startup recovery path) rather than `JobStatus::Cancelled`
     /// (terminal user-cancel state).  See `Job::interrupt_for_shutdown` doc for the
     /// full recovery-flow rationale.
-    pub(crate) async fn interrupt_all_active(&self, interrupted_at: UnixTimestamp) -> usize {
+    pub(crate) async fn interrupt_all_active(&self, interrupted_at: MachineTime) -> usize {
         self.mutate_all(move |jobs| {
             let mut count = 0;
             for job in jobs.values_mut() {
@@ -676,25 +683,25 @@ impl JobRegistry {
     #[cfg(test)]
     pub(crate) async fn claim_ready_queued_jobs(
         &self,
-        now: UnixTimestamp,
+        now: MachineTime,
         node_id: &NodeId,
-        lease_ttl_s: f64,
+        lease_ttl: crate::config::LeaseTtl,
     ) -> ClaimedQueuePoll {
         let node_id = node_id.clone();
         self.mutate_all(move |jobs| {
-            let mut ready: Vec<(f64, JobId)> = jobs
+            let mut ready: Vec<(MachineTime, JobId)> = jobs
                 .values()
                 .filter(|job| job.ready_for_local_dispatch(now))
-                .map(|job| (job.schedule.submitted_at.0, job.identity.job_id.clone()))
+                .map(|job| (job.schedule.submitted_at, job.identity.job_id.clone()))
                 .collect();
-            ready.sort_by(|a, b| a.0.total_cmp(&b.0));
+            ready.sort_by_key(|(submitted_at, _)| *submitted_at);
 
             let ready_job_ids: Vec<JobId> = ready.into_iter().map(|(_, job_id)| job_id).collect();
             let mut claimed_leases: Vec<ClaimedLeaseRecord> =
                 Vec::with_capacity(ready_job_ids.len());
             for job_id in &ready_job_ids {
                 if let Some(job) = jobs.get_mut(job_id)
-                    && let Some(lease) = job.claim_for_local_dispatch(&node_id, now, lease_ttl_s)
+                    && let Some(lease) = job.claim_for_local_dispatch(&node_id, now, lease_ttl)
                 {
                     claimed_leases.push(ClaimedLeaseRecord {
                         job_id: job_id.clone(),
@@ -709,7 +716,7 @@ impl JobRegistry {
                     job.execution.status == JobStatus::Queued && !job.runtime.runner_active
                 })
                 .filter_map(|job| job.next_local_dispatch_wake_at(now))
-                .min_by(|a, b| a.0.total_cmp(&b.0));
+                .min();
 
             ClaimedQueuePoll {
                 poll: QueuePoll {
@@ -734,12 +741,12 @@ impl JobRegistry {
         &self,
         job_id: &JobId,
         node_id: &NodeId,
-        now: UnixTimestamp,
-        lease_ttl_s: f64,
+        now: MachineTime,
+        lease_ttl: crate::config::LeaseTtl,
     ) -> Option<LeaseRecord> {
         let node_id = node_id.clone();
         self.update_job(job_id.clone(), move |job| {
-            job.renew_local_dispatch_lease(&node_id, now, lease_ttl_s)
+            job.renew_local_dispatch_lease(&node_id, now, lease_ttl)
         })
         .await
         .flatten()
@@ -771,7 +778,7 @@ impl JobRegistry {
         &self,
         job_id: &JobId,
         filename: &str,
-        started_at: UnixTimestamp,
+        started_at: MachineTime,
     ) -> Option<FileUpdateProjection> {
         let filename = filename.to_string();
         self.update_job(job_id.clone(), move |job| {
@@ -790,7 +797,7 @@ impl JobRegistry {
         &self,
         job_id: &JobId,
         filename: &str,
-        finished_at: UnixTimestamp,
+        finished_at: MachineTime,
         result: Option<CompletedFileOutput>,
     ) -> Option<FileUpdateProjection> {
         let filename = filename.to_string();
@@ -830,7 +837,7 @@ impl JobRegistry {
         &self,
         job_id: &JobId,
         filename: &str,
-        started_at: UnixTimestamp,
+        started_at: MachineTime,
     ) -> Option<FileUpdateProjection> {
         let filename = filename.to_string();
         self.update_job(job_id.clone(), move |job| {

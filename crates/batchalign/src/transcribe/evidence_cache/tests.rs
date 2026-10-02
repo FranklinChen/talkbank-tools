@@ -1,5 +1,5 @@
 use super::*;
-use crate::api::{DurationMs, NumSpeakers};
+use crate::api::NumSpeakers;
 use crate::cache::UtteranceCache;
 use crate::error::ServerError;
 use crate::types::worker_v2::{
@@ -24,8 +24,8 @@ impl SpeakerEvidenceInference for CountingSpeakerService {
 
 fn segment(speaker: &str) -> SpeakerSegmentV2 {
     SpeakerSegmentV2 {
-        start_ms: DurationMs(0),
-        end_ms: DurationMs(750),
+        interval: batchalign_types::interval::AdmittedInterval::admit_millis(0, 750)
+            .expect("ordered"),
         speaker: speaker.to_owned(),
     }
 }
@@ -37,8 +37,8 @@ fn raw_evidence(segments: &[SpeakerSegmentV2]) -> SpeakerInferenceEvidenceV2 {
             "exclusiveDiarization": segments
                 .iter()
                 .map(|segment| serde_json::json!({
-                    "start": segment.start_ms.0 as f64 / 1000.0,
-                    "end": segment.end_ms.0 as f64 / 1000.0,
+                    "start": segment.interval.start_ms() as f64 / 1000.0,
+                    "end": segment.interval.end_ms() as f64 / 1000.0,
                     "speaker": segment.speaker,
                 }))
                 .collect::<Vec<_>>()
@@ -310,7 +310,8 @@ async fn production_resolver_crosses_billable_boundary_once_then_replays() {
 fn segment_projection_digest_changes_with_timing_or_speaker() {
     let baseline = ValidatedSpeakerEvidence::new(vec![segment("SPEAKER_00")]);
     let mut shifted_segment = segment("SPEAKER_00");
-    shifted_segment.end_ms = DurationMs(1_001);
+    shifted_segment.interval =
+        batchalign_types::interval::AdmittedInterval::admit_millis(0, 1_001).expect("ordered");
     let shifted = ValidatedSpeakerEvidence::new(vec![shifted_segment]);
     let relabeled = ValidatedSpeakerEvidence::new(vec![segment("SPEAKER_01")]);
 
@@ -601,7 +602,10 @@ async fn invalid_cached_timing_fails_closed() {
         .lookup(&cache, CachePolicy::UseCache)
         .await
         .expect_err("invalid timing must not become a miss");
-    assert!(error.to_string().contains("inverted interval"));
+    assert!(
+        error.to_string().contains("before its start"),
+        "the interval admission refuses the stored segment: {error}"
+    );
 }
 
 #[tokio::test]
@@ -623,8 +627,8 @@ async fn zero_duration_segment_allowed_by_worker_protocol_round_trips() {
     .await
     .expect("request");
     let zero_duration = SpeakerSegmentV2 {
-        start_ms: DurationMs(500),
-        end_ms: DurationMs(500),
+        interval: batchalign_types::interval::AdmittedInterval::admit_millis(500, 500)
+            .expect("ordered"),
         speaker: "SPEAKER_00".to_owned(),
     };
 

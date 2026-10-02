@@ -4,13 +4,11 @@ use super::fixtures::{
     DIRECT_ENG_AFTER_INCREMENTAL, DIRECT_ENG_BEFORE_INCREMENTAL, DIRECT_ENG_FILE_A,
     DIRECT_ENG_FILE_B, DIRECT_SPEAKER_FATHER, DIRECT_SPEAKER_MOTHER,
 };
-use super::helpers::{
-    count_ast_mor_tiers, find_mor_line_for, has_mor_tier, minimal_chat, parse_output,
-    strip_provenance_stamps,
-};
+use super::helpers::{count_ast_mor_tiers, minimal_chat, strip_provenance_stamps};
 use crate::common::{
     LiveDirectJobClient, assert_completed_without_errors, require_live_direct_warmed,
 };
+use crate::ml_golden::golden::helpers::{find_mor_line_for, has_mor_tier, parse_output};
 use batchalign::api::{FilePayload, ReleasedCommand};
 use batchalign::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use batchalign::worker::InferTask;

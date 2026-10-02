@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::api::AudioPositionSeconds;
+
 /// A raw token with its onset time, as returned by Whisper-style FA models.
 ///
 /// Whisper produces token-level timestamps (one onset per sub-word token) rather
@@ -17,10 +19,12 @@ pub struct FaRawToken {
     /// Leading whitespace is significant -- it indicates a word boundary in
     /// Whisper's byte-pair encoding.
     pub text: String,
-    /// Onset time of this token in **seconds** (NOT milliseconds).
-    /// Downstream code must convert to milliseconds (multiply by 1000) before
-    /// injecting into CHAT timing bullets, which use integer milliseconds.
-    pub time_s: f64,
+    /// Onset of this token, a position in **seconds** (NOT milliseconds)
+    /// from the start of the alignment window. Proven finite and
+    /// non-negative where the worker's response was read;
+    /// [`AudioPositionSeconds::whole_millis`] is the conversion into the
+    /// integer milliseconds a window position is measured in.
+    pub time_s: AudioPositionSeconds,
 }
 
 /// Indexed timing produced when the callback already preserves word order.

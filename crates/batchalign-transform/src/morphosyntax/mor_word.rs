@@ -1,41 +1,67 @@
 //! Single-word UD-to-CHAT MOR mapping.
 
-use super::features::{adj_features, det_features, noun_features, pron_features, verb_features};
+use super::features::{
+    RenderedFeatures, UdFeats, adj_features, det_features, noun_features, pron_features,
+    verb_features,
+};
 use super::{
     MappingContext, MappingError, UdPunctable, UdWord, UniversalPos, japanese_verbform, lang2,
     sanitize_mor_text,
 };
-use smallvec::SmallVec;
-use std::collections::HashMap;
-use talkbank_model::model::dependent_tier::mor::{Mor, MorFeature, MorStem, MorWord, PosCategory};
+use talkbank_model::model::dependent_tier::mor::{Mor, MorStem, MorWord, PosCategory};
+
+/// The category a `%mor` item is written with: a UD category, or Japanese
+/// `cm` for a comma. Typed, so the feature handlers match on it instead of
+/// searching a category name for `verb` or `sconj`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MorPos {
+    Upos(UniversalPos),
+    JapaneseComma,
+}
+
+impl MorPos {
+    /// The name written before `|`.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Upos(upos) => upos.to_chat_pos_name(),
+            Self::JapaneseComma => "cm",
+        }
+    }
+}
 
 /// Map a single UD word into a CHAT `%mor` item.
-pub fn map_ud_word_to_mor(ud: &UdWord, ctx: &MappingContext) -> Result<Mor, MappingError> {
+pub fn map_ud_word(ud: &UdWord, ctx: &MappingContext) -> Result<Mor, MappingError> {
+    map_ud_mor_word(ud, ctx).map(Mor::new)
+}
+
+/// Map a single UD word into one `%mor` word: one chunk, by type.
+pub(super) fn map_ud_mor_word(ud: &UdWord, ctx: &MappingContext) -> Result<MorWord, MappingError> {
     if matches!(ud.lemma.as_str(), "." | "!" | "?" | "," | "$,") {
         return Ok(map_actual_punct(ud));
     }
 
-    let feats = parse_feats(ud.feats.as_deref());
+    let feats = UdFeats::of_word(ud);
     let mut cleaned_lemma = clean_lemma(&ud.lemma, &ud.text);
-    let mut effective_pos = upos_to_name(&ud.upos).to_string();
-    if lang2(&ctx.lang) == "ja"
-        && let Some(ovr) = japanese_verbform(&effective_pos, &cleaned_lemma, &ud.text)
-    {
-        effective_pos = ovr.pos.to_string();
-        cleaned_lemma = ovr.lemma.to_string();
-        cleaned_lemma = cleaned_lemma.replace(',', "cm");
-    }
-
+    // Stanza's own punctuation marker is written as the `punct` category.
+    let tagged = match ud.upos {
+        UdPunctable::Value(upos) => upos,
+        UdPunctable::Punct(_) => UniversalPos::Punct,
+    };
+    let mut written = MorPos::Upos(tagged);
     if lang2(&ctx.lang) == "ja" {
-        if matches!(ud.upos, UdPunctable::Value(UniversalPos::Punct)) {
-            effective_pos = "cm".to_string();
+        if let Some(ovr) = japanese_verbform(tagged, &cleaned_lemma, &ud.text) {
+            written = MorPos::Upos(ovr.pos);
+            cleaned_lemma = ovr.lemma.replace(',', "cm");
         }
-        if ud.lemma == "、" || ud.lemma == "," {
-            effective_pos = "cm".to_string();
+        if matches!(ud.upos, UdPunctable::Value(UniversalPos::Punct))
+            || ud.lemma == "\u{3001}"
+            || ud.lemma == ","
+        {
+            written = MorPos::JapaneseComma;
         }
     }
 
-    let features = compute_features(&ud.upos, &feats, &effective_pos, ud, ctx);
+    let suffixes = compute_features(&ud.upos, &feats, written, ud, ctx).into_suffixes();
     let sanitized_lemma = sanitize_mor_text(&cleaned_lemma);
     if sanitized_lemma.is_empty() {
         return Err(MappingError::EmptyStem {
@@ -46,35 +72,21 @@ pub fn map_ud_word_to_mor(ud: &UdWord, ctx: &MappingContext) -> Result<Mor, Mapp
     }
 
     let mor_word = MorWord::new(
-        PosCategory::new(&effective_pos),
+        PosCategory::new(written.name()),
         MorStem::new(sanitized_lemma),
     )
-    .with_features(features);
-    Ok(Mor::new(mor_word))
+    .with_features(suffixes);
+    Ok(mor_word)
 }
 
-fn map_actual_punct(ud: &UdWord) -> Mor {
+fn map_actual_punct(ud: &UdWord) -> MorWord {
     let (pos_name, stem) = if ud.lemma == "," || ud.lemma == "$," {
         ("cm", "cm")
     } else {
         ("punct", ud.lemma.as_str())
     };
 
-    let mor_word = MorWord::new(PosCategory::new(pos_name), MorStem::new(stem));
-    Mor::new(mor_word)
-}
-
-pub(super) fn parse_feats(feats: Option<&str>) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    if let Some(f) = feats {
-        for pair in f.split('|') {
-            let mut parts = pair.split('=');
-            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                map.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-    map
+    MorWord::new(PosCategory::new(pos_name), MorStem::new(stem))
 }
 
 /// Clean a UD lemma for use as a CHAT `%mor` stem.
@@ -169,48 +181,38 @@ pub fn clean_lemma(lemma: &str, text: &str) -> String {
     target
 }
 
-fn upos_to_name(upos: &UdPunctable<UniversalPos>) -> &'static str {
-    match upos {
-        UdPunctable::Value(v) => v.to_chat_pos_name(),
-        UdPunctable::Punct(_) => "punct",
-    }
-}
-
-pub(super) fn push_feature(features: &mut SmallVec<[MorFeature; 4]>, value: &str) {
-    if !value.is_empty() {
-        features.push(MorFeature::flat(value));
-    }
-}
-
-pub(super) fn push_feat(
-    features: &mut SmallVec<[MorFeature; 4]>,
-    feats: &HashMap<String, String>,
-    key: &str,
-) {
-    if let Some(val) = feats.get(key) {
-        push_feature(features, val);
-    }
-}
-
 fn compute_features(
     original_upos: &UdPunctable<UniversalPos>,
-    feats: &HashMap<String, String>,
-    effective_pos: &str,
+    feats: &UdFeats<'_>,
+    written: MorPos,
     ud: &UdWord,
     ctx: &MappingContext,
-) -> SmallVec<[MorFeature; 4]> {
+) -> RenderedFeatures {
+    // Every UPOS named, so a new one fails to compile here instead of falling
+    // through to "no features".
     match original_upos {
         UdPunctable::Value(UniversalPos::Verb | UniversalPos::Aux) => {
-            verb_features(feats, effective_pos, ud, ctx)
+            verb_features(feats, written, ud, ctx)
         }
         UdPunctable::Value(UniversalPos::Pron) => pron_features(feats, ud, ctx),
-        UdPunctable::Value(UniversalPos::Det) => det_features(feats, ctx),
+        UdPunctable::Value(UniversalPos::Det) => det_features(feats),
         UdPunctable::Value(UniversalPos::Adj) => adj_features(feats),
         UdPunctable::Value(UniversalPos::Noun | UniversalPos::Propn) => {
             noun_features(feats, ud, ctx)
         }
-        UdPunctable::Value(UniversalPos::Sym | UniversalPos::Punct) => SmallVec::new(),
-        _ => SmallVec::new(),
+        UdPunctable::Value(
+            UniversalPos::Adp
+            | UniversalPos::Adv
+            | UniversalPos::Cconj
+            | UniversalPos::Intj
+            | UniversalPos::Num
+            | UniversalPos::Part
+            | UniversalPos::Punct
+            | UniversalPos::Sconj
+            | UniversalPos::Sym
+            | UniversalPos::X,
+        )
+        | UdPunctable::Punct(_) => RenderedFeatures::default(),
     }
 }
 
@@ -228,13 +230,6 @@ pub fn is_clitic(text: &str, ctx: &MappingContext) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_feats_preserves_multi_value_commas() {
-        let feats = parse_feats(Some("PronType=Int,Rel|Person=3"));
-        assert_eq!(feats.get("PronType"), Some(&"Int,Rel".to_string()));
-        assert_eq!(feats.get("Person"), Some(&"3".to_string()));
-    }
 
     /// The zero-prefix branch was DELETED (see `clean_lemma`'s own docs): a
     /// leading `0` is CHAT's omission marker, omissions never reach a `%mor`

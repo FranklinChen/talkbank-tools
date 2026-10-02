@@ -31,11 +31,15 @@ class TestTranslateModels:
 class TestBatchInferTranslate:
     """Verify the thin Python translation adapter behavior."""
 
-    def test_uses_request_language_and_rewrites_first_elapsed(
-        self, monkeypatch
-    ) -> None:
+    def test_uses_request_language_and_times_each_item(self, monkeypatch) -> None:
+        """Each item reports its own call's time; the batch total goes nowhere.
+
+        Clock reads: batch start, item 0 start and end, item 1 start and end,
+        batch end. Until 2026-10-01 the batch total was stamped on item 0 and
+        item 1 reported an unmeasured 0.0.
+        """
         calls: list[tuple[str, str]] = []
-        monotonic = _monotonic_values(100.0, 104.5)
+        monotonic = _monotonic_values(100.0, 101.0, 104.5, 105.0, 105.25, 106.0)
 
         monkeypatch.setattr(
             "batchalign.inference.translate.time.monotonic",
@@ -64,17 +68,19 @@ class TestBatchInferTranslate:
             "raw_translation": "HOLA",
             "engine": "test-engine",
         }
-        assert response.results[0].elapsed_s == 4.5
+        assert response.results[0].elapsed_s == 3.5
         assert response.results[1].result == {
             "kind": "translated",
             "raw_translation": "ADIOS",
             "engine": "test-engine",
         }
-        assert response.results[1].elapsed_s == 0.0
+        assert response.results[1].elapsed_s == 0.25
 
     def test_defaults_lang_to_eng_and_skips_blank_items(self, monkeypatch) -> None:
         calls: list[tuple[str, str]] = []
-        monotonic = _monotonic_values(10.0, 12.0)
+        # Batch start, the translated item's start and end, batch end. The
+        # blank item never reaches the engine, so it reads no clock.
+        monotonic = _monotonic_values(10.0, 11.0, 12.5, 13.0)
 
         monkeypatch.setattr(
             "batchalign.inference.translate.time.monotonic",
@@ -99,7 +105,8 @@ class TestBatchInferTranslate:
 
         assert calls == [("hello", "eng")]
         assert response.results[0].result == {"kind": "blank_input"}
-        assert response.results[0].elapsed_s == 2.0
+        assert response.results[0].elapsed_s is None
+        assert response.results[1].elapsed_s == 1.5
         assert response.results[1].result == {
             "kind": "translated",
             "raw_translation": "eng:hello",
@@ -108,7 +115,9 @@ class TestBatchInferTranslate:
 
     def test_reports_invalid_and_runtime_error_items(self, monkeypatch) -> None:
         calls: list[tuple[str, str]] = []
-        monotonic = _monotonic_values(0.0, 3.0)
+        # Batch start, then start and end for each of the two items that
+        # reach the engine, then batch end.
+        monotonic = _monotonic_values(0.0, 1.0, 1.5, 2.0, 3.0, 3.0)
 
         monkeypatch.setattr(
             "batchalign.inference.translate.time.monotonic",
@@ -140,7 +149,11 @@ class TestBatchInferTranslate:
 
         assert calls == [("hello", "yue"), ("boom", "yue")]
         assert response.results[0].error == "Invalid batch item"
-        assert response.results[0].elapsed_s == 3.0
+        # An item that never parsed ran no work: no elapsed time, not zero.
+        assert response.results[0].elapsed_s is None
+        assert response.results[1].elapsed_s == 0.5
+        assert response.results[2].elapsed_s == 1.0
+        assert response.results[3].elapsed_s is None
         assert response.results[1].result == {
             "kind": "translated",
             "raw_translation": "yue:HELLO",
@@ -182,7 +195,8 @@ class TestBatchInferTranslate:
         plane decides whether to wait it out. Nothing here sleeps, and the
         items after a refusal are still attempted: stopping the file is the
         control plane's call too."""
-        monotonic = _monotonic_values(0.0, 1.0)
+        # Batch start, start and end for each of the three items, batch end.
+        monotonic = _monotonic_values(0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
         monkeypatch.setattr(
             "batchalign.inference.translate.time.monotonic",
             lambda: next(monotonic),

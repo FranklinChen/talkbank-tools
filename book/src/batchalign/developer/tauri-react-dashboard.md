@@ -1,7 +1,7 @@
 # Tauri + React Dashboard
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-10-01 15:49 EDT
 
 ## Overview
 
@@ -319,6 +319,39 @@ Verify no drift (CI gate):
 ```bash
 scripts/check_dashboard_api_drift.sh
 ```
+
+### Known open work: a branded server-time type
+
+`compareTimesNewestFirst` in `frontend/src/utils.ts` sorts jobs newest first
+by comparing two server times as strings. That is correct only because both
+are `MachineTime`: RFC 3339 in UTC with exactly three fractional digits, so
+string order is time order. Its six callers (two in `src/state.ts`, four in
+`src/components/JobList.tsx`) all pass `submitted_at`, which is a
+`MachineTime`. But the signature takes `(a: string, b: string)`, so a
+display-formatted time, or one with a different offset or precision, would
+type-check and sort wrongly without complaint.
+
+The fix is a branded type, and it cannot be written by hand. openapi-typescript
+(7.13.0) turns the `MachineTime` schema (`type: string`, `format: date-time`)
+into `MachineTime: string`, so every generated field that references
+`components["schemas"]["MachineTime"]` is a plain `string`. A hand-declared
+brand would need a cast at every read, which asserts the invariant instead of
+carrying it.
+
+The change belongs in the generator. The CLI that
+`scripts/generate_dashboard_api_types.sh` runs
+(`npx openapi-typescript openapi.json -o src/generated/api.ts`) has no
+transform option. The library's Node API does: `openapiTS(source, options)`
+accepts `transform: (schemaObject, { path }) => ts.TypeNode | undefined`.
+Replace that one step with a small Node script that calls `openapiTS` with a
+`transform` returning `string & { readonly __brand: "MachineTime" }` for the
+schema at `#/components/schemas/MachineTime` (and `undefined` everywhere
+else), then writes the result with the exported `astToString`. Every field
+that references the schema then carries the brand, and
+`compareTimesNewestFirst(a: MachineTime, b: MachineTime)` refuses any other
+string at compile time. `scripts/check_dashboard_api_drift.sh` reruns the
+generator script, so the drift gate follows the change with no edit of its
+own.
 
 ## Dashboard Component Map
 

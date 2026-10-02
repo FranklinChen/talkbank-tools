@@ -7,20 +7,16 @@ and an ``infer`` function (called per batch_infer request).
 from __future__ import annotations
 
 import logging
-import time
-
-from pydantic import ValidationError
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
-    InferResponse,
 )
 
 from ._asr_types import admit_provider_monologues
-from ._common import EngineOverrides
+from ._common import EngineOverrides, ProviderNotLoaded, answer_asr_batch
 from ._funaudio_common import FunAudioRecognizer
 
 L = logging.getLogger("batchalign.hk.funaudio_asr")
@@ -137,40 +133,12 @@ def infer_funaudio_asr(req: BatchInferRequest) -> BatchInferResponse:
         One :class:`InferResponse` per item, each containing a tagged
         monologue payload on success.
     """
-    if _recognizer is None:
-        return BatchInferResponse(
-            results=[
-                InferResponse(error=NOT_LOADED_ERROR, elapsed_s=0.0) for _ in req.items
-            ]
-        )
-
-    t0 = time.monotonic()
-    n = len(req.items)
-    results: list[InferResponse] = []
-
-    for item_idx, raw_item in enumerate(req.items):
-        try:
-            item = AsrBatchItem.model_validate(raw_item)
-        except ValidationError:
-            results.append(InferResponse(error="Invalid AsrBatchItem", elapsed_s=0.0))
-            continue
-
-        try:
-            response = _transcribe_to_monologues(item)
-            results.append(InferResponse(result=response.model_dump(), elapsed_s=0.0))
-        except Exception as e:
-            L.warning("FunAudio ASR failed for item %d: %s", item_idx, e, exc_info=True)
-            results.append(InferResponse(error=str(e), elapsed_s=0.0))
-
-    elapsed = time.monotonic() - t0
-    if results:
-        first = results[0]
-        results[0] = InferResponse(
-            result=first.result, error=first.error, elapsed_s=elapsed
-        )
-
-    L.info("batch_infer funaudio_asr: %d items, %.3fs", n, elapsed)
-    return BatchInferResponse(results=results)
+    transcribe = (
+        ProviderNotLoaded(NOT_LOADED_ERROR)
+        if _recognizer is None
+        else _transcribe_to_monologues
+    )
+    return answer_asr_batch("funaudio_asr", req.items, transcribe)
 
 
 # ---------------------------------------------------------------------------

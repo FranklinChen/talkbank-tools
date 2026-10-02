@@ -38,8 +38,8 @@ pub struct CancelledReceipt {
     pub host: Option<String>,
     /// Caller-reported reason text.
     pub reason: Option<String>,
-    /// ISO 8601 timestamp the cancel arrived at the server.
-    pub at_iso: String,
+    /// When the cancel arrived at the server.
+    pub at: batchalign_types::machine_time::MachineTime,
 }
 
 /// Reducer message sent from polling code into the TUI state owner.
@@ -212,11 +212,11 @@ pub struct FileState {
     /// Wall-clock processing time in seconds, computed from the server's
     /// `started_at` and `finished_at` timestamps. `None` while the file
     /// is still queued or processing.
-    pub duration_s: Option<f64>,
+    pub duration_s: Option<crate::api::NonNegativeSeconds>,
 
-    /// Unix timestamp when processing started. Used to compute elapsed
-    /// time for files that are still being processed.
-    pub started_at: Option<f64>,
+    /// When processing started. Used to compute elapsed time for files
+    /// that are still being processed.
+    pub started_at: Option<crate::api::MachineTime>,
 
     /// Current step in a multi-step file operation (e.g. Rev.AI polling).
     /// `None` if the server does not report sub-file progress.
@@ -236,10 +236,6 @@ pub struct FileState {
     /// Error message if the file failed. `None` for successful or
     /// in-progress files.
     pub error_msg: Option<String>,
-
-    /// Structured error codes attached to the failure (e.g. `["E362"]`).
-    /// Empty vec for files that have not failed.
-    pub error_codes: Vec<String>,
 }
 
 /// An error entry displayed in the collapsible error summary panel.
@@ -250,10 +246,6 @@ pub struct FileState {
 pub struct ErrorEntry {
     /// The filename that produced this error (display name, not full path).
     pub filename: String,
-
-    /// Structured error code if available (e.g. `"E362"`). `None` for
-    /// errors that do not carry a CHAT-spec error code.
-    pub code: Option<String>,
 
     /// Human-readable error description from the server or worker.
     pub message: String,
@@ -301,23 +293,17 @@ impl AppState {
             let (dir, name) = split_dir_file(&entry.filename);
             let status = entry.status;
 
-            let duration_s = match (entry.started_at, entry.finished_at) {
-                (Some(start), Some(end)) => Some(end.0 - start.0),
-                _ => None,
-            };
-
             let file_state = FileState {
                 name: name.to_string(),
                 full_path: entry.filename.to_string(),
                 status,
-                duration_s,
-                started_at: entry.started_at.map(|t| t.0),
+                duration_s: entry.duration_s,
+                started_at: entry.started_at,
                 progress_current: entry.progress_current,
                 progress_total: entry.progress_total,
                 progress_label: entry.progress_label.clone(),
                 progress_stage: entry.progress_stage,
                 error_msg: entry.error.clone(),
-                error_codes: entry.error_codes.clone().unwrap_or_default(),
             };
 
             dir_map.entry(dir.to_string()).or_default().push(file_state);
@@ -361,12 +347,11 @@ impl AppState {
 
         self.directories.groups = groups;
 
-        // Extract error entries with proper codes from poll data
+        // Extract error entries from poll data
         for entry in file_statuses {
             if entry.status == FileStatusKind::Error
                 && !self.errors.seen_files.contains(&*entry.filename)
             {
-                let code = entry.error_codes.as_ref().and_then(|c| c.first()).cloned();
                 let msg = entry
                     .error
                     .clone()
@@ -374,7 +359,6 @@ impl AppState {
                 self.errors.seen_files.insert(entry.filename.to_string());
                 self.errors.entries.push(ErrorEntry {
                     filename: split_dir_file(&entry.filename).1.to_string(),
-                    code,
                     message: msg,
                 });
             }
@@ -398,7 +382,7 @@ impl AppState {
                 self.update_from_poll(done, &file_statuses);
             }
             TuiUpdate::FileError { filename, message } => {
-                self.add_error(&filename, &message, None);
+                self.add_error(&filename, &message);
             }
             TuiUpdate::HealthSnapshot(h) => {
                 self.health = Some(h);
@@ -413,14 +397,13 @@ impl AppState {
     }
 
     /// Add an error entry, deduplicating by filename.
-    pub fn add_error(&mut self, filename: &str, msg: &str, code: Option<&str>) {
+    pub fn add_error(&mut self, filename: &str, msg: &str) {
         if self.errors.seen_files.contains(filename) {
             return;
         }
         self.errors.seen_files.insert(filename.to_string());
         self.errors.entries.push(ErrorEntry {
             filename: filename.to_string(),
-            code: code.map(str::to_string),
             message: msg.to_string(),
         });
     }
@@ -526,12 +509,10 @@ mod tests {
             status,
             error: None,
             error_category: None,
-            error_codes: None,
-            error_line: None,
-            bug_report_id: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
+            duration_s: None,
             next_eligible_at: None,
             progress_current: None,
             progress_total: None,
@@ -663,7 +644,7 @@ mod tests {
             source: "tui".to_string(),
             host: Some("test-laptop".to_string()),
             reason: Some("user-pressed-cancel".to_string()),
-            at_iso: "2026-04-26T14:34:13+00:00".to_string(),
+            at: "2026-04-26T14:34:13Z".parse().unwrap(),
         };
         state.apply_update(TuiUpdate::CancelledReceipt(receipt.clone()));
 
@@ -729,15 +710,13 @@ mod tests {
     }
 
     #[test]
-    fn error_codes_extracted_from_poll_entries() {
+    fn error_entries_extracted_from_poll_entries() {
         let mut state = AppState::new(1, "morphotag");
         let mut entry = make_entry("eng/a.cha", FileStatusKind::Error);
         entry.error = Some("morph lookup failed".into());
-        entry.error_codes = Some(vec!["E4012".into()]);
         state.update_from_poll(0, &[entry]);
 
         assert_eq!(state.errors.entries.len(), 1);
-        assert_eq!(state.errors.entries[0].code.as_deref(), Some("E4012"));
         assert_eq!(state.errors.entries[0].message, "morph lookup failed");
     }
 
@@ -771,10 +750,10 @@ mod tests {
     fn started_at_propagated_from_poll() {
         let mut state = AppState::new(1, "align");
         let mut entry = make_entry("eng/a.cha", FileStatusKind::Processing);
-        entry.started_at = Some(crate::api::UnixTimestamp(1710000000.0));
+        entry.started_at = Some(crate::unix_time(1710000000.0));
         state.update_from_poll(0, &[entry]);
 
         let file = &state.directories.groups[0].files[0];
-        assert_eq!(file.started_at, Some(1710000000.0));
+        assert_eq!(file.started_at, Some(crate::unix_time(1710000000.0)));
     }
 }

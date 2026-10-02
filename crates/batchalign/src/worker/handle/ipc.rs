@@ -4,21 +4,22 @@
 //! these methods: writing JSON-lines requests to stdin, reading JSON-lines
 //! responses from stdout, and handling timeouts, noise lines, and crashes.
 
-use std::time::Duration;
-
-use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2};
-use crate::worker::error::WorkerError;
+use crate::types::worker_v2::{
+    ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2, batched_items_timeout,
+};
+use crate::worker::error::{WorkerError, WorkerWait};
 use crate::worker::{
     BatchInferRequest, BatchInferResponse, InferRequest, InferResponse, WorkerCapabilities,
     WorkerHealthResponse,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use super::WorkerHandle;
 use super::protocol::{
-    MAX_RESPONSE_STDOUT_NOISE_LINES, WorkerRequest, WorkerResponse, dump_failed_ipc_request,
+    NoiseLimit, NoiseRun, WireLine, WorkerRequest, WorkerResponse, dump_failed_ipc_request, excerpt,
 };
+use serde::Deserialize;
 
 impl WorkerHandle {
     /// Serialize and write a JSON-lines request to the worker's stdin.
@@ -43,12 +44,14 @@ impl WorkerHandle {
 
     /// Read and parse a single JSON-lines response from the worker's stdout.
     ///
-    /// Skips empty lines and non-JSON noise (up to
-    /// [`MAX_RESPONSE_STDOUT_NOISE_LINES`]). On pipe errors or EOF, drains
-    /// stderr for diagnostic output before returning the error.
+    /// Skips blank lines and noise (up to
+    /// [`MAX_RESPONSE_STDOUT_NOISE_LINES`] in a row), by the one line rule
+    /// ([`WireLine`]). On pipe errors or EOF, drains stderr for diagnostic
+    /// output before returning the error.
     #[instrument(skip_all, fields(pid = %self.pid))]
     pub(super) async fn read_response(&mut self) -> Result<WorkerResponse, WorkerError> {
-        let mut skipped_noise_lines = 0usize;
+        // One response per call, so a run of noise ends with the call.
+        let mut noise = NoiseRun::default();
 
         loop {
             let mut line = String::new();
@@ -73,35 +76,17 @@ impl WorkerHandle {
                 return Err(WorkerError::ProcessExited { code, stderr });
             }
 
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            match serde_json::from_str::<WorkerResponse>(&line) {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                        return Err(WorkerError::Protocol(format!(
-                            "failed to decode response: {e} (line: {line:?})"
-                        )));
-                    }
-
-                    skipped_noise_lines += 1;
-                    warn!(
-                        pid = %self.pid,
-                        target = %self.config.bootstrap_label(),
-                        line = trimmed,
-                        skipped_noise_lines,
-                        "Ignoring non-protocol stdout while waiting for worker response"
-                    );
-
-                    if skipped_noise_lines >= MAX_RESPONSE_STDOUT_NOISE_LINES {
-                        return Err(WorkerError::Protocol(format!(
-                            "worker emitted too many non-protocol stdout lines while waiting for response; last line: {line:?}"
-                        )));
-                    }
+            match WireLine::classify(&line) {
+                WireLine::Blank => {}
+                WireLine::Message(message) => {
+                    return WorkerResponse::deserialize(&message).map_err(|e| {
+                        WorkerError::Protocol(format!(
+                            "failed to decode response: {e} (line: {})",
+                            excerpt(line.trim())
+                        ))
+                    });
                 }
+                WireLine::Noise => noise.noise(&line).map_err(NoiseLimit::into_worker_error)?,
             }
         }
     }
@@ -113,25 +98,17 @@ impl WorkerHandle {
         // Tolerate progress preamble: a worker mid-bootstrap (e.g.
         // Stanza catalog still downloading) may emit progress_v2
         // events before it can answer the health probe.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let response = self
-            .read_response_skipping_progress_via_self(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => {
-                    WorkerError::HealthCheckFailed("timeout waiting for health response".into())
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress_via_self(
+                WorkerWait::Health,
+                crate::worker::HEALTH_TIMEOUT,
+                None,
+            )
+            .await?;
 
         let resp = match response {
             WorkerResponse::Health { response } => response,
-            WorkerResponse::Error { error, kind: _ } => {
-                // Health-check responses don't have a "bootstrap vs runtime"
-                // distinction at the application layer, any error here means
-                // the worker isn't healthy.
-                return Err(WorkerError::HealthCheckFailed(error));
-            }
+            WorkerResponse::Error(failure) => return Err(failure.into_health_error()),
             other => {
                 return Err(WorkerError::HealthCheckFailed(format!(
                     "unexpected response for health: {other:?}"
@@ -156,21 +133,22 @@ impl WorkerHandle {
     /// Timeout is generous (120s) for model downloads + initialization.
     pub async fn ensure_task(
         &mut self,
-        task: &str,
+        task: crate::worker::InferTask,
         engine_overrides: Option<&std::collections::BTreeMap<String, String>>,
-        timeout_s: u64,
+        timeout: crate::api::PositiveSeconds,
     ) -> Result<(), WorkerError> {
         // Fast path: skip IPC if already known-loaded.
-        if self.loaded_tasks.contains(task) {
+        if self.loaded_tasks.contains(&task) {
             return Ok(());
         }
 
-        use super::protocol::EnsureTaskRequest;
+        use super::protocol::{ControlRequestId, EnsureTaskRequest};
 
         self.write_request(&WorkerRequest::EnsureTask {
             request: EnsureTaskRequest {
-                task: task.to_owned(),
-                engine_overrides: engine_overrides.cloned(),
+                request_id: &ControlRequestId::next(),
+                task,
+                engine_overrides,
             },
         })
         .await?;
@@ -180,44 +158,28 @@ impl WorkerHandle {
         // checkpoint warm-ups all fire progress_v2 events from inside
         // this call. Tolerate them; the timeout is per the caller's
         // task budget, not per individual progress event.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
         let response = self
-            .read_response_skipping_progress_via_self(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => WorkerError::Protocol(
-                    format!("timeout ({timeout_s}s) waiting for ensure_task({task}) response"),
-                ),
-                other => other,
-            })?;
+            .read_response_skipping_progress_via_self(
+                WorkerWait::EnsureTask { task },
+                timeout,
+                None,
+            )
+            .await?;
 
         match response {
             WorkerResponse::EnsureTask { response } => {
+                let response = response.about(task)?;
                 tracing::info!(
                     pid = %self.pid,
-                    task = task,
+                    task = ?response.task,
                     status = %response.status,
-                    elapsed_s = response.elapsed_s,
+                    elapsed_s = response.elapsed_s.get(),
                     "ensure_task completed (sequential worker)"
                 );
-                self.loaded_tasks.insert(task.to_owned());
+                self.loaded_tasks.insert(task);
                 Ok(())
             }
-            WorkerResponse::Error { error, kind } => {
-                // ``ensure_task`` is the on-demand model-loading IPC; any error
-                // here is by definition a bootstrap-class failure regardless
-                // of the wire ``kind`` field. Default to ``Bootstrap`` if the
-                // worker emits ``Runtime`` (legacy or generic) so the
-                // orchestrator does not retry deterministic load failures.
-                match kind {
-                    crate::worker::handle::WorkerErrorKind::Bootstrap => Err(
-                        WorkerError::Bootstrap(format!("ensure_task failed: {error}")),
-                    ),
-                    crate::worker::handle::WorkerErrorKind::Runtime => Err(WorkerError::Bootstrap(
-                        format!("ensure_task failed: {error}"),
-                    )),
-                }
-            }
+            WorkerResponse::Error(failure) => Err(failure.into_ensure_task_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected response for ensure_task: {other:?}"
             ))),
@@ -236,20 +198,17 @@ impl WorkerHandle {
 
         // First-touch model loads (HF download, torch warmup) can fire
         // progress_v2 from inside the inference call too. Skip them.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         let response = self
-            .read_response_skipping_progress_via_self(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => {
-                    WorkerError::Protocol("timeout waiting for infer response".into())
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress_via_self(
+                WorkerWait::Infer,
+                crate::worker::INFER_TIMEOUT,
+                None,
+            )
+            .await?;
 
         match response {
             WorkerResponse::Infer { response } => Ok(response),
-            WorkerResponse::Error { error, kind } => Err(kind.into_worker_error(error)),
+            WorkerResponse::Error(failure) => Err(failure.into_worker_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected response for infer: {other:?}"
             ))),
@@ -268,25 +227,18 @@ impl WorkerHandle {
         self.write_request(&WorkerRequest::BatchInfer { request })
             .await?;
 
-        // Generous timeout: roughly 5s per item, minimum 120s.
-        let timeout_s = (request.items.len() as u64 * 5).max(120);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
-        let item_count = request.items.len();
+        let items = request.items.len();
         let response = self
-            .read_response_skipping_progress_via_self(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => {
-                    WorkerError::Protocol(format!(
-                        "timeout ({timeout_s}s) waiting for batch_infer response ({item_count} items)"
-                    ))
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress_via_self(
+                WorkerWait::BatchInfer { items },
+                batched_items_timeout(items as u64),
+                None,
+            )
+            .await?;
 
         match response {
             WorkerResponse::BatchInfer { response } => Ok(response),
-            WorkerResponse::Error { error, kind } => Err(kind.into_worker_error(error)),
+            WorkerResponse::Error(failure) => Err(failure.into_worker_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected response for batch_infer: {other:?}"
             ))),
@@ -332,21 +284,18 @@ impl WorkerHandle {
         self.write_request(&WorkerRequest::ExecuteV2 { request })
             .await?;
 
-        let timeout_s = request.timeout_seconds_with_config(
-            self.config.audio_task_timeout_s,
-            self.config.analysis_task_timeout_s,
-        );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
+        let limit = request.transport_timeout(self.config.task_timeouts);
+        let deadline = crate::worker::Deadline::after(limit);
 
         // Read loop: consume progress events until the final response arrives.
         loop {
-            let response = tokio::time::timeout_at(deadline, self.read_response())
-                .await
-                .map_err(|_| {
-                    let err = WorkerError::Protocol(format!(
-                        "timeout ({timeout_s}s) waiting for execute_v2 response ({:?})",
-                        request.task
-                    ));
+            let response = match deadline.within(self.read_response()).await {
+                Some(read) => read?,
+                None => {
+                    let err = WorkerError::Timeout {
+                        waited_for: WorkerWait::ExecuteV2 { task: request.task },
+                        limit,
+                    };
                     dump_failed_ipc_request(
                         self.pid,
                         &self.config.bootstrap_label(),
@@ -354,8 +303,9 @@ impl WorkerHandle {
                         &err,
                         None,
                     );
-                    err
-                })??;
+                    return Err(err);
+                }
+            };
 
             match response {
                 WorkerResponse::ProgressV2 { event } => {
@@ -371,11 +321,11 @@ impl WorkerHandle {
                     self.request_flight = super::RequestFlight::Idle;
                     return Ok(response);
                 }
-                WorkerResponse::Error { error, kind } => {
+                WorkerResponse::Error(failure) => {
                     // Also a complete, well-formed terminal message: the
                     // stream is not desynchronized, only the WORK failed.
                     self.request_flight = super::RequestFlight::Idle;
-                    let err = kind.into_worker_error(error);
+                    let err = failure.into_worker_error();
                     dump_failed_ipc_request(
                         self.pid,
                         &self.config.bootstrap_label(),
@@ -407,21 +357,29 @@ impl WorkerHandle {
 
     /// Query the worker's capabilities.
     pub async fn capabilities(&mut self) -> Result<WorkerCapabilities, WorkerError> {
-        self.write_request(&WorkerRequest::Capabilities).await?;
+        self.write_request(&WorkerRequest::Capabilities {
+            request: super::protocol::CapabilitiesRequest {
+                request_id: &super::protocol::ControlRequestId::next(),
+            },
+        })
+        .await?;
 
         // Import probes in _capabilities() may load heavy ML libraries
         // (torch, whisper, pyannote) on first invocation, AND on first
         // run a Stanza catalog download can fire `progress_v2` events
         // before the final `capabilities` response. Use the shared cold-start
         // budget; a health-check-sized wait can expire while imports progress.
-        let deadline = tokio::time::Instant::now() + crate::worker::CAPABILITY_TIMEOUT;
         let response = self
-            .read_response_skipping_progress_via_self(deadline, None)
+            .read_response_skipping_progress_via_self(
+                WorkerWait::Capabilities,
+                crate::worker::CAPABILITY_TIMEOUT,
+                None,
+            )
             .await?;
 
         match response {
             WorkerResponse::Capabilities { response } => Ok(response),
-            WorkerResponse::Error { error, kind } => Err(kind.into_worker_error(error)),
+            WorkerResponse::Error(failure) => Err(failure.into_worker_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected response for capabilities: {other:?}"
             ))),

@@ -1,140 +1,209 @@
 //! Transform-layer planning for secondary L2 dispatch.
 //!
 //! `batchalign` should only obtain primary/secondary UD analyses. The stable
-//! CHAT-specific planning seam lives here: contiguous span grouping,
-//! provenance-preserving word extraction, and host attachment planning.
+//! CHAT-specific planning seam lives here: contiguous span grouping and host
+//! attachment planning.
+//!
+//! The plan is a step in a chain of owned types, each made from the one
+//! before: deferred positions ([`L2DeferredPosition`]) become planned spans
+//! ([`L2SpanPlan`], which own their positions), a planned span and its
+//! secondary analysis become a merged span (`MergedL2Span`), and the splice
+//! consumes merged spans. No step refers back to an earlier one by a bare
+//! index.
 
+use talkbank_model::alignment::MorItemIndex;
 use talkbank_model::model::LanguageCode;
 
 use super::deprel::UdDeprel;
-use super::extract::L2DeferredPosition;
+use super::extract::{L2DeferredPosition, PrimaryStructuralInfo};
+use crate::morphosyntax::alignment::HeadTarget;
 
-/// How the secondary span's ROOT should anchor back into the host utterance.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum L2RootAnchor {
-    /// Attach the secondary ROOT under the current governing host chunk for the
-    /// chosen deferred placeholder position.
-    HostGovernor {
-        /// Global index into the `L2DeferredPosition` array for the deferred word
-        /// that supplied the host attachment.
-        source_deferred_index: usize,
-    },
-    /// Preserve utterance-root anchoring for the chosen deferred placeholder
-    /// position.
-    UtteranceRoot {
-        /// Global index into the `L2DeferredPosition` array for the deferred word
-        /// that supplied the root attachment.
-        source_deferred_index: usize,
-    },
-}
-
-/// Host-utterance attachment metadata for one secondary-dispatch span.
+/// How a secondary span's root attaches to the host utterance.
 ///
-/// This stays explicit until final lowering so secondary sentence roots can be
-/// re-anchored back into the host utterance without carrying raw numeric
-/// indices across word-domain/chunk-domain boundaries.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum L2Attachment {
-    /// The secondary span keeps its own internal ROOT; no host-side anchor.
-    #[default]
+/// Decided from the primary analysis of the span's words: the first word
+/// whose primary head lies outside the span is the ATTACHMENT SOURCE. The
+/// span root takes its place in the host tree.
+///
+/// `R` is the stage of the external relation: [`AsPlanned`] in a plan (the
+/// source's primary relation, with no field for anything else), and
+/// [`ExternalRelation`] once merged (the primary's, or the merge's
+/// correction). So a plan cannot carry a correction, and a merged span says
+/// which one it has.
+#[derive(Debug, Clone, PartialEq)]
+pub enum L2Attachment<R = AsPlanned> {
+    /// No span word attaches outside the span (only a cyclic primary
+    /// analysis gets here); the secondary root stays a root.
     InternalRoot,
-    /// The secondary ROOT should reattach to the host utterance, using the
-    /// supplied host-side deprel once splice resolves the actual chunk anchor
-    /// from the placeholder `%gra` relation.
-    ExternalRoot {
-        /// Host-side deprel to use when rewriting the secondary ROOT away from
-        /// `ROOT` after attaching it back to the host utterance.
-        host_deprel: UdDeprel,
-        /// Provenance for how the secondary ROOT should anchor back into the host.
-        root_anchor: L2RootAnchor,
+    /// The span root attaches under the host word the source's primary head
+    /// is, with the relation `relation` gives.
+    HostGovernor {
+        /// The span word whose primary head lies outside the span.
+        source_word: MorItemIndex,
+        /// The primary's structure for that word.
+        source: PrimaryStructuralInfo,
+        /// The external relation at this stage.
+        relation: R,
+    },
+    /// The source is the primary's utterance root, so the span root is the
+    /// utterance root. Its relation is `root` by definition: there is no
+    /// field to hold any other.
+    UtteranceRoot {
+        /// The span word the primary made the utterance root.
+        source_word: MorItemIndex,
     },
 }
 
-impl L2Attachment {
-    /// Returns the host-side deprel used when an external root attachment is
-    /// present.
-    pub fn external_root_deprel(&self) -> Option<&UdDeprel> {
+/// The stage of a host-governed span's external relation: which relation
+/// the span root takes, given the attachment source's primary structure.
+pub trait RelationStage: Clone + std::fmt::Debug + PartialEq {
+    /// The relation, read with the source it qualifies.
+    fn relation<'a>(&'a self, source: &'a PrimaryStructuralInfo) -> &'a UdDeprel;
+}
+
+/// A planned attachment's relation: the source's primary relation, as the
+/// primary gave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsPlanned;
+
+impl RelationStage for AsPlanned {
+    fn relation<'a>(&'a self, source: &'a PrimaryStructuralInfo) -> &'a UdDeprel {
+        source.deprel()
+    }
+}
+
+/// A merged attachment's relation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExternalRelation {
+    /// The source's primary relation stands.
+    Primary,
+    /// The merge corrected it against the secondary root's category.
+    Corrected(UdDeprel),
+}
+
+impl RelationStage for ExternalRelation {
+    fn relation<'a>(&'a self, source: &'a PrimaryStructuralInfo) -> &'a UdDeprel {
+        match self {
+            Self::Primary => source.deprel(),
+            Self::Corrected(deprel) => deprel,
+        }
+    }
+}
+
+impl<R: RelationStage> L2Attachment<R> {
+    /// The relation the span root gets in the host utterance, if it
+    /// attaches there.
+    pub fn external_root_deprel(&self) -> Option<UdDeprel> {
         match self {
             Self::InternalRoot => None,
-            Self::ExternalRoot { host_deprel, .. } => Some(host_deprel),
+            Self::HostGovernor {
+                relation, source, ..
+            } => Some(relation.relation(source).clone()),
+            Self::UtteranceRoot { .. } => Some(UdDeprel::new("root")),
         }
     }
 
-    /// Returns whether this span's secondary root attaches back to the host.
+    /// Whether the span root attaches to the host utterance.
     pub fn is_external_root(&self) -> bool {
-        matches!(self, Self::ExternalRoot { .. })
-    }
-
-    /// Returns the deferred position that supplied the root attachment.
-    pub fn source_deferred_index(&self) -> Option<usize> {
         match self {
-            Self::InternalRoot => None,
-            Self::ExternalRoot {
-                root_anchor:
-                    L2RootAnchor::HostGovernor {
-                        source_deferred_index,
-                    }
-                    | L2RootAnchor::UtteranceRoot {
-                        source_deferred_index,
-                    },
-                ..
-            } => Some(*source_deferred_index),
+            Self::InternalRoot => false,
+            Self::HostGovernor { .. } | Self::UtteranceRoot { .. } => true,
         }
     }
 
-    /// Returns whether the external root should attach to a host governor.
-    pub fn uses_host_governor_anchor(&self) -> bool {
-        matches!(
-            self,
-            Self::ExternalRoot {
-                root_anchor: L2RootAnchor::HostGovernor { .. },
-                ..
-            }
-        )
-    }
-
-    /// Returns whether the external root should preserve utterance-root anchoring.
-    pub fn uses_utterance_root_anchor(&self) -> bool {
-        matches!(
-            self,
-            Self::ExternalRoot {
-                root_anchor: L2RootAnchor::UtteranceRoot { .. },
-                ..
-            }
-        )
-    }
-
-    /// Return this attachment with a replacement host-side deprel, preserving
-    /// its anchor provenance.
-    pub fn with_host_deprel(&self, host_deprel: UdDeprel) -> Self {
+    /// The span word that decided the attachment.
+    pub fn source_word(&self) -> Option<MorItemIndex> {
         match self {
-            Self::InternalRoot => Self::InternalRoot,
-            Self::ExternalRoot { root_anchor, .. } => Self::ExternalRoot {
-                host_deprel,
-                root_anchor: root_anchor.clone(),
-            },
+            Self::InternalRoot => None,
+            Self::HostGovernor { source_word, .. } | Self::UtteranceRoot { source_word } => {
+                Some(*source_word)
+            }
+        }
+    }
+}
+
+impl L2Attachment<ExternalRelation> {
+    /// The merge's correction of the external relation, if it made one.
+    pub fn corrected_deprel(&self) -> Option<&UdDeprel> {
+        match self {
+            Self::HostGovernor {
+                relation: ExternalRelation::Corrected(deprel),
+                ..
+            } => Some(deprel),
+            Self::HostGovernor {
+                relation: ExternalRelation::Primary,
+                ..
+            }
+            | Self::InternalRoot
+            | Self::UtteranceRoot { .. } => None,
         }
     }
 }
 
 /// One contiguous secondary-dispatch span plus its planned host attachment.
+///
+/// Owns its deferred positions: consecutive host words of one utterance,
+/// one target language, at least one word. Built only by
+/// [`plan_dispatch_spans`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct L2SpanPlan {
-    /// Global indices into the `L2DeferredPosition` array.
-    pub deferred_indices: Vec<usize>,
+    pub(super) line_idx: usize,
+    pub(super) target_lang: LanguageCode,
+    pub(super) terminator: talkbank_model::Terminator,
+    /// The host word of `positions[0]`, stored so no reader handles an
+    /// empty span.
+    pub(super) first_word: MorItemIndex,
+    pub(super) positions: Vec<L2DeferredPosition>,
+    pub(super) attachment: L2Attachment,
+}
+
+impl L2SpanPlan {
     /// Owning line in the `ChatFile`.
-    pub line_idx: usize,
+    pub fn line_idx(&self) -> usize {
+        self.line_idx
+    }
+
     /// Target language to dispatch this span to.
-    pub target_lang: LanguageCode,
-    /// Provenance-sealed word texts to send to the secondary model.
-    pub words: Vec<talkbank_model::ChatCleanedText>,
-    /// Explicit host-attachment plan for the span's secondary root.
-    pub attachment: L2Attachment,
+    pub fn target_lang(&self) -> &LanguageCode {
+        &self.target_lang
+    }
+
     /// Terminator of the utterance this span came from.
     ///
     /// An INPUT to the secondary Stanza model, which changes its analysis
     /// when sentence-final punctuation is absent or wrong.
-    pub terminator: talkbank_model::Terminator,
+    pub fn terminator(&self) -> &talkbank_model::Terminator {
+        &self.terminator
+    }
+
+    /// The span's deferred positions, in host order.
+    pub fn positions(&self) -> &[L2DeferredPosition] {
+        &self.positions
+    }
+
+    /// Provenance-sealed word texts to send to the secondary model.
+    pub fn words(&self) -> impl Iterator<Item = &talkbank_model::ChatCleanedText> {
+        self.positions.iter().map(L2DeferredPosition::word)
+    }
+
+    /// Number of words in the span (at least one).
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// Whether the span has no words; producer-admitted plans are nonempty.
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
+    /// The host word the span starts at.
+    pub fn first_word(&self) -> MorItemIndex {
+        self.first_word
+    }
+
+    /// Explicit host-attachment plan for the span's secondary root.
+    pub fn attachment(&self) -> &L2Attachment {
+        &self.attachment
+    }
 }
 
 /// Full secondary-dispatch plan for one utterance batch.
@@ -144,134 +213,78 @@ pub struct L2DispatchPlan {
     pub spans: Vec<L2SpanPlan>,
 }
 
-fn planned_attachment(deferred: &[L2DeferredPosition], deferred_indices: &[usize]) -> L2Attachment {
-    let mut utterance_root_candidate: Option<(usize, UdDeprel)> = None;
+/// The attachment of a span, from its words' primary heads.
+fn planned_attachment(positions: &[L2DeferredPosition]) -> L2Attachment {
+    let covers = |head: MorItemIndex| positions.iter().any(|p| p.word_idx() == head);
+    let mut utterance_root = None;
 
-    for &global_idx in deferred_indices {
-        let Some(current) = deferred.get(global_idx) else {
-            tracing::warn!(
-                global_idx,
-                "L2 dispatch plan: deferred index out of range while computing attachment"
-            );
-            continue;
-        };
-
-        let primary_head = current.primary.head;
-        let head_in_span = primary_head > 0
-            && deferred_indices.iter().any(|&candidate_idx| {
-                deferred
-                    .get(candidate_idx)
-                    .is_some_and(|candidate| candidate.word_idx + 1 == primary_head)
-            });
-
-        if !head_in_span {
-            if primary_head > 0 {
-                return L2Attachment::ExternalRoot {
-                    host_deprel: current.primary.deprel.clone(),
-                    root_anchor: L2RootAnchor::HostGovernor {
-                        source_deferred_index: global_idx,
-                    },
+    for current in positions {
+        match current.primary().head() {
+            // The primary attached this word to a host word outside the
+            // span: it is the span's attachment source.
+            HeadTarget::Word(head) if !covers(head) => {
+                return L2Attachment::HostGovernor {
+                    source_word: current.word_idx(),
+                    source: current.primary().clone(),
+                    relation: AsPlanned,
                 };
             }
-            if primary_head == 0 && utterance_root_candidate.is_none() {
-                // The L2 word is the host primary's utterance root.
-                // The host-side deprel for an UtteranceRoot anchor MUST
-                // be "root" so the splice's eventual head=0 promotion
-                // pairs with deprel=ROOT (joint invariant `(head == 0)
-                // ⟺ (deprel == "ROOT")`). Copying `current.primary.deprel`
-                // verbatim was the bug behind ~308 wild E722 occurrences
-                // (head=0 with deprel ∈ {DET, NMOD, …}) on 2026-05-06.
-                utterance_root_candidate = Some((global_idx, UdDeprel::new("root")));
+            // Attached inside the span: the secondary parse governs it.
+            HeadTarget::Word(_) => {}
+            // The primary's utterance root. A host-governed word later in
+            // the span still wins, so only the first root is remembered.
+            HeadTarget::Root => {
+                utterance_root.get_or_insert(current.word_idx());
             }
         }
     }
 
-    if let Some((source_deferred_index, host_deprel)) = utterance_root_candidate {
-        return L2Attachment::ExternalRoot {
-            host_deprel,
-            root_anchor: L2RootAnchor::UtteranceRoot {
-                source_deferred_index,
-            },
-        };
+    match utterance_root {
+        Some(source_word) => L2Attachment::UtteranceRoot { source_word },
+        None => L2Attachment::InternalRoot,
     }
-
-    L2Attachment::InternalRoot
 }
 
-fn push_planned_span(
-    spans: &mut Vec<L2SpanPlan>,
-    deferred: &[L2DeferredPosition],
-    line_idx: usize,
-    target_lang: LanguageCode,
-    deferred_indices: Vec<usize>,
-    words: Vec<talkbank_model::ChatCleanedText>,
-    terminator: talkbank_model::Terminator,
-) {
-    if deferred_indices.is_empty() {
-        return;
-    }
-
-    spans.push(L2SpanPlan {
-        attachment: planned_attachment(deferred, &deferred_indices),
-        deferred_indices,
-        line_idx,
-        target_lang,
-        words,
-        terminator,
-    });
+/// Whether host word `next` immediately follows host word `previous`.
+pub(super) fn follows(previous: MorItemIndex, next: MorItemIndex) -> bool {
+    previous.as_usize() + 1 == next.as_usize()
 }
 
-/// Plan contiguous secondary-dispatch spans from deferred positions.
+/// Plan contiguous secondary-dispatch spans from deferred positions,
+/// consuming them: each position moves into exactly one span.
 ///
-/// Everything a span needs travels on the positions themselves, so there is
-/// no second derivation to keep in step and no lookup that can miss.
-pub fn plan_dispatch_spans(deferred: &[L2DeferredPosition]) -> L2DispatchPlan {
-    let mut spans = Vec::new();
-    let mut current_indices = Vec::new();
-    let mut current_words = Vec::new();
-    let mut current_line: Option<(usize, talkbank_model::Terminator)> = None;
-    let mut current_lang: Option<LanguageCode> = None;
-    let mut previous_word_idx = None;
-
-    for (global_idx, def) in deferred.iter().enumerate() {
-        let extends = current_line.as_ref().map(|(idx, _)| *idx) == Some(def.line_idx)
-            && current_lang.as_ref() == Some(&def.target_lang)
-            && previous_word_idx.is_some_and(|prev| prev + 1 == def.word_idx);
-
-        if !extends {
-            if let (Some((line_idx, line_terminator)), Some(target_lang)) =
-                (current_line.take(), current_lang.take())
-            {
-                push_planned_span(
-                    &mut spans,
-                    deferred,
-                    line_idx,
-                    target_lang,
-                    std::mem::take(&mut current_indices),
-                    std::mem::take(&mut current_words),
-                    line_terminator,
-                );
-            }
-            current_line = Some((def.line_idx, def.terminator.clone()));
-            current_lang = Some(def.target_lang.clone());
+/// A span is a run of positions on one line, in one target language, at
+/// consecutive host words.
+pub fn plan_dispatch_spans(deferred: Vec<L2DeferredPosition>) -> L2DispatchPlan {
+    let mut runs: Vec<Vec<L2DeferredPosition>> = Vec::new();
+    for position in deferred {
+        let extends = |run: &Vec<L2DeferredPosition>| {
+            run.last().is_some_and(|previous| {
+                previous.line_idx() == position.line_idx()
+                    && previous.target_lang() == position.target_lang()
+                    && follows(previous.word_idx(), position.word_idx())
+            })
+        };
+        match runs.last_mut() {
+            Some(run) if extends(run) => run.push(position),
+            Some(_) | None => runs.push(vec![position]),
         }
-
-        current_indices.push(global_idx);
-        current_words.push(def.word.clone());
-        previous_word_idx = Some(def.word_idx);
     }
 
-    if let (Some((line_idx, line_terminator)), Some(target_lang)) = (current_line, current_lang) {
-        push_planned_span(
-            &mut spans,
-            deferred,
-            line_idx,
-            target_lang,
-            current_indices,
-            current_words,
-            line_terminator,
-        );
-    }
+    let spans = runs
+        .into_iter()
+        .filter_map(|positions| {
+            let first = positions.first()?;
+            Some(L2SpanPlan {
+                line_idx: first.line_idx(),
+                target_lang: first.target_lang().clone(),
+                terminator: first.terminator().clone(),
+                first_word: first.word_idx(),
+                attachment: planned_attachment(&positions),
+                positions,
+            })
+        })
+        .collect();
 
     L2DispatchPlan { spans }
 }
@@ -282,227 +295,122 @@ mod tests {
     use crate::morphosyntax::UniversalPos;
     use crate::morphosyntax::l2::PrimaryStructuralInfo;
 
+    /// A deferred position at host word `word_idx`, attached by the
+    /// primary to host word `head` (`None` for the utterance root).
     fn make_deferred(
         line_idx: usize,
         word_idx: usize,
         lang: &str,
         deprel: &str,
-        head: usize,
+        head: Option<usize>,
         word: &str,
     ) -> L2DeferredPosition {
-        L2DeferredPosition {
+        L2DeferredPosition::for_test(
             line_idx,
-            word_idx,
-            target_lang: LanguageCode::new(lang).expect("valid test language code"),
-            word: crate::parsed_word_text_cleaned(word),
-            terminator: talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
-            },
-            primary: PrimaryStructuralInfo {
-                deprel: UdDeprel::new(deprel),
-                upos: Some(UniversalPos::Noun),
-                head,
-                dependent_deprels: Vec::new(),
-                head_upos: Some(UniversalPos::Verb),
-            },
-        }
+            MorItemIndex::new(word_idx),
+            lang,
+            word,
+            PrimaryStructuralInfo::for_test(
+                deprel,
+                head.map_or(HeadTarget::Root, |word| {
+                    HeadTarget::Word(MorItemIndex::new(word))
+                }),
+                Some(UniversalPos::Verb),
+            ),
+        )
+    }
+
+    /// The span's words, as text.
+    fn words(span: &L2SpanPlan) -> Vec<&str> {
+        span.words().map(|word| word.as_str()).collect()
     }
 
     #[test]
     fn plan_dispatch_spans_tracks_external_attachment_for_contiguous_span() {
         let deferred = vec![
-            make_deferred(5, 1, "spa", "obj", 1, "los"),
-            make_deferred(5, 2, "spa", "obl", 1, "ninos"),
+            make_deferred(5, 1, "spa", "obj", Some(0), "los"),
+            make_deferred(5, 2, "spa", "obl", Some(0), "ninos"),
         ];
 
-        let plan = plan_dispatch_spans(&deferred);
+        let plan = plan_dispatch_spans(deferred);
         assert_eq!(plan.spans.len(), 1);
-        assert_eq!(plan.spans[0].deferred_indices, vec![0, 1]);
-        assert_eq!(plan.spans[0].line_idx, 5);
-        assert_eq!(plan.spans[0].words, vec!["los", "ninos"]);
-        assert_eq!(
-            plan.spans[0]
-                .attachment
-                .external_root_deprel()
-                .map(UdDeprel::as_str),
-            Some("obj")
-        );
-        assert!(plan.spans[0].attachment.is_external_root());
-        assert!(plan.spans[0].attachment.uses_host_governor_anchor());
-        assert_eq!(plan.spans[0].attachment.source_deferred_index(), Some(0));
+        let span = &plan.spans[0];
+        assert_eq!(span.line_idx(), 5);
+        assert_eq!(span.first_word(), MorItemIndex::new(1));
+        assert_eq!(words(span), ["los", "ninos"]);
+        assert!(matches!(
+            span.attachment(),
+            L2Attachment::HostGovernor { source_word, source, relation: AsPlanned }
+                if *source_word == MorItemIndex::new(1) && source.deprel().as_str() == "obj"
+        ));
     }
 
     #[test]
     fn plan_dispatch_spans_separates_noncontiguous_same_language_words() {
         let deferred = vec![
-            make_deferred(5, 1, "spa", "obj", 1, "uno"),
-            make_deferred(5, 3, "spa", "obl", 1, "dos"),
+            make_deferred(5, 1, "spa", "obj", Some(0), "uno"),
+            make_deferred(5, 3, "spa", "obl", Some(0), "dos"),
         ];
 
-        let plan = plan_dispatch_spans(&deferred);
+        let plan = plan_dispatch_spans(deferred);
         assert_eq!(plan.spans.len(), 2);
-        assert_eq!(plan.spans[0].deferred_indices, vec![0]);
-        assert_eq!(plan.spans[1].deferred_indices, vec![1]);
+        assert_eq!(words(&plan.spans[0]), ["uno"]);
+        assert_eq!(words(&plan.spans[1]), ["dos"]);
     }
 
+    /// A span whose earlier word is the primary's utterance root and whose
+    /// later word attaches to a host word attaches through the later word.
     #[test]
     fn plan_dispatch_spans_prefers_real_host_attachment_over_earlier_primary_root_noise() {
         let deferred = vec![
-            make_deferred(5, 1, "spa", "root", 0, "uno"),
-            make_deferred(5, 2, "spa", "obj", 6, "dos"),
+            make_deferred(5, 1, "spa", "root", None, "uno"),
+            make_deferred(5, 2, "spa", "obj", Some(5), "dos"),
         ];
 
-        let plan = plan_dispatch_spans(&deferred);
+        let plan = plan_dispatch_spans(deferred);
         assert_eq!(plan.spans.len(), 1);
-        assert_eq!(plan.spans[0].deferred_indices, vec![0, 1]);
-        assert_eq!(
-            plan.spans[0]
-                .attachment
-                .external_root_deprel()
-                .map(UdDeprel::as_str),
-            Some("obj"),
-            "when one contiguous @s span contains an earlier primary-root token \
-             and a later token with a real host-governed attachment, the plan \
-             must prefer the host-governed attachment source instead of \
-             collapsing the span to the earlier `root` deprel"
-        );
-        assert!(plan.spans[0].attachment.uses_host_governor_anchor());
-        assert_eq!(plan.spans[0].attachment.source_deferred_index(), Some(1));
+        assert!(matches!(
+            plan.spans[0].attachment(),
+            L2Attachment::HostGovernor { source_word, source, relation: AsPlanned }
+                if *source_word == MorItemIndex::new(2) && source.deprel().as_str() == "obj"
+        ));
     }
 
     #[test]
     fn plan_dispatch_spans_preserves_utterance_root_when_no_host_governor_exists() {
         let deferred = vec![
-            make_deferred(5, 1, "spa", "dep", 2, "uno"),
-            make_deferred(5, 2, "spa", "root", 0, "dos"),
+            make_deferred(5, 1, "spa", "dep", Some(2), "uno"),
+            make_deferred(5, 2, "spa", "root", None, "dos"),
         ];
 
-        let plan = plan_dispatch_spans(&deferred);
+        let plan = plan_dispatch_spans(deferred);
         assert_eq!(plan.spans.len(), 1);
-        assert_eq!(plan.spans[0].deferred_indices, vec![0, 1]);
-        assert!(plan.spans[0].attachment.is_external_root());
-        assert!(plan.spans[0].attachment.uses_utterance_root_anchor());
-        assert_eq!(plan.spans[0].attachment.source_deferred_index(), Some(1));
-    }
-
-    // ========================================================================
-    // Family B (planner level), RED tests pinning the planner's
-    // invariant violation that produces wild-corpus `head=0/deprel≠ROOT`.
-    //
-    // See the L2 architectural-reassessment notes (Family B partition,
-    // §4) for the structural rationale these tests pin.
-    //
-    // Bug location (suspected): `planned_attachment` at line 174-176:
-    //
-    //     if primary_head == 0 && utterance_root_candidate.is_none() {
-    //         utterance_root_candidate = Some((global_idx, current.primary.deprel.clone()));
-    //     }
-    //
-    // The planner copies the primary parse's deprel verbatim into
-    // `host_deprel`. If the primary's deprel for the head=0 token is
-    // anything other than "root" (case-insensitive), Stanza noise,
-    // edge-case copular constructions, mis-typed root labels, the
-    // splice then writes `head=0` paired with that non-"root" deprel,
-    // violating the bidirectional invariant `(head==0) ⟺ (deprel==ROOT)`.
-    //
-    // Wild evidence: sastre03.cha:843, herring09.cha:2570,
-    // sastre03.cha:2823 each exhibit `head=0` with `deprel ∈
-    // {DET, NMOD, …}`. See plan §3 Family B for full traces.
-    //
-    // Architectural rule the fix should enforce:
-    //
-    //     When `root_anchor == UtteranceRoot`, `host_deprel` MUST be
-    //     "root" (case-insensitive). The deprel of the secondary span's
-    //     externally-anchored root is determined by HOW it attaches to
-    //     the host (utterance root → "root"; host governor → primary
-    //     parse's deprel for the L2 position), not by what the primary
-    //     happened to label the L2 token internally.
-    // ========================================================================
-
-    /// **Family B planner RED-1**, when the L2 word is the host
-    /// primary's utterance root and primary's deprel is *not* "root"
-    /// (rare but observed in the wild via Stanza noise / typed
-    /// non-root labels), the planner must still emit
-    /// `host_deprel = "root"` for the `UtteranceRoot` attachment.
-    /// Otherwise the splice writes `head=0` paired with the bogus
-    /// deprel and the validator fires E722.
-    ///
-    /// EXPECTED on current build: FAILS, `planned_attachment` at
-    /// `plan.rs:175` copies `current.primary.deprel.clone()` verbatim,
-    /// so `host_deprel = "det"` here.
-    #[test]
-    fn family_b_planner_utterance_root_attachment_must_use_root_deprel_not_primary_deprel() {
-        // Single L2 word; primary parse marked it head=0 (utterance
-        // root) but with deprel="det", exactly the shape that produces
-        // the wild `head=0/deprel=DET` pattern at sastre03.cha:843.
-        let deferred = vec![make_deferred(5, 1, "spa", "det", 0, "el")];
-
-        let plan = plan_dispatch_spans(&deferred);
-        assert_eq!(plan.spans.len(), 1);
-
-        let attachment = &plan.spans[0].attachment;
-        assert!(
-            attachment.is_external_root(),
-            "head=0 L2 word must be planned as ExternalRoot, not InternalRoot"
-        );
-        assert!(
-            attachment.uses_utterance_root_anchor(),
-            "head=0 L2 word must anchor as UtteranceRoot"
-        );
-
-        let host_deprel = attachment.external_root_deprel().expect("external root");
-        assert!(
-            host_deprel.as_str().eq_ignore_ascii_case("root"),
-            "Family B planner bug: when the planned attachment is \
-             UtteranceRoot, host_deprel must be \"root\" so the splice's \
-             eventual head=0 promotion pairs with deprel=ROOT (joint \
-             invariant). Got host_deprel={:?}; the planner copied the \
-             primary's deprel verbatim instead of using \"root\".",
-            host_deprel.as_str()
+        assert_eq!(
+            plan.spans[0].attachment(),
+            &L2Attachment::UtteranceRoot {
+                source_word: MorItemIndex::new(2)
+            }
         );
     }
 
-    /// **Family B planner RED-2**, same bug surface for `nmod`.
-    /// Mirrors herring09.cha:2570 where the wild output has chunk 7
-    /// `head=0/deprel=NMOD`.
-    ///
-    /// EXPECTED on current build: FAILS for the same reason as -1.
+    /// A word the primary made the utterance root plans as `UtteranceRoot`
+    /// whatever label the primary gave it, and that attachment's relation
+    /// is `root`: the variant has no field for another one. (Copying the
+    /// primary's label here produced `head=0` with `DET`/`NMOD`, E722.)
     #[test]
-    fn family_b_planner_utterance_root_attachment_rejects_nmod_deprel_propagation() {
-        let deferred = vec![make_deferred(5, 1, "spa", "nmod", 0, "camino")];
+    fn a_primary_root_word_plans_as_utterance_root_with_relation_root() {
+        let plan = plan_dispatch_spans(vec![make_deferred(5, 1, "spa", "det", None, "el")]);
 
-        let plan = plan_dispatch_spans(&deferred);
-        let attachment = &plan.spans[0].attachment;
-
-        assert!(attachment.uses_utterance_root_anchor());
-        let host_deprel = attachment.external_root_deprel().expect("external root");
-        assert!(
-            host_deprel.as_str().eq_ignore_ascii_case("root"),
-            "Family B planner bug (nmod variant): host_deprel must be \
-             \"root\" for UtteranceRoot anchors regardless of the primary \
-             parse's local deprel for the L2 token. Got {:?}.",
-            host_deprel.as_str()
+        let attachment = plan.spans[0].attachment();
+        assert_eq!(
+            attachment,
+            &L2Attachment::UtteranceRoot {
+                source_word: MorItemIndex::new(1)
+            }
         );
-    }
-
-    /// **Family B planner GREEN guard**, the canonical case where
-    /// the primary's head=0 deprel IS "root". This must keep working
-    /// after the fix; locks the GREEN baseline so the fix doesn't
-    /// over-correct.
-    #[test]
-    fn family_b_planner_utterance_root_with_root_primary_deprel_stays_root() {
-        let deferred = vec![make_deferred(5, 1, "spa", "root", 0, "camino")];
-
-        let plan = plan_dispatch_spans(&deferred);
-        let attachment = &plan.spans[0].attachment;
-
-        assert!(attachment.uses_utterance_root_anchor());
-        let host_deprel = attachment.external_root_deprel().expect("external root");
-        assert!(
-            host_deprel.as_str().eq_ignore_ascii_case("root"),
-            "GREEN baseline: when primary deprel is already \"root\", \
-             host_deprel stays \"root\". Got {:?}.",
-            host_deprel.as_str()
+        assert_eq!(
+            attachment.external_root_deprel(),
+            Some(UdDeprel::new("root"))
         );
     }
 
@@ -512,20 +420,61 @@ mod tests {
     /// enters, in `extract`; here it only has to survive grouping.
     #[test]
     fn planned_span_carries_the_positions_terminator() {
-        let mut def = make_deferred(5, 1, "spa", "obj", 1, "camino");
-        def.terminator = talkbank_model::Terminator::Question {
-            span: talkbank_model::Span::DUMMY,
-        };
+        let def = make_deferred(5, 1, "spa", "obj", Some(0), "camino").with_terminator(
+            talkbank_model::Terminator::Question {
+                span: talkbank_model::Span::DUMMY,
+            },
+        );
 
-        let plan = plan_dispatch_spans(&[def]);
+        let plan = plan_dispatch_spans(vec![def]);
 
         assert!(
             matches!(
-                plan.spans[0].terminator,
+                plan.spans[0].terminator(),
                 talkbank_model::Terminator::Question { .. }
             ),
             "grouping must not substitute a period; got {:?}",
-            plan.spans[0].terminator
+            plan.spans[0].terminator()
         );
+    }
+
+    /// Positions on different lines are different spans.
+    #[test]
+    fn plan_dispatch_spans_separates_utterances() {
+        let plan = plan_dispatch_spans(vec![
+            make_deferred(3, 5, "eng", "obj", Some(0), "film"),
+            make_deferred(7, 2, "eng", "obj", Some(0), "studies"),
+        ]);
+        assert_eq!(plan.spans.len(), 2);
+    }
+
+    /// Adjacent positions in different target languages are different
+    /// spans, in transcript order.
+    #[test]
+    fn plan_dispatch_spans_separates_languages() {
+        let plan = plan_dispatch_spans(vec![
+            make_deferred(5, 2, "spa", "obj", Some(0), "tienda"),
+            make_deferred(5, 3, "fra", "obj", Some(0), "bonjour"),
+        ]);
+        let languages: Vec<&str> = plan
+            .spans
+            .iter()
+            .map(|span| span.target_lang().as_str())
+            .collect();
+        assert_eq!(languages, ["spa", "fra"]);
+    }
+
+    /// Three consecutive positions are one span of three words.
+    #[test]
+    fn plan_dispatch_spans_groups_three_consecutive_words() {
+        let plan = plan_dispatch_spans(vec![
+            make_deferred(10, 4, "eng", "amod", Some(6), "full"),
+            make_deferred(10, 5, "eng", "amod", Some(6), "English"),
+            make_deferred(10, 6, "eng", "obj", Some(0), "breakfast"),
+        ]);
+        assert_eq!(plan.spans.len(), 1);
+        assert_eq!(words(&plan.spans[0]), ["full", "English", "breakfast"]);
+        assert_eq!(plan.spans[0].len(), 3);
+        assert!(!plan.spans[0].is_empty());
     }
 }

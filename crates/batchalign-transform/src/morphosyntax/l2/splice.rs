@@ -3,19 +3,49 @@
 //! Overwrites `L2|xxx` MOR items with pre-mapped `Mor` items from the
 //! structural merge algorithm, and optionally corrects GRA deprels.
 
-use super::extract::L2DeferredPosition;
-use super::merge::MergedL2Morphology;
-use super::plan::{L2Attachment, L2RootAnchor};
-use talkbank_model::alignment::MorItemIndex;
+use super::merge::MergedL2Span;
+use super::plan::{L2Attachment, RelationStage};
+use talkbank_model::alignment::{GraHeadRef, MorItemIndex};
+use talkbank_model::model::dependent_tier::mor::tier::CoordinatedMutationError;
+use talkbank_model::model::dependent_tier::{
+    AttachmentRelation, BlockChunk, GraTier, HostRedirects, ItemTarget, MorTier,
+    RootRelationUnderHost, SpanRoot, SplicedBlock, SplicedBlockError,
+};
+
+/// Why the host anchor of a span could not be read.
+#[derive(Debug, thiserror::Error)]
+enum AnchorError {
+    /// The host tiers do not hold the attachment source's relation.
+    #[error("the attachment source's host relation cannot be read: {0}")]
+    Unreadable(#[from] CoordinatedMutationError),
+    /// A root label cannot attach a span under another chunk.
+    #[error(transparent)]
+    RootRelation(#[from] RootRelationUnderHost),
+    /// The secondary relations do not form an admitted tree.
+    #[error(transparent)]
+    Block(#[from] SplicedBlockError),
+    /// The attachment source must belong to the span it describes.
+    #[error("attachment source {source_word} is outside span {start}..{end}")]
+    SourceOutsideSpan {
+        source_word: usize,
+        start: usize,
+        end: usize,
+    },
+}
 
 /// Outcome of splicing L2 results into a `ChatFile`.
 #[derive(Debug, Default)]
 pub struct SpliceOutcome {
     /// Number of @s positions successfully spliced with real morphology.
     pub spliced: usize,
-    /// Number of @s positions that fell back to L2|xxx (no secondary result).
+    /// Number of words of the spliced spans that fell back to `L2|xxx`
+    /// (rolled back, or no `%mor` to place them in). Words whose span was
+    /// never merged are not counted here; the caller reports them.
     pub fallback: usize,
-    /// Number of GRA deprels corrected.
+    /// Number of corrected external relations written into `%gra`. A
+    /// correction is written only on a span root that ends attached to a
+    /// host governor. Utterance-root replacements and generic primary-root
+    /// fallback attachments are not external corrections and are not counted.
     pub gra_upgraded: usize,
 }
 
@@ -31,8 +61,8 @@ enum SpliceFallbackCategory {
     SecondaryNoRoot,
     SecondaryCycle,
     SecondaryHeadOob,
-    SecondaryChunkCountMismatch,
     SpliceInvariantOther,
+    HostAnchorUnreadable,
 }
 
 impl SpliceFallbackCategory {
@@ -48,8 +78,10 @@ impl SpliceFallbackCategory {
             MappingError::InvalidRoot { .. } => Self::SecondaryNoRoot,
             MappingError::CircularDependency { .. } => Self::SecondaryCycle,
             MappingError::InvalidHeadReference { .. } => Self::SecondaryHeadOob,
-            MappingError::ChunkCountMismatch { .. } => Self::SecondaryChunkCountMismatch,
-            _ => Self::SpliceInvariantOther,
+            MappingError::EmptyStem { .. }
+            | MappingError::InvalidDeprel { .. }
+            | MappingError::Sentence(_)
+            | MappingError::EmptyRangeComponents => Self::SpliceInvariantOther,
         }
     }
 }
@@ -61,8 +93,8 @@ impl std::fmt::Display for SpliceFallbackCategory {
             Self::SecondaryNoRoot => "secondary_no_root",
             Self::SecondaryCycle => "secondary_cycle",
             Self::SecondaryHeadOob => "secondary_head_oob",
-            Self::SecondaryChunkCountMismatch => "secondary_chunk_count_mismatch",
             Self::SpliceInvariantOther => "splice_invariant_other",
+            Self::HostAnchorUnreadable => "host_anchor_unreadable",
         };
         f.write_str(s)
     }
@@ -79,9 +111,8 @@ fn join_relations(relations: &[talkbank_model::model::GrammaticalRelation]) -> S
         .join(" ")
 }
 
-/// Outcome of the post-splice invariant gate. The single-position
-/// and multi-position splice branches both update their `outcome`
-/// counters off this result.
+/// Outcome of the post-splice invariant gate; `splice_span` updates its
+/// `outcome` counters off this result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpliceValidationResult {
     /// Splice output passed `validate_generated_gra`; commit.
@@ -92,13 +123,12 @@ enum SpliceValidationResult {
 }
 
 /// Position descriptor for a splice fallback's `tracing::warn!`
-/// payload. Single-position spans report `word_idx`; multi-position
-/// contiguous spans report the inclusive word-index range start
-/// and size, matching the shape of `splice_range_coordinated`'s
-/// `item_range` argument.
+/// payload. A one-word span reports its host word; a longer span
+/// reports its first host word and size, matching the shape of
+/// `splice_range_coordinated`'s `item_range` argument.
 #[derive(Debug, Clone, Copy)]
 enum SplicePositionDescriptor {
-    SingleWord { word_idx: usize },
+    SingleWord { word_idx: MorItemIndex },
     Span { range_start: usize, size: usize },
 }
 
@@ -111,7 +141,7 @@ struct SpliceFallbackContext<'a> {
     /// when the splice rolls back. For single-position splices this
     /// is a one-element slice; for multi-position contiguous spans,
     /// every word in the span.
-    word_indices_to_reset: &'a [usize],
+    word_indices_to_reset: &'a [MorItemIndex],
     position: SplicePositionDescriptor,
 }
 
@@ -151,7 +181,7 @@ fn validate_or_rollback_splice(
     *mor = mor_snapshot;
     *gra = gra_snapshot;
     for &word_idx in ctx.word_indices_to_reset {
-        if let Some(mor_item) = mor.items_mut().get_mut(word_idx) {
+        if let Some(mor_item) = mor.items_mut().get_mut(word_idx.as_usize()) {
             mor_item.main.reset_to_l2_placeholder();
         }
     }
@@ -160,7 +190,7 @@ fn validate_or_rollback_splice(
         SplicePositionDescriptor::SingleWord { word_idx } => {
             tracing::warn!(
                 line_idx = ctx.line_idx,
-                word_idx,
+                word_idx = word_idx.as_usize(),
                 target_lang = %ctx.target_lang,
                 category = %category,
                 invariant_error = %invariant_err,
@@ -196,478 +226,164 @@ fn validate_or_rollback_splice(
     SpliceValidationResult::RolledBack
 }
 
-/// Slice-based version: collect 0-indexed positions in `gras` whose
-/// relation is the strict splice-contract root, offset by
-/// `local_chunk_offset`. Used by both the splice loop (post-repair,
-/// where we have the gras slice but not a `MergedL2Morphology`) and
-/// by [`root_offsets_for_merged`].
-fn root_offsets_in_gras(
-    gras: &[talkbank_model::model::dependent_tier::GrammaticalRelation],
-    local_chunk_offset: usize,
-) -> Vec<usize> {
-    gras.iter()
-        .enumerate()
-        .filter(|(_, rel)| rel.head == 0 && rel.relation.eq_ignore_ascii_case("ROOT"))
-        .map(|(idx, _)| local_chunk_offset + idx)
-        .collect()
-}
-
-/// Slice-based version: pair each strict-root position in `gras`
-/// with the deprel `apply_safe_root_rewrites` should write at that
-/// position. Empty when `attachment` is not [`L2Attachment::ExternalRoot`].
-fn root_rewrites_for_attachment(
-    gras: &[talkbank_model::model::dependent_tier::GrammaticalRelation],
-    attachment: &L2Attachment,
-    local_chunk_offset: usize,
-) -> Vec<(usize, crate::morphosyntax::l2::deprel::UdDeprel)> {
-    let Some(rewrite) = attachment.external_root_deprel().cloned() else {
-        return Vec::new();
-    };
-    root_offsets_in_gras(gras, local_chunk_offset)
-        .into_iter()
-        .map(|idx| (idx, rewrite.clone()))
-        .collect()
-}
-
+/// Read the span attachment in the host's pre-splice numbering. Chatter
+/// owns translation and refuses an anchor inside or dependent on the span.
 fn current_root_anchor_for_attachment(
-    mor: &talkbank_model::model::MorTier,
-    gra: &talkbank_model::model::GraTier,
-    deferred: &[L2DeferredPosition],
-    attachment: &L2Attachment,
-) -> Option<usize> {
+    mor: &MorTier,
+    gra: &GraTier,
+    attachment: &L2Attachment<super::plan::ExternalRelation>,
+) -> Result<SpanRoot, AnchorError> {
     match attachment {
-        L2Attachment::InternalRoot => None,
-        L2Attachment::ExternalRoot {
-            root_anchor: L2RootAnchor::UtteranceRoot { .. },
-            ..
-        } => Some(0),
-        L2Attachment::ExternalRoot {
-            root_anchor:
-                L2RootAnchor::HostGovernor {
-                    source_deferred_index,
-                },
-            ..
+        L2Attachment::InternalRoot | L2Attachment::UtteranceRoot { .. } => {
+            Ok(SpanRoot::UtteranceRoot)
+        }
+        L2Attachment::HostGovernor {
+            source_word,
+            source,
+            relation,
         } => {
-            let current = deferred.get(*source_deferred_index)?;
-            mor.governing_head_for_item(gra, MorItemIndex::new(current.word_idx))
-                .ok()
-                .and_then(|head_ref| head_ref.word())
-                .map(|index| index.as_usize())
+            let head = mor.governing_head_for_item(gra, *source_word)?;
+            match head {
+                GraHeadRef::Root => Ok(SpanRoot::UtteranceRoot),
+                GraHeadRef::Word(chunk) => Ok(SpanRoot::HostChunk {
+                    chunk,
+                    relation: AttachmentRelation::new(relation.relation(source).to_chat_gra())?,
+                }),
+            }
         }
     }
 }
 
-fn anchor_depends_on_replaced_range(
-    gra: &talkbank_model::model::GraTier,
-    anchor: usize,
-    replaced_start: usize,
-    replaced_end: usize,
-) -> bool {
-    let mut current = anchor;
-    let mut seen = std::collections::HashSet::new();
-
-    while current > 0 && seen.insert(current) {
-        if current >= replaced_start && current <= replaced_end {
-            return true;
-        }
-
-        let Some(rel) = gra.relations().iter().find(|rel| rel.index == current) else {
-            return false;
-        };
-
-        if rel.head == 0 || rel.head == current {
-            return false;
-        }
-
-        current = rel.head;
-    }
-
-    false
-}
-
-fn safe_root_anchor_override(
-    gra: &talkbank_model::model::GraTier,
-    chunk_offset: usize,
-    old_chunks: usize,
-    new_chunks: usize,
-    root_offsets: &[usize],
-    candidate_anchor: Option<usize>,
-) -> Option<usize> {
-    let anchor = candidate_anchor?;
-    let final_len = gra.len().saturating_sub(old_chunks) + new_chunks;
-    if anchor > final_len {
-        return None;
-    }
-    if root_offsets
-        .iter()
-        .any(|local_idx| anchor == chunk_offset + local_idx + 1)
-    {
-        return None;
-    }
-
-    let replaced_start = chunk_offset + 1;
-    let replaced_end = chunk_offset + old_chunks;
-    if anchor_depends_on_replaced_range(gra, anchor, replaced_start, replaced_end) {
-        return None;
-    }
-
-    Some(anchor)
-}
-
-fn apply_safe_root_rewrites(
-    gra: &mut talkbank_model::model::GraTier,
-    chunk_offset: usize,
-    root_rewrites: &[(usize, crate::morphosyntax::l2::deprel::UdDeprel)],
-) {
-    for (local_idx, deprel) in root_rewrites {
-        if let Some(rel) = gra.relations_mut().get_mut(chunk_offset + local_idx)
-            && rel.head != 0
-            && rel.head != rel.index
-        {
-            rel.relation = deprel.to_chat_gra();
-        }
-    }
-}
-
-/// Detect and repair the post-splice `secondary_multi_root` shape:
-/// the L2 plan picked `UtteranceRoot` (so `splice_coordinated` kept
-/// `head=0/ROOT` for the L2 position) but the host's pre-splice gra
-/// already had a different `head=0/ROOT`, leaving two roots in the
-/// post-splice gra. The host's structure is canonical; demote the
-/// L2 contribution to attach to the host's root with a generic
-/// `dep` relation.
-///
-/// Operates on the WHOLE gra. `l2_chunk_offset` and `l2_chunk_count`
-/// identify the L2 span's chunk range; any `head=0/ROOT` inside that
-/// range is the L2 contribution. Any `head=0/ROOT` outside is the
-/// host's pre-existing root.
-///
-/// This catches the 43-rollbacks-per-750-file `secondary_multi_root`
-/// variant that the merge-stage `repair_secondary_gras` couldn't
-/// address (it only sees the span, not the surrounding host gra).
-fn demote_duplicate_l2_root(
-    gra: &mut talkbank_model::model::GraTier,
-    l2_chunk_offset: usize,
-    l2_chunk_count: usize,
-) {
-    let l2_range = l2_chunk_offset..(l2_chunk_offset + l2_chunk_count);
-    let root_indices: Vec<usize> = gra
-        .relations()
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.head == 0 && r.relation.eq_ignore_ascii_case("ROOT"))
-        .map(|(i, _)| i)
-        .collect();
-    if root_indices.len() <= 1 {
-        return;
-    }
-    let host_root_position = root_indices
-        .iter()
-        .find(|&&i| !l2_range.contains(&i))
-        .map(|&i| gra.relations()[i].index);
-    let Some(host_root_position) = host_root_position else {
-        // All roots are inside the L2 span; constructive-merge's
-        // `repair_secondary_gras` is responsible for that case.
-        return;
+/// Host dependents of the primary attachment source follow the secondary
+/// span root. Other words retain their own counterpart's head chunk.
+fn host_redirects(
+    attachment: &L2Attachment<super::plan::ExternalRelation>,
+    range: &std::ops::Range<usize>,
+    root: BlockChunk,
+) -> Result<HostRedirects, AnchorError> {
+    let Some(source) = attachment.source_word() else {
+        return Ok(HostRedirects::ByItem);
     };
-    for &i in root_indices.iter().filter(|&&i| l2_range.contains(&i)) {
-        let rel = &mut gra.relations_mut()[i];
-        rel.head = host_root_position;
-        rel.relation = "DEP".into();
+    let source_word = source.as_usize();
+    if !range.contains(&source_word) {
+        return Err(AnchorError::SourceOutsideSpan {
+            source_word,
+            start: range.start,
+            end: range.end,
+        });
+    }
+    Ok(HostRedirects::PerItem(
+        range
+            .clone()
+            .map(|item| {
+                if item == source_word {
+                    ItemTarget::Chunk(root)
+                } else {
+                    ItemTarget::Counterpart
+                }
+            })
+            .collect(),
+    ))
+}
+
+/// The attachment actually admitted, distinct from the requested plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppliedAttachment {
+    PlannedHost,
+    UtteranceRoot,
+    PrimaryRootFallback,
+}
+
+/// Retain the primary root when the secondary requests the utterance root
+/// but a host root survives outside the span. This is the explicit generic
+/// DEP policy; the splice itself never invents that relation.
+fn splice_with_primary_root_policy(
+    mor: &mut MorTier,
+    gra: &mut GraTier,
+    range: std::ops::Range<usize>,
+    block: SplicedBlock,
+    root: SpanRoot,
+    redirects: HostRedirects,
+) -> Result<AppliedAttachment, AnchorError> {
+    let planned = match &root {
+        SpanRoot::HostChunk { .. } => AppliedAttachment::PlannedHost,
+        SpanRoot::UtteranceRoot => AppliedAttachment::UtteranceRoot,
+    };
+    match mor.splice_range_coordinated(gra, range.clone(), block.clone(), root, redirects.clone()) {
+        Ok(()) => Ok(planned),
+        Err(CoordinatedMutationError::UtteranceRootTaken { host_root }) => {
+            mor.splice_range_coordinated(
+                gra,
+                range,
+                block,
+                SpanRoot::HostChunk {
+                    chunk: host_root,
+                    relation: AttachmentRelation::new("DEP")?,
+                },
+                redirects,
+            )?;
+            Ok(AppliedAttachment::PrimaryRootFallback)
+        }
+        Err(
+            CoordinatedMutationError::SpanRootDependsOnSpan { .. }
+            | CoordinatedMutationError::SpanRootInReplacedRange { .. }
+            | CoordinatedMutationError::SpanRootOutOfHost { .. },
+        ) => {
+            // Retry as the utterance root only if admission proves the
+            // primary root is being replaced, not surviving outside it.
+            mor.splice_range_coordinated(gra, range, block, SpanRoot::UtteranceRoot, redirects)?;
+            Ok(AppliedAttachment::UtteranceRoot)
+        }
+        Err(error) => Err(AnchorError::Unreadable(error)),
     }
 }
 
-/// Overwrite `L2|xxx` MOR items with merged morphology.
+/// Overwrite `L2|xxx` MOR items with merged spans, consuming them.
 ///
-/// Each `MergedL2Morphology` contains a fully-mapped `Mor` item (produced
-/// by `map_ud_sentence` which handles MWT contractions, then POS-overridden
-/// by the merge algorithm).
+/// Each [`MergedL2Span`] replaces the `%mor` items of its host words with
+/// the secondary's items, and the matching `%gra` relations with the
+/// secondary's span-relative relations, the span root reattached to the
+/// host as its attachment says. Every span goes through chatter's
+/// range splice ([`MorTier::splice_range_coordinated`]), which keeps the
+/// span's cross-word heads (`la@s fecha@s bien@s`: `la` and `bien` both
+/// under `fecha`) in one block.
 ///
-/// **Multi-position spans (2026-05-03 fix).** When a contiguous run of
-/// `@s` positions on the same line, in the same target language, was
-/// dispatched as one secondary Stanza sentence (mirroring the grouping
-/// in `super::spans::group_deferred_into_dispatch_spans`), the gras
-/// inside each per-position [`MergedL2Morphology`] use heads in
-/// SPAN-RELATIVE chunk space, including cross-position references
-/// (e.g. `la@s fecha@s bien@s` produces `la → fecha (head=2)` and
-/// `bien → fecha (head=2)`). Splicing each position with the
-/// per-item [`splice_coordinated`] misclassifies these as within-MWT
-/// and remaps them with the wrong `chunk_offset`, yielding the E722 +
-/// E724 cascade. To fix this, we group consecutive same-line same-language
-/// positions here and apply [`splice_range_coordinated`] to each
-/// multi-position span atomically. Single-position spans still use
-/// the existing [`splice_coordinated`] path so the (passing) MWT
-/// behavior is untouched.
+/// Every span is validated after splicing and rolled back to `L2|xxx` if
+/// the result breaks a `%gra` invariant.
 ///
-/// This function must be called AFTER `inject_results` has set L2|xxx on
-/// all @s positions.
+/// Must be called AFTER `inject_results` has set `L2|xxx` on every `@s`
+/// position.
+///
+/// [`MorTier::splice_range_coordinated`]: talkbank_model::model::MorTier::splice_range_coordinated
 pub fn splice_l2_into_chat(
     chat_file: &mut talkbank_model::model::ChatFile,
-    deferred: &[L2DeferredPosition],
-    merged_results: &[Option<MergedL2Morphology>],
+    mut merged: Vec<MergedL2Span>,
 ) -> SpliceOutcome {
-    use talkbank_model::model::DependentTier;
-    use talkbank_model::model::Line;
-
+    // Transcript order, whatever order the caller merged in (it batches by
+    // language): each splice reads the %gra the previous ones left, so the
+    // order is part of the result.
+    merged.sort_by_key(|span| (span.line_idx, span.first_word));
     let mut outcome = SpliceOutcome::default();
-
-    // Walk deferred positions, grouping into contiguous spans that match
-    // the dispatch grouping (same `line_idx`, same `target_lang`,
-    // consecutive `word_idx`). The splice algorithm then differs by span
-    // size: 1 → existing per-item splice; >1 → atomic range splice that
-    // preserves cross-position head references.
-    let mut i = 0;
-    while i < deferred.len() {
-        // Find the end of the contiguous span starting at i.
-        let mut j = i + 1;
-        while j < deferred.len()
-            && deferred[j].line_idx == deferred[i].line_idx
-            && deferred[j].target_lang == deferred[i].target_lang
-            && deferred[j].word_idx == deferred[j - 1].word_idx + 1
-        {
-            j += 1;
-        }
-        let span_indices = i..j;
-        i = j;
-
-        // Any position in the span without a merged result falls back
-        // (no secondary inference for that target language). We process
-        // the span only if EVERY position has a merged result; otherwise
-        // each missing position is fallback and present positions go
-        // through the per-item path so partial spans still get value.
-        let all_present = span_indices.clone().all(|k| merged_results[k].is_some());
-
-        if !all_present {
-            for k in span_indices {
-                match merged_results[k].as_ref() {
-                    None => outcome.fallback += 1,
-                    Some(merged) => {
-                        splice_one_position(chat_file, deferred, &deferred[k], merged, &mut outcome)
-                    }
-                }
-            }
-            continue;
-        }
-
-        // All positions have merged results.
-        let span_size = span_indices.end - span_indices.start;
-        if span_size == 1 {
-            let k = span_indices.start;
-            // `all_present` above guarantees this is Some; the None arm is a
-            // safe no-op fallback rather than a panic.
-            if let Some(merged) = merged_results[k].as_ref() {
-                splice_one_position(chat_file, deferred, &deferred[k], merged, &mut outcome);
-            } else {
-                outcome.fallback += 1;
-            }
-            continue;
-        }
-
-        // Multi-position span: aggregate per-position mors+gras and
-        // splice atomically.
-        let line_idx = deferred[span_indices.start].line_idx;
-        let utt = match &mut chat_file.lines.as_mut_slice()[line_idx] {
-            Line::Utterance(u) => u,
-            _ => {
-                outcome.fallback += span_size;
-                continue;
-            }
-        };
-        let mut mor_tier_ref = None;
-        let mut gra_tier_ref = None;
-        for tier in &mut utt.dependent_tiers {
-            match &mut tier.tier {
-                DependentTier::Mor(m) => mor_tier_ref = Some(m),
-                DependentTier::Gra(g) => gra_tier_ref = Some(g),
-                _ => {}
-            }
-        }
-
-        let mor = match mor_tier_ref {
-            Some(m) => m,
-            None => {
-                outcome.fallback += span_size;
-                continue;
-            }
-        };
-
-        // Aggregate mors and gras across the span. Each
-        // MergedL2Morphology's gras are span-relative-chunk-1-indexed
-        // by construction (sliced from map_ud_sentence's per-chunk
-        // output for this same span), so concatenating them produces
-        // a within-block-relative gra sequence, exactly the contract
-        // splice_range_coordinated expects.
-        let mut new_mors: Vec<talkbank_model::model::dependent_tier::mor::Mor> =
-            Vec::with_capacity(span_size);
-        let mut new_gras: Vec<talkbank_model::model::dependent_tier::GrammaticalRelation> =
-            Vec::new();
-        let mut any_corrected_deprel = false;
-        let mut local_chunk_offset = 0usize;
-        for k in span_indices.clone() {
-            // `all_present` above guarantees every position is Some; skip
-            // safely rather than panic if that invariant is ever broken.
-            let Some(merged) = merged_results[k].as_ref() else {
-                continue;
-            };
-            new_mors.push(merged.mor.clone());
-            new_gras.extend(merged.gras.iter().cloned());
-            if merged.corrected_deprel.is_some() {
-                any_corrected_deprel = true;
-            }
-            local_chunk_offset += merged.mor.count_chunks();
-        }
-
-        let item_range = deferred[span_indices.start].word_idx
-            ..deferred[span_indices.start].word_idx + span_size;
-
-        if let Some(gra) = gra_tier_ref {
-            let chunk_offset: usize = mor.items()[..item_range.start]
-                .iter()
-                .map(|m| m.count_chunks())
-                .sum();
-            let old_chunks: usize = mor.items()[item_range.clone()]
-                .iter()
-                .map(|m| m.count_chunks())
-                .sum();
-            // Constructive repair on aggregated span-level gras. The
-            // bounds for OOB clamp are span-total chunks
-            // (`local_chunk_offset` after the per-position loop above);
-            // cross-position head references like `head=2` for chunk 1
-            // pointing at chunk 2 of the span are valid here, not OOB.
-            // See `repair_secondary_gras` in merge.rs.
-            let span_attachment = merged_results[span_indices.start]
-                .as_ref()
-                .map(|m| m.attachment.clone())
-                .unwrap_or(L2Attachment::InternalRoot);
-            let root_offsets = crate::morphosyntax::l2::merge::repair_secondary_gras(
-                &mut new_gras,
-                &span_attachment,
-            );
-            // Post-repair root-rewrites for `apply_safe_root_rewrites`
-            // below: at-most-one strict root times the span
-            // attachment's deprel (empty when InternalRoot).
-            let root_rewrites: Vec<(usize, crate::morphosyntax::l2::deprel::UdDeprel)> =
-                match span_attachment.external_root_deprel() {
-                    Some(deprel) => root_offsets
-                        .iter()
-                        .map(|&idx| (idx, deprel.clone()))
-                        .collect(),
-                    None => Vec::new(),
-                };
-            let safe_anchor = safe_root_anchor_override(
-                gra,
-                chunk_offset,
-                old_chunks,
-                local_chunk_offset,
-                &root_offsets,
-                merged_results[span_indices.start]
-                    .as_ref()
-                    .and_then(|merged| {
-                        current_root_anchor_for_attachment(mor, gra, deferred, &merged.attachment)
-                    }),
-            );
-
-            // Whole-tier snapshot for rollback. `splice_range_coordinated`
-            // mutates `.head` and `.index` fields across the ENTIRE host
-            // gra (not just the spliced range), so slice-scoped restore
-            // is not structurally sufficient.
-            let mor_snapshot = mor.clone();
-            let gra_snapshot = gra.clone();
-
-            match mor.splice_range_coordinated(
-                gra,
-                item_range.clone(),
-                new_mors,
-                new_gras,
-                safe_anchor,
-            ) {
-                Ok(()) => {
-                    apply_safe_root_rewrites(gra, chunk_offset, &root_rewrites);
-                    demote_duplicate_l2_root(gra, chunk_offset, local_chunk_offset);
-
-                    let word_indices: Vec<usize> =
-                        span_indices.clone().map(|k| deferred[k].word_idx).collect();
-                    let merged_for_summary = merged_results;
-                    let span_indices_for_summary = span_indices.clone();
-                    match validate_or_rollback_splice(
-                        mor,
-                        gra,
-                        mor_snapshot,
-                        gra_snapshot,
-                        || {
-                            span_indices_for_summary
-                                .map(|k| {
-                                    merged_for_summary[k]
-                                        .as_ref()
-                                        .map(|m| join_relations(&m.gras))
-                                        .unwrap_or_default()
-                                })
-                                .collect()
-                        },
-                        SpliceFallbackContext {
-                            line_idx,
-                            target_lang: &deferred[span_indices.start].target_lang,
-                            word_indices_to_reset: &word_indices,
-                            position: SplicePositionDescriptor::Span {
-                                range_start: item_range.start,
-                                size: span_size,
-                            },
-                        },
-                    ) {
-                        SpliceValidationResult::Valid => {
-                            outcome.spliced += span_size;
-                            if any_corrected_deprel {
-                                outcome.gra_upgraded += 1;
-                            }
-                        }
-                        SpliceValidationResult::RolledBack => {
-                            outcome.fallback += span_size;
-                        }
-                    }
-                }
-                Err(_) => {
-                    outcome.fallback += span_size;
-                }
-            }
-        } else {
-            // No %gra tier: replace mor items in place, span-level. The
-            // single-position fallback already supports this; do the
-            // equivalent for the range here.
-            let start = deferred[span_indices.start].word_idx;
-            for (offset, mor_item) in new_mors.into_iter().enumerate() {
-                if let Some(slot) = mor.items_mut().get_mut(start + offset) {
-                    *slot = mor_item;
-                    outcome.spliced += 1;
-                } else {
-                    outcome.fallback += 1;
-                }
-            }
-        }
+    for span in merged {
+        splice_span(chat_file, span, &mut outcome);
     }
-
     outcome
 }
 
-/// Splice ONE merged L2 result into a host utterance. Extracted so the
-/// single-position path and the partial-span-fallback path share code.
-fn splice_one_position(
+/// Splice one merged span into its host utterance.
+fn splice_span(
     chat_file: &mut talkbank_model::model::ChatFile,
-    deferred: &[L2DeferredPosition],
-    def: &L2DeferredPosition,
-    merged: &MergedL2Morphology,
+    span: MergedL2Span,
     outcome: &mut SpliceOutcome,
 ) {
     use talkbank_model::model::DependentTier;
     use talkbank_model::model::Line;
 
-    let utt = match &mut chat_file.lines.as_mut_slice()[def.line_idx] {
-        Line::Utterance(u) => u,
-        _ => {
-            outcome.fallback += 1;
-            return;
-        }
+    let words = span.mors.len();
+    let Some(Line::Utterance(utt)) = chat_file.lines.as_mut_slice().get_mut(span.line_idx) else {
+        outcome.fallback += words;
+        return;
     };
-
     let mut mor_tier = None;
     let mut gra_tier = None;
     for tier in &mut utt.dependent_tiers {
@@ -677,123 +393,106 @@ fn splice_one_position(
             _ => {}
         }
     }
-
-    if let Some(mor) = mor_tier {
-        if let Some(gra) = gra_tier {
-            let chunk_offset: usize = mor.items()[..def.word_idx]
-                .iter()
-                .map(|m| m.count_chunks())
-                .sum();
-            let old_chunks = mor.items()[def.word_idx].count_chunks();
-            // Constructive repair: a single-position span IS its own
-            // span; gras.len() bounds head indices and the
-            // attachment dictates whether one head=0/ROOT must exist.
-            // See `repair_secondary_gras` in merge.rs.
-            let mut repaired_gras = merged.gras.clone();
-            let root_offsets = crate::morphosyntax::l2::merge::repair_secondary_gras(
-                &mut repaired_gras,
-                &merged.attachment,
-            );
-            let safe_anchor = safe_root_anchor_override(
-                gra,
-                chunk_offset,
-                old_chunks,
-                merged.mor.count_chunks(),
-                &root_offsets,
-                merged
-                    .attachment
-                    .is_external_root()
-                    .then(|| {
-                        current_root_anchor_for_attachment(mor, gra, deferred, &merged.attachment)
-                    })
-                    .flatten(),
-            );
-            // Whole-tier snapshot for rollback. `splice_coordinated`
-            // mutates `.head` and `.index` fields across the ENTIRE host
-            // gra (not just the spliced item), so slice-scoped restore
-            // is not structurally sufficient.
-            let mor_snapshot = mor.clone();
-            let gra_snapshot = gra.clone();
-
-            if mor
-                .splice_coordinated(
-                    gra,
-                    def.word_idx,
-                    merged.mor.clone(),
-                    repaired_gras.clone(),
-                    safe_anchor,
-                )
-                .is_ok()
-            {
-                let root_rewrites =
-                    root_rewrites_for_attachment(&repaired_gras, &merged.attachment, 0);
-                apply_safe_root_rewrites(gra, chunk_offset, &root_rewrites);
-                demote_duplicate_l2_root(gra, chunk_offset, merged.mor.count_chunks());
-
-                let word_indices = [def.word_idx];
-                match validate_or_rollback_splice(
-                    mor,
-                    gra,
-                    mor_snapshot,
-                    gra_snapshot,
-                    || vec![join_relations(&repaired_gras)],
-                    SpliceFallbackContext {
-                        line_idx: def.line_idx,
-                        target_lang: &def.target_lang,
-                        word_indices_to_reset: &word_indices,
-                        position: SplicePositionDescriptor::SingleWord {
-                            word_idx: def.word_idx,
-                        },
-                    },
-                ) {
-                    SpliceValidationResult::Valid => {
-                        outcome.spliced += 1;
-                        if merged.corrected_deprel.is_some() {
-                            outcome.gra_upgraded += 1;
-                        }
-                    }
-                    SpliceValidationResult::RolledBack => {
-                        outcome.fallback += 1;
-                    }
-                }
-            } else {
-                outcome.fallback += 1;
-            }
-        } else if let Some(mor_item) = mor.items_mut().get_mut(def.word_idx) {
-            *mor_item = merged.mor.clone();
-            outcome.spliced += 1;
-        } else {
-            outcome.fallback += 1;
-        }
-    } else {
-        outcome.fallback += 1;
+    let Some(mor) = mor_tier else {
+        outcome.fallback += words;
+        return;
+    };
+    let start = span.first_word.as_usize();
+    let item_range = start..start + words;
+    if item_range.end > mor.items().len() {
+        outcome.fallback += words;
+        return;
     }
-}
 
-/// Apply L2|xxx fallback to deferred positions that have no merged result.
-pub fn apply_l2_fallback(
-    chat_file: &mut talkbank_model::model::ChatFile,
-    deferred: &[L2DeferredPosition],
-) {
-    use talkbank_model::model::DependentTier;
-    use talkbank_model::model::Line;
+    let Some(gra) = gra_tier else {
+        // No %gra tier: only the %mor items change.
+        for (slot, item) in mor.items_mut()[item_range].iter_mut().zip(span.mors) {
+            *slot = item;
+        }
+        outcome.spliced += words;
+        return;
+    };
 
-    for def in deferred {
-        let utt = match &mut chat_file.lines.as_mut_slice()[def.line_idx] {
-            Line::Utterance(u) => u,
-            _ => continue,
-        };
-        let mor_tier = utt
-            .dependent_tiers
-            .iter_mut()
-            .find_map(|t| match &mut t.tier {
-                DependentTier::Mor(m) => Some(m),
-                _ => None,
-            });
-        if let Some(mor) = mor_tier
-            && let Some(mor_item) = mor.items_mut().get_mut(def.word_idx)
-        {
-            mor_item.main.reset_to_l2_placeholder();
+    let mut new_gras = span.gras;
+    crate::morphosyntax::l2::merge::repair_secondary_gras(&mut new_gras, &span.attachment);
+    let anchor = match current_root_anchor_for_attachment(mor, gra, &span.attachment) {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            tracing::warn!(
+                line_idx = span.line_idx,
+                span_word_start = start,
+                span_size = words,
+                target_lang = %span.target_lang,
+                category = %SpliceFallbackCategory::HostAnchorUnreadable,
+                %error,
+                "L2 splice fell back to L2|xxx: the host anchor of the span \
+                 root cannot be read"
+            );
+            outcome.fallback += words;
+            return;
+        }
+    };
+
+    // Whole-tier snapshot for rollback: chatter's splices re-index and
+    // re-head relations across the WHOLE host %gra, not just the block.
+    let mor_snapshot = mor.clone();
+    let gra_snapshot = gra.clone();
+    let secondary_gras = join_relations(&new_gras);
+
+    let position = match words {
+        1 => SplicePositionDescriptor::SingleWord {
+            word_idx: span.first_word,
+        },
+        _ => SplicePositionDescriptor::Span {
+            range_start: start,
+            size: words,
+        },
+    };
+    let prepared = (|| {
+        let block = SplicedBlock::new(span.mors, new_gras)?;
+        let redirects = host_redirects(&span.attachment, &item_range, block.root_chunk())?;
+        splice_with_primary_root_policy(mor, gra, item_range.clone(), block, anchor, redirects)
+    })();
+    let applied_attachment = match prepared {
+        Ok(applied_attachment) => applied_attachment,
+        Err(error) => {
+            tracing::warn!(
+                line_idx = span.line_idx,
+                span_word_start = start,
+                target_lang = %span.target_lang,
+                %error,
+                "L2 splice refused; the primary placeholders are retained"
+            );
+            outcome.fallback += words;
+            return;
+        }
+    };
+
+    let word_indices: Vec<MorItemIndex> = item_range.map(MorItemIndex::new).collect();
+    match validate_or_rollback_splice(
+        mor,
+        gra,
+        mor_snapshot,
+        gra_snapshot,
+        || vec![secondary_gras],
+        SpliceFallbackContext {
+            line_idx: span.line_idx,
+            target_lang: &span.target_lang,
+            word_indices_to_reset: &word_indices,
+            position,
+        },
+    ) {
+        SpliceValidationResult::Valid => {
+            outcome.spliced += words;
+            // A correction counts where it was written.
+            if applied_attachment == AppliedAttachment::PlannedHost
+                && span.attachment.corrected_deprel().is_some()
+            {
+                outcome.gra_upgraded += 1;
+            }
+        }
+        SpliceValidationResult::RolledBack => {
+            outcome.fallback += words;
         }
     }
 }
@@ -801,11 +500,13 @@ pub fn apply_l2_fallback(
 #[cfg(test)]
 mod cardinality_tests {
     use super::*;
+    use crate::morphosyntax::l2::deprel::UdDeprel;
     use crate::morphosyntax::l2::extract::{L2DeferredPosition, PrimaryStructuralInfo};
-    use crate::morphosyntax::l2::merge::MergedL2Morphology;
+    use crate::morphosyntax::l2::merge::MergedL2Span;
+    use crate::morphosyntax::l2::plan::ExternalRelation;
     use crate::parse::parse_lenient;
     use talkbank_model::ParseValidateOptions;
-    use talkbank_model::model::LanguageCode;
+    use talkbank_model::WriteChat;
     use talkbank_model::model::dependent_tier::GrammaticalRelation;
     use talkbank_model::model::dependent_tier::mor::{Mor, MorStem, MorWord, PosCategory};
     use talkbank_parser::TreeSitterParser;
@@ -857,33 +558,27 @@ mod cardinality_tests {
         // The L2 placeholder is at word_idx 1 (after "voici" at idx 0).
         // Host primary said the L2 word is utterance root (head=0,
         // deprel=root): chunk 2 in the host gra.
-        let deferred = vec![L2DeferredPosition {
+        let deferred = vec![L2DeferredPosition::for_test(
             line_idx,
-            word_idx: 1,
-            target_lang: LanguageCode::new("ara").expect("valid test language code"),
-            word: crate::parsed_word_text_cleaned("mrhba"),
-            terminator: talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
-            },
-            primary: PrimaryStructuralInfo {
-                deprel: crate::morphosyntax::l2::deprel::UdDeprel::new("root"),
-                upos: None,
-                head: 0,
-                dependent_deprels: Vec::new(),
-                head_upos: None,
-            },
-        }];
-        let merged = vec![Some(MergedL2Morphology {
+            MorItemIndex::new(1),
+            "ara",
+            "mrhba",
+            PrimaryStructuralInfo::for_test(
+                "root",
+                crate::morphosyntax::alignment::HeadTarget::Root,
+                None,
+            ),
+        )];
+        let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
                 GrammaticalRelation::new(1, 0, "ROOT"),
                 GrammaticalRelation::new(2, 1, "DEP"),
             ],
-            corrected_deprel: None,
-            attachment: L2Attachment::InternalRoot,
+            attachment: TestAttachment::Internal,
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
             outcome.spliced, 1,
             "splice must report success for the slot"
@@ -954,22 +649,25 @@ mod cardinality_tests {
         primary_deprel: &str,
         primary_head: usize,
     ) -> L2DeferredPosition {
-        L2DeferredPosition {
+        L2DeferredPosition::for_test(
             line_idx,
-            word_idx,
-            target_lang: LanguageCode::new(target_lang).expect("valid test language code"),
-            word: crate::parsed_word_text_cleaned("word"),
-            terminator: talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
-            },
-            primary: PrimaryStructuralInfo {
-                deprel: crate::morphosyntax::l2::deprel::UdDeprel::new(primary_deprel),
-                upos: None,
-                head: primary_head,
-                dependent_deprels: Vec::new(),
-                head_upos: None,
-            },
-        }
+            MorItemIndex::new(word_idx),
+            target_lang,
+            "word",
+            PrimaryStructuralInfo::for_test(
+                primary_deprel,
+                // The UD head id the primary gave, as the host word it
+                // lies in (fixtures have no contractions, so id `n` is
+                // word `n - 1`).
+                match primary_head.checked_sub(1) {
+                    None => crate::morphosyntax::alignment::HeadTarget::Root,
+                    Some(word) => {
+                        crate::morphosyntax::alignment::HeadTarget::Word(MorItemIndex::new(word))
+                    }
+                },
+                None,
+            ),
+        )
     }
 
     /// **RED test 1** (l2.md §6 / postmortem §6 Step 1): three contiguous
@@ -1000,30 +698,27 @@ mod cardinality_tests {
         // "fecha" (the second word in the secondary sentence), bien→head=2
         // means "fecha" too.
         let merged = vec![
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("det"), MorStem::new("la"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "DET")],
-                corrected_deprel: None,
-                attachment: L2Attachment::InternalRoot,
+                attachment: TestAttachment::Internal,
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(
                     PosCategory::new("noun"),
                     MorStem::new("fecha"),
                 )),
                 gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-                corrected_deprel: None,
-                attachment: L2Attachment::InternalRoot,
+                attachment: TestAttachment::Internal,
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("adv"), MorStem::new("bien"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "ADVMOD")],
-                corrected_deprel: None,
-                attachment: L2Attachment::InternalRoot,
+                attachment: TestAttachment::Internal,
             }),
         ];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 3, "all three positions must splice");
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1043,29 +738,28 @@ mod cardinality_tests {
             .with_post_clitic(MorWord::new(PosCategory::new("part"), MorStem::new("c2")));
 
         let deferred = vec![deferred_position(line_idx, 0, "fra", "root", 0)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
                 GrammaticalRelation::new(1, 0, "ROOT"),
                 GrammaticalRelation::new(2, 1, "DEP"),
                 GrammaticalRelation::new(3, 1, "DEP"),
             ],
-            corrected_deprel: None,
-            attachment: L2Attachment::InternalRoot,
+            attachment: TestAttachment::Internal,
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
     }
 
     /// **RED test 3**: phrasal-verb particle: an `@s` word whose merge
-    /// sets `corrected_deprel = Some("compound:prt")`. Verifies that
+    /// corrects the external relation to `compound:prt`. Verifies that
     /// (a) the splice still reports success and (b) the host's terminator
     /// gra is preserved (not silently overwritten by the corrected deprel
     /// path). The existing single-position test does not exercise the
-    /// `corrected_deprel.is_some()` branch.
+    /// corrected-relation branch.
     #[test]
     fn phrasal_verb_particle_preserves_terminator_gra() {
         // Host: `wake up .` where `up@s` is the L2 particle. Primary says
@@ -1088,16 +782,15 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "fra", "advmod", 1)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(PosCategory::new("part"), MorStem::new("up"))),
-            gras: vec![GrammaticalRelation::new(1, 0, "COMPOUND-PRT")],
-            corrected_deprel: Some(crate::morphosyntax::l2::deprel::UdDeprel::new(
-                "compound:prt",
-            )),
+            // The secondary's own analysis of the one-word span: its root.
+            // The splice writes the corrected relation on it.
+            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
             attachment: host_attachment(0, "compound:prt"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.gra_upgraded, 1);
         validate_morphosyntax(&mut chat_file);
@@ -1139,17 +832,16 @@ mod cardinality_tests {
             .with_post_clitic(MorWord::new(PosCategory::new("det"), MorStem::new("il")));
 
         let deferred = vec![deferred_position(line_idx, 0, "ita", "root", 0)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
                 GrammaticalRelation::new(1, 0, "ROOT"),
                 GrammaticalRelation::new(2, 1, "DET"),
             ],
-            corrected_deprel: None,
-            attachment: L2Attachment::InternalRoot,
+            attachment: TestAttachment::Internal,
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1171,17 +863,16 @@ mod cardinality_tests {
         let merged_mor = Mor::new(MorWord::new(PosCategory::new("verb"), MorStem::new("yel")))
             .with_post_clitic(MorWord::new(PosCategory::new("part"), MorStem::new("lo")));
         let deferred = vec![deferred_position(line_idx, 0, "ara", "root", 0)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
                 GrammaticalRelation::new(1, 0, "ROOT"),
                 GrammaticalRelation::new(2, 1, "DEP"),
             ],
-            corrected_deprel: None,
-            attachment: L2Attachment::InternalRoot,
+            attachment: TestAttachment::Internal,
         })];
 
-        splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        splice_positions(&mut chat_file, &deferred, merged);
 
         // Round-trip: serialize → re-parse → validate the re-parsed file.
         let parser = TreeSitterParser::new().unwrap();
@@ -1210,17 +901,16 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "spa", "obj", 1)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "obj"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1266,17 +956,16 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "spa", "case", 1)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "case"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1321,17 +1010,16 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "spa", "case", 2)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "case"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
 
@@ -1374,17 +1062,16 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "spa", "compound", 5)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "compound"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1428,17 +1115,16 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "spa", "obj", 1)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "obj"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1486,21 +1172,19 @@ mod cardinality_tests {
             deferred_position(line_idx, 3, "spa", "obl", 1),
         ];
         let merged = vec![
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("uno"))),
                 gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-                corrected_deprel: None,
                 attachment: host_attachment(0, "obj"),
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
                 gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-                corrected_deprel: None,
                 attachment: host_attachment(1, "obl"),
             }),
         ];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 2);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1558,21 +1242,19 @@ mod cardinality_tests {
             deferred_position(line_idx, 2, "spa", "root", 0),
         ];
         let merged = vec![
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("uno"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "DEP")],
-                corrected_deprel: None,
                 attachment: utterance_root_attachment(1),
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
                 gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-                corrected_deprel: None,
                 attachment: utterance_root_attachment(1),
             }),
         ];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 2);
         assert_eq!(outcome.fallback, 0);
         validate_morphosyntax(&mut chat_file);
@@ -1736,29 +1418,26 @@ mod cardinality_tests {
         //         determine since "lieutenant" is outside the secondary
         //         input: Stanza in practice may attach el→soy with
         //         deprel=det or similar)
-        // Each per-position MergedL2Morphology carries one chunk.
+        // Each position's result carries one chunk.
         let merged = vec![
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("pron"), MorStem::new("yo"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "NSUBJ")],
-                corrected_deprel: None,
                 attachment: utterance_root_attachment(2),
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("aux"), MorStem::new("ser"))),
                 gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-                corrected_deprel: None,
                 attachment: utterance_root_attachment(2),
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("det"), MorStem::new("el"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "DET")],
-                corrected_deprel: None,
                 attachment: utterance_root_attachment(2),
             }),
         ];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 3);
         assert_eq!(outcome.fallback, 0);
 
@@ -1805,24 +1484,22 @@ mod cardinality_tests {
             deferred_position(line_idx, 2, "spa", "flat", 2),
         ];
         let merged = vec![
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("det"), MorStem::new("el"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "DET")],
-                corrected_deprel: None,
                 attachment: host_attachment(0, "obl"),
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(
                     PosCategory::new("noun"),
                     MorStem::new("camino"),
                 )),
                 gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-                corrected_deprel: None,
                 attachment: host_attachment(0, "obl"),
             }),
         ];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 2);
         assert_eq!(outcome.fallback, 0);
 
@@ -1862,17 +1539,16 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "spa", "obj", 1)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "obj"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(outcome.spliced, 1);
         assert_eq!(outcome.fallback, 0);
 
@@ -1899,8 +1575,8 @@ mod cardinality_tests {
     // OR when our merge slicing math is wrong, the splice must either
     // correctly normalize or fall back to `L2|xxx` for the affected
     // position. Silent passthrough produced 756 wild errors on
-    // 2026-05-06 (E724=539, E713=109, E723=108): see
-    // `~/talkbank/still-have-error-3.log`.
+    // 2026-05-06 (E724=539, E713=109, E723=108) in one production
+    // run's validation log.
     //
     // Each fallback in production must emit a structured warning so
     // every fallback becomes an actionable TODO toward smarter merge
@@ -1975,14 +1651,13 @@ mod cardinality_tests {
 
         let deferred = vec![deferred_position(line_idx, 1, "spa", "root", 0)];
         // Adversarial: head=5 references a nonexistent chunk.
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
             gras: vec![GrammaticalRelation::new(1, 5, "COMPOUND")],
-            corrected_deprel: None,
             attachment: utterance_root_attachment(0),
         })];
 
-        splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        splice_positions(&mut chat_file, &deferred, merged);
         assert_post_splice_gra_valid(&mut chat_file, "C1: secondary head OOB (E713 wild shape)");
     }
 
@@ -2016,18 +1691,17 @@ mod cardinality_tests {
         let deferred = vec![deferred_position(line_idx, 1, "eng", "root", 0)];
         // Adversarial: secondary returns a 2-chunk MWT result with an
         // internal 2-cycle.
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("foo")))
                 .with_post_clitic(MorWord::new(PosCategory::new("part"), MorStem::new("bar"))),
             gras: vec![
                 GrammaticalRelation::new(1, 2, "FLAT"),
                 GrammaticalRelation::new(2, 1, "FLAT"),
             ],
-            corrected_deprel: None,
             attachment: utterance_root_attachment(0),
         })];
 
-        splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        splice_positions(&mut chat_file, &deferred, merged);
         assert_post_splice_gra_valid(&mut chat_file, "C2: secondary 2-cycle (E724 wild shape)");
     }
 
@@ -2063,18 +1737,17 @@ mod cardinality_tests {
         let deferred = vec![deferred_position(line_idx, 1, "spa", "obj", 1)];
         // Adversarial: secondary returns 2 chunks, BOTH labelled ROOT
         // with head=0.
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("a")))
                 .with_post_clitic(MorWord::new(PosCategory::new("noun"), MorStem::new("b"))),
             gras: vec![
                 GrammaticalRelation::new(1, 0, "ROOT"),
                 GrammaticalRelation::new(2, 0, "ROOT"),
             ],
-            corrected_deprel: None,
             attachment: host_attachment(0, "obj"),
         })];
 
-        splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        splice_positions(&mut chat_file, &deferred, merged);
         assert_post_splice_gra_valid(&mut chat_file, "C3: secondary multi-root (E723 wild shape)");
     }
 
@@ -2119,17 +1792,16 @@ mod cardinality_tests {
         // exist in this 1-chunk merged response). After the splice's
         // remap, head=2 maps to host chunk 3 (the period), creating a
         // 2-cycle (chunk 2 ↔ chunk 3).
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("foreign"),
             )),
             gras: vec![GrammaticalRelation::new(1, 2, "NMOD")],
-            corrected_deprel: None,
             attachment: utterance_root_attachment(0),
         })];
 
-        splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        splice_positions(&mut chat_file, &deferred, merged);
         assert_post_splice_gra_valid(
             &mut chat_file,
             "C4: secondary head into host terminator (bougzers wild shape)",
@@ -2196,21 +1868,19 @@ mod cardinality_tests {
         // `splice_range_coordinated` accepts the input. Only the cycle
         // invariant is violated.
         let merged = vec![
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("adp"), MorStem::new("a"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "FIXED")],
-                corrected_deprel: None,
                 attachment: host_attachment(0, "dep"),
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("b"))),
                 gras: vec![GrammaticalRelation::new(1, 1, "FLAT")],
-                corrected_deprel: None,
                 attachment: host_attachment(1, "dep"),
             }),
         ];
 
-        splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        splice_positions(&mut chat_file, &deferred, merged);
         assert_post_splice_gra_valid(
             &mut chat_file,
             "C6: multi-position contiguous internal cycle (maria20 wild shape)",
@@ -2249,23 +1919,21 @@ mod cardinality_tests {
         ];
         let merged = vec![
             // Position 1: adversarial OOB head=99
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("a"))),
                 gras: vec![GrammaticalRelation::new(1, 99, "COMPOUND")],
-                corrected_deprel: None,
                 attachment: host_attachment(0, "dep"),
             }),
             // Position 2: clean: should succeed normally and not be
             // disturbed by the failure at position 1.
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("b"))),
                 gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-                corrected_deprel: None,
                 attachment: host_attachment(1, "dep"),
             }),
         ];
 
-        splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        splice_positions(&mut chat_file, &deferred, merged);
         assert_post_splice_gra_valid(&mut chat_file, "C5: multi-position adversarial sweep");
     }
 
@@ -2324,17 +1992,16 @@ mod cardinality_tests {
         // Secondary's relation lacks head=0/ROOT, head=2 mimics the
         // wild warn-line `secondary_gras=["1|2|NMOD"]`. Single-chunk
         // merged Mor (one gra entry).
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
             gras: vec![GrammaticalRelation::new(1, 2, "NMOD")],
-            corrected_deprel: None,
-            attachment: L2Attachment::InternalRoot,
+            attachment: TestAttachment::Internal,
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
             outcome.spliced, 1,
             "InternalRoot span must splice successfully; merge must \
@@ -2402,17 +2069,16 @@ mod cardinality_tests {
             .unwrap();
 
         let deferred = vec![deferred_position(line_idx, 1, "ara", "obj", 1)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "obj"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
             outcome.spliced, 1,
             "ExternalRoot span must splice; secondary's `1|0|ROOT` must \
@@ -2483,17 +2149,16 @@ mod cardinality_tests {
         // Today: splice_coordinated maps 99 to a host index out of bounds
         // → secondary_head_oob. After fix: head clamped to anchor (host
         // pos 1, the verb), relation rewritten to host's `obj`.
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
             gras: vec![GrammaticalRelation::new(1, 99, "NMOD")],
-            corrected_deprel: None,
             attachment: host_attachment(0, "obj"),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
             outcome.spliced, 1,
             "OOB-head span must splice with head clamped to anchor. \
@@ -2562,17 +2227,16 @@ mod cardinality_tests {
         // root (UtteranceRoot attachment), but host's final gra has
         // the verb at position 2 as root.
         let deferred = vec![deferred_position(line_idx, 2, "fra", "root", 0)];
-        let merged = vec![Some(MergedL2Morphology {
+        let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
             gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
-            corrected_deprel: None,
             attachment: utterance_root_attachment(0),
         })];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
             outcome.spliced, 1,
             "L2 with UtteranceRoot conflicting with host root must \
@@ -2631,21 +2295,19 @@ mod cardinality_tests {
         // (in span-local indexing): pos 0's relation says head=2 (= span
         // pos 1), pos 1's relation says head=1 (= span pos 0). Cycle.
         let merged = vec![
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("x"))),
                 gras: vec![GrammaticalRelation::new(1, 2, "DEP")],
-                corrected_deprel: None,
-                attachment: L2Attachment::InternalRoot,
+                attachment: TestAttachment::Internal,
             }),
-            Some(MergedL2Morphology {
+            Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("y"))),
                 gras: vec![GrammaticalRelation::new(1, 1, "DEP")],
-                corrected_deprel: None,
-                attachment: L2Attachment::InternalRoot,
+                attachment: TestAttachment::Internal,
             }),
         ];
 
-        let outcome = splice_l2_into_chat(&mut chat_file, &deferred, &merged);
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
             outcome.spliced, 2,
             "cycle must be repaired into a valid tree; \
@@ -2659,25 +2321,381 @@ mod cardinality_tests {
         );
     }
 
-    /// Test helper: build an `ExternalRoot` attachment anchored to a host
-    /// governor at `source_deferred_index` carrying `deprel`.
-    fn host_attachment(source_deferred_index: usize, deprel: &str) -> L2Attachment {
-        L2Attachment::ExternalRoot {
-            host_deprel: crate::morphosyntax::l2::deprel::UdDeprel::new(deprel),
-            root_anchor: L2RootAnchor::HostGovernor {
-                source_deferred_index,
-            },
-        }
+    /// Spans splice in transcript order whatever order the caller merged
+    /// them in (the dispatcher batches by language). Each splice reads the
+    /// %gra the previous ones left, so the order is part of the result.
+    #[test]
+    fn spans_splice_in_transcript_order_whatever_the_input_order() {
+        let chat_text = "@UTF8\n\
+                         @Begin\n\
+                         @Languages:\teng, spa, fra\n\
+                         @Participants:\tPAR Participant\n\
+                         @ID:\teng|test|PAR|||||Participant|||\n\
+                         *PAR:\thost uno bridge dos tail .\n\
+                         %mor:\tverb|host L2|xxx noun|bridge L2|xxx noun|tail .\n\
+                         %gra:\t1|0|ROOT 2|1|DEP 3|1|OBJ 4|5|DEP 5|1|OBL 6|1|PUNCT\n\
+                         @End\n";
+        let parser = TreeSitterParser::new().unwrap();
+        let line_idx = parse_lenient(&parser, chat_text)
+            .0
+            .lines
+            .iter()
+            .position(|l| matches!(l, talkbank_model::model::Line::Utterance(_)))
+            .expect("fixture has an utterance");
+        let spans = |source: &L2DeferredPosition, other: &L2DeferredPosition| {
+            vec![
+                MergedL2Span::for_splice_test(
+                    line_idx,
+                    source.word_idx(),
+                    vec![
+                        Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("uno")))
+                            .with_post_clitic(MorWord::new(
+                                PosCategory::new("pron"),
+                                MorStem::new("lo"),
+                            )),
+                    ],
+                    vec![
+                        GrammaticalRelation::new(1, 0, "ROOT"),
+                        GrammaticalRelation::new(2, 1, "OBJ"),
+                    ],
+                    L2Attachment::HostGovernor {
+                        source_word: source.word_idx(),
+                        source: source.primary().clone(),
+                        relation: ExternalRelation::Primary,
+                    },
+                ),
+                MergedL2Span::for_splice_test(
+                    line_idx,
+                    other.word_idx(),
+                    vec![Mor::new(MorWord::new(
+                        PosCategory::new("noun"),
+                        MorStem::new("dos"),
+                    ))],
+                    vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                    L2Attachment::HostGovernor {
+                        source_word: other.word_idx(),
+                        source: other.primary().clone(),
+                        relation: ExternalRelation::Primary,
+                    },
+                ),
+            ]
+        };
+        let uno = deferred_position(line_idx, 1, "spa", "obj", 1);
+        let dos = deferred_position(line_idx, 3, "fra", "nmod", 5);
+        let render = |reverse: bool| {
+            let (mut chat_file, _errors) = parse_lenient(&parser, chat_text);
+            let mut merged = spans(&uno, &dos);
+            if reverse {
+                merged.reverse();
+            }
+            let outcome = splice_l2_into_chat(&mut chat_file, merged);
+            assert_eq!(outcome.spliced, 2, "{outcome:?}");
+            let talkbank_model::model::Line::Utterance(utt) = &chat_file.lines[line_idx] else {
+                unreachable!()
+            };
+            utt.gra_tier().map(|gra| gra.to_chat_string())
+        };
+        assert_eq!(render(true), render(false));
     }
 
-    /// Test helper: build an `ExternalRoot` attachment anchored to the
-    /// utterance root at `source_deferred_index`.
-    fn utterance_root_attachment(source_deferred_index: usize) -> L2Attachment {
-        L2Attachment::ExternalRoot {
-            host_deprel: crate::morphosyntax::l2::deprel::UdDeprel::new("root"),
-            root_anchor: L2RootAnchor::UtteranceRoot {
-                source_deferred_index,
+    /// Where a test position's span root attaches, by index into the
+    /// test's `deferred` list.
+    enum TestAttachment {
+        Internal,
+        Host(usize, &'static str),
+        UtteranceRoot(usize),
+    }
+
+    /// One word's result as these tests state it. [`splice_positions`]
+    /// groups consecutive results into spans the way the plan groups
+    /// words, each span taking its first position's attachment.
+    struct PositionResult {
+        mor: Mor,
+        gras: Vec<GrammaticalRelation>,
+        attachment: TestAttachment,
+    }
+
+    /// Group per-word results into merged spans (a `None` breaks a span and
+    /// counts as a fallback) and splice them.
+    fn splice_positions(
+        chat_file: &mut talkbank_model::model::ChatFile,
+        deferred: &[L2DeferredPosition],
+        merged: Vec<Option<PositionResult>>,
+    ) -> SpliceOutcome {
+        let attachment = |test: &TestAttachment| match *test {
+            TestAttachment::Internal => L2Attachment::InternalRoot,
+            // The test's relation is the primary's when it matches it, and
+            // otherwise the merge's correction.
+            TestAttachment::Host(source, deprel) => {
+                let primary = deferred[source].primary().clone();
+                let relation = match primary.deprel().as_str() == deprel {
+                    true => ExternalRelation::Primary,
+                    false => ExternalRelation::Corrected(UdDeprel::new(deprel)),
+                };
+                L2Attachment::HostGovernor {
+                    source_word: deferred[source].word_idx(),
+                    source: primary,
+                    relation,
+                }
+            }
+            TestAttachment::UtteranceRoot(source) => L2Attachment::UtteranceRoot {
+                source_word: deferred[source].word_idx(),
             },
+        };
+        let mut runs: Vec<Vec<(&L2DeferredPosition, PositionResult)>> = Vec::new();
+        let mut unmerged = 0;
+        let mut previous: Option<&L2DeferredPosition> = None;
+        for (position, result) in deferred.iter().zip(merged) {
+            let Some(result) = result else {
+                unmerged += 1;
+                previous = None;
+                continue;
+            };
+            let extends = previous.is_some_and(|previous| {
+                previous.line_idx() == position.line_idx()
+                    && previous.target_lang() == position.target_lang()
+                    && crate::morphosyntax::l2::plan::follows(
+                        previous.word_idx(),
+                        position.word_idx(),
+                    )
+            });
+            match runs.last_mut() {
+                Some(run) if extends => run.push((position, result)),
+                Some(_) | None => runs.push(vec![(position, result)]),
+            }
+            previous = Some(position);
         }
+        let spans = runs
+            .into_iter()
+            .map(|run| {
+                let (first, first_result) = &run[0];
+                let span_attachment = attachment(&first_result.attachment);
+                let line_idx = first.line_idx();
+                let first_word = first.word_idx();
+                let (mors, gras): (Vec<Mor>, Vec<Vec<GrammaticalRelation>>) = run
+                    .into_iter()
+                    .map(|(_, result)| (result.mor, result.gras))
+                    .unzip();
+                MergedL2Span::for_splice_test(
+                    line_idx,
+                    first_word,
+                    mors,
+                    gras.into_iter()
+                        .flatten()
+                        .enumerate()
+                        .map(|(position, mut relation)| {
+                            relation.index = position + 1;
+                            relation
+                        })
+                        .collect(),
+                    span_attachment,
+                )
+            })
+            .collect();
+        let mut outcome = splice_l2_into_chat(chat_file, spans);
+        outcome.fallback += unmerged;
+        outcome
+    }
+
+    /// Test helper: a span root attached under the host governor of the
+    /// position at `source`, with `deprel`.
+    fn host_attachment(source: usize, deprel: &'static str) -> TestAttachment {
+        TestAttachment::Host(source, deprel)
+    }
+
+    /// Test helper: a span root that is the utterance root, decided by the
+    /// position at `source`.
+    fn utterance_root_attachment(source: usize) -> TestAttachment {
+        TestAttachment::UtteranceRoot(source)
+    }
+
+    /// A one-utterance file with the given main tier and host tiers.
+    fn host_file(main: &str, mor: &str, gra: &str) -> (talkbank_model::model::ChatFile, usize) {
+        let chat_text = format!(
+            "@UTF8\n@Begin\n@Languages:\teng, spa\n@Participants:\tPAR Participant\n\
+             @ID:\teng|test|PAR|||||Participant|||\n*PAR:\t{main}\n%mor:\t{mor}\n\
+             %gra:\t{gra}\n@End\n"
+        );
+        let parser = TreeSitterParser::new().expect("parser");
+        let (chat_file, _errors) = parse_lenient(&parser, &chat_text);
+        let line_idx = chat_file
+            .lines
+            .iter()
+            .position(|l| matches!(l, talkbank_model::model::Line::Utterance(_)))
+            .expect("fixture has an utterance");
+        (chat_file, line_idx)
+    }
+
+    /// The `%gra` line of the fixture's utterance.
+    fn gra_line(chat_file: &talkbank_model::model::ChatFile, line_idx: usize) -> String {
+        let talkbank_model::model::Line::Utterance(utt) = &chat_file.lines[line_idx] else {
+            unreachable!("the fixture line is an utterance")
+        };
+        utt.gra_tier()
+            .map(|gra| gra.to_chat_string())
+            .unwrap_or_default()
+    }
+
+    /// A corrected relation is counted only where it was written.
+    ///
+    /// `dos` attaches outside the span to `casa`, but `casa` depends on the
+    /// span (`uno`), so attaching the span root to it would make a cycle:
+    /// the span root stays the utterance root, and the corrected relation
+    /// is written nowhere. `gra_upgraded` used to count it anyway, one per
+    /// span with a correction.
+    #[test]
+    fn an_unwritten_correction_is_not_counted() {
+        let (mut chat_file, line_idx) = host_file(
+            "uno@s:spa dos@s:spa casa .",
+            "L2|xxx L2|xxx noun|casa .",
+            "1|0|ROOT 2|3|OBJ 3|1|NMOD 4|1|PUNCT",
+        );
+        let deferred = vec![
+            deferred_position(line_idx, 0, "spa", "root", 0),
+            deferred_position(line_idx, 1, "spa", "obj", 3),
+        ];
+        let merged = vec![
+            Some(PositionResult {
+                mor: Mor::new(MorWord::new(PosCategory::new("num"), MorStem::new("uno"))),
+                gras: vec![GrammaticalRelation::new(1, 2, "NUMMOD")],
+                attachment: host_attachment(1, "nmod"),
+            }),
+            Some(PositionResult {
+                mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
+                gras: vec![GrammaticalRelation::new(2, 0, "ROOT")],
+                attachment: TestAttachment::Internal,
+            }),
+        ];
+
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
+
+        assert_eq!(outcome.spliced, 2, "{outcome:?}");
+        let gra = gra_line(&chat_file, line_idx);
+        assert!(
+            gra.contains(" 2|0|ROOT "),
+            "the span root stays the root: {gra}"
+        );
+        assert_eq!(outcome.gra_upgraded, 0, "no corrected relation was written");
+    }
+
+    /// A host anchor that cannot be read is an error with its reason, not
+    /// "no anchor": the latter used to send the splice on with the span
+    /// root's old head.
+    #[test]
+    fn an_unreadable_host_anchor_is_an_error() {
+        let (chat_file, line_idx) = host_file(
+            "dos@s:spa casa .",
+            "L2|xxx noun|casa .",
+            "1|2|NMOD 2|0|ROOT 3|2|PUNCT",
+        );
+        let talkbank_model::model::Line::Utterance(utt) = &chat_file.lines[line_idx] else {
+            unreachable!("the fixture line is an utterance")
+        };
+        let mor = utt.mor_tier().expect("%mor");
+        let gra = utt.gra_tier().expect("%gra");
+        let source = deferred_position(line_idx, 5, "spa", "nmod", 2);
+        let attachment = L2Attachment::HostGovernor {
+            source_word: source.word_idx(),
+            source: source.primary().clone(),
+            relation: ExternalRelation::Primary,
+        };
+        assert!(
+            current_root_anchor_for_attachment(mor, gra, &attachment).is_err(),
+            "item 5 has no %gra relation to read"
+        );
+    }
+
+    /// The span root attaches to the host word it named, after a span that
+    /// grew past it.
+    ///
+    /// `dos` (one chunk) becomes `verb|dar~pron|lo` (two), and its host
+    /// governor `casa` lies after it, at chunk 2 before the splice and 3
+    /// after. chatter v0.27.0 applies the anchor as given, after the splice,
+    /// so the root lands on the span's own clitic and the cycle rolls the
+    /// splice back. chatter v0.28's `SpanRoot::HostChunk` names the chunk
+    /// before the splice and translates it.
+    #[test]
+    fn a_span_root_after_a_growing_span_attaches_to_its_host_word() {
+        let (mut chat_file, line_idx) = host_file(
+            "dos@s:spa casa .",
+            "L2|xxx noun|casa .",
+            "1|2|NMOD 2|0|ROOT 3|2|PUNCT",
+        );
+        let deferred = vec![deferred_position(line_idx, 0, "spa", "nmod", 2)];
+        let merged = vec![Some(PositionResult {
+            mor: Mor::new(MorWord::new(PosCategory::new("verb"), MorStem::new("dar")))
+                .with_post_clitic(MorWord::new(PosCategory::new("pron"), MorStem::new("lo"))),
+            gras: vec![
+                GrammaticalRelation::new(1, 0, "ROOT"),
+                GrammaticalRelation::new(2, 1, "OBJ"),
+            ],
+            attachment: host_attachment(0, "nmod"),
+        })];
+
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
+
+        assert_eq!(outcome.spliced, 1, "{outcome:?}");
+        assert_eq!(
+            gra_line(&chat_file, line_idx),
+            "%gra:\t1|3|NMOD 2|1|OBJ 3|0|ROOT 4|3|PUNCT"
+        );
+    }
+
+    /// A farther governor must follow its word when a preceding span grows.
+    #[test]
+    fn a_growing_span_keeps_its_farther_host_governor() {
+        let (mut chat_file, line_idx) = host_file(
+            "dos@s:spa muy casa .",
+            "L2|xxx adv|muy noun|casa .",
+            "1|3|NMOD 2|3|ADVMOD 3|0|ROOT 4|3|PUNCT",
+        );
+        let deferred = vec![deferred_position(line_idx, 0, "spa", "nmod", 3)];
+        let merged = vec![Some(PositionResult {
+            mor: Mor::new(MorWord::new(PosCategory::new("verb"), MorStem::new("dar")))
+                .with_post_clitic(MorWord::new(PosCategory::new("pron"), MorStem::new("lo"))),
+            gras: vec![
+                GrammaticalRelation::new(1, 0, "ROOT"),
+                GrammaticalRelation::new(2, 1, "OBJ"),
+            ],
+            attachment: host_attachment(0, "nmod"),
+        })];
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
+        assert_eq!(outcome.spliced, 1, "{outcome:?}");
+        assert_eq!(
+            gra_line(&chat_file, line_idx),
+            "%gra:\t1|4|NMOD 2|1|OBJ 3|4|ADVMOD 4|0|ROOT 5|4|PUNCT"
+        );
+    }
+
+    /// A host dependent of the primary representative follows the secondary root.
+    #[test]
+    fn host_dependents_of_the_attachment_source_follow_the_span_root() {
+        let (mut chat_file, line_idx) = host_file(
+            "uno@s:spa dos@s:spa muy casa .",
+            "L2|xxx L2|xxx adv|muy noun|casa .",
+            "1|4|NMOD 2|1|OBJ 3|1|ADVMOD 4|0|ROOT 5|4|PUNCT",
+        );
+        let deferred = vec![
+            deferred_position(line_idx, 0, "spa", "nmod", 4),
+            deferred_position(line_idx, 1, "spa", "obj", 1),
+        ];
+        let merged = vec![
+            Some(PositionResult {
+                mor: Mor::new(MorWord::new(PosCategory::new("num"), MorStem::new("uno"))),
+                gras: vec![GrammaticalRelation::new(1, 2, "NUMMOD")],
+                attachment: host_attachment(0, "nmod"),
+            }),
+            Some(PositionResult {
+                mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
+                gras: vec![GrammaticalRelation::new(2, 0, "ROOT")],
+                attachment: TestAttachment::Internal,
+            }),
+        ];
+        let outcome = splice_positions(&mut chat_file, &deferred, merged);
+        assert_eq!(outcome.spliced, 2, "{outcome:?}");
+        assert_eq!(
+            gra_line(&chat_file, line_idx),
+            "%gra:\t1|2|NUMMOD 2|4|NMOD 3|2|ADVMOD 4|0|ROOT 5|4|PUNCT"
+        );
     }
 }

@@ -27,7 +27,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{LanguageCode3, NonNegativeSeconds, NumSpeakers, WorkerLanguage};
+use crate::api::{
+    AudioPositionSeconds, LanguageCode3, NumSpeakers, PositiveSeconds, WorkerLanguage,
+};
 use crate::worker::WorkerPid;
 
 string_id!(
@@ -87,12 +89,12 @@ numeric_id!(
 
 /// Wall-clock decode budget for one ASR request, in seconds.
 ///
-/// Named apart from a bare `DurationSeconds` because this quantity
+/// Named apart from a bare `NonNegativeSeconds` length because this quantity
 /// carries a specific provenance contract: it is derived once, at
 /// request-build time, from the audio's own duration and
 /// [`DEADLINE_REALTIME_FACTOR`], and it is the value both the Python
 /// decode loop (`_qwen_chunking.DecodeBudget`) and the Rust transport
-/// ceiling (`TaskRequestV2::timeout_seconds_with_config`) are computed
+/// ceiling (`TaskRequestV2::transport_timeout`) are computed
 /// FROM. A generic duration carries no such contract, so reusing one
 /// here would let a caller pass an unrelated seconds value where this
 /// one is required.
@@ -165,7 +167,7 @@ pub const DEADLINE_REALTIME_FACTOR: f64 = 12.8;
 /// transport ceiling additionally has to cover audio load, alignment
 /// postprocessing, and IPC framing around that loop, so it must always be
 /// strictly larger than the budget it was computed from.
-pub const TRANSPORT_CEILING_MARGIN_SECONDS: u64 = 300;
+pub const TRANSPORT_CEILING_MARGIN: PositiveSeconds = PositiveSeconds::literal::<300>();
 
 /// Transport ceiling used for an ASR request whose audio duration is not
 /// knowable to Rust before dispatch (a provider-media request whose file
@@ -176,7 +178,8 @@ pub const TRANSPORT_CEILING_MARGIN_SECONDS: u64 = 300;
 /// case where [`DecodeBudgetSeconds`] genuinely cannot be derived, not a
 /// normal-case value, so it errs toward "wait longer" rather than toward a
 /// tight number a real long file could exceed.
-pub const PROVIDER_MEDIA_ASR_TRANSPORT_CEILING_SECONDS: u64 = 3600;
+pub const PROVIDER_MEDIA_ASR_TRANSPORT_CEILING: PositiveSeconds =
+    PositiveSeconds::literal::<3600>();
 
 impl DecodeBudgetSeconds {
     /// Derive a request's decode budget from a prepared audio artifact's
@@ -208,9 +211,9 @@ impl DecodeBudgetSeconds {
     /// budget: the budget itself plus the named margin, rounded up to the
     /// next whole second so the transport is never shorter than the
     /// fractional-second budget it was computed from.
-    pub fn transport_ceiling_seconds(self) -> u64 {
+    pub fn transport_ceiling(self) -> PositiveSeconds {
         let budget_seconds = self.as_seconds().max(0.0).ceil() as u64;
-        budget_seconds.saturating_add(TRANSPORT_CEILING_MARGIN_SECONDS)
+        TRANSPORT_CEILING_MARGIN.saturating_add_seconds(budget_seconds)
     }
 
     /// The budget's raw seconds value.
@@ -816,7 +819,7 @@ pub struct AsrRequestV2 {
     /// dispatch (see the request builder in
     /// `batchalign::worker::asr_request_v2`), never "no budget applies";
     /// the transport ceiling falls back to
-    /// [`PROVIDER_MEDIA_ASR_TRANSPORT_CEILING_SECONDS`] in that case. When
+    /// [`PROVIDER_MEDIA_ASR_TRANSPORT_CEILING`] in that case. When
     /// present, this is also the value Python's native Qwen3-ASR decode
     /// loop uses in place of re-deriving its own budget from the file it
     /// is given (`_qwen_chunking.DecodeBudget`), so the two ceilings are
@@ -1068,22 +1071,59 @@ pub struct ExecuteRequestV2 {
 }
 
 impl ExecuteRequestV2 {
-    /// Return the timeout budget this request should receive on the worker
-    /// transport.
-    pub fn timeout_seconds(&self) -> u64 {
-        self.payload.timeout_seconds()
+    /// How long the worker transport waits for this request's reply, under
+    /// the operator's overrides for audio and analysis tasks.
+    pub fn transport_timeout(&self, overrides: TaskTimeoutOverrides) -> PositiveSeconds {
+        self.payload.transport_timeout(overrides)
     }
+}
 
-    /// Return the timeout with optional config overrides for audio and
-    /// analysis tasks.
-    pub fn timeout_seconds_with_config(
-        &self,
-        audio_timeout_s: u64,
-        analysis_timeout_s: u64,
-    ) -> u64 {
-        self.payload
-            .timeout_seconds_with_config(audio_timeout_s, analysis_timeout_s)
-    }
+/// The transport ceiling for forced alignment and speaker diarization when the
+/// operator set no audio override.
+pub const DEFAULT_AUDIO_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<1800>();
+
+/// The transport ceiling for OpenSMILE and AVQI when the operator set no
+/// analysis override.
+pub const DEFAULT_ANALYSIS_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<120>();
+
+/// The minimum wait for a batched request, however few items it carries.
+const BATCHED_ITEMS_TIMEOUT_FLOOR: PositiveSeconds = PositiveSeconds::literal::<120>();
+
+/// Seconds a batched request is allowed per item above the floor.
+const BATCHED_ITEMS_SECONDS_PER_ITEM: u64 = 5;
+
+/// How long to wait for a batched request of `items` items: five seconds per
+/// item, never less than two minutes. Shared by the V2 text tasks, speaker
+/// embedding (per span) and the V1 `batch_infer` transport.
+pub const fn batched_items_timeout(items: u64) -> PositiveSeconds {
+    PositiveSeconds::at_least(
+        items.saturating_mul(BATCHED_ITEMS_SECONDS_PER_ITEM),
+        BATCHED_ITEMS_TIMEOUT_FLOOR,
+    )
+}
+
+/// The operator's overrides of the worker transport ceilings, each absent
+/// unless the operator set it (`server.yaml`'s `audio_task_timeout_s` and
+/// `analysis_task_timeout_s`, or `--timeout` for the audio one).
+///
+/// Absence is `None`, never a zero: the two used to travel as a pair of `u64`
+/// parameters in which `0` meant "the built-in default", through the pool,
+/// every worker handle and the registry, and each reader of the pair had to
+/// know that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskTimeoutOverrides {
+    /// Override for audio-heavy tasks (ASR, forced alignment, speaker).
+    pub audio: Option<PositiveSeconds>,
+    /// Override for lightweight analysis tasks (OpenSMILE, AVQI).
+    pub analysis: Option<PositiveSeconds>,
+}
+
+impl TaskTimeoutOverrides {
+    /// No overrides: every task gets its built-in ceiling.
+    pub const NONE: Self = Self {
+        audio: None,
+        analysis: None,
+    };
 }
 
 impl TaskRequestV2 {
@@ -1108,26 +1148,19 @@ impl TaskRequestV2 {
         }
     }
 
-    /// Return the timeout budget this task family should receive on the worker
-    /// transport.
-    pub fn timeout_seconds(&self) -> u64 {
-        self.timeout_seconds_with_config(0, 0)
-    }
-
-    /// Return the timeout with optional config overrides.
+    /// How long the worker transport waits for this task's reply, under the
+    /// operator's overrides.
     ///
-    /// When `audio_timeout_s` or `analysis_timeout_s` is 0, the built-in
-    /// defaults (1800 and 120) are used.
-    pub fn timeout_seconds_with_config(
-        &self,
-        audio_timeout_s: u64,
-        analysis_timeout_s: u64,
-    ) -> u64 {
+    /// An absent override leaves the task's built-in ceiling
+    /// ([`DEFAULT_AUDIO_TASK_TIMEOUT`], [`DEFAULT_ANALYSIS_TASK_TIMEOUT`],
+    /// or the budget the request carries).
+    pub fn transport_timeout(&self, overrides: TaskTimeoutOverrides) -> PositiveSeconds {
+        let audio_override = overrides.audio;
         match self {
-            Self::Morphosyntax(request) => batched_text_timeout_seconds(request.item_count),
-            Self::Utseg(request) => batched_text_timeout_seconds(request.item_count),
-            Self::Translate(request) => batched_text_timeout_seconds(request.item_count),
-            Self::Coref(request) => batched_text_timeout_seconds(request.item_count),
+            Self::Morphosyntax(request) => batched_items_timeout(u64::from(request.item_count)),
+            Self::Utseg(request) => batched_items_timeout(u64::from(request.item_count)),
+            Self::Translate(request) => batched_items_timeout(u64::from(request.item_count)),
+            Self::Coref(request) => batched_items_timeout(u64::from(request.item_count)),
             // The ASR request carries its own decode budget, derived from
             // the audio's actual duration (see `DecodeBudgetSeconds`), so
             // its transport ceiling scales with the file rather than using
@@ -1137,22 +1170,22 @@ impl TaskRequestV2 {
             // own budget needs, never lower it below.
             Self::Asr(request) => {
                 let derived = match request.decode_budget_seconds {
-                    Some(budget) => budget.transport_ceiling_seconds(),
-                    None => PROVIDER_MEDIA_ASR_TRANSPORT_CEILING_SECONDS,
+                    Some(budget) => budget.transport_ceiling(),
+                    None => PROVIDER_MEDIA_ASR_TRANSPORT_CEILING,
                 };
-                derived.max(audio_timeout_s)
+                match audio_override {
+                    Some(seconds) => derived.max(seconds),
+                    None => derived,
+                }
             }
             // Forced alignment and speaker diarization do not yet carry a
             // request-level duration the way ASR now does. A generous flat
             // ceiling remains here as their transport bound; scoped out of
             // the ASR decode-budget change (2026-09-02).
-            Self::ForcedAlignment(_) | Self::Speaker(_) => {
-                if audio_timeout_s > 0 {
-                    audio_timeout_s
-                } else {
-                    1800
-                }
-            }
+            Self::ForcedAlignment(_) | Self::Speaker(_) => match audio_override {
+                Some(seconds) => seconds,
+                None => DEFAULT_AUDIO_TASK_TIMEOUT,
+            },
             // Speaker embedding scales with the NUMBER OF SPANS rather than
             // with the recording, because the model runs once per span over a
             // few seconds of audio each and never over the whole file. The
@@ -1160,24 +1193,19 @@ impl TaskRequestV2 {
             // it reuses that budget rather than inheriting a flat 1800 that
             // says nothing about the work actually asked for.
             Self::SpeakerEmbedding(request) => {
-                let per_span = (request.spans.len() as u64).saturating_mul(5);
-                per_span.max(120).max(audio_timeout_s)
-            }
-            // Lightweight audio analysis: 120s is sufficient.
-            Self::Opensmile(_) | Self::Avqi(_) => {
-                if analysis_timeout_s > 0 {
-                    analysis_timeout_s
-                } else {
-                    120
+                let per_span = batched_items_timeout(request.spans.len() as u64);
+                match audio_override {
+                    Some(seconds) => per_span.max(seconds),
+                    None => per_span,
                 }
             }
+            // Lightweight audio analysis: 120s is sufficient.
+            Self::Opensmile(_) | Self::Avqi(_) => match overrides.analysis {
+                Some(seconds) => seconds,
+                None => DEFAULT_ANALYSIS_TASK_TIMEOUT,
+            },
         }
     }
-}
-
-/// Return the timeout budget for one batched text-inference request.
-fn batched_text_timeout_seconds(item_count: u32) -> u64 {
-    u64::from(item_count).saturating_mul(5).max(120)
 }
 
 /// One raw Whisper chunk as a producer emitted it: its words, and whichever
@@ -1187,8 +1215,8 @@ fn batched_text_timeout_seconds(item_count: u32) -> u64 {
 /// neither producer (the Python worker, the in-process whisper.cpp backend)
 /// repairs that. The consumer does, once, through `MonotoneChunkSpans` in
 /// `batchalign::worker::chunk_spans`; the only invariant the wire carries is
-/// that a bound, when present, is a finite non-negative duration, which its
-/// type proves.
+/// that a bound, when present, is a finite non-negative position in the
+/// audio, which its type proves.
 ///
 /// A bound is absent when the model predicted no timestamp for it: the
 /// HuggingFace pipeline reports `(start, None)` for a chunk cut off
@@ -1203,10 +1231,10 @@ pub struct WhisperChunkSpanV2 {
     pub text: String,
     /// Start timestamp in seconds, when the model reported one.
     #[serde(default)]
-    pub start_s: Option<NonNegativeSeconds>,
+    pub start_s: Option<AudioPositionSeconds>,
     /// End timestamp in seconds, when the model reported one.
     #[serde(default)]
-    pub end_s: Option<NonNegativeSeconds>,
+    pub end_s: Option<AudioPositionSeconds>,
 }
 
 #[cfg(test)]
@@ -1369,18 +1397,20 @@ mod tests {
             FrameCountV2(900 * 16_000),
             SampleRateHzV2(16_000),
         )));
-        let short_ceiling = TaskRequestV2::Asr(short).timeout_seconds_with_config(0, 0);
-        let long_ceiling = TaskRequestV2::Asr(long).timeout_seconds_with_config(0, 0);
+        let short_ceiling = TaskRequestV2::Asr(short).transport_timeout(TaskTimeoutOverrides::NONE);
+        let long_ceiling = TaskRequestV2::Asr(long).transport_timeout(TaskTimeoutOverrides::NONE);
         assert!(
             short_ceiling < long_ceiling,
             "a 30s file's ceiling ({short_ceiling}) must be below a 900s file's ({long_ceiling})"
         );
         assert_ne!(
-            short_ceiling, 1800,
+            short_ceiling.get(),
+            1800,
             "the flat 1800 ceiling must be gone for a request with a known decode budget"
         );
         assert_ne!(
-            long_ceiling, 1800,
+            long_ceiling.get(),
+            1800,
             "the flat 1800 ceiling must be gone for a request with a known decode budget"
         );
     }
@@ -1392,9 +1422,9 @@ mod tests {
             SampleRateHzV2(16_000),
         )));
         let sent_budget = request.decode_budget_seconds.expect("budget set above");
-        let ceiling = TaskRequestV2::Asr(request).timeout_seconds_with_config(0, 0);
+        let ceiling = TaskRequestV2::Asr(request).transport_timeout(TaskTimeoutOverrides::NONE);
         assert!(
-            (ceiling as f64) >= sent_budget.as_seconds(),
+            (ceiling.get() as f64) >= sent_budget.as_seconds(),
             "transport ceiling ({ceiling}) must never be shorter than the decode budget it sent ({})",
             sent_budget.as_seconds()
         );
@@ -1403,8 +1433,35 @@ mod tests {
     #[test]
     fn asr_ceiling_falls_back_to_named_constant_when_budget_unknown() {
         let request = asr_request(None);
-        let ceiling = TaskRequestV2::Asr(request).timeout_seconds_with_config(0, 0);
-        assert_eq!(ceiling, PROVIDER_MEDIA_ASR_TRANSPORT_CEILING_SECONDS);
+        let ceiling = TaskRequestV2::Asr(request).transport_timeout(TaskTimeoutOverrides::NONE);
+        assert_eq!(ceiling, PROVIDER_MEDIA_ASR_TRANSPORT_CEILING);
+    }
+
+    /// Overrides naming only an audio ceiling.
+    fn audio_override(seconds: u64) -> TaskTimeoutOverrides {
+        TaskTimeoutOverrides {
+            audio: Some(PositiveSeconds::try_from(seconds).expect("a positive fixture")),
+            analysis: None,
+        }
+    }
+
+    /// An absent override is the built-in ceiling, and a present one is the
+    /// ceiling, for the flat-ceiling families.
+    #[test]
+    fn analysis_override_replaces_the_built_in_ceiling_only_when_set() {
+        let avqi = TaskRequestV2::Avqi(AvqiRequestV2 {
+            cs_audio_ref_id: WorkerArtifactIdV2::from("cs"),
+            sv_audio_ref_id: WorkerArtifactIdV2::from("sv"),
+        });
+        assert_eq!(
+            avqi.transport_timeout(TaskTimeoutOverrides::NONE),
+            DEFAULT_ANALYSIS_TASK_TIMEOUT
+        );
+        let overrides = TaskTimeoutOverrides {
+            audio: None,
+            analysis: Some(PositiveSeconds::try_from(45).expect("positive")),
+        };
+        assert_eq!(avqi.transport_timeout(overrides).get(), 45);
     }
 
     #[test]
@@ -1414,18 +1471,18 @@ mod tests {
             SampleRateHzV2(16_000),
         )));
         let task = TaskRequestV2::Asr(request);
-        let derived = task.timeout_seconds_with_config(0, 0);
+        let derived = task.transport_timeout(TaskTimeoutOverrides::NONE);
 
         // A tiny override below the derived ceiling must not lower it.
-        let overridden_low = task.timeout_seconds_with_config(1, 0);
+        let overridden_low = task.transport_timeout(audio_override(1));
         assert_eq!(
             overridden_low, derived,
             "an operator override below the derived ceiling must not shorten it"
         );
 
         // A large override must raise the ceiling.
-        let overridden_high = task.timeout_seconds_with_config(derived + 500, 0);
-        assert_eq!(overridden_high, derived + 500);
+        let overridden_high = task.transport_timeout(audio_override(derived.get() + 500));
+        assert_eq!(overridden_high.get(), derived.get() + 500);
     }
 
     #[test]

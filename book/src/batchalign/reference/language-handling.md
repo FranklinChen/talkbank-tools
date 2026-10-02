@@ -1,7 +1,7 @@
 # Language Handling in CHAT: Complete Data Model
 
 **Status:** Current
-**Last updated:** 2026-05-20 20:21 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 ---
 
@@ -260,28 +260,38 @@ When building morphosyntax batch payloads, Rust:
 1. Resolves each word's language using `resolve_word_language()`
 2. Sends **semantic resolution**, not CHAT syntax
 
-**Batch payload struct**:
+**Batch payload**: one record per word, so a word's text and its role
+cannot fall out of step:
+
 ```rust,ignore
-#[derive(serde::Serialize, serde::Deserialize)]
-struct MorphosyntaxBatchItem {
-    words: Vec<String>,                          // Word texts
-    terminator: String,                          // ".", "?", "!"
-    special_forms: Vec<(
-        Option<FormType>,                        // @c, @s, @b markers
-        Option<LanguageResolution>,              // Resolved language
-    )>,
-    lang: LanguageCode,                          // Tier-level language
+pub enum WordRole {
+    Analysed,                           // the model analyses it
+    SpecialForm(FormType),              // @c, @b, ...: synthesized %mor
+    CodeSwitched(LanguageResolution),   // @s or an [@s] span: L2|xxx, then
+                                        // the secondary model
+}
+pub struct BatchWord { text: ChatCleanedText, role: WordRole }
+pub struct MorphosyntaxBatchItem {
+    words: Vec<BatchWord>,              // private; MorphosyntaxBatchItem::new
+    pub terminator: Terminator,         // ".", "?", "!" on the wire
+    pub lang: LanguageCode,             // tier-level language
 }
 ```
 
-**Example JSON payload**:
+`BatchWord::new` sends a special form's placeholder (`xbxxx`) rather than its
+text, so the placeholder rule lives in the record. A code-switch takes
+precedence over a form type the word also carries (`WordRole::of`).
+
+**Example JSON payload** (the wire keeps the per-word pairs, which the worker
+does not read):
 ```json
 {
   "words": ["I", "want", "biberon", "please"],
+  "terminator": ".",
   "special_forms": [
-    [null, null],                              // "I" - no marker, primary lang
+    [null, null],                              // "I": analysed
     [null, null],                              // "want"
-    ["S", {"Single": "spa"}],                  // "biberon@s" → resolved to Spanish
+    [null, "spa"],                             // "biberon@s": resolved to Spanish
     [null, null]                               // "please"
   ],
   "lang": "eng"                                // Utterance language
@@ -349,7 +359,7 @@ for lang_code, items in by_lang.items():
 - splice/lowering needs a safe placeholder before secondary dispatch completes
 
 **What's still limited**:
-- `@s:eng+spa` / `@s:eng&spa` do not dispatch because there is no single target
+- `@s:eng+spa` / `@s:eng&spa` dispatch to the first language named
 - unsupported secondary languages remain `L2|xxx` (see "Unsupported
   non-primary languages" below for the handling contract)
 
@@ -508,7 +518,7 @@ Errors are collected during resolution and reported via the validation system.
 
 ### Rust (talkbank-transform - payload & injection)
 
-- **Batch payload definition**: `crates/batchalign-transform/src/morphosyntax/payload.rs:29-55`: `MorphosyntaxBatchItem` struct (words, terminator, special_forms, lang)
+- **Batch payload definition**: `crates/batchalign-transform/src/morphosyntax/payload.rs`: `MorphosyntaxBatchItem` (words as `BatchWord` records, terminator, lang) and its wire shape
 - **L2|xxx placeholder for unresolved words**: `crates/batchalign-transform/src/morphosyntax/injection.rs`: replaces pos with `PosCategory::new("L2")` when word has language marker but isn't routed
 - **L2 splice logic**: `crates/batchalign-transform/src/morphosyntax/l2/splice.rs`: replaces L2|xxx with real morphology after secondary dispatch
 

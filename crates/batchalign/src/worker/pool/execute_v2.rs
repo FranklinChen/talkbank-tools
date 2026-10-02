@@ -106,9 +106,14 @@ fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOverrides {
 /// eager-profile mode). Used by the LazyProfile dispatch path.
 pub(super) fn ensure_task_params(
     request: &ExecuteRequestV2,
-) -> Result<(String, Option<std::collections::BTreeMap<String, String>>), WorkerError> {
+) -> Result<
+    (
+        InferTask,
+        Option<std::collections::BTreeMap<String, String>>,
+    ),
+    WorkerError,
+> {
     let task = infer_task_for_execute_v2(request.task)?;
-    let task_name = crate::worker::target::task_name(task).to_string();
 
     // A lazy worker's identity is the task's own keys, whatever its target
     // would preload eagerly.
@@ -120,7 +125,7 @@ pub(super) fn ensure_task_params(
     );
     let overrides = (!selection.is_none()).then(|| selection.overrides().dispatch_overrides());
 
-    Ok((task_name, overrides))
+    Ok((task, overrides))
 }
 
 fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {

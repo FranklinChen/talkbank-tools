@@ -26,12 +26,17 @@ impl WorkerPool {
     pub async fn shutdown(&self) {
         self.cancel.cancel();
 
-        // Retire only the TCP daemon workers owned by this server instance.
+        // Retire only the TCP daemon workers owned by this server instance,
+        // off the runtime: it waits for the registry's file lock.
         let registry_path = self.registry_path();
-        super::super::registry::kill_owned_daemons(
-            &registry_path,
-            self.current_server_instance_id(),
-        );
+        let server_instance_id = self.current_server_instance_id().to_owned();
+        if let Err(error) = crate::blocking::spawn_in_span(move || {
+            super::super::registry::kill_owned_daemons(&registry_path, &server_instance_id)
+        })
+        .await
+        {
+            warn!(%error, "Retiring owned TCP daemon workers did not finish");
+        }
 
         // Shut down shared GPU workers (stdio).
         //
@@ -53,7 +58,9 @@ impl WorkerPool {
                             pid = %worker.pid(),
                             "Shutting down GPU worker"
                         );
-                        worker.shutdown().await;
+                        worker
+                            .shutdown(super::shared_gpu::Retirement::PoolShutdown)
+                            .await;
                     }
                     None => info!(
                         target = %key.target.label(),
@@ -76,7 +83,9 @@ impl WorkerPool {
                     pid = %worker.pid(),
                     "Disconnecting TCP GPU worker"
                 );
-                worker.shutdown().await;
+                worker
+                    .shutdown(super::shared_gpu::Retirement::PoolShutdown)
+                    .await;
             }
         }
 

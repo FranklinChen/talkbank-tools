@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::api::{DisplayPath, JobId, JobStatus, UnixTimestamp};
+use crate::api::{DisplayPath, JobId, JobStatus, MachineTime};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::CompletedFileOutput;
 
@@ -49,11 +49,15 @@ pub(crate) struct RecordingSink {
 
 #[async_trait]
 impl RunnerEventSink for RecordingSink {
+    fn now(&self) -> crate::store::EventTime {
+        crate::store::EventTime::fixed(crate::unix_time(1_700_000_000.0))
+    }
+
     async fn mark_file_processing(
         &self,
         _job_id: &JobId,
         _filename: &str,
-        _started_at: UnixTimestamp,
+        _started_at: crate::store::EventTime,
     ) {
     }
 
@@ -61,7 +65,7 @@ impl RunnerEventSink for RecordingSink {
         &self,
         _job_id: &JobId,
         _filename: &str,
-        _finished_at: UnixTimestamp,
+        _finished_at: crate::store::EventTime,
         _result: Option<CompletedFileOutput>,
     ) {
     }
@@ -72,7 +76,7 @@ impl RunnerEventSink for RecordingSink {
         filename: &str,
         error: &str,
         category: FailureCategory,
-        _finished_at: UnixTimestamp,
+        _finished_at: crate::store::EventTime,
     ) {
         self.errors
             .lock()
@@ -89,7 +93,7 @@ impl RunnerEventSink for RecordingSink {
         _job_id: &JobId,
         filename: &str,
         work_unit_kind: WorkUnitKind,
-        _started_at: UnixTimestamp,
+        _started_at: crate::store::EventTime,
     ) {
         self.attempts
             .lock()
@@ -107,7 +111,7 @@ impl RunnerEventSink for RecordingSink {
         _outcome: AttemptOutcome,
         _failure_category: Option<FailureCategory>,
         _disposition: RetryDisposition,
-        _finished_at: UnixTimestamp,
+        _finished_at: crate::store::EventTime,
     ) {
     }
 
@@ -115,10 +119,10 @@ impl RunnerEventSink for RecordingSink {
         &self,
         _job_id: &JobId,
         _filename: &str,
-        _retry_at: UnixTimestamp,
+        _retry_at: MachineTime,
         _category: FailureCategory,
         _message: &str,
-        _finished_at: UnixTimestamp,
+        _finished_at: crate::store::EventTime,
     ) {
     }
 
@@ -154,13 +158,13 @@ impl RunnerEventSink for RecordingSink {
 
     async fn bump_forced_terminal_errors(&self, _count: usize) {}
 
-    async fn fail_job(&self, _job_id: &JobId, _error: &str, _failed_at: UnixTimestamp) {}
+    async fn fail_job(&self, _job_id: &JobId, _error: &str) {}
 
     async fn mark_job_running(&self, _job_id: &JobId) {}
 
     async fn record_job_worker_count(&self, _job_id: &JobId, _worker_count: usize) {}
 
-    async fn requeue_job_after_memory_gate(&self, _job_id: &JobId, _retry_at: UnixTimestamp) {}
+    async fn requeue_job_after_memory_gate(&self, _job_id: &JobId, _retry_at: MachineTime) {}
 
     async fn bump_deferred_work_units(&self) {}
 
@@ -171,7 +175,7 @@ impl RunnerEventSink for RecordingSink {
         _job_id: &JobId,
         _expected_generation: crate::store::RunGeneration,
         _final_status: JobStatus,
-        _completed_at: UnixTimestamp,
+        _completed_at: crate::store::EventTime,
     ) -> Option<String> {
         None
     }

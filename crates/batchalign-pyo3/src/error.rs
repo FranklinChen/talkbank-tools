@@ -37,8 +37,7 @@ create_exception!(
     CHATValidationException,
     BatchalignError,
     "Raised when CHAT validation detects structural problems. \
-     Carries `errors: list[ValidationErrorEntry]` and an optional \
-     `bug_report_id: str`."
+     Carries `errors: list[ValidationErrorEntry]`."
 );
 create_exception!(
     batchalign_core,
@@ -150,14 +149,12 @@ impl BodyLimitLayer {
 #[allow(dead_code)] // Most variants are awaiting their first call site as Phase D sweeps the rest of pyo3/.
 pub(crate) enum BatchalignBoundaryError {
     /// CHAT validation produced a structured error list. Maps to
-    /// `CHATValidationException` on the Python side; the entries +
-    /// optional `bug_report_id` populate fields on the raised
-    /// exception so Python catch sites can `exc.errors[i].code`
-    /// directly.
+    /// `CHATValidationException` on the Python side; the entries
+    /// populate `errors` on the raised exception so Python catch sites
+    /// can `exc.errors[i].code` directly.
     ChatValidation {
         message: String,
         entries: Vec<ValidationErrorEntry>,
-        bug_report_id: Option<String>,
     },
 
     /// A non-CHAT document payload (server's content-mode submission)
@@ -255,29 +252,24 @@ impl From<BatchalignBoundaryError> for PyErr {
         // and exception construction.
         let message = error.to_string();
         match error {
-            BatchalignBoundaryError::ChatValidation {
-                entries,
-                bug_report_id,
-                ..
-            } => Python::attach(|py| -> PyErr {
-                let py_err = CHATValidationException::new_err(message);
-                let py_entries: Vec<Bound<'_, pyo3::types::PyDict>> = match entries
-                    .into_iter()
-                    .map(|entry| entry.into_pydict(py))
-                    .collect::<PyResult<Vec<_>>>()
-                {
-                    Ok(v) => v,
-                    Err(setup_err) => return setup_err,
-                };
-                let value = py_err.value(py);
-                if let Err(e) = value.setattr("errors", py_entries) {
-                    return e;
-                }
-                if let Err(e) = value.setattr("bug_report_id", bug_report_id) {
-                    return e;
-                }
-                py_err
-            }),
+            BatchalignBoundaryError::ChatValidation { entries, .. } => {
+                Python::attach(|py| -> PyErr {
+                    let py_err = CHATValidationException::new_err(message);
+                    let py_entries: Vec<Bound<'_, pyo3::types::PyDict>> = match entries
+                        .into_iter()
+                        .map(|entry| entry.into_pydict(py))
+                        .collect::<PyResult<Vec<_>>>()
+                    {
+                        Ok(v) => v,
+                        Err(setup_err) => return setup_err,
+                    };
+                    let value = py_err.value(py);
+                    if let Err(e) = value.setattr("errors", py_entries) {
+                        return e;
+                    }
+                    py_err
+                })
+            }
             BatchalignBoundaryError::DocumentValidation { .. } => {
                 DocumentValidationException::new_err(message)
             }

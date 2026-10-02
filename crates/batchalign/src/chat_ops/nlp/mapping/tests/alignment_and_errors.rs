@@ -7,7 +7,7 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 
@@ -16,7 +16,7 @@ fn test_mwt_gra_per_component_alignment() {
     let sentence = UdSentence {
         words: vec![
             // Range entry for the MWT "it's"
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "it's".into(),
                 lemma: "it's".into(),
@@ -27,9 +27,9 @@ fn test_mwt_gra_per_component_alignment() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
             // Component 1: "it"
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "it".into(),
                 lemma: "it".into(),
@@ -40,9 +40,9 @@ fn test_mwt_gra_per_component_alignment() {
                 deprel: "nsubj".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
             // Component 2: "'s"
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "'s".into(),
                 lemma: "be".into(),
@@ -53,9 +53,9 @@ fn test_mwt_gra_per_component_alignment() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
             // Regular word: "just"
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "just".into(),
                 lemma: "just".into(),
@@ -66,7 +66,7 @@ fn test_mwt_gra_per_component_alignment() {
                 deprel: "advmod".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
 
@@ -99,7 +99,7 @@ fn test_mwt_gra_per_component_alignment() {
 fn test_mwt_gra_dont_contraction() {
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "I".into(),
                 lemma: "I".into(),
@@ -110,9 +110,9 @@ fn test_mwt_gra_dont_contraction() {
                 deprel: "nsubj".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
             // Range entry for "don't"
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Range(2, 3),
                 text: "don't".into(),
                 lemma: "don't".into(),
@@ -123,8 +123,8 @@ fn test_mwt_gra_dont_contraction() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "do".into(),
                 lemma: "do".into(),
@@ -135,8 +135,8 @@ fn test_mwt_gra_dont_contraction() {
                 deprel: "aux".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "n't".into(),
                 lemma: "not".into(),
@@ -147,8 +147,8 @@ fn test_mwt_gra_dont_contraction() {
                 deprel: "advmod".into(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(4),
                 text: "know".into(),
                 lemma: "know".into(),
@@ -159,7 +159,7 @@ fn test_mwt_gra_dont_contraction() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
 
@@ -195,12 +195,12 @@ fn test_clean_lemma_apostrophe_fallback_to_text() {
 
 #[test]
 fn test_map_ud_word_apostrophe_no_empty_stem() {
-    // map_ud_word_to_mor with an apostrophe-only PUNCT token must produce
+    // map_ud_word with an apostrophe-only PUNCT token must produce
     // "punct|'" (non-empty stem), not "punct|" (E342).
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(2),
         text: "'".to_string(),
         lemma: "'".to_string(),
@@ -211,9 +211,9 @@ fn test_map_ud_word_apostrophe_no_empty_stem() {
         deprel: "case".to_string(),
         deps: None,
         misc: None,
-    };
+    });
 
-    let mor = map_ud_word_to_mor(&ud, &ctx).unwrap();
+    let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
 
@@ -225,12 +225,12 @@ fn test_map_ud_word_apostrophe_no_empty_stem() {
 #[test]
 fn test_map_ud_word_rejects_empty_stem() {
     // If clean_lemma and sanitize_mor_text both produce an empty string,
-    // map_ud_word_to_mor must return Err(EmptyStem), not silently pass.
+    // map_ud_word must return Err(EmptyStem), not silently pass.
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
     // Craft a UD word whose lemma sanitizes to empty (all reserved chars).
-    let ud = UdWord {
+    let ud = UdWord::from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "|||".to_string(),
         lemma: "|||".to_string(), // clean_lemma preserves; sanitize strips '|' → "___" → non-empty
@@ -241,10 +241,10 @@ fn test_map_ud_word_rejects_empty_stem() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    };
+    });
     // sanitize_mor_text replaces reserved chars, so this won't actually be empty.
     // Verify it succeeds (non-empty stem after sanitization).
-    let result = map_ud_word_to_mor(&ud, &ctx);
+    let result = map_ud_word(&ud, &ctx);
     assert!(
         result.is_ok(),
         "Reserved chars should be sanitized, not empty: {result:?}"
@@ -260,7 +260,7 @@ fn test_unmapped_head_reference() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "dog".to_string(),
                 lemma: "dog".to_string(),
@@ -271,9 +271,9 @@ fn test_unmapped_head_reference() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
             // Decimal word (empty/enhanced token), not indexed in chunk map
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Decimal(1.1),
                 text: "of".to_string(),
                 lemma: "of".to_string(),
@@ -284,8 +284,8 @@ fn test_unmapped_head_reference() {
                 deprel: "case".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "cat".to_string(),
                 lemma: "cat".to_string(),
@@ -297,13 +297,23 @@ fn test_unmapped_head_reference() {
                 deprel: "nmod".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
+    // The walk refuses a head that is no word of the sentence, before any
+    // `%gra` is built.
     let err = map_ud_sentence(&sentence, &ctx).unwrap_err();
     assert!(
-        matches!(err, MappingError::InvalidHeadReference { .. }),
-        "Expected InvalidHeadReference, got: {err}"
+        matches!(
+            err,
+            MappingError::Sentence(
+                batchalign_transform::morphosyntax::alignment::UdSentenceError::HeadOutsideSentence {
+                    word: 2,
+                    head: 99
+                }
+            )
+        ),
+        "Expected HeadOutsideSentence, got: {err}"
     );
 }
 
@@ -316,7 +326,7 @@ fn test_no_root_in_ud_parse() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "the".to_string(),
                 lemma: "the".to_string(),
@@ -327,8 +337,8 @@ fn test_no_root_in_ud_parse() {
                 deprel: "det".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "dog".to_string(),
                 lemma: "dog".to_string(),
@@ -339,7 +349,7 @@ fn test_no_root_in_ud_parse() {
                 deprel: "nsubj".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let err = map_ud_sentence(&sentence, &ctx).unwrap_err();

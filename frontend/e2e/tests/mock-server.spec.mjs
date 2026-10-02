@@ -37,15 +37,12 @@ function makeFileStatus(filename, status, overrides = {}) {
     status,
     error: null,
     error_category: null,
-    error_codes: [],
-    started_at: status === "done" ? 1 : null,
-    finished_at: status === "done" ? 2 : null,
+    started_at: status === "done" ? "2026-02-25T00:00:01.000Z" : null,
+    finished_at: status === "done" ? "2026-02-25T00:00:02.000Z" : null,
     progress_current: status === "processing" ? 1 : null,
     progress_total: status === "processing" ? 4 : null,
     progress_stage: status === "processing" ? "analyzing_morphosyntax" : null,
     progress_label: status === "processing" ? "Analyzing morphosyntax" : null,
-    error_line: null,
-    bug_report_id: null,
     ...overrides,
   };
 }
@@ -67,9 +64,6 @@ function buildFailedJobFileStatuses() {
           `Second line detail for sample-${sample}.cha explains the exact mismatch and preserves the full diagnostic payload.`,
         ].join("\n"),
         error_category: "validation",
-        error_codes: ["E362"],
-        error_line: 2,
-        bug_report_id: `report-${sample}`,
       })
     );
   }
@@ -78,24 +72,18 @@ function buildFailedJobFileStatuses() {
     makeFileStatus("gamma/sample-54.cha", "error", {
       error: "CHAT declaration is missing an @ID tier for speaker PAR.",
       error_category: "input",
-      error_codes: ["E101"],
-      error_line: 3,
     }),
     makeFileStatus("gamma/sample-55.cha", "error", {
       error: "CHAT declaration is missing an @ID tier for speaker PAR.",
       error_category: "input",
-      error_codes: ["E101"],
-      error_line: 3,
     }),
     makeFileStatus("gamma/sample-56.cha", "error", {
       error: "Referenced media file missing from media root.",
       error_category: "media",
-      error_line: 1,
     }),
     makeFileStatus("gamma/sample-57.cha", "error", {
       error: "Referenced media file missing from media root.",
       error_category: "media",
-      error_line: 1,
     }),
     makeFileStatus("gamma/sample-58.cha", "error", {
       error: "SQLite store returned a synthetic write failure while flushing the result bundle.",
@@ -129,10 +117,8 @@ function makeJob(jobId, status, { completed, total, submittedAt, fileStatuses, e
               ? "synthetic failure while analyzing this file: tokenization and morphosyntax pipeline both reported inconsistent state for dashboard testing."
               : null,
           error_category: status === "failed" ? "processing" : null,
-          error_codes: status === "failed" ? ["E_SYNTH"] : [],
           progress_current: completed,
           progress_total: total,
-          error_line: status === "failed" ? 12 : null,
         }
       ),
     ];
@@ -305,7 +291,6 @@ async function startHarness() {
           status: "queued",
           error: null,
           error_category: null,
-          error_codes: [],
           progress_current: 0,
           progress_stage: null,
           progress_label: null,
@@ -775,11 +760,14 @@ test("dashboard groups errors, paginates files, and filters failed job details",
     await expect(page.getByText("18 errors")).toBeVisible();
     await expect(
       page.getByText(
-        "This is a pipeline bug, not your input. A diagnostic report has been filed automatically."
+        "This is a pipeline bug, not your input. The file's error below is the report; please pass it on."
       )
     ).toBeVisible();
 
-    const validationGroup = page.locator("button").filter({ hasText: "E362" }).first();
+    const validationGroup = page
+      .locator("button")
+      .filter({ hasText: "Validation mismatch for sample-42.cha" })
+      .first();
     await validationGroup.click();
     await expect(page.getByRole("button", { name: "sample-42.cha", exact: true })).toBeVisible();
 

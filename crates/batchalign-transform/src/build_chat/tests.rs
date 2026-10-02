@@ -674,32 +674,32 @@ fn disfluency_and_retrace_end_to_end() {
             elements: vec![
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("um"),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.0),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.2),
+                    ts: asr_postprocess::observed(0.0),
+                    end_ts: asr_postprocess::observed(0.2),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("um"),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.2),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.4),
+                    ts: asr_postprocess::observed(0.2),
+                    end_ts: asr_postprocess::observed(0.4),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("I"),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.4),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.5),
+                    ts: asr_postprocess::observed(0.4),
+                    end_ts: asr_postprocess::observed(0.5),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("I"),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.5),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.6),
+                    ts: asr_postprocess::observed(0.5),
+                    end_ts: asr_postprocess::observed(0.6),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
                 asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new("went"),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(0.6),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(0.8),
+                    ts: asr_postprocess::observed(0.6),
+                    end_ts: asr_postprocess::observed(0.8),
                     kind: asr_postprocess::AsrElementKind::Text,
                 },
             ],
@@ -922,8 +922,8 @@ fn single_speaker_asr_output(tokens: &[(&str, f64, f64)]) -> asr_postprocess::As
             };
             asr_postprocess::AsrElement {
                 value: asr_postprocess::AsrRawText::new(*text),
-                ts: asr_postprocess::AsrTimestampSecs::Observed(*start),
-                end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end),
+                ts: asr_postprocess::observed(*start),
+                end_ts: asr_postprocess::observed(*end),
                 kind,
             }
         })
@@ -1120,8 +1120,8 @@ fn asr_single_speaker(elements: &[(&str, f64, f64)]) -> asr_postprocess::AsrOutp
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
+                    ts: asr_postprocess::observed(*ts),
+                    end_ts: asr_postprocess::observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),
@@ -1227,8 +1227,8 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
+                    ts: asr_postprocess::observed(*ts),
+                    end_ts: asr_postprocess::observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),
@@ -1246,8 +1246,8 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
+                    ts: asr_postprocess::observed(*ts),
+                    end_ts: asr_postprocess::observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),
@@ -1264,8 +1264,8 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
                 .iter()
                 .map(|(v, ts, end_ts)| asr_postprocess::AsrElement {
                     value: asr_postprocess::AsrRawText::new(*v),
-                    ts: asr_postprocess::AsrTimestampSecs::Observed(*ts),
-                    end_ts: asr_postprocess::AsrTimestampSecs::Observed(*end_ts),
+                    ts: asr_postprocess::observed(*ts),
+                    end_ts: asr_postprocess::observed(*end_ts),
                     kind: asr_postprocess::AsrElementKind::Text,
                 })
                 .collect(),

@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::transcribe::TranscribeOptions;
 
 use super::super::util::{
@@ -252,14 +252,9 @@ async fn process_one_transcribe_file(
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
-    let started_at = unix_now();
 
     lifecycle
-        .begin_first_attempt(
-            WorkUnitKind::FileInfer,
-            started_at,
-            FileStage::ResolvingAudio,
-        )
+        .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
         .await;
 
     let prepared_media =
@@ -267,9 +262,7 @@ async fn process_one_transcribe_file(
             Ok(prepared) => prepared,
             Err(error) => {
                 let err_msg = error.to_string();
-                lifecycle
-                    .fail(&err_msg, FailureCategory::Validation, unix_now())
-                    .await;
+                lifecycle.fail(&err_msg, FailureCategory::Validation).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
         };
@@ -286,9 +279,7 @@ async fn process_one_transcribe_file(
             "Resolved transcribe media path does not exist: {}",
             audio_path.display()
         );
-        lifecycle
-            .fail(&err_msg, FailureCategory::Validation, unix_now())
-            .await;
+        lifecycle.fail(&err_msg, FailureCategory::Validation).await;
         return FileTaskOutcome::TerminalStateRecorded;
     }
 
@@ -336,9 +327,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::api::{
-        DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand, UnixTimestamp,
-    };
+    use crate::api::{DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand};
     use crate::api::{LanguageCode3, LanguageSpec};
     use crate::cache::UtteranceCache;
     use crate::db::JobDB;
@@ -349,7 +338,7 @@ mod tests {
     use crate::runner::util::StoreRunnerEventSink;
     use crate::store::{
         FileStatus, Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
-        JobLeaseState, JobRuntimeControl, JobScheduleState, JobSourceContext, JobStore,
+        JobRuntimeControl, JobScheduleState, JobSourceContext, JobStore,
     };
     use crate::transcribe::AsrBackend;
     use crate::ws::BROADCAST_CAPACITY;
@@ -387,8 +376,10 @@ mod tests {
                 debug_traces: false,
             },
             source: JobSourceContext {
-                submitted_by: "127.0.0.1".into(),
-                submitted_by_name: "localhost".into(),
+                submitter: Some(crate::store::Submitter::client(
+                    std::net::Ipv4Addr::LOCALHOST.into(),
+                    "localhost".into(),
+                )),
                 source_dir: Default::default(),
             },
             filesystem: JobFilesystemConfig {
@@ -415,15 +406,11 @@ mod tests {
                 completed_files: 0,
             },
             schedule: JobScheduleState {
-                submitted_at: UnixTimestamp(1.0),
+                submitted_at: crate::unix_time(1.0),
                 completed_at: None,
                 next_eligible_at: None,
                 num_workers: None,
-                lease: JobLeaseState {
-                    leased_by_node: None,
-                    expires_at: None,
-                    heartbeat_at: None,
-                },
+                lease: None,
                 last_cancel: None,
             },
             runtime: JobRuntimeControl {
@@ -449,6 +436,7 @@ mod tests {
             crate::config::ServerConfig::default(),
             Some(db.clone()),
             tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
         ));
         store
             .submit(make_transcribe_job(

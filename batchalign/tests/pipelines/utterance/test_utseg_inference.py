@@ -25,26 +25,34 @@ from batchalign.models.utterance.evidence import (
 from batchalign.providers import BatchInferRequest
 
 
-class _SteppingMonotonic:
-    """Deterministic ``time.monotonic`` stub advancing one second per call.
+class _WorkClock:
+    """Deterministic ``time.monotonic`` stub that moves only when work runs.
 
-    Every measured item calls it exactly twice, once to start and once to
-    stop, so each item's own elapsed time is exactly one step regardless of
-    how many items the batch holds. That is what makes the timing assertions
-    below a proof of per-item attribution rather than a restatement of an
-    arbitrary number: under the batch-total stamping this module used until
-    2026-09-16, the first item reported the whole batch span and every other
-    item reported zero.
+    Reading it does not advance it; a fake model or pipeline advances it by
+    ``step`` each time it does an item's work. So an item's elapsed time is
+    exactly the simulated work done inside its own measurement, however many
+    times anything else reads the clock: a reading added anywhere (a log
+    line, the batch total) cannot shift an item's span, which it did when
+    every call advanced the clock.
     """
 
     def __init__(self, step: float = 1.0) -> None:
-        self._next = 0.0
+        self._now = 0.0
         self._step = step
 
     def __call__(self) -> float:
-        current = self._next
-        self._next += self._step
-        return current
+        return self._now
+
+    def work(self) -> None:
+        """One item's simulated work."""
+        self._now += self._step
+
+
+def _install_clock(monkeypatch) -> _WorkClock:
+    """Replace ``time.monotonic`` with a fresh work clock."""
+    clock = _WorkClock()
+    monkeypatch.setattr("batchalign.inference.utseg.time.monotonic", clock)
+    return clock
 
 
 class _FakeTree:
@@ -108,10 +116,7 @@ class TestBatchInferUtseg:
     """Verify the thin Python utseg adapter behavior."""
 
     def test_short_circuits_invalid_and_single_word_items(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "batchalign.inference.utseg.time.monotonic",
-            _SteppingMonotonic(),
-        )
+        _install_clock(monkeypatch)
         calls: list[list[str]] = []
 
         def build_stanza_config(
@@ -130,14 +135,17 @@ class TestBatchInferUtseg:
         )
 
         assert calls == []
-        assert response.results[0].result == {"assignments": [0]}
+        assert response.results[0].result == {
+            "kind": "unattributed",
+            "assignments": [0],
+        }
         assert response.results[1].error == "Invalid batch item"
-        # The short-circuited item is measured like any other item: it did the
-        # work of deciding that one word is one utterance.
-        assert response.results[0].elapsed_s == 1.0
-        # The rejected item never parsed, so no work is attributable to it.
-        # Its zero is the rejection variant speaking, not a measurement.
-        assert response.results[1].elapsed_s == 0.0
+        # The short-circuited item is measured like any other item: a measured
+        # zero, since it ran no simulated work, never an absent time.
+        assert response.results[0].elapsed_s == 0.0
+        # The rejected item never parsed, so no work is attributable to it:
+        # it reports no time at all (null on the wire), never a zero.
+        assert response.results[1].elapsed_s is None
 
     def test_builds_single_language_pipeline_and_serializes_trees(
         self, monkeypatch
@@ -148,10 +156,7 @@ class TestBatchInferUtseg:
         init_kwargs: list[dict[str, Any]] = []
         seen_texts: list[str] = []
 
-        monkeypatch.setattr(
-            "batchalign.inference.utseg.time.monotonic",
-            _SteppingMonotonic(),
-        )
+        clock = _install_clock(monkeypatch)
 
         class _FakePipeline:
             def __init__(self, **kwargs) -> None:
@@ -159,6 +164,7 @@ class TestBatchInferUtseg:
 
             def __call__(self, text: str):
                 seen_texts.append(text)
+                clock.work()
                 return SimpleNamespace(
                     sentences=[
                         SimpleNamespace(constituency="(S (NP I eat) (VP cookies))"),
@@ -192,7 +198,10 @@ class TestBatchInferUtseg:
             }
         ]
         assert seen_texts == ["I eat cookies"]
-        assert response.results[0].result == {"trees": ["(S (NP I eat) (VP cookies))"]}
+        assert response.results[0].result == {
+            "kind": "constituency",
+            "trees": ["(S (NP I eat) (VP cookies))"],
+        }
         # This item's own span, not the batch's. Building the Stanza pipeline
         # happens outside any item's measurement and is charged to no item.
         assert response.results[0].elapsed_s == 1.0
@@ -308,10 +317,7 @@ class TestBatchInferUtseg:
         init_kwargs: list[dict[str, Any]] = []
         seen_texts: list[str] = []
 
-        monkeypatch.setattr(
-            "batchalign.inference.utseg.time.monotonic",
-            _SteppingMonotonic(),
-        )
+        clock = _install_clock(monkeypatch)
 
         class _FakeMultilingualPipeline:
             def __init__(self, **kwargs) -> None:
@@ -319,6 +325,7 @@ class TestBatchInferUtseg:
 
             def __call__(self, text: str):
                 seen_texts.append(text)
+                clock.work()
                 if text == "boom now":
                     raise AttributeError("missing constituency")
                 return SimpleNamespace(
@@ -367,22 +374,58 @@ class TestBatchInferUtseg:
             }
         ]
         assert seen_texts == ["good path", "boom now"]
-        assert response.results[0].result == {"trees": ["(S good path)"]}
-        assert response.results[1].result == {"trees": []}
+        assert response.results[0].result == {
+            "kind": "constituency",
+            "trees": ["(S good path)"],
+        }
+        # A parse that raised is a failure at its own position, never an
+        # empty parse that would read as one utterance.
+        assert response.results[1].result is None
+        assert response.results[1].error is not None
+        assert "missing constituency" in response.results[1].error
         # Both items report their own equal spans. This is the assertion that
         # would have caught the old misattribution: it read 4.0 and 0.0.
         assert response.results[0].elapsed_s == 1.0
         assert response.results[1].elapsed_s == 1.0
 
-    def test_returns_empty_trees_when_no_language_pipeline_is_available(
+    def test_a_parse_with_no_constituency_tree_is_a_failure(self, monkeypatch) -> None:
+        # A document whose sentences carry no constituency tree is no parse:
+        # an empty tree list would read as one utterance.
+        clock = _install_clock(monkeypatch)
+
+        class _FakeTreelessPipeline:
+            def __init__(self, **kwargs) -> None:
+                pass
+
+            def __call__(self, text: str):
+                clock.work()
+                return SimpleNamespace(sentences=[SimpleNamespace(constituency=None)])
+
+        _install_fake_stanza(
+            monkeypatch,
+            pipeline_factory=_FakeTreelessPipeline,
+            multilingual_factory=_FakeTreelessPipeline,
+        )
+        response = batch_infer_utseg(
+            BatchInferRequest(
+                task="utseg",
+                lang="eng",
+                items=[{"words": ["no", "tree"], "text": "no tree"}],
+                allow_stanza_fallback=True,
+            ),
+            lambda langs: (["en"], {"en": {"processors": "tokenize,constituency"}}),
+        )
+
+        assert response.results[0].result is None
+        assert response.results[0].error is not None
+        assert "produced no tree" in response.results[0].error
+
+    def test_reports_a_failure_when_no_language_pipeline_is_available(
         self, monkeypatch
     ) -> None:
         # Empty-langs path is reachable only when the operator opted in
         # to the Stanza fallback; otherwise the dispatcher refuses earlier.
-        monkeypatch.setattr(
-            "batchalign.inference.utseg.time.monotonic",
-            _SteppingMonotonic(),
-        )
+        _install_clock(monkeypatch)
         response = batch_infer_utseg(
             BatchInferRequest(
                 task="utseg",
@@ -393,9 +436,12 @@ class TestBatchInferUtseg:
             lambda langs: ([], {}),
         )
 
-        assert response.results[0].result == {"trees": []}
-        # Still this item's own measured span, even though the outcome is empty.
-        assert response.results[0].elapsed_s == 1.0
+        # No pipeline is a failure, never an empty parse.
+        assert response.results[0].result is None
+        assert response.results[0].error is not None
+        assert "no Stanza pipeline" in response.results[0].error
+        # Still this item's own measured span: no simulated work ran.
+        assert response.results[0].elapsed_s == 0.0
 
     def test_uses_boundary_model_assignments_when_available(self) -> None:
         class _FakeBoundaryModel:
@@ -450,6 +496,7 @@ class TestBatchInferUtseg:
         )
 
         assert response.results[0].result == {
+            "kind": "boundary_model",
             "assignments": [0, 0, 1, 1],
             "boundary_model_evidence": {
                 "model_id": "test-boundary-model",
@@ -510,6 +557,7 @@ class TestBatchInferUtseg:
         )
 
         assert response.results[0].result == {
+            "kind": "boundary_model",
             "assignments": [0],
             "boundary_model_evidence": {
                 "model_id": "test-boundary-model",
@@ -554,15 +602,13 @@ class TestBatchInferUtseg:
         reported zero, so the first item's cost was overstated by all the
         others and every other item's was simply wrong.
         """
-        monkeypatch.setattr(
-            "batchalign.inference.utseg.time.monotonic",
-            _SteppingMonotonic(),
-        )
+        clock = _install_clock(monkeypatch)
 
         class _FakeBoundaryModel:
             def predict_boundary_evidence(
                 self, words: list[str]
             ) -> UtteranceBoundaryPrediction:
+                clock.work()
                 low = BoundaryProbability.from_float(0.1)
                 return UtteranceBoundaryPrediction(
                     model_id="test-boundary-model",
@@ -603,15 +649,13 @@ class TestBatchInferUtseg:
         write, so a middle item's failure cannot be recorded against the
         first item's evidence.
         """
-        monkeypatch.setattr(
-            "batchalign.inference.utseg.time.monotonic",
-            _SteppingMonotonic(),
-        )
+        clock = _install_clock(monkeypatch)
 
         class _SecondItemFails:
             def predict_boundary_evidence(
                 self, words: list[str]
             ) -> UtteranceBoundaryPrediction:
+                clock.work()
                 if words == ["bad", "item"]:
                     raise ValueError("deliberate model failure")
                 return UtteranceBoundaryPrediction(

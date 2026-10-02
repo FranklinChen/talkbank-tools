@@ -2,7 +2,7 @@ use crate::planning;
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage};
 use crate::scheduling::WorkUnitKind;
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 use crate::text_batch::TextBatchFileResults;
 
 use super::text_io::{load_text_inputs, write_text_results};
@@ -49,11 +49,10 @@ pub(crate) async fn dispatch_translate_job(
     };
     let engine = options.effective_translate_engine();
     let sink = host.sink().clone();
-    let started_at = unix_now();
 
     for file in &job.pending_files {
         FileRunTracker::new(sink.as_ref(), &job.identity.job_id, file.filename.as_ref())
-            .begin_first_attempt(WorkUnitKind::BatchInfer, started_at, FileStage::Translating)
+            .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Translating)
             .await;
     }
 
@@ -281,6 +280,7 @@ mod tests {
             crate::config::ServerConfig::default(),
             None,
             tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
         )))
     }
 

@@ -1,7 +1,7 @@
 # Server Dispatch Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-02 14:49 EDT
 
 This page describes the implemented `batchalign3` runtime:
 
@@ -76,6 +76,12 @@ route-state aggregate:
   same bucket at once
 - `AppState` groups route-visible handles as control plane, worker subsystem,
   environment, and build identity
+
+The prepared-worker app constructors receive directory overrides as one named
+`AppStorageOverrides` value. Each absent override retains the existing layout
+or platform-cache resolution. These options are configuration, not filesystem
+admission: the app still opens and checks its storage at construction. Prepared
+workers and the injected clock remain separate, explicit inputs.
 
 ```mermaid
 flowchart LR
@@ -179,6 +185,86 @@ flowchart LR
 That split matters because routes, queueing, and runner code no longer need one
 30+ field interior runtime record just to touch one concern.
 
+### A file's phase
+
+Each file's state is one `FilePhase` (see the type-driven-design page): every
+transition builds the whole phase it moves to, so nothing from the previous
+phase can survive by being forgotten. A file awaiting a retry is
+`RetryPending`: still `processing` on the API, with its deadline and the
+failure that caused it, and with no finish time or duration, since it has not
+finished. Progress (`FileProgress`) is separate, ephemeral display state.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued
+    Queued --> Processing: mark_file_processing / start_file_attempt
+    Processing --> RetryPending: mark_file_retry_pending
+    RetryPending --> Processing: clear_file_retry_state / start_file_attempt
+    Processing --> Done: mark_file_done
+    Processing --> Error: mark_file_error
+    Queued --> Error: setup refusal
+    Processing --> Interrupted: server stopped (recovery)
+    RetryPending --> Interrupted: server stopped (recovery)
+    Interrupted --> Queued: requeue
+    Error --> Queued: restart (requeue)
+```
+
+A phase and its `file_statuses` row are converted by one pair of functions.
+`FilePhase::columns` is the column image of a phase (`status`, `error`,
+`error_category`, `started_at`, `finished_at`, `next_eligible_at`), with
+`None` written as NULL; `JobDB::update_file_status` takes the phase and writes
+that whole image, so every file transition replaces all six columns and none
+survives from an earlier phase. A pending retry stores its failed attempt's end
+in `finished_at` beside its deadline. At startup, each file of an interrupted
+job is read as its phase and moved through `FilePhase::interrupted`; a row the
+move changes (an in-flight phase) is written from the interrupted phase's image
+(start time and last failure kept, `finished_at` and `next_eligible_at`
+cleared), one row at a time.
+`FilePhase::from_row` is the inverse: it rebuilds the phase a row describes at
+load (a `processing` row with a `next_eligible_at` is a pending retry) and
+reports, for every phase by the same rule, each column that held a value the
+phase does not own. `content_type` (the result's type, written when a file
+finishes with output) is not a phase column.
+
+### Who submitted a job
+
+`JobSourceContext::submitter` is an `Option<Submitter>`: the client's address
+and, when it resolved to one, a name. `None` means no submitter was recorded;
+the empty string stands for that only in the database columns. `Submitter`'s
+fields are private and each route in is named:
+
+```mermaid
+flowchart LR
+    http["POST /jobs<br/>peer IpAddr + resolved name"] -->|"Submitter::client"| ctx["SubmissionContext<br/>submitter: Submitter"]
+    cli["direct CLI"] -->|"Submitter::direct_cli"| ctx
+    ctx --> job["JobSourceContext<br/>submitter: Some(..)"]
+    job -->|"Submitter::columns"| db[("jobs.submitted_by,<br/>submitted_by_name<br/>'' = absent")]
+    db -->|"Submitter::from_columns<br/>(StoredSubmitter)"| recovered["JobSourceContext<br/>Some(..) or None"]
+    job --> api["JobInfo / JobListItem<br/>submitted_by: Option"]
+    recovered --> api
+```
+
+A resolution that names nothing records no name, never an empty one. The
+direct CLI has no network peer and is recorded as a loopback client named
+`direct-cli`. The columns are `TEXT NOT NULL DEFAULT ''`, so `''` is the
+database's spelling of absence, decided in `Submitter::columns` and
+`Submitter::from_columns` and nowhere else. `from_columns` returns a
+`StoredSubmitter`: `Recorded`, `Absent`, or `NameWithoutAddress { name }` for
+a row naming a submitter with no address, which this build never writes;
+recovery records that as no submitter, logs the name it drops, and rewrites
+the row's submitter columns once, so the next startup has nothing to report.
+File rows are read as a `RecoveredFilePhase`: `Exact` (the phase's own
+image), `Repairable` (it held columns its phase does not own, which is logged,
+and the row is rewritten once from the phase), or `Foreign` (a status or
+failure category this build cannot read, such as a newer build's after a
+rollback: read as an error with a `[recovery]` note, logged at each startup,
+and never rewritten, so the other build's row survives). A job status, a
+language or a command this build cannot read is likewise read with a fallback
+and never rewritten. A repair write that fails is logged and startup goes on.
+Conflict
+detection keys on `(Option<address>, path)`, so jobs with no recorded
+submitter conflict with each other.
+
 ## Runner boundary
 
 The runner now has a sharper read/write split:
@@ -226,6 +312,87 @@ The local queue backend now crosses the store boundary with typed values:
 
 That keeps queue wakeups and lease renewal from depending on `Vec<String>`,
 `Option<f64>`, bare booleans, and open-coded lease field mutation.
+
+A job's lease is one value, `Option<LeaseRecord>` (owner, heartbeat, expiry),
+not three fields that must agree. A lease always expires strictly after its
+heartbeat, and the type holds that: its fields are private, `taken` and
+`renew` (which renews the held lease in place) are the only places an expiry
+is computed, from a positive `LeaseTtl`, and `LeaseRecord::new` refuses an
+expiry that is not after the heartbeat. Deserialization goes through `new`
+too (`serde(try_from)`), so neither the wire nor a test fixture can build an
+inverted lease. The database writes all three lease columns or none
+(`update_job_lease(job, Option<&LeaseRecord>)`), and the store writes them
+through one method, `db_persist_lease(job, lease, LeaseWrite)`, for every
+transition (claim, runner claim, renew, release, restart), and `read_lease` refuses a
+row that holds part of a lease or an inverted one with a typed
+`StoredLeaseError` (`Partial` or `Unordered`, naming the job), reported as
+`ServerError::StoredLease`.
+
+```mermaid
+flowchart LR
+    ttl["LeaseTtl<br/>(positive, > heartbeat)"] --> taken["LeaseRecord::taken<br/>claim"]
+    ttl --> renew["LeaseRecord::renew<br/>heartbeat, in place"]
+    row[("jobs: leased_by_node,<br/>lease_heartbeat_at,<br/>lease_expires_at")] -->|"read_lease"| cols{"all set?"}
+    cols -->|"all NULL"| none["None"]
+    cols -->|"some NULL"| partial["StoredLeaseError::Partial"]
+    cols -->|"all set"| new["LeaseRecord::new"]
+    wire["JSON (API)"] -->|"serde try_from"| new
+    new -->|"expires > heartbeat"| lease["LeaseRecord"]
+    new -->|"otherwise"| unordered["StoredLeaseError::Unordered"]
+    taken --> lease
+    renew --> lease
+```
+ A lease's lifetime is a `LeaseTtl`
+(config `local_lease_ttl_s`, default 300), refused at config load unless it is
+longer than the 60 s heartbeat (`LEASE_HEARTBEAT`), so a healthy runner's
+lease can never lapse between renewals. `begin_runner` returns the lease it
+took, and that value is what the store persists.
+
+## Time
+
+Every time the store and its runners record comes from one clock. `JobStore`
+owns an injected `Clock` (`crate::clock`), and `JobStore::new` requires it:
+there is no default for a store to fall back to. It is created once where the
+program is composed, `SystemClock` in `serve_with_runtime` and the direct
+CLI, and passed down (the `create_app*` entry points and `DirectHost::new`
+take it as a parameter); startup recovery and retention read the same one.
+Tests pass a `ManualClock` where they pin or advance time.
+
+An event is recorded at an `EventTime` (`crate::store::EventTime`), a
+`MachineTime` that only the store's clock produces (`JobStore::event_time`;
+its constructor is private to the store). `RunnerEventSink::now()` returns
+one, and every sink event method (file processing, done, error, attempt start
+and finish, retry pending, job finalize and fail) and the store's own event
+methods and records take one, as does a submission (`SubmissionContext`). So
+a pipeline cannot record an event at a time it chose: there is no
+`EventTime` it could build from `MachineTime::now()`. A deadline derived from
+an event (a file's retry, a job's memory-gate requeue) is
+`EventTime::deadline_after(backoff)`, the one place one is computed.
+
+`FileRunTracker` stamps every file event from the sink, and an event that
+writes two records (the file and its attempt) writes one instant to both. The
+free helpers that used to forward one sink call each, taking a time from
+their caller, are gone; supervision's fallback paths stamp from the sink too.
+
+```mermaid
+flowchart LR
+    root["entry point<br/>(serve, direct CLI, test)"] -->|"Arc&lt;dyn Clock&gt;"| store["JobStore::new"]
+    store -->|"event_time()"| et["EventTime"]
+    et --> sink["RunnerEventSink::now()"]
+    sink --> tracker["FileRunTracker"]
+    sink --> supervision["supervision fallbacks"]
+    et --> submit["SubmissionContext.submitted_at"]
+    et -->|"deadline_after(backoff)"| deadline["retry / requeue deadline<br/>(MachineTime)"]
+```
+
+All of these times are `MachineTime` (see the type-driven-design page): a
+`REAL` column of Unix seconds in SQLite, decoded through
+`MachineTime::from_unix_seconds` so a stored time that names no instant fails
+to load, and RFC 3339 UTC with three fractional digits on the wire. Durations
+on the wire (`duration_s` on jobs and files) are `NonNegativeSeconds`,
+computed by the server through `NonNegativeSeconds::between(start, end)`,
+never negative; a job's comes from one `Job::duration`, shared by `to_info`
+and `to_list_item`.
 
 ```mermaid
 flowchart LR
@@ -291,8 +458,8 @@ The current server exposes these job/control endpoints:
 - `GET /media/list`
 - `GET /ws`
 
-Dashboard and bug-report routes are also present, but the list above is the
-core processing surface.
+Dashboard routes are also present, but the list above is the core processing
+surface.
 
 ## Concurrency mapping
 
@@ -368,11 +535,18 @@ The key operations are:
 - `execute_v2` (live typed infer path)
 - `shutdown`
 
-The current Rust worker handle tolerates a bounded amount of non-protocol
-stdout noise while waiting for startup or a response, which protects the pool
-from common library banners and download messages. Protocol-shaped malformed
-JSON is still treated as a hard framing error so the request fails loudly
-instead of silently desynchronizing the stream.
+A stdio worker keeps its protocol stream to itself: at startup
+(`claim_protocol_stdout` in `batchalign/worker/_protocol.py`) it moves the
+pipe the server reads onto a private descriptor that only protocol lines are
+written to, and points descriptor 1 and `sys.stdout` at stderr, so a library
+banner or a C extension's print is logged, not read as a reply. Every Rust
+reader (sequential stdio, sequential TCP, shared GPU) classifies a line by
+one rule (`WireLine`): a JSON object is a message, a blank line is nothing,
+and anything else is noise. A message the protocol refuses is a hard framing
+error (`Protocol`), so the request fails loudly. Up to
+`MAX_RESPONSE_STDOUT_NOISE_LINES` consecutive noise lines are skipped; the
+next one makes the stream untrusted, and the waiters receive the retryable
+`OutputNoise` while the worker is retired.
 
 For live `execute_v2` requests, the worker/result contract is also split on
 purpose: malformed request payloads and unreadable prepared artifacts stay in
@@ -524,12 +698,82 @@ bound. Callers read the port from there rather than from `server.yaml`, whose
 `port` is a request (`0` asks the OS to choose).
 Auto-daemon state is tracked separately from manual `serve start`.
 
+The state file, the handshake and the worker registry are all written through
+`atomic_file::write_atomically`, the one atomic writer: a uniquely named
+temporary file beside the target, flushed, renamed over it, and the directory
+synced on Unix. The comparison reports
+and the debug and evaluation artifacts use the same writer (`Existing::Keep`
+where an existing artifact must not be replaced).
+
+Each daemon profile (main, sidecar) has a start lock, a file lock held as a
+`DaemonStartLock` value in `crates/batchalign/src/cli/daemon.rs` (over the
+shared `file_lock::HeldFileLock`, the one cross-process lock primitive). Checking,
+starting, replacing and stopping a daemon all take it, and writing or
+removing the profile's state file needs it (the functions take the lock, not
+a profile), so a `serve stop` cannot race another process's start. Reading
+the state file or the handshake takes no lock and never deletes
+(`DaemonStartLock::read_state` and `read_handshake` are the reads the ensure
+and stop paths share).
+
+A state file or handshake that exists but cannot be read is an
+`UnreadableRecord` (the path and the reason), never "no daemon": it may name
+a live process. The ensure path refuses with it (exit code 6, naming the file
+and what to check) instead of starting a daemon and writing a new record over
+it; `serve start` refuses the same way over an unreadable handshake; `serve
+stop` leaves it in place, says so, and fails after stopping everything else.
+A stop reports a `StopOutcome` per record: `Stopped`, `AlreadyDead` (the
+record named an exited process and was removed), `NotRunning` or
+`Unreadable`.
+
+The daemon path reads `server.yaml` once, where the CLI loads it, and is
+handed that `ServerConfig` with a `DaemonRequest` (the device switches,
+`--workers` as a `NumWorkers`, `--timeout` as a `PositiveSeconds`): the port
+request, the verbosity and the device settings all come from it.
+
+The handshake is the running server's own record, and only it removes it
+while it runs: `ServerHandshake::publish_listening` writes this process's
+PID and returns a `PublishedHandshake`, whose `retire` removes the file only
+while the record still names this process. The CLI removes a handshake only
+for a process it stopped or found dead, and only while the record names that
+PID (`remove_if_names`). The removal's read and delete, and every publish,
+run under the slot's own `HandshakeLock` (an OS lock on `server.pid.lock` or
+`sidecar-server.pid.lock`), so a replacement cannot publish between a stopping
+server's read of its own record and its delete: a server that is shutting down
+cannot delete the handshake a replacement has published. That lock is held for
+one file operation and never across a wait. It is deliberately not the CLI's
+per-profile `DaemonStartLock`, which the CLI holds while it waits for a spawned
+server to publish and for a stopped one to exit; a server taking it to publish
+or retire would deadlock against that wait.
+
+```mermaid
+flowchart LR
+    yaml["server.yaml"] -->|"load_config_from_layout (once)"| cfg["ServerConfig"]
+    cli["CLI flags"] --> req["DaemonRequest"]
+    cfg --> ensure["ensure_daemon"]
+    req --> ensure
+    ensure -->|"read_state()"| state{"daemon.json"}
+    state -->|"absent"| start["start_daemon"]
+    state -->|"recorded"| reuse["reuse / restart"]
+    state -->|"unreadable"| refuse["UnreadableRecord<br/>refused, file kept"]
+    start --> child["child server"]
+    child -->|"publish_listening"| hs["server.pid<br/>(PublishedHandshake)"]
+    child -->|"retire: only if it names us"| hs
+``` `started_at` in the state file is
+a `MachineTime`; a state file from an older build, which wrote Unix seconds
+there, still reads, so the stale-build check can find and replace that
+daemon rather than orphan it.
+
 ## Startup recovery
 
 Server startup now treats crash recovery as an explicit typed transition rather
 than ad hoc map mutation.
 
-1. SQLite marks previously active jobs as `Interrupted`.
+1. SQLite marks previously active jobs as `Interrupted` (returning their
+   `JobId`s), and deletes jobs past `job_ttl_days`, returning each as a
+   `PrunedJob` (its `JobId` and the `ServerPath` of its staging directory, one
+   value rather than two parallel string lists) for startup to remove from
+   disk. The jobs directory stays a `PathBuf` from the layout
+   onward, never re-encoded through `to_string_lossy`.
 2. `JobStore::load_from_db()` rebuilds each `Job` value from persisted rows.
 3. `Job::reconcile_recovered_runtime_state()` decides the canonical next state:
    requeue unfinished work or promote all-terminal jobs to `Completed` /
@@ -568,7 +812,8 @@ model:
   Cancelled job is never auto-resumed. The user said stop; the server
   honors that.
 - **`Interrupted` is the system-initiated counterpart.** Graceful server
-  shutdown and crash recovery (`db.recover_interrupted` SQL migration)
+  shutdown and crash recovery (`db.recover_interrupted`, through the typed
+  status image)
   both write `JobStatus::Interrupted`. Although `JobStatus::is_terminal()`
   returns `true` for it, the recovery sequence above is special-cased to
   transition resumable Interrupted rows back to `Queued` so the next local
@@ -633,7 +878,7 @@ runbook: the deploy procedure's migration-hash drift (self-healing) section.
 | `crates/batchalign/src/cli/dispatch/mod.rs` | top-level dispatch router |
 | `crates/batchalign/src/cli/dispatch/single.rs` | explicit remote single-server dispatch |
 | `crates/batchalign/src/cli/dispatch/paths.rs` | local-daemon paths-mode dispatch |
-| `crates/batchalign/src/daemon.rs` | daemon lifecycle, state files, sidecar handling |
+| `crates/batchalign/src/cli/daemon.rs` | daemon lifecycle, start locks, state files, sidecar handling |
 | `crates/batchalign/src/routes/mod.rs` | axum router composition and middleware |
 | `crates/batchalign/src/routes/jobs/mod.rs` | job submission/list/detail routes |
 | `crates/batchalign/src/routes/health.rs` | `/health` payload and capability reporting |

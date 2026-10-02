@@ -1,7 +1,7 @@
 # Errors at the Python ↔ Rust Boundary
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:57 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 How errors crossing the PyO3 boundary between the Rust worker
 runtime (`batchalign_core`) and the Python ML hosting layer
@@ -29,7 +29,6 @@ pub enum BatchalignBoundaryError {
     ChatValidation {
         message: String,
         entries: Vec<ValidationErrorEntry>,
-        bug_report_id: Option<BugReportId>,
     },
 
     /// A non-CHAT document payload failed validation.
@@ -87,9 +86,9 @@ impl From<BatchalignBoundaryError> for PyErr {
                 )),
             };
             let (class_name, kwargs) = match &error {
-                BatchalignBoundaryError::ChatValidation { entries, bug_report_id, .. } => (
+                BatchalignBoundaryError::ChatValidation { entries, .. } => (
                     "CHATValidationException",
-                    pydict! { "errors": entries, "bug_report_id": bug_report_id },
+                    pydict! { "errors": entries },
                 ),
                 BatchalignBoundaryError::DocumentValidation { .. } => (
                     "DocumentValidationException",
@@ -193,7 +192,7 @@ sequenceDiagram
     Rust-->>Bridge: BatchalignBoundaryError::ChatValidation { entries, ... }
     Bridge->>Bridge: From<…> for PyErr → CHATValidationException(message, errors=...)
     Bridge-->>Py: raise CHATValidationException
-    Note over Py: catch CHATValidationException as exc<br/>exc.errors[0].code == "E312"<br/>exc.bug_report_id is None
+    Note over Py: catch CHATValidationException as exc<br/>exc.errors[0].code == "E312"
 ```
 
 Every error category that crosses the boundary already exists as a
@@ -219,16 +218,6 @@ construct `BatchalignBoundaryError` rather than
 
 `rg PyValueError crates/batchalign-pyo3/src/` returns zero matches
 in the worker-* files, the typed pathway is the only path.
-
-## `bug_report_id` is Python-populated for now
-
-The Rust side has the `MisalignmentBug` shape but not the
-bug-report-filing pipeline; filing happens server-side after the
-exception crosses the boundary. The `bug_report_id` field on
-`CHATValidationException` is therefore set by Python code that
-catches the exception and files the report. Moving filing into Rust
-and having the boundary populate `bug_report_id` directly is a
-future change.
 
 ## Internals-leakage scan
 

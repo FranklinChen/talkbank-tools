@@ -287,7 +287,7 @@ impl LabelTrack {
             if norm.is_empty() {
                 continue;
             }
-            match window.to_file(WindowMs::reported((token.time_s * 1000.0) as u64), engine) {
+            match window.to_file(WindowMs::reported(token.time_s.whole_millis()), engine) {
                 Ok(onset) => {
                     norms.push(norm);
                     onsets.push(onset);

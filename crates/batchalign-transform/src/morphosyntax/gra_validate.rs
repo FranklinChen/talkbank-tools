@@ -9,9 +9,9 @@ use talkbank_model::model::GrammaticalRelation;
 /// a self-loop is a root only when the deprel is literally `ROOT`
 /// (case-insensitive). Self-loops with any other deprel are cycles
 /// per the wider validator's rule, and the L2 splice's post-validation
-/// gate must agree to avoid the wild `chunk N|N|DISCOURSE` shape from
-/// `~/talkbank/still-have-error-6.log` (Cantonese L2 splice cases at
-/// `EACMC/long/Leo/Cantonese/020716.cha:3634, 3642`).
+/// gate must agree, or a spliced utterance could pass this gate with a
+/// relation shaped `N|N|DISCOURSE` (a word headed by itself under a non-root
+/// label) that the validator then refuses.
 fn is_self_loop_a_valid_root(rel: &GrammaticalRelation) -> bool {
     rel.head == rel.index && rel.relation.as_str().eq_ignore_ascii_case("ROOT")
 }
@@ -107,8 +107,8 @@ fn has_any_cycle_generated(gras: &[GrammaticalRelation]) -> Option<usize> {
 mod tests {
     use super::*;
 
-    /// Wild shape from `~/talkbank/still-have-error-6.log`
-    /// (`EACMC/long/Leo/Cantonese/020716.cha:3642`):
+    /// Wild shape from a production run's validation log (a Cantonese
+    /// utterance with an L2 splice):
     /// `1|5|NSUBJ 2|5|PUNCT 3|4|CASE 4|5|NSUBJ 5|5|DISCOURSE 6|5|DISCOURSE 7|5|PUNCT`
     ///: chunk 5 is `head=5/DISCOURSE`, a self-loop with non-ROOT
     /// deprel. The wider `chatter validate` flags this as E724;

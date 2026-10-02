@@ -7,7 +7,7 @@ use super::*;
 use crate::chat_ops::nlp::mapping::validate_generated_gra;
 use crate::chat_ops::nlp::mapping::*;
 use crate::chat_ops::nlp::{UdId, UdPunctable, UdSentence, UdWord, UniversalPos};
-use crate::chat_ops::nlp::{clean_lemma, map_ud_word_to_mor};
+use crate::chat_ops::nlp::{clean_lemma, map_ud_word};
 use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
 
@@ -61,6 +61,50 @@ fn test_italian_defect6_parla_collapses_to_verb_parlare() {
         !items[0].contains("~"),
         "Reconciled mor must not carry a clitic suffix, got {:?}",
         items[0]
+    );
+}
+
+#[test]
+fn test_italian_collapse_keeps_a_non_first_representatives_attachment() {
+    let sentence = UdSentence {
+        words: vec![
+            it_range(1, 2, "parla"),
+            it_word(
+                1,
+                "par",
+                "par",
+                UniversalPos::Verb,
+                2,
+                "aux",
+                Some("Mood=Imp|Number=Sing|Person=2|VerbForm=Fin"),
+            ),
+            it_word(
+                2,
+                "la",
+                "il",
+                UniversalPos::Pron,
+                0,
+                "root",
+                Some("Number=Sing|Person=3|PronType=Prs"),
+            ),
+            it_word(
+                3,
+                "forte",
+                "forte",
+                UniversalPos::Adj,
+                2,
+                "advmod",
+                Some("Number=Sing"),
+            ),
+        ],
+    };
+    let (mors, gras) = map_ud_sentence(&sentence, &it_ctx()).unwrap();
+    assert!(chat_strings(&mors)[0].starts_with("verb|parlare"));
+    assert_eq!(
+        gras.iter()
+            .map(|gra| (gra.index, gra.head, gra.relation.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, 0, "ROOT"), (2, 1, "ADVMOD"), (3, 1, "PUNCT")],
     );
 }
 

@@ -787,8 +787,4 @@ async fn e2e_job_status_lifecycle() {
         final_info.completed_at.is_some(),
         "completed_at should be set"
     );
-    assert!(
-        final_info.submitted_at.is_some(),
-        "submitted_at should be set"
-    );
 }

@@ -11,7 +11,7 @@ use crate::cli::args::{
 };
 use crate::cli::dispatch::build_direct_pool_config;
 use crate::cli::error::CliError;
-use crate::config::{RuntimeLayout, load_validated_config_from_layout};
+use crate::config::{RuntimeLayout, load_config_from_layout};
 use crate::params::CachePolicy;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::transcribe::run_transcribe_pipeline_with_legacy_replay;
@@ -86,10 +86,7 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
     }
 
     let layout = RuntimeLayout::from_env();
-    let (config, warnings) = load_validated_config_from_layout(&layout, None)?;
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
+    let config = load_config_from_layout(&layout, None)?;
     let workers = prepare_workers(
         build_direct_pool_config(&config, false, false, layout.state_dir()),
         RegistryDiscovery::Ignore,
@@ -325,8 +322,13 @@ fn replay_error(error: impl std::fmt::Display) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::DurationSeconds;
+    use crate::api::AudioPositionSeconds;
     use crate::transcribe::{AsrResponse, AsrToken};
+
+    /// A fixture position; every literal in this module is a valid one.
+    fn at(seconds: f64) -> Option<AudioPositionSeconds> {
+        Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
+    }
 
     fn run_args(
         no_utseg: bool,
@@ -359,8 +361,8 @@ mod tests {
             serde_json::to_vec(&AsrResponse {
                 tokens: vec![AsrToken {
                     text: "hello".into(),
-                    start_s: Some(DurationSeconds(0.0)),
-                    end_s: Some(DurationSeconds(0.5)),
+                    start_s: at(0.0),
+                    end_s: at(0.5),
                     speaker: Some("0".into()),
                     confidence: None,
                 }],

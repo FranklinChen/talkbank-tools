@@ -15,6 +15,7 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/shallow";
 import type { HealthResponse, JobListItem } from "./types";
+import { compareTimesNewestFirst } from "./utils";
 
 interface AppState {
   /** Jobs keyed by `serverHost|job_id` (avoids collisions across servers). */
@@ -103,7 +104,7 @@ export function useSortedJobs(): JobListItem[] {
   return useStore(
     useShallow((s) =>
       [...s.jobs.values()].sort((a, b) =>
-        (b.submitted_at ?? "").localeCompare(a.submitted_at ?? "")
+        compareTimesNewestFirst(a.submitted_at, b.submitted_at)
       )
     )
   );
@@ -117,7 +118,7 @@ export function useFilteredJobs(): JobListItem[] {
       const all = [...s.jobs.values()];
       const filtered = filter === null ? all : all.filter((j) => j.server === filter);
       return filtered.sort((a, b) =>
-        (b.submitted_at ?? "").localeCompare(a.submitted_at ?? "")
+        compareTimesNewestFirst(a.submitted_at, b.submitted_at)
       );
     })
   );

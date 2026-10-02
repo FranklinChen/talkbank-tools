@@ -22,6 +22,7 @@ from batchalign.worker import (
     InferResponse,
     InferTask,
 )
+from batchalign.worker._types import ItemFailed, ItemProduced
 
 
 def test_health_response() -> None:
@@ -121,26 +122,70 @@ def test_infer_request_serialization() -> None:
 
 
 def test_infer_response_success() -> None:
-    """InferResponse on success has result, no error."""
-    resp = InferResponse(
-        result={"mor": "det|the n|dog v|run-3S", "gra": "1|2|DET 2|3|SUBJ 3|0|ROOT"},
-        elapsed_s=0.5,
+    """A produced item's outcome carries its result and nothing else."""
+    resp = InferResponse.unexecuted(
+        ItemProduced(
+            result={"mor": "det|the n|dog v|run-3S", "gra": "1|2|DET 2|3|SUBJ 3|0|ROOT"}
+        )
     )
     data = json.loads(resp.model_dump_json())
-    assert data["result"]["mor"].startswith("det|the")
-    assert data["error"] is None
-    assert data["elapsed_s"] == 0.5
+    assert data["outcome"]["kind"] == "produced"
+    assert data["outcome"]["result"]["mor"].startswith("det|the")
+    assert "error" not in data["outcome"]
+    assert resp.result is not None and resp.error is None
+
+
+def test_infer_response_elapsed_has_no_default() -> None:
+    """Every item says whether it was timed; there is no zero to fall back on."""
+    with pytest.raises(ValidationError):
+        InferResponse(outcome=ItemFailed(error="x"))  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        InferResponse(outcome=ItemFailed(error="x"), elapsed_s=-0.5)
+
+
+def test_an_item_is_a_result_or_a_failure_never_both_or_neither() -> None:
+    """The outcome is a union: both fields, or neither, do not parse."""
+    for malformed in (
+        {"outcome": {"kind": "produced", "result": 1, "error": "x"}, "elapsed_s": None},
+        {"outcome": {"kind": "failed"}, "elapsed_s": None},
+        {"result": 1, "error": "x", "elapsed_s": None},
+        {"elapsed_s": None},
+    ):
+        with pytest.raises(ValidationError):
+            InferResponse.model_validate(malformed)
+
+
+def test_unexecuted_item_writes_null_elapsed() -> None:
+    """An item no work ran for reports no time (null), never 0.0."""
+    resp = InferResponse.unexecuted(ItemFailed(error="Invalid batch item"))
+    data = json.loads(resp.model_dump_json())
+    assert data == {
+        "outcome": {"kind": "failed", "error": "Invalid batch item"},
+        "elapsed_s": None,
+    }
+
+
+def test_timed_item_reports_its_own_work(monkeypatch) -> None:
+    """``timed`` reads the clock around the work it runs, and nothing else."""
+    readings = iter([10.0, 12.5])
+    monkeypatch.setattr(
+        "batchalign.worker._types.time.monotonic", lambda: next(readings)
+    )
+    resp = InferResponse.timed(lambda: ItemProduced(result={"kind": "ok"}))
+    assert resp.result == {"kind": "ok"}
+    assert resp.error is None
+    assert resp.elapsed_s == 2.5
 
 
 def test_infer_response_error() -> None:
-    """InferResponse on error has error message, no result."""
-    resp = InferResponse(
-        error="infer task 'morphosyntax' not yet implemented",
-        elapsed_s=0.0,
+    """A failed item's outcome carries its error and no result."""
+    resp = InferResponse.unexecuted(
+        ItemFailed(error="infer task 'morphosyntax' not yet implemented")
     )
     data = json.loads(resp.model_dump_json())
-    assert data["result"] is None
-    assert "not yet implemented" in data["error"]
+    assert data["outcome"]["kind"] == "failed"
+    assert "not yet implemented" in data["outcome"]["error"]
+    assert resp.result is None
 
 
 def test_batch_infer_request_serialization() -> None:
@@ -163,14 +208,14 @@ def test_batch_infer_response_serialization() -> None:
     """BatchInferResponse contains a list of InferResponse."""
     resp = BatchInferResponse(
         results=[
-            InferResponse(result={"mor": "n|hello"}, elapsed_s=0.1),
-            InferResponse(error="failed", elapsed_s=0.0),
+            InferResponse.unexecuted(ItemProduced(result={"mor": "n|hello"})),
+            InferResponse.unexecuted(ItemFailed(error="failed")),
         ],
     )
     data = json.loads(resp.model_dump_json())
     assert len(data["results"]) == 2
-    assert data["results"][0]["result"]["mor"] == "n|hello"
-    assert data["results"][1]["error"] == "failed"
+    assert data["results"][0]["outcome"]["result"]["mor"] == "n|hello"
+    assert data["results"][1]["outcome"]["error"] == "failed"
 
 
 def test_rust_can_parse_python_infer_request() -> None:
@@ -196,8 +241,10 @@ def test_python_can_parse_rust_infer_response() -> None:
     """Verify Python can parse the JSON that Rust produces for InferResponse."""
     rust_json = json.dumps(
         {
-            "result": {"mor": "n|hello n|world", "gra": "1|2|SUBJ 2|0|ROOT"},
-            "error": None,
+            "outcome": {
+                "kind": "produced",
+                "result": {"mor": "n|hello n|world", "gra": "1|2|SUBJ 2|0|ROOT"},
+            },
             "elapsed_s": 0.123,
         }
     )

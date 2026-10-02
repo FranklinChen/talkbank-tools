@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-09-30 22:58 EDT
+**Last updated:** 2026-10-01 14:00 EDT
 
 ## Overview
 
@@ -1457,6 +1457,22 @@ Before injecting timestamps into the CHAT AST, the offset must be added:
 
 - **TokenLevel** (Whisper): `absolute_ms = time_s * 1000 + audio_start_ms`
 - **WordLevel** (Wave2Vec): `absolute_ms = start_ms + audio_start_ms`
+
+A Whisper onset `time_s` is an `AudioPositionSeconds` from the worker's
+response onward (`WhisperTokenTimingV2`, then `FaRawToken`): a point in the
+window, finite and non-negative by type, never a length. The PyO3 parser
+admits it with the type's own constructor, which also refuses the NaN and
+infinite onsets its old `< 0.0` comparison let through.
+`AudioPositionSeconds::whole_millis` (truncating) turns it into the
+`WindowMs` that `FaWindow::to_file` offsets; it is the only conversion.
+
+```mermaid
+flowchart LR
+    py["Python host<br/>(text, time_s: float)"] -->|"AudioPositionSeconds::try_from<br/>refuses negative, NaN, infinite"| wire["WhisperTokenTimingV2<br/>time_s: AudioPositionSeconds"]
+    wire --> raw["FaRawToken<br/>time_s: AudioPositionSeconds"]
+    raw -->|"whole_millis()"| win["WindowMs"]
+    win -->|"FaWindow::to_file"| file["FileMs<br/>(transcript timing)"]
+```
 
 Failing to add the offset produces timestamps that are internally consistent
 (words are correctly spaced relative to each other) but placed at the wrong

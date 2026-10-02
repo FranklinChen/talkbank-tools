@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::api::{DisplayPath, JobId, JobStatus, ReleasedCommand};
 
-use super::Job;
+use super::{Job, Submitter};
 
 /// Describes one file-level collision between an incoming job submission and an
 /// existing active job.
@@ -33,7 +33,9 @@ pub struct ConflictEntry {
 
 /// Find file-level conflicts between an incoming job and all active jobs.
 pub(crate) fn find_conflicts(jobs: &HashMap<JobId, Job>, incoming: &Job) -> Vec<ConflictEntry> {
-    let incoming_keys: std::collections::HashSet<(String, String)> = incoming
+    // `None` keys jobs with no recorded submitter together, as the empty
+    // string did before absence had its own type.
+    let incoming_keys: std::collections::HashSet<(Option<&str>, String)> = incoming
         .filesystem
         .filenames
         .iter()
@@ -43,7 +45,10 @@ pub(crate) fn find_conflicts(jobs: &HashMap<JobId, Job>, incoming: &Job) -> Vec<
             } else {
                 format!("{}/{fn_}", incoming.source.source_dir)
             };
-            (incoming.source.submitted_by.clone(), path)
+            (
+                incoming.source.submitter.as_ref().map(Submitter::address),
+                path,
+            )
         })
         .collect();
 
@@ -58,7 +63,10 @@ pub(crate) fn find_conflicts(jobs: &HashMap<JobId, Job>, incoming: &Job) -> Vec<
             } else {
                 format!("{}/{fn_}", active.source.source_dir)
             };
-            let key = (active.source.submitted_by.clone(), path);
+            let key = (
+                active.source.submitter.as_ref().map(Submitter::address),
+                path,
+            );
             if incoming_keys.contains(&key) {
                 conflicts.push(ConflictEntry {
                     filename: fn_.clone(),

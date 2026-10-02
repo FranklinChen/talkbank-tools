@@ -29,7 +29,10 @@
 //! - Do NOT rename types or enum variants.
 //! - If a new feature is needed, define it in [`crate::worker_v2`] instead.
 //!
-//! Any changes that would break the JSON serialization format are banned for this module.
+//! A change to the JSON serialization format moves the Rust types and the
+//! Python models in `batchalign/worker/_types.py` together, since the server
+//! and the worker ship as one runtime (the item outcome union, `ItemOutcome`,
+//! is one such change).
 //!
 //! ## Migration Path
 //!
@@ -43,7 +46,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DurationSeconds, LanguageCode3, ReportedEngineName, WorkerLanguage};
+use crate::api::{LanguageCode3, NonNegativeSeconds, ReportedEngineName, WorkerLanguage};
 
 // ---------------------------------------------------------------------------
 // Domain newtypes (worker-specific)
@@ -108,7 +111,7 @@ pub struct WorkerHealthResponse {
     pub pid: WorkerPid,
     /// Seconds since the worker process started (wall clock).  Useful for
     /// monitoring idle workers and debugging memory leaks over time.
-    pub uptime_s: DurationSeconds,
+    pub uptime_s: NonNegativeSeconds,
 }
 
 /// Response from worker capabilities operation.
@@ -239,18 +242,171 @@ pub struct InferRequest {
     pub payload: serde_json::Value,
 }
 
+/// What one inference item produced: its result or its failure, one of the
+/// two by type.
+///
+/// On the wire `{"kind": "produced", "result": ...}` or `{"kind": "failed",
+/// "error": "..."}`. A response holding both, or neither, is malformed rather
+/// than a case every reader must decide.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ItemOutcome {
+    /// The item's result (structure depends on the task).
+    Produced {
+        /// The task's result payload, never `null`.
+        result: ItemPayload,
+    },
+    /// The item failed, and this is why.
+    Failed {
+        /// The worker's diagnosis.
+        error: String,
+    },
+}
+
+impl ItemOutcome {
+    /// The result payload, when the item produced one.
+    pub fn result(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Produced { result } => Some(result.as_value()),
+            Self::Failed { .. } => None,
+        }
+    }
+
+    /// The failure, when the item failed.
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed { error } => Some(error),
+            Self::Produced { .. } => None,
+        }
+    }
+}
+
+/// A produced item's result payload: any JSON value but `null`.
+///
+/// A produced item with a `null` result is an item with no result, which the
+/// outcome union exists to rule out; it is refused when the item is read, not
+/// discovered by each task's reader.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "serde_json::Value")]
+pub struct ItemPayload(serde_json::Value);
+
+impl ItemPayload {
+    /// The payload as JSON.
+    pub fn as_value(&self) -> &serde_json::Value {
+        &self.0
+    }
+}
+
+impl TryFrom<serde_json::Value> for ItemPayload {
+    type Error = &'static str;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        match value {
+            serde_json::Value::Null => Err("a produced item's result must not be null"),
+            value @ (serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+            | serde_json::Value::Array(_)
+            | serde_json::Value::Object(_)) => Ok(Self(value)),
+        }
+    }
+}
+
 /// Response from a single inference operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct InferResponse {
-    /// Inference result (structure depends on the task).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    /// Error message if inference failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Processing time in seconds.
-    #[serde(default)]
-    pub elapsed_s: DurationSeconds,
+    /// The item's result or its failure.
+    pub outcome: ItemOutcome,
+    /// How long this item's own work took, or that no work is attributable
+    /// to it. Required: a response without the key is malformed; `null`
+    /// says the item never executed.
+    pub elapsed_s: ItemElapsed,
+}
+
+/// How long one inference item's own work took, or the fact that none is
+/// attributable to it.
+///
+/// On the wire this is `elapsed_s`: a non-negative number of seconds, or
+/// `null`. `null` belongs to an item no work ran for: its payload never
+/// parsed, its provider was not loaded, it had nothing to analyze, or its
+/// whole language group failed before per-item work began. A `0.0` there
+/// would be a measurement nobody took, indistinguishable from an item that
+/// genuinely finished instantly.
+///
+/// Serialized through `Option` (`null` for [`Self::NotExecuted`]); read by
+/// hand so that only an explicit `null` means "not executed" and a response
+/// without the key stays malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(into = "Option<NonNegativeSeconds>")]
+pub enum ItemElapsed {
+    /// The worker timed this item's own work.
+    Measured(NonNegativeSeconds),
+    /// No work ran for this item, so there is nothing to measure.
+    NotExecuted,
+}
+
+impl<'de> Deserialize<'de> for ItemElapsed {
+    /// `deserialize_any`, not `Option::deserialize`: serde hands a missing
+    /// key to its missing-field deserializer, whose `deserialize_option`
+    /// answers `None` (so a forgotten key would read as "not executed") and
+    /// whose `deserialize_any` refuses with "missing field".
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ElapsedVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ElapsedVisitor {
+            type Value = ItemElapsed;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a non-negative number of seconds, or null")
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<ItemElapsed, E> {
+                Ok(ItemElapsed::NotExecuted)
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<ItemElapsed, E> {
+                Ok(ItemElapsed::NotExecuted)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<ItemElapsed, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                NonNegativeSeconds::deserialize(deserializer).map(ItemElapsed::Measured)
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, seconds: f64) -> Result<ItemElapsed, E> {
+                NonNegativeSeconds::try_from(seconds)
+                    .map(ItemElapsed::Measured)
+                    .map_err(E::custom)
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, seconds: u64) -> Result<ItemElapsed, E> {
+                // A JSON integer such as `2` is a whole number of seconds.
+                self.visit_f64(seconds as f64)
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, seconds: i64) -> Result<ItemElapsed, E> {
+                // A negative one is refused by `NonNegativeSeconds`.
+                self.visit_f64(seconds as f64)
+            }
+        }
+
+        deserializer.deserialize_any(ElapsedVisitor)
+    }
+}
+
+impl From<ItemElapsed> for Option<NonNegativeSeconds> {
+    fn from(elapsed: ItemElapsed) -> Self {
+        match elapsed {
+            ItemElapsed::Measured(seconds) => Some(seconds),
+            ItemElapsed::NotExecuted => None,
+        }
+    }
 }
 
 /// Request for batched inference (multiple items, one model call).
@@ -290,6 +446,26 @@ pub struct BatchInferResponse {
 mod tests {
     use super::*;
 
+    /// The outcome union admits neither "no result" nor a field it does not
+    /// name: a produced item with a `null` result, and an unknown field on
+    /// the outcome or the response, are refused when read.
+    #[test]
+    fn an_item_with_no_result_or_an_unknown_field_is_refused() {
+        let reads = |line: &str| serde_json::from_str::<InferResponse>(line).is_ok();
+        assert!(reads(
+            r#"{"outcome": {"kind": "produced", "result": {"x": 1}}, "elapsed_s": 0.5}"#
+        ));
+        assert!(!reads(
+            r#"{"outcome": {"kind": "produced", "result": null}, "elapsed_s": 0.5}"#
+        ));
+        assert!(!reads(
+            r#"{"outcome": {"kind": "produced", "result": 1, "error": "x"}, "elapsed_s": 0.5}"#
+        ));
+        assert!(!reads(
+            r#"{"outcome": {"kind": "failed", "error": "x"}, "elapsed_s": null, "extra": 1}"#
+        ));
+    }
+
     #[test]
     fn worker_health_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let health = WorkerHealthResponse {
@@ -297,7 +473,7 @@ mod tests {
             command: "infer:morphosyntax".into(),
             lang: WorkerLanguage::from(LanguageCode3::eng()),
             pid: WorkerPid(12345),
-            uptime_s: DurationSeconds(120.5),
+            uptime_s: NonNegativeSeconds::try_from(120.5)?,
         };
         let json = serde_json::to_string(&health)?;
         let back: WorkerHealthResponse = serde_json::from_str(&json)?;
@@ -393,25 +569,49 @@ mod tests {
     #[test]
     fn infer_response_success() -> Result<(), Box<dyn std::error::Error>> {
         let resp = InferResponse {
-            result: Some(
-                serde_json::json!({"mor": "det|the n|dog v|run-3S", "gra": "1|2|DET 2|3|SUBJ 3|0|ROOT"}),
-            ),
-            error: None,
-            elapsed_s: DurationSeconds(0.042),
+            outcome: ItemOutcome::Produced {
+                result: ItemPayload::try_from(
+                    serde_json::json!({"mor": "det|the n|dog v|run-3S", "gra": "1|2|DET 2|3|SUBJ 3|0|ROOT"}),
+                )?,
+            },
+            elapsed_s: ItemElapsed::Measured(NonNegativeSeconds::try_from(0.042)?),
         };
         let json = serde_json::to_string(&resp)?;
-        assert!(!json.contains("error")); // None fields skipped
+        assert!(!json.contains("error"));
         let back: InferResponse = serde_json::from_str(&json)?;
         assert_eq!(resp, back);
+        Ok(())
+    }
+
+    /// The elapsed key is required and its number must be a length: a
+    /// response without one used to read as zero seconds through
+    /// `#[serde(default)]`. `null` is the one way to say no work ran.
+    #[test]
+    fn infer_response_refuses_a_missing_or_negative_elapsed_time()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let failed = r#""outcome":{"kind":"failed","error":"x"}"#;
+        assert!(serde_json::from_str::<InferResponse>(&format!("{{{failed}}}")).is_err());
+        assert!(
+            serde_json::from_str::<InferResponse>(&format!("{{{failed},\"elapsed_s\":-0.5}}"))
+                .is_err()
+        );
+        let unexecuted: InferResponse =
+            serde_json::from_str(&format!("{{{failed},\"elapsed_s\":null}}"))?;
+        assert_eq!(unexecuted.elapsed_s, ItemElapsed::NotExecuted);
+        assert_eq!(
+            serde_json::to_value(&unexecuted)?,
+            serde_json::json!({"outcome": {"kind": "failed", "error": "x"}, "elapsed_s": null})
+        );
         Ok(())
     }
 
     #[test]
     fn infer_response_error() -> Result<(), Box<dyn std::error::Error>> {
         let resp = InferResponse {
-            result: None,
-            error: Some("model not loaded".into()),
-            elapsed_s: DurationSeconds(0.001),
+            outcome: ItemOutcome::Failed {
+                error: "model not loaded".into(),
+            },
+            elapsed_s: ItemElapsed::Measured(NonNegativeSeconds::try_from(0.001)?),
         };
         let json = serde_json::to_string(&resp)?;
         let back: InferResponse = serde_json::from_str(&json)?;
@@ -484,14 +684,16 @@ mod tests {
         let resp = BatchInferResponse {
             results: vec![
                 InferResponse {
-                    result: Some(serde_json::json!({"mor": "co|hello"})),
-                    error: None,
-                    elapsed_s: DurationSeconds(0.01),
+                    outcome: ItemOutcome::Produced {
+                        result: ItemPayload::try_from(serde_json::json!({"mor": "co|hello"}))?,
+                    },
+                    elapsed_s: ItemElapsed::Measured(NonNegativeSeconds::try_from(0.01)?),
                 },
                 InferResponse {
-                    result: None,
-                    error: Some("empty input".into()),
-                    elapsed_s: DurationSeconds(0.0),
+                    outcome: ItemOutcome::Failed {
+                        error: "empty input".into(),
+                    },
+                    elapsed_s: ItemElapsed::NotExecuted,
                 },
             ],
         };

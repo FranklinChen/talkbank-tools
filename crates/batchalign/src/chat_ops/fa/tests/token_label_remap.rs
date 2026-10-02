@@ -24,6 +24,7 @@
 
 use super::*;
 
+use crate::api::AudioPositionSeconds;
 use crate::chat_ops::fa::alignment::residue::{MAX_RESIDUE_ALIGN_CHARS, owners_are_monotone};
 use crate::chat_ops::fa::alignment::token_map::{
     UntimedReason, WordSlot, WordTimingOutcome, map_labels_to_words, normalize_fa_alignment_unit,
@@ -53,7 +54,7 @@ fn labels(items: &[(&str, f64)]) -> Vec<FaRawToken> {
         .iter()
         .map(|(text, time_s)| FaRawToken {
             text: (*text).to_string(),
-            time_s: *time_s,
+            time_s: AudioPositionSeconds::try_from(*time_s).expect("fixture onset"),
         })
         .collect()
 }

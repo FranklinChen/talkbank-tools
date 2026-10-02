@@ -7,7 +7,7 @@ use crate::recipe_runner::runtime::{
     ChatOutputTarget, result_display_path_for_command, write_text_output_artifact,
 };
 use crate::scheduling::{FailureCategory, WorkUnitKind};
-use crate::store::{RunnerJobSnapshot, unix_now};
+use crate::store::RunnerJobSnapshot;
 
 use super::util::{FileRunTracker, FileStage, RunnerEventSink};
 
@@ -35,9 +35,8 @@ pub(super) async fn dispatch_test_echo_files(
 
         let filename = file.filename.as_ref();
         let lifecycle = FileRunTracker::new(sink, job_id, filename);
-        let started_at = unix_now();
         lifecycle
-            .begin_first_attempt(WorkUnitKind::FileProcess, started_at, FileStage::Processing)
+            .begin_first_attempt(WorkUnitKind::FileProcess, FileStage::Processing)
             .await;
 
         let result_display_path = result_display_path_for_command(job.dispatch.command, filename);
@@ -63,7 +62,7 @@ pub(super) async fn dispatch_test_echo_files(
                 Err(error) => {
                     let err_msg = format!("Failed to read input for test-echo dispatch: {error}");
                     lifecycle
-                        .fail(&err_msg, FailureCategory::InputMissing, unix_now())
+                        .fail(&err_msg, FailureCategory::InputMissing)
                         .await;
                     continue;
                 }
@@ -75,14 +74,12 @@ pub(super) async fn dispatch_test_echo_files(
         let target = ChatOutputTarget::new(&job.filesystem, file.file_index, &result_display_path);
         if let Err(error) = write_text_output_artifact(&target, &output_text).await {
             let err_msg = format!("Failed to write test-echo output: {error}");
-            lifecycle
-                .fail(&err_msg, FailureCategory::Validation, unix_now())
-                .await;
+            lifecycle.fail(&err_msg, FailureCategory::Validation).await;
             continue;
         }
 
         lifecycle
-            .complete_with_result(result_display_path, ContentType::Chat, unix_now())
+            .complete_with_result(result_display_path, ContentType::Chat)
             .await;
     }
 }

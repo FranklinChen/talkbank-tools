@@ -97,14 +97,17 @@ def test_the_identity_lemmatizer_needs_no_option(
     """Thai and Vietnamese lemmatize by identity: no checkpoint, no download."""
     import stanza.resources.common
 
-    from batchalign.worker._stanza_lemma_pretrain import lemma_pretrain_options
+    from batchalign.worker._stanza_lemma_pretrain import (
+        lemma_pretrain_options,
+        resolve_lemma_pretrain,
+    )
 
     (tmp_path / "resources.json").write_text(
         '{"th": {"default_processors": {"lemma": "identity"}}}', encoding="utf-8"
     )
     monkeypatch.setattr(stanza.resources.common, "DEFAULT_MODEL_DIR", str(tmp_path))
-    lemma_pretrain_options.cache_clear()
+    resolve_lemma_pretrain.cache_clear()
     try:
         assert lemma_pretrain_options("th") == {}
     finally:
-        lemma_pretrain_options.cache_clear()
+        resolve_lemma_pretrain.cache_clear()

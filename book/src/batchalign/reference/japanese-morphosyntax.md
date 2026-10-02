@@ -1,7 +1,7 @@
 # Japanese Morphosyntax Pipeline
 
 **Status:** Current
-**Last updated:** 2026-05-20 07:58 EDT
+**Last updated:** 2026-10-01 08:17 EDT
 
 ---
 
@@ -205,23 +205,25 @@ to the surface text. If the surface text is also empty, it uses
 
 ## POS Mapping
 
-The `map_ud_word_to_mor()` function
+The `map_ud_word()` function
 (`crates/batchalign-transform/src/morphosyntax/mor_word.rs:13`) applies
 Japanese-specific overrides in steps 3-4.
 
 ### Step 3: Verb Form Overrides
 
 If the language is Japanese, verb form overrides run before generic
-POS mapping (inside `map_ud_word_to_mor` at
-`mor_word.rs:13`):
+POS mapping (inside `map_ud_word` in `mor_word.rs`). The category a word is
+written with is a typed `MorPos` (a UD category, or Japanese `cm`), so the
+override returns a `UniversalPos`, never a category name:
 
 ```rust,ignore
-if lang2(&ctx.lang) == "ja"
-    && let Some(ovr) = lang_ja::japanese_verbform(&effective_pos, &cleaned_lemma, &ud.text)
-{
-    effective_pos = ovr.pos.to_string();
-    cleaned_lemma = ovr.lemma.to_string();
-    cleaned_lemma = cleaned_lemma.replace(',', "cm");
+let mut written = MorPos::Upos(tagged);
+if lang2(&ctx.lang) == "ja" {
+    if let Some(ovr) = japanese_verbform(tagged, &cleaned_lemma, &ud.text) {
+        written = MorPos::Upos(ovr.pos);
+        cleaned_lemma = ovr.lemma.replace(',', "cm");
+    }
+    // Step 4 below.
 }
 ```
 
@@ -232,17 +234,14 @@ produces a lemma containing a comma (which would be illegal in a %mor stem).
 
 All Japanese `PUNCT` tokens map to the `cm` (comma marker) POS
 category, and Japanese commas (both full-width `、` and ASCII `,`)
-also map to `cm` (still inside `map_ud_word_to_mor` at
-`crates/batchalign-transform/src/morphosyntax/mor_word.rs:13`):
+also map to `cm` (still inside `map_ud_word`):
 
 ```rust,ignore
-if lang2(&ctx.lang) == "ja" {
-    if matches!(ud.upos, UdPunctable::Value(UniversalPos::Punct)) {
-        effective_pos = "cm".to_string();
-    }
-    if ud.lemma == "、" || ud.lemma == "," {
-        effective_pos = "cm".to_string();
-    }
+if matches!(ud.upos, UdPunctable::Value(UniversalPos::Punct))
+    || ud.lemma == "、"
+    || ud.lemma == ","
+{
+    written = MorPos::JapaneseComma;
 }
 ```
 
@@ -268,14 +267,14 @@ rules) is ported from the BA2 Python verb-form override file.
 
 ```rust,ignore
 pub struct JaOverride {
-    pub pos: &'static str,   // New POS category
+    pub pos: UniversalPos,   // New POS category
     pub lemma: &'static str, // New lemma
 }
 
-pub fn japanese_verbform(upos: &str, target: &str, text: &str) -> Option<JaOverride>
+pub fn japanese_verbform(upos: UniversalPos, target: &str, text: &str) -> Option<JaOverride>
 ```
 
-The function takes the lowercased UPOS tag, cleaned lemma, and surface text.
+The function takes Stanza's UPOS, the cleaned lemma, and the surface text.
 It returns `Some(JaOverride)` if a match is found, `None` otherwise.
 
 ### Categories
@@ -305,7 +304,7 @@ and `なきゃ` would match the `ちゃ` rule because it appears first.
 ### Execution Timing
 
 Verb form overrides run **before** POS mapping (inside
-`map_ud_word_to_mor` at
+`map_ud_word` at
 `crates/batchalign-transform/src/morphosyntax/mor_word.rs:13`). This
 means they can change both the POS category and lemma that flow
 into feature computation and %mor assembly.
@@ -361,8 +360,8 @@ of the current public runtime contract.
 | Token text whitespace strip | `crates/batchalign-transform/src/morphosyntax/injection.rs` | retokenize-mode token sanitizer |
 | Lemma whitespace strip | `crates/batchalign-transform/src/morphosyntax/ud_types.rs` | `sanitize_mor_text()` @426 |
 | `clean_lemma()` (quote handling) | `crates/batchalign-transform/src/morphosyntax/mor_word.rs` | @81 |
-| `map_ud_word_to_mor()` (JA overrides) | `crates/batchalign-transform/src/morphosyntax/mor_word.rs` | @13 |
-| Japanese PUNCT → cm | `crates/batchalign-transform/src/morphosyntax/mor_word.rs` | inside `map_ud_word_to_mor` @13 |
+| `map_ud_word()` (JA overrides) | `crates/batchalign-transform/src/morphosyntax/mor_word.rs` | @13 |
+| Japanese PUNCT → cm | `crates/batchalign-transform/src/morphosyntax/mor_word.rs` | inside `map_ud_word` @13 |
 | `is_clitic()` (no JA entries) | `crates/batchalign-transform/src/morphosyntax/mor_word.rs` | @200 |
 | Verb form overrides | `crates/batchalign-transform/src/morphosyntax/lang_ja.rs` | `japanese_verbform()` |
 | Retokenize algorithm | `crates/batchalign-transform/src/retokenize.rs` (+ `retokenize/{rebuild,parse_helpers}.rs`) | full module |

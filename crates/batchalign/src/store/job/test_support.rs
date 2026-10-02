@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::api::{
     DisplayPath, JobStatus, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand,
-    UnixTimestamp,
 };
 use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use crate::store::{
@@ -20,8 +19,6 @@ use crate::store::{
 };
 
 use tokio_util::sync::CancellationToken;
-
-use super::types::JobLeaseState;
 
 /// Build a minimal `Job` whose `execution.status = Running`.
 ///
@@ -56,8 +53,10 @@ pub(crate) fn running_job_fixture() -> Job {
             debug_traces: false,
         },
         source: JobSourceContext {
-            submitted_by: "127.0.0.1".into(),
-            submitted_by_name: String::new(),
+            submitter: Some(crate::store::Submitter::client(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                String::new(),
+            )),
             source_dir: Default::default(),
         },
         filesystem: JobFilesystemConfig {
@@ -80,15 +79,11 @@ pub(crate) fn running_job_fixture() -> Job {
             completed_files: 0,
         },
         schedule: JobScheduleState {
-            submitted_at: UnixTimestamp(1_000_000.0),
+            submitted_at: crate::unix_time(1_000_000.0),
             completed_at: None,
             next_eligible_at: None,
             num_workers: None,
-            lease: JobLeaseState {
-                leased_by_node: None,
-                expires_at: None,
-                heartbeat_at: None,
-            },
+            lease: None,
             last_cancel: None,
         },
         runtime: JobRuntimeControl {

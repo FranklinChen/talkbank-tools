@@ -16,76 +16,41 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
-use crate::api::WorkerLanguage;
-use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2};
-use crate::worker::error::WorkerError;
+use crate::api::{PositiveSeconds, WorkerLanguage};
+use crate::types::worker_v2::{
+    ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2, batched_items_timeout,
+};
+use crate::worker::error::{WorkerError, WorkerWait};
+use crate::worker::handle::{
+    EnsureTaskRequest, NoiseLimit, NoiseRun, WireLine, WorkerRequest, WorkerResponse, excerpt,
+};
 use crate::worker::{
     BatchInferRequest, BatchInferResponse, InferRequest, InferResponse, WorkerCapabilities,
     WorkerHealthResponse, WorkerPid, WorkerProfile,
 };
 
-/// Maximum non-JSON lines to tolerate while waiting for a response.
-const MAX_RESPONSE_NOISE_LINES: usize = 8;
-
-/// Wire-level request envelope (same as handle.rs, shared protocol).
-#[derive(Debug, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum WorkerRequest<'a> {
-    Infer { request: &'a InferRequest },
-    BatchInfer { request: &'a BatchInferRequest },
-    ExecuteV2 { request: &'a ExecuteRequestV2 },
-    EnsureTask { request: EnsureTaskRequest<'a> },
-    Health,
-    Capabilities,
-    Shutdown,
-}
-
-#[derive(Debug, Serialize)]
-struct EnsureTaskRequest<'a> {
-    task: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    engine_overrides: Option<&'a std::collections::BTreeMap<String, String>>,
-}
-
-/// Wire-level response envelope (same as handle.rs, shared protocol).
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum WorkerResponse {
-    Infer {
-        response: InferResponse,
-    },
-    BatchInfer {
-        response: BatchInferResponse,
-    },
-    ExecuteV2 {
-        response: ExecuteResponseV2,
-    },
-    ProgressV2 {
-        event: ProgressEventV2,
-    },
-    Health {
-        response: WorkerHealthResponse,
-    },
-    Capabilities {
-        response: WorkerCapabilities,
-    },
-    EnsureTask {
-        response: crate::worker::EnsureTaskResponse,
-    },
-    Shutdown,
-    Error {
-        error: String,
-        /// Bootstrap-vs-runtime discriminator; see [`WorkerErrorKind`] for
-        /// the definitive doc. Default ``Runtime`` keeps existing retry
-        /// semantics for legacy workers that don't emit the field.
-        #[serde(default)]
-        kind: crate::worker::handle::WorkerErrorKind,
-    },
+/// Connect to a worker daemon at `addr`, within [`crate::worker::CONNECT_TIMEOUT`].
+///
+/// Shared by the sequential handle and the shared GPU TCP worker.
+pub(crate) async fn connect_within(addr: &str) -> Result<TcpStream, WorkerError> {
+    let limit = crate::worker::CONNECT_TIMEOUT;
+    match tokio::time::timeout(limit.duration(), TcpStream::connect(addr)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(WorkerError::Protocol(format!(
+            "failed to connect to TCP worker at {addr}: {error}"
+        ))),
+        Err(_) => Err(WorkerError::Timeout {
+            waited_for: WorkerWait::Connect {
+                addr: addr.to_owned(),
+            },
+            limit,
+        }),
+    }
 }
 
 /// Metadata about a discovered TCP worker (from registry).
@@ -103,10 +68,9 @@ pub struct TcpWorkerInfo {
     pub engine_overrides: String,
     /// Worker process ID (from registry, for display).
     pub pid: WorkerPid,
-    /// Timeout for audio-heavy tasks (ASR, FA, speaker). 0 = default (1800).
-    pub audio_task_timeout_s: u64,
-    /// Timeout for analysis tasks (OpenSMILE, AVQI). 0 = default (120).
-    pub analysis_task_timeout_s: u64,
+    /// The operator's transport-ceiling overrides; each absent one leaves the
+    /// task's built-in ceiling.
+    pub task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides,
     /// Python worker's `ThreadPoolExecutor(max_workers=...)` capacity for
     /// concurrent V2 dispatch. Used by `SharedGpuTcpWorker` to cap in-flight
     /// `execute_v2` calls so per-request timeouts never count queue-wait
@@ -143,14 +107,7 @@ impl TcpWorkerHandle {
             "Connecting to TCP worker"
         );
 
-        let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
-            .await
-            .map_err(|_| {
-                WorkerError::Protocol(format!("timeout connecting to TCP worker at {addr}"))
-            })?
-            .map_err(|e| {
-                WorkerError::Protocol(format!("failed to connect to TCP worker at {addr}: {e}"))
-            })?;
+        let stream = connect_within(&addr).await?;
 
         let (read_half, write_half) = tokio::io::split(stream);
 
@@ -167,14 +124,7 @@ impl TcpWorkerHandle {
         let addr = format!("{}:{}", self.info.host, self.info.port);
         debug!(addr = %addr, "Reconnecting to TCP worker");
 
-        let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
-            .await
-            .map_err(|_| {
-                WorkerError::Protocol(format!("timeout reconnecting to TCP worker at {addr}"))
-            })?
-            .map_err(|e| {
-                WorkerError::Protocol(format!("failed to reconnect to TCP worker at {addr}: {e}"))
-            })?;
+        let stream = connect_within(&addr).await?;
 
         let (read_half, write_half) = tokio::io::split(stream);
         self.reader = BufReader::new(read_half);
@@ -201,45 +151,32 @@ impl TcpWorkerHandle {
     }
 
     async fn read_response(&mut self) -> Result<WorkerResponse, WorkerError> {
-        let mut skipped_noise_lines = 0usize;
+        // One response per call, so a run of noise ends with the call.
+        let mut noise = NoiseRun::default();
 
         loop {
             let mut line = String::new();
             let bytes = self.reader.read_line(&mut line).await?;
             if bytes == 0 {
-                return Err(WorkerError::Protocol(
-                    "TCP worker closed connection (EOF)".into(),
-                ));
+                // The daemon closed the connection: the request lost its
+                // worker, as when a shared GPU stream ends (retryable).
+                return Err(WorkerError::ProcessExited {
+                    code: None,
+                    stderr: Some("TCP worker closed the connection (EOF)".into()),
+                });
             }
 
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            match serde_json::from_str::<WorkerResponse>(&line) {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                        return Err(WorkerError::Protocol(format!(
-                            "failed to decode TCP response: {e} (line: {line:?})"
-                        )));
-                    }
-
-                    skipped_noise_lines += 1;
-                    warn!(
-                        host = %self.info.host,
-                        port = self.info.port,
-                        line = trimmed,
-                        "Ignoring non-protocol TCP line"
-                    );
-
-                    if skipped_noise_lines >= MAX_RESPONSE_NOISE_LINES {
-                        return Err(WorkerError::Protocol(format!(
-                            "TCP worker emitted too many non-protocol lines; last: {line:?}"
-                        )));
-                    }
+            match WireLine::classify(&line) {
+                WireLine::Blank => {}
+                WireLine::Message(message) => {
+                    return WorkerResponse::deserialize(&message).map_err(|e| {
+                        WorkerError::Protocol(format!(
+                            "failed to decode TCP response: {e} (line: {})",
+                            excerpt(line.trim())
+                        ))
+                    });
                 }
+                WireLine::Noise => noise.noise(&line).map_err(NoiseLimit::into_worker_error)?,
             }
         }
     }
@@ -251,15 +188,16 @@ impl TcpWorkerHandle {
     /// for the bug-class rationale and the unit-tested static twin.
     async fn read_response_skipping_progress(
         &mut self,
-        deadline: tokio::time::Instant,
+        waited_for: WorkerWait,
+        limit: PositiveSeconds,
         progress_tx: Option<&tokio::sync::mpsc::Sender<ProgressEventV2>>,
     ) -> Result<WorkerResponse, WorkerError> {
+        let deadline = crate::worker::Deadline::after(limit);
         loop {
-            let response = tokio::time::timeout_at(deadline, self.read_response())
-                .await
-                .map_err(|_| {
-                    WorkerError::Protocol("timeout waiting for TCP worker response".into())
-                })??;
+            let response = match deadline.within(self.read_response()).await {
+                Some(read) => read?,
+                None => return Err(WorkerError::Timeout { waited_for, limit }),
+            };
 
             match response {
                 WorkerResponse::ProgressV2 { event } => {
@@ -277,16 +215,13 @@ impl TcpWorkerHandle {
     pub async fn health_check(&mut self) -> Result<WorkerHealthResponse, WorkerError> {
         self.write_request(&WorkerRequest::Health).await?;
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let response = self
-            .read_response_skipping_progress(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => {
-                    WorkerError::HealthCheckFailed("timeout waiting for TCP health response".into())
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress(
+                WorkerWait::Health,
+                crate::worker::HEALTH_TIMEOUT,
+                None,
+            )
+            .await?;
 
         match response {
             WorkerResponse::Health { response } => {
@@ -298,7 +233,7 @@ impl TcpWorkerHandle {
                 }
                 Ok(response)
             }
-            WorkerResponse::Error { error, kind: _ } => Err(WorkerError::HealthCheckFailed(error)),
+            WorkerResponse::Error(failure) => Err(failure.into_health_error()),
             other => Err(WorkerError::HealthCheckFailed(format!(
                 "unexpected TCP response for health: {other:?}"
             ))),
@@ -311,20 +246,13 @@ impl TcpWorkerHandle {
         self.write_request(&WorkerRequest::Infer { request })
             .await?;
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         let response = self
-            .read_response_skipping_progress(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => {
-                    WorkerError::Protocol("timeout waiting for TCP infer response".into())
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress(WorkerWait::Infer, crate::worker::INFER_TIMEOUT, None)
+            .await?;
 
         match response {
             WorkerResponse::Infer { response } => Ok(response),
-            WorkerResponse::Error { error, kind } => Err(kind.into_worker_error(error)),
+            WorkerResponse::Error(failure) => Err(failure.into_worker_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected TCP response for infer: {other:?}"
             ))),
@@ -340,24 +268,18 @@ impl TcpWorkerHandle {
         self.write_request(&WorkerRequest::BatchInfer { request })
             .await?;
 
-        let timeout_s = (request.items.len() as u64 * 5).max(120);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
-        let item_count = request.items.len();
+        let items = request.items.len();
         let response = self
-            .read_response_skipping_progress(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => {
-                    WorkerError::Protocol(format!(
-                        "timeout ({timeout_s}s) waiting for TCP batch_infer response ({item_count} items)"
-                    ))
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress(
+                WorkerWait::BatchInfer { items },
+                batched_items_timeout(items as u64),
+                None,
+            )
+            .await?;
 
         match response {
             WorkerResponse::BatchInfer { response } => Ok(response),
-            WorkerResponse::Error { error, kind } => Err(kind.into_worker_error(error)),
+            WorkerResponse::Error(failure) => Err(failure.into_worker_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected TCP response for batch_infer: {other:?}"
             ))),
@@ -383,21 +305,19 @@ impl TcpWorkerHandle {
         self.write_request(&WorkerRequest::ExecuteV2 { request })
             .await?;
 
-        let timeout_s = request.timeout_seconds_with_config(
-            self.info.audio_task_timeout_s,
-            self.info.analysis_task_timeout_s,
-        );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
+        let limit = request.transport_timeout(self.info.task_timeouts);
+        let deadline = crate::worker::Deadline::after(limit);
 
         loop {
-            let response = tokio::time::timeout_at(deadline, self.read_response())
-                .await
-                .map_err(|_| {
-                    WorkerError::Protocol(format!(
-                        "timeout ({timeout_s}s) waiting for TCP execute_v2 response ({:?})",
-                        request.task
-                    ))
-                })??;
+            let response = match deadline.within(self.read_response()).await {
+                Some(read) => read?,
+                None => {
+                    return Err(WorkerError::Timeout {
+                        waited_for: WorkerWait::ExecuteV2 { task: request.task },
+                        limit,
+                    });
+                }
+            };
 
             match response {
                 WorkerResponse::ProgressV2 { event } => {
@@ -407,9 +327,7 @@ impl TcpWorkerHandle {
                     continue;
                 }
                 WorkerResponse::ExecuteV2 { response } => return Ok(response),
-                WorkerResponse::Error { error, kind } => {
-                    return Err(kind.into_worker_error(error));
-                }
+                WorkerResponse::Error(failure) => return Err(failure.into_worker_error()),
                 other => {
                     return Err(WorkerError::Protocol(format!(
                         "unexpected TCP response for execute_v2: {other:?}"
@@ -421,24 +339,26 @@ impl TcpWorkerHandle {
 
     /// Query worker capabilities.
     pub async fn capabilities(&mut self) -> Result<WorkerCapabilities, WorkerError> {
-        self.write_request(&WorkerRequest::Capabilities).await?;
+        self.write_request(&WorkerRequest::Capabilities {
+            request: crate::worker::handle::CapabilitiesRequest {
+                request_id: &crate::worker::handle::ControlRequestId::next(),
+            },
+        })
+        .await?;
 
         // Same protocol contract as the stdio handle: tolerate
         // progress_v2 preamble during cold-cache catalog/model loads.
-        let deadline = tokio::time::Instant::now() + crate::worker::CAPABILITY_TIMEOUT;
         let response = self
-            .read_response_skipping_progress(deadline, None)
-            .await
-            .map_err(|e| match e {
-                WorkerError::Protocol(msg) if msg.contains("timeout") => {
-                    WorkerError::Protocol("timeout waiting for TCP capabilities response".into())
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress(
+                WorkerWait::Capabilities,
+                crate::worker::CAPABILITY_TIMEOUT,
+                None,
+            )
+            .await?;
 
         match response {
             WorkerResponse::Capabilities { response } => Ok(response),
-            WorkerResponse::Error { error, kind } => Err(kind.into_worker_error(error)),
+            WorkerResponse::Error(failure) => Err(failure.into_worker_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected TCP response for capabilities: {other:?}"
             ))),
@@ -448,34 +368,33 @@ impl TcpWorkerHandle {
     /// Load one task in a lazy-profile TCP worker.
     pub async fn ensure_task(
         &mut self,
-        task: &str,
+        task: crate::worker::InferTask,
         engine_overrides: Option<&std::collections::BTreeMap<String, String>>,
-        timeout_s: u64,
-    ) -> Result<crate::worker::EnsureTaskResponse, WorkerError> {
+        timeout: crate::api::PositiveSeconds,
+    ) -> Result<(), WorkerError> {
         self.write_request(&WorkerRequest::EnsureTask {
             request: EnsureTaskRequest {
+                request_id: &crate::worker::handle::ControlRequestId::next(),
                 task,
                 engine_overrides,
             },
         })
         .await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
         let response = self
-            .read_response_skipping_progress(deadline, None)
-            .await
-            .map_err(|error| match error {
-                WorkerError::Protocol(message) if message.contains("timeout") => {
-                    WorkerError::Protocol(format!(
-                        "timeout ({timeout_s}s) waiting for ensure_task({task}) response"
-                    ))
-                }
-                other => other,
-            })?;
+            .read_response_skipping_progress(WorkerWait::EnsureTask { task }, timeout, None)
+            .await?;
         match response {
-            WorkerResponse::EnsureTask { response } => Ok(response),
-            WorkerResponse::Error { error, kind: _ } => Err(WorkerError::Bootstrap(format!(
-                "ensure_task failed: {error}"
-            ))),
+            WorkerResponse::EnsureTask { response } => {
+                let response = response.about(task)?;
+                tracing::info!(
+                    task = ?response.task,
+                    status = %response.status,
+                    elapsed_s = response.elapsed_s.get(),
+                    "ensure_task completed (TCP worker)"
+                );
+                Ok(())
+            }
+            WorkerResponse::Error(failure) => Err(failure.into_ensure_task_error()),
             other => Err(WorkerError::Protocol(format!(
                 "unexpected TCP response for ensure_task: {other:?}"
             ))),

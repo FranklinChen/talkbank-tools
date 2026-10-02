@@ -6,7 +6,7 @@ use batchalign_types::paths::{ClientPath, MediaMappingKey, RepoRelativePath, Ser
 
 use crate::api::{
     ContentType, CorrelationId, DisplayPath, FileProgressStage, JobId, JobStatus, LanguageSpec,
-    NodeId, NumSpeakers, ReleasedCommand, UnixTimestamp,
+    MachineTime, NumSpeakers, ReleasedCommand,
 };
 use crate::options::CommandOptions;
 use crate::types::execution_plan::ExecutionPlan;
@@ -78,12 +78,117 @@ pub struct JobDispatchConfig {
 /// Submitter-facing provenance for one job.
 #[derive(Debug, Clone)]
 pub struct JobSourceContext {
-    /// IP address or hostname of the submitting client.
-    pub submitted_by: String,
-    /// Human-readable hostname resolved from `submitted_by`.
-    pub submitted_by_name: String,
+    /// Who submitted the job, or `None` when no submitter was recorded (a
+    /// recovered row whose columns are empty). The empty string used to
+    /// stand for that absence in two `String` fields, and only the API
+    /// projection turned it back into an `Option`.
+    pub submitter: Option<Submitter>,
     /// Client-visible source directory used for display and locality hints.
     pub source_dir: ClientPath,
+}
+
+/// Who submitted a job: the client's address as the server saw it, and the
+/// name that address resolved to, when one was found.
+///
+/// Neither text is ever empty. The fields are private, so the constructors
+/// below are the only routes in: [`Self::client`] where an HTTP submission is
+/// born, [`Self::direct_cli`] for the in-process CLI, and
+/// [`Self::from_columns`] at the database boundary, which is the one place
+/// the empty string still means "absent" (the columns are
+/// `TEXT NOT NULL DEFAULT ''`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Submitter {
+    /// The client's address. Conflict detection keys on it.
+    address: String,
+    /// The name the address resolved to, for display.
+    name: Option<String>,
+}
+
+impl Submitter {
+    /// The address the in-process direct CLI is recorded under.
+    const DIRECT_CLI_ADDRESS: std::net::Ipv4Addr = std::net::Ipv4Addr::LOCALHOST;
+    /// The name the in-process direct CLI is recorded under.
+    const DIRECT_CLI_NAME: &'static str = "direct-cli";
+    /// How the database columns spell an absent submitter or name.
+    const ABSENT_COLUMN: &'static str = "";
+
+    /// An HTTP client, by its peer address and the name that address resolved
+    /// to. A resolution that named nothing (a Tailscale peer reporting an
+    /// empty host name) records no name rather than an empty one.
+    pub fn client(address: std::net::IpAddr, resolved_name: String) -> Self {
+        Self {
+            address: address.to_string(),
+            name: (!resolved_name.is_empty()).then_some(resolved_name),
+        }
+    }
+
+    /// The in-process direct CLI, which has no network peer. It is recorded
+    /// as a loopback client named `direct-cli`, the encoding it has always
+    /// had, so its jobs still conflict with each other and display the same.
+    pub fn direct_cli() -> Self {
+        Self {
+            address: Self::DIRECT_CLI_ADDRESS.to_string(),
+            name: Some(Self::DIRECT_CLI_NAME.to_owned()),
+        }
+    }
+
+    /// The client's address.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The name the address resolved to, when one was recorded.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Read the two database columns, where `''` encodes absence.
+    ///
+    /// An empty address is no submitter. A name with no address is not
+    /// something this code writes ([`Self::columns`] cannot produce it), so it
+    /// is not a submitter either; it is its own case, so the reader must say
+    /// what it does with the name rather than lose it without a word.
+    pub(crate) fn from_columns(address: String, name: String) -> StoredSubmitter {
+        match (address.is_empty(), name.is_empty()) {
+            (true, true) => StoredSubmitter::Absent,
+            (true, false) => StoredSubmitter::NameWithoutAddress { name },
+            (false, _) => StoredSubmitter::Recorded(Self {
+                address,
+                name: (!name.is_empty()).then_some(name),
+            }),
+        }
+    }
+
+    /// The two database columns `(submitted_by, submitted_by_name)` for an
+    /// optional submitter, spelling absence as the columns' `''`.
+    pub(crate) fn columns(submitter: Option<&Self>) -> (&str, &str) {
+        match submitter {
+            Some(submitter) => (
+                submitter.address.as_str(),
+                match &submitter.name {
+                    Some(name) => name.as_str(),
+                    None => Self::ABSENT_COLUMN,
+                },
+            ),
+            None => (Self::ABSENT_COLUMN, Self::ABSENT_COLUMN),
+        }
+    }
+}
+
+/// What a job row's two submitter columns hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoredSubmitter {
+    /// An address, and the name it resolved to when there was one.
+    Recorded(Submitter),
+    /// Both columns empty: no submitter was recorded.
+    Absent,
+    /// A name with an empty address. Not written by this build; a row from
+    /// another build or a hand edit. Not a submitter (conflict detection
+    /// keys on the address), and the reader reports the name it drops.
+    NameWithoutAddress {
+        /// The name the row held.
+        name: String,
+    },
 }
 
 /// File lists and storage layout for one job.
@@ -131,30 +236,20 @@ pub struct JobExecutionState {
     pub completed_files: i64,
 }
 
-/// Current queue lease for one job.
-#[derive(Debug, Clone)]
-pub struct JobLeaseState {
-    /// Node that currently owns the queue lease for this job.
-    pub leased_by_node: Option<NodeId>,
-    /// When the current lease will expire if not renewed.
-    pub expires_at: Option<UnixTimestamp>,
-    /// When the current lease was last created or renewed.
-    pub heartbeat_at: Option<UnixTimestamp>,
-}
-
 /// Scheduling and completion state for one job.
 #[derive(Debug, Clone)]
 pub struct JobScheduleState {
-    /// Unix timestamp when the job was submitted.
-    pub submitted_at: UnixTimestamp,
-    /// Unix timestamp when the job reached a terminal state.
-    pub completed_at: Option<UnixTimestamp>,
-    /// Earliest unix timestamp when a deferred queued job should be retried.
-    pub next_eligible_at: Option<UnixTimestamp>,
+    /// When the job was submitted.
+    pub submitted_at: MachineTime,
+    /// When the job reached a terminal state.
+    pub completed_at: Option<MachineTime>,
+    /// Earliest time a deferred queued job should be retried.
+    pub next_eligible_at: Option<MachineTime>,
     /// Number of worker processes used for this job once running.
     pub num_workers: Option<i64>,
-    /// Current queue lease state.
-    pub lease: JobLeaseState,
+    /// The job's queue lease, if a node holds one. One value, so an owner
+    /// without an expiry (or an expiry without an owner) cannot exist.
+    pub lease: Option<crate::scheduling::LeaseRecord>,
     /// Most recent cancel attempt's metadata (denormalized from the
     /// `cancellations` audit table). `None` until a cancel arrives.
     /// Projected onto the `JobInfo`'s `last_cancelled_*` fields.
@@ -168,7 +263,7 @@ pub struct JobScheduleState {
 #[derive(Debug, Clone)]
 pub struct JobLastCancelInfo {
     /// Wall-clock when the cancel arrived at the server.
-    pub at: UnixTimestamp,
+    pub at: MachineTime,
     /// Wire-format source string (`"tui"`, `"api"`, `"signal"`, ...).
     pub source: String,
     /// Caller-reported host or peer-IP.
@@ -205,10 +300,16 @@ impl std::fmt::Display for RunGeneration {
 }
 
 /// Outcome of a runner's attempt to claim exclusive execution of a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BeginRunnerOutcome {
-    /// The claim succeeded; the runner owns the job at this generation.
-    Started(RunGeneration),
+    /// The claim succeeded; the runner owns the job at this generation,
+    /// under the lease the claim took (the store persists exactly that one).
+    Started {
+        /// The run generation the runner owns.
+        generation: RunGeneration,
+        /// The lease taken with the claim.
+        lease: crate::scheduling::LeaseRecord,
+    },
     /// Another runner still owns the job (e.g. a restarted job whose
     /// previous runner is mid-teardown). The caller must wait and retry.
     RunnerStillLive,
@@ -259,8 +360,8 @@ pub(crate) struct FileFailureRecord {
     pub message: String,
     /// Broad failure category for grouping and retry policy.
     pub category: crate::scheduling::FailureCategory,
-    /// Terminal timestamp for the failed file.
-    pub finished_at: UnixTimestamp,
+    /// When the file failed, by the store's clock.
+    pub finished_at: crate::store::EventTime,
 }
 
 /// Retry metadata for one transient file failure.
@@ -270,10 +371,10 @@ pub(crate) struct FileRetryRecord {
     pub message: String,
     /// Broad failure category for the retryable attempt.
     pub category: crate::scheduling::FailureCategory,
-    /// Time when the failed attempt finished.
-    pub finished_at: UnixTimestamp,
+    /// When the failed attempt finished, by the store's clock.
+    pub finished_at: crate::store::EventTime,
     /// Earliest time when the next attempt may run.
-    pub retry_at: UnixTimestamp,
+    pub retry_at: MachineTime,
 }
 
 /// Ephemeral progress update for one in-flight file.
@@ -367,4 +468,50 @@ pub(crate) enum RecoveryDisposition {
     Failed,
     /// The job had completed output and was promoted to completed.
     Completed,
+}
+
+#[cfg(test)]
+mod submitter_tests {
+    use super::{StoredSubmitter, Submitter};
+    use std::net::Ipv4Addr;
+
+    /// The database boundary is the one place `''` means "absent", and the
+    /// two directions agree on it.
+    #[test]
+    fn database_columns_round_trip_including_absence() {
+        assert_eq!(Submitter::columns(None), ("", ""));
+        assert_eq!(
+            Submitter::from_columns(String::new(), String::new()),
+            StoredSubmitter::Absent
+        );
+
+        let named = Submitter::client(Ipv4Addr::new(10, 0, 0, 7).into(), "lab-mac".into());
+        let (address, name) = Submitter::columns(Some(&named));
+        assert_eq!((address, name), ("10.0.0.7", "lab-mac"));
+        assert_eq!(
+            Submitter::from_columns(address.to_owned(), name.to_owned()),
+            StoredSubmitter::Recorded(named)
+        );
+
+        let unnamed = Submitter::client(Ipv4Addr::new(10, 0, 0, 8).into(), String::new());
+        assert_eq!(unnamed.name(), None, "an empty resolution records no name");
+        let (address, name) = Submitter::columns(Some(&unnamed));
+        assert_eq!(
+            Submitter::from_columns(address.to_owned(), name.to_owned()),
+            StoredSubmitter::Recorded(unnamed)
+        );
+    }
+
+    /// A name with no address is not something the writer produces, so it
+    /// is not read back as a submitter, and the name comes back to be
+    /// reported rather than vanishing.
+    #[test]
+    fn a_name_without_an_address_is_no_submitter_and_is_handed_back() {
+        assert_eq!(
+            Submitter::from_columns(String::new(), "orphan".into()),
+            StoredSubmitter::NameWithoutAddress {
+                name: "orphan".into()
+            }
+        );
+    }
 }

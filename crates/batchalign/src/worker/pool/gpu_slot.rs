@@ -161,7 +161,9 @@ impl GpuWorkerSlot {
             _permit: permit,
         };
         if let Occupancy::Worker(worker) = previous {
-            worker.shutdown().await;
+            worker
+                .shutdown(super::shared_gpu::Retirement::WorkerRetired)
+                .await;
         }
         let worker = init().await?;
         transition.publish(worker.clone());

@@ -27,8 +27,7 @@ impl WorkerPool {
 
         let discovery = registry::discover_workers(
             &registry_path,
-            self.config.audio_task_timeout_s,
-            self.config.analysis_task_timeout_s,
+            self.config.task_timeouts,
             self.current_server_instance_id(),
         )
         .await;
@@ -96,18 +95,23 @@ impl WorkerPool {
                     lang: worker.lang.clone(),
                     engine_overrides: worker.entry.engine_overrides.clone(),
                     pid: WorkerPid(worker.entry.pid),
-                    audio_task_timeout_s: self.config.audio_task_timeout_s,
-                    analysis_task_timeout_s: self.config.analysis_task_timeout_s,
+                    task_timeouts: self.config.task_timeouts,
                     gpu_thread_pool_size: self.config.runtime.gpu_thread_pool_size,
                 };
 
                 match shared_gpu::SharedGpuTcpWorker::connect(info).await {
                     Ok(shared) => {
-                        self.gpu_tcp_workers
-                            .lock()
-                            .await
-                            .entry(key)
-                            .or_insert_with(|| std::sync::Arc::new(shared));
+                        // A live connection for this key is kept (the new one
+                        // drops); a connection whose stream has closed is
+                        // replaced, so a restarted daemon is picked up again.
+                        let mut workers = self.gpu_tcp_workers.lock().await;
+                        match workers.get(&key).map(|existing| existing.check_available()) {
+                            Some(Ok(())) => {}
+                            Some(Err(_)) | None => {
+                                workers.insert(key, std::sync::Arc::new(shared));
+                            }
+                        }
+                        drop(workers);
                         info!(
                             profile = %worker.entry.profile,
                             lang = %worker.entry.lang,
@@ -134,8 +138,7 @@ impl WorkerPool {
                     lang: worker.lang.clone(),
                     engine_overrides: worker.entry.engine_overrides.clone(),
                     pid: WorkerPid(worker.entry.pid),
-                    audio_task_timeout_s: self.config.audio_task_timeout_s,
-                    analysis_task_timeout_s: self.config.analysis_task_timeout_s,
+                    task_timeouts: self.config.task_timeouts,
                     gpu_thread_pool_size: self.config.runtime.gpu_thread_pool_size,
                 };
 

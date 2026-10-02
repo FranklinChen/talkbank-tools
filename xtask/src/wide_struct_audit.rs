@@ -127,24 +127,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
                  serialization and return notifications; synchronized shared state is not a pipeline stage bag",
     },
     WideStructAllowance {
-        path: "crates/batchalign/src/worker/pool/shared_gpu/stdio.rs",
-        struct_name: "SharedGpuWorker",
-        max_fields: 11,
-        max_bool_fields: 0,
-        disposition: WideStructDisposition::RealAggregate,
-        reason: "owned process and stdio response router with request/control synchronization, \
-                 shutdown admission and dispatch capacity; lifecycle ownership differs from the TCP peer",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/worker/pool/shared_gpu/tcp.rs",
-        struct_name: "SharedGpuTcpWorker",
-        max_fields: 10,
-        max_bool_fields: 0,
-        disposition: WideStructDisposition::RealAggregate,
-        reason: "TCP connection and response router own socket tasks and request/control admission, \
-                 but not the remote process; transport timeouts and capacity are independent configuration",
-    },
-    WideStructAllowance {
         path: "crates/batchalign/src/chat_ops/speaker_identity/evidence.rs",
         struct_name: "SpeakerIdentityProvenance",
         max_fields: 14,
@@ -177,21 +159,21 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         reason: "the ten CoNLL-U columns; the format fixes the width, so it cannot grow",
     },
     WideStructAllowance {
+        path: "crates/batchalign-transform/src/morphosyntax/ud_types.rs",
+        struct_name: "UdWordAnalysis",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::TransportRecord,
+        reason: "the ten CoNLL-U columns received at the analysis boundary; conversion to \
+                 UdWord owns typed head and feature-provenance admission, not this wire record",
+    },
+    WideStructAllowance {
         path: "crates/batchalign-types/src/worker_v2/responses.rs",
         struct_name: "AvqiResultV2",
         max_fields: 11,
         max_bool_fields: 1,
         disposition: WideStructDisposition::TransportRecord,
         reason: "worker protocol response payload for AVQI scoring",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign-whisper-pilot/src/decoder.rs",
-        struct_name: "Decoder",
-        max_fields: 14,
-        max_bool_fields: 1,
-        disposition: WideStructDisposition::RealAggregate,
-        reason: "whisper decoding state; eight of the fourteen are special-token ids, and \
-                 gathering those into one SpecialTokens struct would take it to seven",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/cli/args/commands.rs",
@@ -353,12 +335,13 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     },
     WideStructAllowance {
         path: "crates/batchalign/src/store/mod.rs",
-        struct_name: "FileStatus",
-        max_fields: 15,
+        struct_name: "JobStore",
+        max_fields: 10,
         max_bool_fields: 0,
-        disposition: WideStructDisposition::TransportRecord,
-        reason: "stored per-file processing status record; the newest field is the per-file \
-                 provenance stamp outcome, a closed enum rather than a flag",
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "job control-plane owner: actor registry, dispatch admission, database, \
+                 notifications, counters, tracing, configuration and node identity; the \
+                 explicit injected clock is shared by the store and its runners, never defaulted",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/pipeline/transcribe.rs",

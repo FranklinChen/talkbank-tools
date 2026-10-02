@@ -19,7 +19,7 @@
 //! producer could not say when it was. `tests::projection_matches_the_exact_oracle`
 //! checks the fit against an independent closed form on every short sequence.
 
-use crate::api::DurationSeconds;
+use crate::api::{AudioPositionSeconds, InvalidAudioPosition};
 use crate::types::worker_v2::WhisperChunkSpanV2;
 
 /// L2 isotonic regression by pool-adjacent violators, O(n).
@@ -54,8 +54,8 @@ pub(crate) fn project_non_decreasing(values: &[f64]) -> Vec<f64> {
 #[derive(Debug)]
 pub(crate) struct MonotoneChunk<'a> {
     pub(crate) text: &'a str,
-    pub(crate) start_s: Option<DurationSeconds>,
-    pub(crate) end_s: Option<DurationSeconds>,
+    pub(crate) start_s: Option<AudioPositionSeconds>,
+    pub(crate) end_s: Option<AudioPositionSeconds>,
 }
 
 /// Chunk spans whose timed boundaries never decrease, built by
@@ -70,7 +70,13 @@ impl<'a> MonotoneChunkSpans<'a> {
     /// Project the fully timed producer spans onto the closest non-decreasing
     /// boundaries, in order; chunks without both bounds pass through as they
     /// are.
-    pub(crate) fn project(raw: &'a [WhisperChunkSpanV2]) -> Self {
+    ///
+    /// Each fitted boundary is the mean of a run of valid positions, so it is
+    /// one too, unless the run's sum overflows `f64`. That needs positions
+    /// near `f64::MAX` seconds, which no recording has, but the fit is an
+    /// `f64` computation and the refusal is how it says so rather than a
+    /// position nothing proved.
+    pub(crate) fn project(raw: &'a [WhisperChunkSpanV2]) -> Result<Self, InvalidAudioPosition> {
         let timed: Vec<(usize, f64, f64)> = raw
             .iter()
             .enumerate()
@@ -100,23 +106,23 @@ impl<'a> MonotoneChunkSpans<'a> {
             .enumerate()
             .map(
                 |(index, chunk)| match projected.next_if(|(timed, _, _)| *timed == index) {
-                    Some((_, start_s, end_s)) => MonotoneChunk {
+                    Some((_, start_s, end_s)) => Ok(MonotoneChunk {
                         text: &chunk.text,
-                        start_s: Some(DurationSeconds(start_s)),
-                        end_s: Some(DurationSeconds(end_s)),
-                    },
-                    None => MonotoneChunk {
+                        start_s: Some(AudioPositionSeconds::try_from(start_s)?),
+                        end_s: Some(AudioPositionSeconds::try_from(end_s)?),
+                    }),
+                    None => Ok(MonotoneChunk {
                         text: &chunk.text,
-                        start_s: chunk.start_s.map(DurationSeconds::from),
-                        end_s: chunk.end_s.map(DurationSeconds::from),
-                    },
+                        start_s: chunk.start_s,
+                        end_s: chunk.end_s,
+                    }),
                 },
             )
-            .collect();
-        Self {
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
             chunks,
             adjusted_boundaries,
-        }
+        })
     }
 
     /// How many boundaries the projection moved; zero when the input was
@@ -134,7 +140,6 @@ impl<'a> MonotoneChunkSpans<'a> {
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::api::NonNegativeSeconds;
 
     /// Exact L2 isotonic fit, independent of the algorithm under test:
     /// `fit[i] = max over j <= i of min over k >= i of mean(x[j..=k])`.
@@ -155,8 +160,8 @@ mod tests {
     fn span(text: &str, start_s: f64, end_s: f64) -> WhisperChunkSpanV2 {
         WhisperChunkSpanV2 {
             text: text.into(),
-            start_s: Some(NonNegativeSeconds::try_from(start_s).expect("test bound")),
-            end_s: Some(NonNegativeSeconds::try_from(end_s).expect("test bound")),
+            start_s: Some(AudioPositionSeconds::try_from(start_s).expect("test bound")),
+            end_s: Some(AudioPositionSeconds::try_from(end_s).expect("test bound")),
         }
     }
 
@@ -173,8 +178,8 @@ mod tests {
             .iter()
             .map(|c| {
                 (
-                    c.start_s.expect("timed in this test").0,
-                    c.end_s.expect("timed in this test").0,
+                    c.start_s.expect("timed in this test").get(),
+                    c.end_s.expect("timed in this test").get(),
                 )
             })
             .collect()
@@ -190,12 +195,12 @@ mod tests {
             untimed("two"),
             span("three", 1.0, 2.0),
         ];
-        let projected = MonotoneChunkSpans::project(&raw);
+        let projected = MonotoneChunkSpans::project(&raw).expect("fits");
         let chunks: Vec<_> = projected.iter().collect();
         assert_eq!(chunks[1].text, "two");
         assert_eq!((chunks[1].start_s, chunks[1].end_s), (None, None));
-        assert!((chunks[0].end_s.unwrap().0 - 1.1).abs() < 1e-9);
-        assert!((chunks[2].start_s.unwrap().0 - 1.1).abs() < 1e-9);
+        assert!((chunks[0].end_s.unwrap().get() - 1.1).abs() < 1e-9);
+        assert!((chunks[2].start_s.unwrap().get() - 1.1).abs() < 1e-9);
         assert_eq!(projected.adjusted_boundaries(), 2);
     }
 
@@ -204,7 +209,7 @@ mod tests {
     #[test]
     fn a_whole_transcript_without_timestamps_is_kept_untimed() {
         let raw = [untimed("有個小朋友在戶外踢球")];
-        let projected = MonotoneChunkSpans::project(&raw);
+        let projected = MonotoneChunkSpans::project(&raw).expect("fits");
         let chunks: Vec<_> = projected.iter().collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "有個小朋友在戶外踢球");
@@ -239,7 +244,7 @@ mod tests {
             span("two", 1.0, 2.0),
             span("three", 2.0, 3.0),
         ];
-        let projected = MonotoneChunkSpans::project(&raw);
+        let projected = MonotoneChunkSpans::project(&raw).expect("fits");
         let spans = spans_of(&projected);
         assert_eq!(spans[0].0, 0.0);
         assert_eq!(spans[2], (2.0, 3.0));
@@ -256,7 +261,7 @@ mod tests {
     #[test]
     fn an_inverted_chunk_collapses_to_zero_width_for_the_admission_to_demote() {
         let raw = [span("x", 2.0, 1.0)];
-        let projected = MonotoneChunkSpans::project(&raw);
+        let projected = MonotoneChunkSpans::project(&raw).expect("fits");
         assert_eq!(spans_of(&projected), vec![(1.5, 1.5)]);
         assert_eq!(projected.adjusted_boundaries(), 2);
     }
@@ -264,12 +269,20 @@ mod tests {
     #[test]
     fn a_monotone_input_is_untouched_and_reports_nothing_moved() {
         let raw = [span("a", 0.0, 0.5), span("b", 0.5, 1.25)];
-        let projected = MonotoneChunkSpans::project(&raw);
+        let projected = MonotoneChunkSpans::project(&raw).expect("fits");
         assert_eq!(spans_of(&projected), vec![(0.0, 0.5), (0.5, 1.25)]);
         assert_eq!(projected.adjusted_boundaries(), 0);
         assert_eq!(
             projected.iter().map(|c| c.text).collect::<Vec<_>>(),
             vec!["a", "b"]
         );
+    }
+
+    /// Two bounds near `f64::MAX` seconds overflow the fit's sum. That is
+    /// refused rather than handed on as an infinite position.
+    #[test]
+    fn a_fit_that_overflows_is_refused_rather_than_made_a_position() {
+        let raw = [span("x", f64::MAX, f64::MAX / 2.0)];
+        assert!(MonotoneChunkSpans::project(&raw).is_err());
     }
 }

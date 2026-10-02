@@ -97,8 +97,6 @@ async fn main() {
     // context (see whisper_native::ProcessGuard).
     let whisper_guard = batchalign::whisper_native::ProcessGuard;
 
-    let update_handle = batchalign::cli::update_check::spawn_update_check();
-
     let exit_code = match batchalign::cli::run_command(cli).await {
         Ok(()) => 0,
         Err(e) => {
@@ -106,9 +104,6 @@ async fn main() {
             e.exit_code()
         }
     };
-
-    // Give the background update check a moment to finish printing.
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), update_handle).await;
 
     if let Some(provider) = tracer_provider
         && let Err(err) = provider.shutdown()

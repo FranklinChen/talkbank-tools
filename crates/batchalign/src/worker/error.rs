@@ -22,6 +22,56 @@ fn format_process_exited(code: Option<i32>, stderr: Option<&str>) -> String {
     }
 }
 
+/// What a wait on a worker was for, so a timeout names it as data rather
+/// than in a message a classifier would have to parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerWait {
+    /// A TCP connection to a worker daemon at this address.
+    Connect {
+        /// `host:port`.
+        addr: String,
+    },
+    /// A health probe's reply.
+    Health,
+    /// A capabilities report.
+    Capabilities,
+    /// An on-demand model load (`ensure_task`).
+    EnsureTask {
+        /// The task being loaded.
+        task: crate::worker::InferTask,
+    },
+    /// A V1 `infer` reply.
+    Infer,
+    /// A V1 `batch_infer` reply.
+    BatchInfer {
+        /// Items in the batch.
+        items: usize,
+    },
+    /// A V2 `execute_v2` reply.
+    ExecuteV2 {
+        /// The task family requested.
+        task: crate::types::worker_v2::InferenceTaskV2,
+    },
+}
+
+impl std::fmt::Display for WorkerWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect { addr } => write!(f, "a connection to the worker at {addr}"),
+            Self::Health => f.write_str("the health response"),
+            Self::Capabilities => f.write_str("the capabilities response"),
+            Self::EnsureTask { task } => write!(
+                f,
+                "the ensure_task({}) response",
+                crate::worker::target::task_name(*task)
+            ),
+            Self::Infer => f.write_str("the infer response"),
+            Self::BatchInfer { items } => write!(f, "the batch_infer response ({items} items)"),
+            Self::ExecuteV2 { task } => write!(f, "the execute_v2 response ({task:?})"),
+        }
+    }
+}
+
 /// Errors arising from Python worker process management.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
@@ -51,7 +101,7 @@ pub enum WorkerError {
     #[error("worker not ready after {timeout_s}s")]
     ReadyTimeout {
         /// Number of seconds waited before giving up.
-        timeout_s: u64,
+        timeout_s: crate::api::PositiveSeconds,
     },
 
     /// The worker emitted something on stdout before the ready signal, but it
@@ -100,13 +150,35 @@ pub enum WorkerError {
         stderr: Option<String>,
     },
 
+    /// A wait on the worker ran past its limit: a reply, a model load, or a
+    /// connection.
+    ///
+    /// **Retryable** (`WorkerTimeout`) -- a stall can clear. What happens to
+    /// the worker depends on how it serves:
+    ///
+    /// - A sequential worker (a spawned process or a TCP daemon handle) is
+    ///   retired, since its late reply could still arrive on its
+    ///   single-flight stream.
+    /// - A spawned shared GPU worker is retired too: the thread serving the
+    ///   request may still hold one of its `gpu_thread_pool_size` slots.
+    /// - A shared GPU daemon connection is kept: its replies are routed by
+    ///   request id, so a late one is dropped, and the daemon is not this
+    ///   server's to restart. A request hung inside it holds a slot until it
+    ///   ends.
+    #[error("timeout ({limit}s) waiting for {waited_for}")]
+    Timeout {
+        /// What was awaited.
+        waited_for: WorkerWait,
+        /// The limit that passed.
+        limit: crate::api::PositiveSeconds,
+    },
+
     /// The stdio JSON-lines protocol was violated: a request could not be
     /// serialized, a response could not be deserialized, or the response
     /// had the wrong `op` tag for the request that was sent.
     ///
     /// This points to a version mismatch between Rust and Python, or a bug
-    /// in one side's serialization. Also used for IPC timeouts (e.g. a
-    /// batch_infer that exceeds its per-item budget).
+    /// in one side's serialization.
     ///
     /// **Terminal for this request** -- the worker's stdio stream may be
     /// desynchronized after a framing error. The pool should discard the
@@ -153,6 +225,15 @@ pub enum WorkerError {
     /// disk full, authentication failure, etc., all actionable).
     #[error("worker bootstrap error: {0}")]
     Bootstrap(String),
+
+    /// The worker refused the request as sent: the line was not JSON, the op
+    /// or its `request` mapping was missing, or the payload failed the
+    /// worker's request model (`{"op":"error", "kind":"invalid_request"}`).
+    ///
+    /// **Terminal** -- the same request is refused the same way again. The
+    /// worker answered with a complete line, so it stays in service.
+    #[error("worker refused the request: {0}")]
+    RequestRefused(String),
 
     /// A newly spawned worker reports different executable code from the
     /// runtime already pinned by this server.
@@ -229,6 +310,29 @@ pub enum WorkerError {
     /// against. Callers should let the job unwind.
     #[error("worker pool is shutting down")]
     PoolShuttingDown,
+
+    /// The pool retired the shared worker a request was sent to while the
+    /// pool keeps serving: its capability report was refused, or it is being
+    /// replaced. The request was not refused; its worker went away under it.
+    ///
+    /// **Retryable** (`WorkerCrash`) -- a retry is dispatched to another
+    /// worker.
+    #[error("the worker serving this request was retired")]
+    WorkerRetired,
+
+    /// The worker wrote `MAX_RESPONSE_STDOUT_NOISE_LINES` (8) consecutive
+    /// lines that are not protocol messages, so its stream is
+    /// not trusted further. A stdio worker writes its protocol on a private
+    /// descriptor and sends library output to stderr, so this means
+    /// something wrote into the protocol stream anyway.
+    ///
+    /// **Retryable** (`WorkerCrash`) -- the worker is retired and the request
+    /// runs again on another.
+    #[error("worker wrote too many lines that are not protocol messages; last: {last_line:?}")]
+    OutputNoise {
+        /// The last such line, truncated.
+        last_line: String,
+    },
 }
 
 /// What a failed exchange leaves of the worker it ran on: whether the worker
@@ -254,6 +358,7 @@ impl WorkerError {
         match self {
             Self::WorkerResponse(_)
             | Self::Bootstrap(_)
+            | Self::RequestRefused(_)
             | Self::MemoryGuard(_)
             | Self::NoWorker { .. }
             | Self::PoolShuttingDown => WorkerAfterFailure::Reusable,
@@ -262,8 +367,11 @@ impl WorkerError {
             | Self::ReadyParseFailed(_)
             | Self::HealthCheckFailed(_)
             | Self::ProcessExited { .. }
+            | Self::Timeout { .. }
             | Self::Protocol(_)
             | Self::Io(_)
+            | Self::WorkerRetired
+            | Self::OutputNoise { .. }
             | Self::RuntimeIdentityMismatch
             // A worker whose capability report was refused is not used.
             | Self::CapabilitiesRefused(_) => WorkerAfterFailure::Retire,

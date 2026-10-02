@@ -12,7 +12,7 @@ mod single;
 
 use std::time::Duration;
 
-use crate::config::{RuntimeLayout, load_validated_config_from_layout};
+use crate::config::{RuntimeLayout, load_config_from_layout};
 use crate::host_facts::EffectiveConfig;
 use crate::host_memory::HostMemoryRuntimeConfig;
 use crate::host_policy::HostExecutionPolicy;
@@ -77,7 +77,7 @@ pub struct DispatchRequest<'a> {
     /// Optional explicit worker count.
     pub workers: Option<usize>,
     /// Optional daemon startup timeout.
-    pub timeout: Option<u64>,
+    pub timeout: Option<crate::api::PositiveSeconds>,
     /// Sequential mode: one worker, no memory gate, no server.
     pub sequential: bool,
     /// Override auto-detected memory tier (small, medium, large, fleet).
@@ -208,10 +208,7 @@ pub async fn dispatch(
         return Ok(());
     }
 
-    let (mut cfg, warnings) = load_validated_config_from_layout(layout, None)?;
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
+    let mut cfg = load_config_from_layout(layout, None)?;
 
     // Apply --memory-tier CLI override (for testing constrained-memory behavior
     // on large machines). Overrides auto-detection from system RAM.
@@ -221,7 +218,17 @@ pub async fn dispatch(
 
     // 2. Auto-daemon routing applies only when no server was explicitly named.
     let local_daemon_url = if !no_server && cfg.auto_daemon {
-        daemon::ensure_daemon(force_cpu, allow_mps, workers, timeout).await?
+        daemon::ensure_daemon(
+            layout,
+            &cfg,
+            daemon::DaemonRequest {
+                force_cpu,
+                allow_mps,
+                workers: workers.map(crate::api::NumWorkers),
+                timeout,
+            },
+        )
+        .await?
     } else {
         None
     };
@@ -329,7 +336,7 @@ async fn dispatch_direct_mode(
     force_cpu: bool,
     allow_mps: bool,
     workers: Option<usize>,
-    timeout: Option<u64>,
+    timeout: Option<crate::api::PositiveSeconds>,
     sequential: bool,
 ) -> Result<(), CliError> {
     if let Some(workers) = workers {
@@ -338,7 +345,7 @@ async fn dispatch_direct_mode(
         cfg.max_workers_per_job = Some(workers as u32);
     }
     if let Some(timeout) = timeout {
-        cfg.audio_task_timeout_s = timeout;
+        cfg.audio_task_timeout_s = Some(timeout);
     }
     if sequential {
         apply_sequential_config(&mut cfg);
@@ -376,9 +383,16 @@ async fn dispatch_direct_mode(
     )
     .await
     .map_err(CliError::from)?;
-    let host = DirectHost::new(cfg, layout, None, None, &direct_workers)
-        .await
-        .map_err(CliError::from)?;
+    let host = DirectHost::new(
+        cfg,
+        layout,
+        None,
+        None,
+        &direct_workers,
+        std::sync::Arc::new(crate::clock::SystemClock),
+    )
+    .await
+    .map_err(CliError::from)?;
     let job_id = host
         .submit_submission(prepared.submission)
         .await
@@ -490,11 +504,7 @@ pub(crate) fn build_direct_pool_config(
     };
     PoolConfig {
         python_path: resolve_python_executable(),
-        health_check_interval_s: if cfg.worker_health_interval_s > 0 {
-            cfg.worker_health_interval_s
-        } else {
-            PoolConfig::default().health_check_interval_s
-        },
+        health_check_interval_s: cfg.worker_health_interval_s,
         verbose: 0,
         // See serve_cmd: the state dir comes from the resolved RuntimeLayout,
         // never inferred from worker_registry_path.
@@ -503,15 +513,10 @@ pub(crate) fn build_direct_pool_config(
             Some(n) => crate::host_facts::PerProfile::uniform(n as usize),
             None => effective.max_workers_per_key_by_profile.map(|n| n as usize),
         },
-        ready_timeout_s: if cfg.worker_ready_timeout_s > 0 {
-            cfg.worker_ready_timeout_s
-        } else {
-            PoolConfig::default().ready_timeout_s
-        },
+        ready_timeout_s: cfg.worker_ready_timeout_s,
         max_total_workers: effective.max_total_workers as usize,
-        audio_task_timeout_s: cfg.audio_task_timeout_s,
-        analysis_task_timeout_s: cfg.analysis_task_timeout_s,
-        ensure_task_timeout_s: cfg.ensure_task_timeout_s,
+        task_timeouts: cfg.task_timeouts(),
+        ensure_task_timeout: cfg.ensure_task_timeout_s,
         worker_registry_path: cfg.worker_registry_path.clone(),
         ..PoolConfig::default()
     }
@@ -596,7 +601,7 @@ pub(crate) fn apply_sequential_config(cfg: &mut ServerConfig) {
     // coordinator requires only 1 MB free, which is always true.
     cfg.memory_gate_mb = Some(MemoryMb(1));
     cfg.max_workers_per_key = Some(1);
-    cfg.max_concurrent_worker_startups = crate::config::WorkerStartupLimit::new(1);
+    cfg.max_concurrent_worker_startups = crate::config::WorkerStartupLimit::literal::<1>();
 }
 
 #[cfg(test)]

@@ -1,14 +1,14 @@
-//! Shared helpers for the invariant modules' tests: a synthetic UD word with
-//! an explicit id, a punctuation token, and the production seam (dispatcher
+//! Shared helpers for the invariant modules' tests: a word as the analysis
+//! returns it, with an explicit id, a punctuation token, and the production seam (dispatcher
 //! plus mapping) rendered to `%mor` strings.
 
 use crate::morphosyntax::evidence::UtteranceEvidence;
 use crate::morphosyntax::{
-    MappingContext, UdId, UdPunctable, UdSentence, UdWord, UniversalPos,
+    MappingContext, UdId, UdPunctable, UdSentence, UdWord, UdWordAnalysis, UniversalPos,
     apply_grammatical_invariants, map_ud_sentence,
 };
 
-/// A word with the given UD id.
+/// A word with the given UD id, as the analysis returns it.
 pub(crate) fn word(
     id: usize,
     text: &str,
@@ -18,15 +18,23 @@ pub(crate) fn word(
     head: usize,
     deprel: &str,
 ) -> UdWord {
-    let mut w = UdWord::synthetic(text, lemma, upos, feats, head, deprel);
-    w.id = UdId::Single(id);
-    w
+    UdWord::from(UdWordAnalysis {
+        id: UdId::Single(id),
+        text: text.to_string(),
+        lemma: lemma.to_string(),
+        upos: UdPunctable::Value(upos),
+        xpos: None,
+        feats: feats.map(str::to_string),
+        head,
+        deprel: deprel.to_string(),
+        deps: None,
+        misc: None,
+    })
 }
 
 /// A punctuation token with the given UD id.
 pub(crate) fn punct(id: usize, text: &str, head: usize) -> UdWord {
-    let mut w = UdWord::synthetic(text, text, UniversalPos::Punct, None, head, "punct");
-    w.id = UdId::Single(id);
+    let mut w = word(id, text, text, UniversalPos::Punct, None, head, "punct");
     w.upos = UdPunctable::Punct(text.to_string());
     w
 }

@@ -125,7 +125,7 @@ fn test_echo_tcp_config(python_path: String, state_dir: &tempfile::TempDir) -> W
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         runtime: WorkerRuntimeConfig::default().with_state_dir(state_dir.path().to_path_buf()),
         ..Default::default()
     }
@@ -157,7 +157,7 @@ async fn spawn_test_echo_worker() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -180,7 +180,7 @@ async fn health_check_works() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -204,7 +204,7 @@ async fn spawn_test_echo_worker_task_bootstrap() {
         profile: WorkerProfile::Stanza,
         task: Some(InferTask::Morphosyntax),
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -226,7 +226,7 @@ async fn capabilities_test_echo() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -273,7 +273,7 @@ async fn infer_echo_returns_payload() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -286,8 +286,8 @@ async fn infer_echo_returns_payload() {
         .infer(&infer_request(payload.clone()))
         .await
         .expect("infer failed");
-    assert_eq!(response.result, Some(payload));
-    assert!(response.error.is_none());
+    assert_eq!(response.outcome.result().cloned(), Some(payload));
+    assert!(response.outcome.error().is_none());
 }
 
 #[tokio::test]
@@ -298,7 +298,7 @@ async fn batch_infer_echo_returns_items() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -315,8 +315,14 @@ async fn batch_infer_echo_returns_items() {
         .await
         .expect("batch infer failed");
     assert_eq!(response.results.len(), 2);
-    assert_eq!(response.results[0].result, Some(items[0].clone()));
-    assert_eq!(response.results[1].result, Some(items[1].clone()));
+    assert_eq!(
+        response.results[0].outcome.result().cloned(),
+        Some(items[0].clone())
+    );
+    assert_eq!(
+        response.results[1].outcome.result().cloned(),
+        Some(items[1].clone())
+    );
 }
 
 #[tokio::test]
@@ -324,8 +330,8 @@ async fn pool_dispatch_batch_infer_spawns_and_processes() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -341,7 +347,7 @@ async fn pool_dispatch_batch_infer_spawns_and_processes() {
         )
         .await
         .expect("dispatch failed");
-    assert_eq!(response.results[0].result, Some(item));
+    assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
 
     assert_eq!(pool.worker_count().await, 1);
     let summary = pool.worker_summary().await;
@@ -361,8 +367,8 @@ async fn pool_reuses_existing_worker() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -379,7 +385,7 @@ async fn pool_reuses_existing_worker() {
             )
             .await
             .expect("dispatch failed");
-        assert_eq!(response.results[0].result, Some(item));
+        assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
     }
 
     assert_eq!(pool.worker_count().await, 1);
@@ -391,8 +397,8 @@ async fn pool_multiple_task_groups() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -416,8 +422,8 @@ async fn pool_multiple_task_groups() {
         )
         .await
         .expect("dispatch 2 failed");
-    assert_eq!(r1.results[0].result, Some(morph_item));
-    assert_eq!(r2.results[0].result, Some(fa_item));
+    assert_eq!(r1.results[0].outcome.result().cloned(), Some(morph_item));
+    assert_eq!(r2.results[0].outcome.result().cloned(), Some(fa_item));
     assert_eq!(pool.worker_count().await, 2);
 
     pool.shutdown().await;
@@ -428,8 +434,8 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -453,8 +459,8 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
         )
         .await
         .expect("dispatch 2 failed");
-    assert_eq!(r1.results[0].result, Some(morph_item));
-    assert_eq!(r2.results[0].result, Some(coref_item));
+    assert_eq!(r1.results[0].outcome.result().cloned(), Some(morph_item));
+    assert_eq!(r2.results[0].outcome.result().cloned(), Some(coref_item));
     assert_eq!(pool.worker_count().await, 2);
     let summary = pool.worker_summary().await;
     assert!(
@@ -478,8 +484,8 @@ async fn pool_pre_scale_uses_infer_targets() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -535,13 +541,13 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
 
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: Default::default(),
-        worker_registry_path: registry_path.to_string_lossy().into_owned(),
+        worker_registry_path: Some(registry_path.clone()),
         ..Default::default()
     });
 
@@ -577,8 +583,8 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
 
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -587,7 +593,7 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
             server_process_id: Some(std::process::id()),
             ..Default::default()
         },
-        worker_registry_path: registry_path.to_string_lossy().into_owned(),
+        worker_registry_path: Some(registry_path.clone()),
         ..Default::default()
     });
 
@@ -631,13 +637,13 @@ async fn shutdown_only_kills_current_server_owned_daemons() {
 
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: owned_runtime,
-        worker_registry_path: registry_path.to_string_lossy().into_owned(),
+        worker_registry_path: Some(registry_path.clone()),
         ..Default::default()
     });
 
@@ -666,8 +672,8 @@ async fn pool_pre_scale_respects_max_workers_per_key() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
@@ -712,8 +718,8 @@ async fn pool_serializes_worker_bootstrap_per_key() {
 
     let pool = WorkerPool::new(PoolConfig {
         python_path: wrapped_python.to_string_lossy().into_owned(),
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(3),
         verbose: 0,
@@ -737,15 +743,24 @@ async fn pool_serializes_worker_bootstrap_per_key() {
     let elapsed = started.elapsed();
 
     assert_eq!(
-        r1.expect("dispatch 1 failed").results[0].result,
+        r1.expect("dispatch 1 failed").results[0]
+            .outcome
+            .result()
+            .cloned(),
         Some(item1)
     );
     assert_eq!(
-        r2.expect("dispatch 2 failed").results[0].result,
+        r2.expect("dispatch 2 failed").results[0]
+            .outcome
+            .result()
+            .cloned(),
         Some(item2)
     );
     assert_eq!(
-        r3.expect("dispatch 3 failed").results[0].result,
+        r3.expect("dispatch 3 failed").results[0]
+            .outcome
+            .result()
+            .cloned(),
         Some(item3)
     );
     assert_eq!(pool.worker_count().await, 3);
@@ -766,7 +781,7 @@ async fn spawn_failure_bad_python_path() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -806,7 +821,7 @@ async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -838,7 +853,7 @@ async fn spawn_failure_includes_worker_startup_stderr() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -887,7 +902,7 @@ async fn health_check_tolerates_non_protocol_stdout_between_requests() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -906,8 +921,8 @@ async fn profile_groups_related_tasks_into_single_worker() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -947,8 +962,8 @@ async fn each_profile_gets_its_own_worker() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 60,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,

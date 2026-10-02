@@ -2,7 +2,7 @@
 
 **Status:** Current
 **Last verified:** 2026-08-31 07:13 EDT
-**Last updated:** 2026-09-22 17:22 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 **Speaker attribution (2026-09-16).** `AsrMonologueV2.speaker` is a tagged
 `SpeakerAttribution` rather than a bare string, and `ProviderMediaInput`
@@ -90,7 +90,7 @@ The Python cutover is complete. Audio tasks and text-only NLP tasks
 commands preserve cross-file batching by freezing one prepared-text artifact per
 miss batch and sending one batched `execute_v2` request per task.
 
-Utseg item results may carry `boundary_model_evidence`. Its model ID is
+A `boundary_model` utseg item carries `boundary_model_evidence`. Its model ID is
 nonempty, its model revision is REQUIRED and is a hub commit rather than free
 text, so a worker that cannot say which revision it loaded refuses instead of
 reporting one, and its `word_evidence` vector is parallel to the request words. Each word is a
@@ -283,6 +283,18 @@ so they were deleted from Rust, Python, the shared fixtures and `ipc-schema`.
 }
 ```
 
+`elapsed_s` is required: every response is one a worker sent, and the Rust
+side holds it as a plain `NonNegativeSeconds`. Every value is a reading the
+worker took. A task executor reports its own execution time; a response the
+Python dispatcher builds itself (a payload whose `kind` does not match its
+task, a task not wired into the live worker, a test echo) reports the time from
+receipt to reply, measured in `execute_request_v2`. The server composes no responses
+of its own. A reply that cannot answer a waiting request (on the shared GPU
+path: a reply the protocol refuses, or an `op=error` line) becomes a
+`WorkerError` for that request, exactly as on the sequential path; see "Failure
+replies on the two worker paths" below. Every `ExecuteResponseV2` value
+therefore has a wire form, and its `Serialize` cannot fail.
+
 `ProgressEvent`
 
 ```text
@@ -467,8 +479,8 @@ pre-existing fallback. Two consumers read it from one value rather than
 computing two independent numbers that can drift apart: Python's native
 Qwen3-ASR decode loop (`_qwen_chunking.DecodeBudget`) bounds decode time with
 it, and Rust's own worker-transport read timeout
-(`TaskRequestV2::timeout_seconds_with_config`) is the same value plus a fixed
-margin, so the transport ceiling can never be shorter than the budget it just
+(`TaskRequestV2::transport_timeout`, a `PositiveSeconds`) is the same value plus
+a fixed margin, so the transport ceiling can never be shorter than the budget it just
 sent.
 
 ```text
@@ -943,10 +955,13 @@ Responses are written under a stdout lock so JSON lines never interleave.
 
 ### Rust side
 
-The `SharedGpuWorker` type (in
-`crates/batchalign/src/worker/pool/shared_gpu/`, with the transport
-split between `stdio.rs` and `tcp.rs`) replaces the exclusive
-`CheckedOutWorker` for GPU profile dispatch:
+One transport, `SharedGpuChannel<W>` (`crates/batchalign/src/worker/pool/shared_gpu/channel.rs`),
+serves both kinds of shared GPU worker and replaces the exclusive
+`CheckedOutWorker` for GPU profile dispatch. It is generic over the writer;
+`SharedGpuWorker` (`stdio.rs`) wraps it over a spawned child's stdio and owns
+the process, and `SharedGpuTcpWorker` (`tcp.rs`) wraps it over a registry
+daemon's TCP connection. Dispatch, the sequential ops, routing and liveness
+are therefore one implementation:
 
 ```mermaid
 flowchart LR
@@ -955,10 +970,11 @@ flowchart LR
         t2["Task 2: FA file B"]
         t3["Task 3: FA file C"]
         sem["dispatch_semaphore\n(Semaphore K=gpu_thread_pool_size)"]
-        gpu["SharedGpuWorker"]
-        reader["Background reader"]
-        p1["pending: id=1 → oneshot"]
-        p2["pending: id=2 → oneshot"]
+        chan["SharedGpuChannel"]
+        reader["Reader task"]
+        p1["PendingDispatches: id=1"]
+        p2["PendingDispatches: id=2"]
+        ctl["ControlSlot"]
     end
     subgraph Python
         stdin["stdin reader"]
@@ -970,8 +986,8 @@ flowchart LR
     t1 -->|"acquire permit"| sem
     t2 -->|"acquire permit"| sem
     t3 -. "wait at gate\n(no timeout yet)" .-> sem
-    sem -->|"slot held → execute_v2"| gpu
-    gpu -->|"stdin mutex"| stdin
+    sem -->|"register, write"| chan
+    chan -->|"writer mutex"| stdin
     stdin --> pool
     pool --> th1
     pool --> th2
@@ -979,27 +995,62 @@ flowchart LR
     th2 -->|"response(id=1)"| reader
     reader --> p1
     reader --> p2
+    reader --> ctl
 ```
 
 Key components:
-- **`dispatch_semaphore: Arc<Semaphore>`** (`shared_gpu/stdio.rs`,
-  `shared_gpu/tcp.rs`), caps in-flight `execute_v2` calls per worker at
-  `gpu_thread_pool_size` so Rust dispatch concurrency matches Python's
-  `ThreadPoolExecutor` capacity. **Permit is acquired before
-  `pending.insert()` and before the `tokio::time::timeout` wrap**, so a
-  caller waiting for a slot does not consume its per-request timeout
-  budget on queue-wait. Without this gate, late callers would register
-  pending oneshots and start their timers while their request sat in the
-  Python executor's queue, and the timer would expire ahead of the
-  response, see "Why the dispatch semaphore exists" below.
-- **`stdin: Mutex<ChildStdin>`**: serialized writes so JSON lines don't interleave
-- **`pending: Mutex<HashMap<String, oneshot::Sender>>`**: maps request_id to response channel
-- **Background reader task**: continuously reads stdout, parses responses, routes by request_id
-- **Control channel**: sequential non-V2 ops (health, capabilities,
-  `ensure_task`, shutdown) via a separate oneshot. A dedicated control gate is
-  held for the complete request/response round trip; locking only the oneshot
-  slot would allow a concurrent caller to replace its recipient before the
-  reader delivered the first response.
+- **`dispatch_semaphore`** caps in-flight `execute_v2` calls per worker at
+  `gpu_thread_pool_size`, so Rust dispatch concurrency matches Python's
+  `ThreadPoolExecutor` capacity. **The permit is taken before the dispatch
+  registers and before its timer starts**, so a caller waiting for a slot does
+  not spend its per-request budget on queue-wait; see "The dispatch semaphore
+  contract" below.
+- **`writer: Mutex<W>`**: serialized writes so JSON lines don't interleave.
+  Requests are serialized from the same `WorkerRequest` envelope the
+  sequential handles use.
+- **`PendingDispatches`** (`routes.rs`): the dispatches waiting for a reply,
+  keyed by the typed `WorkerRequestIdV2`. `register` returns a
+  `DispatchReceipt` whose `reply_within(limit)` yields a
+  `DispatchReply = Result<ExecuteResponseV2, WorkerError>` (the worker's
+  response, or the error its reply amounted to; see "Failure replies on the
+  two worker paths"), or `None` at the time limit, withdrawing the
+  registration. A second registration under an id already waiting is refused.
+- **`ControlSlot`** (`routes.rs`): the one sequential op (capabilities,
+  `ensure_task`, shutdown) waiting for its reply. Arming it
+  (`arm_capabilities`, `arm_ensure_task(task)`) mints a `ControlRequestId`
+  that the request carries, and the waiter holds a sender typed for its own
+  reply (`WorkerCapabilities`, `EnsureTaskResponse`). A line answers the
+  waiter only when it names it: a reply of the waiter's op (for
+  `ensure_task`, about the waiter's `InferTask`), or a failure tagged with
+  the waiter's id. So an op that timed out cannot have its late reply or its
+  late failure taken as the next op's answer, and a task is remembered as
+  loaded only from a reply about that task. A control gate is held for the
+  complete round trip, so at most one op waits; shutdown, which does not take
+  the gate, supersedes a waiting op and then waits only for its own
+  acknowledgement.
+- **Reader task** (`reader.rs`): reads every line and routes it to its owner
+  (below).
+- **Liveness**: both routes are state machines that CLOSE when the stream
+  ends: at EOF, on a read error, after `MAX_RESPONSE_STDOUT_NOISE_LINES`
+  consecutive noise lines (by the line rule every reader applies,
+  `WireLine`: a JSON object is a message, anything else is noise), when the
+  reader task stops any other way (its close-on-exit guard), or at
+  shutdown. Closing answers every waiter through its own reply with the
+  reason (`StreamClosed`: `ProcessExited` for a stream that ended, the
+  retryable `OutputNoise` for noise, and at a stop the pool's reason:
+  `PoolShuttingDown` when the pool shuts down, the retryable `WorkerRetired`
+  when the pool retires this one worker and keeps serving) and
+  refuses every later registration at once. `check_available` reads that
+  state, for both transports: the GPU slot replaces a closed stdio worker,
+  and `WorkerPool::live_gpu_tcp_worker` drops a closed daemon connection so
+  dispatch falls back to a spawned worker and the next discovery sweep
+  connects afresh (discovery replaces a closed entry and keeps a live one).
+- **Loaded-task cache**: `ensure_task` first checks a Rust-side set of
+  tasks this worker has already loaded, before and again after taking the
+  control gate, and skips the IPC on a hit. Every path returns `Ok(())`: the
+  worker's own response (`loaded` or `already_loaded`, with the `elapsed_s`
+  it measured) is logged where it arrives, and a cache hit, which has no
+  response, invents none.
 
 ### The dispatch semaphore contract
 
@@ -1030,8 +1081,7 @@ succeed: each caller's per-request budget governs work-time only,
 never queue-wait.
 
 Verified source files:
-`crates/batchalign/src/worker/pool/shared_gpu/stdio.rs`,
-`crates/batchalign/src/worker/pool/shared_gpu/tcp.rs`,
+`crates/batchalign/src/worker/pool/shared_gpu/channel.rs`,
 `crates/batchalign/src/worker/tcp_handle.rs` (carries
 `gpu_thread_pool_size` on `TcpWorkerInfo`),
 `batchalign/worker/_protocol.py` (`_serve_stdio_concurrent`).
@@ -1039,16 +1089,55 @@ Verified source files:
 ### Request/response correlation
 
 `ExecuteRequestV2.request_id` and `ExecuteResponseV2.request_id` are the
-multiplexing key. The background reader extracts the request_id from each
-response and sends it to the matching pending oneshot channel.
+multiplexing key. The reader routes each line to its owner:
 
-Orphaned responses (the response arrives after the pending entry has been
-removed) are logged at `WARN` level. The expected steady-state rate is
-zero; the typical cause is a shutdown race where the worker drained a
-request while the orchestrator tore down. A burst of orphaned-response
-warnings during normal operation indicates the in-flight cap is wrong,
-e.g., a `gpu_thread_pool_size` mismatch between Rust pool config and the
-daemon's spawn arguments.
+| Line | Owner | Owner receives |
+|---|---|---|
+| `execute_v2` that decodes | the dispatch its `request_id` names | the response |
+| `execute_v2` that does not decode | the dispatch its raw `request_id` names | `WorkerError::Protocol` |
+| `op=error` with `request_id` | the sequential op whose request carried that id, else that dispatch | the reported failure's error, or `Protocol` if the envelope does not decode |
+| `op=error` without `request_id` | the waiting sequential op | the failure |
+| `capabilities` / `ensure_task` / `shutdown` | the waiting sequential op of that op (and, for `ensure_task`, that task) | the reply, or a refusal if it does not decode |
+| `health` (no shared GPU op asks for it) | the waiting sequential op | a refusal |
+| an op the protocol does not name | the dispatch it names, else the sequential op | a refusal |
+
+**A line's failure reaches only its owner.** A line whose owner is not
+waiting (its dispatch already timed out, or no sequential op is waiting) is
+logged and goes nowhere else: it is never handed to another dispatch, a
+dispatch-tagged error never reaches the control slot, and a reply or failure
+of a sequential op that timed out never answers the next one. A line that names no
+request fails no dispatch; the dispatches in flight are answered by their own
+replies or by the stream closing. A response whose dispatch is gone is logged
+at `WARN` as having no pending dispatch. The expected steady-state rate is
+zero; the typical cause is a shutdown race. A burst of them during normal
+operation indicates the in-flight cap is wrong, e.g. a `gpu_thread_pool_size`
+mismatch between the Rust pool config and the daemon's spawn arguments.
+
+### Failure replies on the two worker paths
+
+The sequential handle (`WorkerHandle::execute_v2_with_progress`) and the shared
+GPU reader turn the same failing line into the same `WorkerError`, through the
+same `ReportedFailure` mapping, so `classify_worker_error` and the retry loop
+in `infer_retry.rs` treat both paths alike:
+
+| Worker line | Both paths return | Category | Retried? |
+|---|---|---|---|
+| `execute_v2` response the protocol refuses (for example success with no result) | `WorkerError::Protocol` | `WorkerProtocol` | No: the file fails |
+| `op=error`, `kind` `runtime` | `WorkerError::WorkerResponse` | `ProviderTransient` | Yes, up to the retry budget |
+| `op=error`, `kind` `bootstrap` | `WorkerError::Bootstrap` | `WorkerBootstrap` | No: the file fails |
+| `op=error`, `kind` `invalid_request` | `WorkerError::RequestRefused` | `WorkerProtocol` | No: the same request is refused again |
+| `op=error` envelope the protocol refuses (no `error` text, no or unknown `kind`) | `WorkerError::Protocol` | `WorkerProtocol` | No |
+
+The sequential ops read the same mapping for their own kind of answer:
+`ensure_task` through `ReportedFailure::into_ensure_task_error` and
+capabilities through `into_worker_error`, on both transports.
+
+**Worker restart is the one deliberate difference.** A sequential handle that
+fails to decode a reply is discarded, because its single-flight stdout cannot
+be trusted to be positioned at the next reply (`RequestFlight`). The shared GPU
+worker is kept: its reader consumed the whole line and routes by `request_id`,
+so the other dispatches in flight are still answerable. It is replaced when
+its stream closes, which `check_available` observes.
 
 ### Profile routing
 

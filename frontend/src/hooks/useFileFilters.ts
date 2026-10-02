@@ -7,17 +7,11 @@ import type { FileStatusEntry } from "../types";
 
 export type FilterTab = "all" | "error" | "processing" | "done" | "queued";
 
-export type ErrorCodeGroup = {
-  code: string;       // e.g. "E705" or "general"
-  label: string;      // first line of error message
-  files: FileStatusEntry[];
-};
-
 export type ErrorGroup = {
   category: string;        // "input" | "media" | "system" | "processing"
   categoryLabel: string;   // "CHAT Parse Error" etc.
-  codeGroups: ErrorCodeGroup[];
-  totalFiles: number;
+  label: string;           // first line of the first file's error
+  files: FileStatusEntry[];
 };
 
 export type FileCounts = {
@@ -124,42 +118,13 @@ export function useFileFilters(files: FileStatusEntry[]) {
 
     const groups: ErrorGroup[] = [];
     for (const [cat, catFiles] of catMap) {
-      // Group by individual error code within category
-      const codeMap = new Map<string, FileStatusEntry[]>();
-      for (const f of catFiles) {
-        const codes = f.error_codes;
-        if (codes && codes.length > 0) {
-          for (const code of codes) {
-            const list = codeMap.get(code);
-            if (list) list.push(f);
-            else codeMap.set(code, [f]);
-          }
-        } else {
-          const list = codeMap.get("general");
-          if (list) list.push(f);
-          else codeMap.set("general", [f]);
-        }
-      }
-
-      const codeGroups: ErrorCodeGroup[] = [];
-      for (const [code, codeFiles] of codeMap) {
-        // Use first line of the first file's error as the label
-        const firstError = codeFiles[0]?.error ?? "Unknown error";
-        const label = firstError.split("\n")[0];
-        codeGroups.push({ code, label, files: codeFiles });
-      }
-      // Sort: specific codes first (alphabetically), "general" last
-      codeGroups.sort((a, b) => {
-        if (a.code === "general") return 1;
-        if (b.code === "general") return -1;
-        return a.code.localeCompare(b.code);
-      });
-
+      // The first line of the first file's error labels the group.
+      const firstError = catFiles[0]?.error ?? "Unknown error";
       groups.push({
         category: cat,
         categoryLabel: CATEGORY_DISPLAY[cat] ?? cat,
-        codeGroups,
-        totalFiles: catFiles.length,
+        label: firstError.split("\n")[0],
+        files: catFiles,
       });
     }
 

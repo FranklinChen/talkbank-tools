@@ -39,6 +39,7 @@ use tracing::info;
 use crate::AppState;
 use crate::error::ServerError;
 use crate::hostname::resolve_hostname;
+use crate::store::Submitter;
 use crate::submission::{SubmissionContext, materialize_submission_job};
 
 /// Build the jobs router with all job lifecycle endpoints.
@@ -161,9 +162,9 @@ pub(crate) async fn submit_job(
         &SubmissionContext {
             job_id: job_id.clone().into(),
             correlation_id: correlation_id.clone(),
-            jobs_dir: state.environment.paths.jobs_dir.clone().into(),
-            submitted_by: addr.ip().to_string(),
-            submitted_by_name: resolve_hostname(&addr.ip()),
+            jobs_dir: state.environment.paths.jobs_dir.clone(),
+            submitter: Submitter::client(addr.ip(), resolve_hostname(&addr.ip())),
+            submitted_at: state.control.backend.event_time(),
         },
     )
     .await?;

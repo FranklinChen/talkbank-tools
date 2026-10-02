@@ -1244,7 +1244,7 @@ async fn server_starts_with_real_worker_capability_gate() {
     let config = ServerConfig {
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
-        job_ttl_days: batchalign::config::JobTtlDays::new(7),
+        job_ttl_days: batchalign::config::JobTtlDays::literal::<7>(),
         memory_gate_mb: Some(MemoryMb(0)),
         ..Default::default()
     };
@@ -1259,8 +1259,8 @@ async fn server_starts_with_real_worker_capability_gate() {
     let pool_config = PoolConfig {
         python_path: python_path.clone(),
         test_echo: false,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: Default::default(),
@@ -1273,6 +1273,7 @@ async fn server_starts_with_real_worker_capability_gate() {
         Some(jobs_dir.to_string_lossy().into()),
         Some(db_dir),
         Some("test-build-hash".into()),
+        std::sync::Arc::new(batchalign::clock::SystemClock),
     )
     .await;
 

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::identity::AdmittedMorphosyntaxResponse;
 use crate::api::LanguageCode3;
-use crate::chat_ops::morphosyntax_ops::{BatchItemWithPosition, MwtDict};
+use crate::chat_ops::morphosyntax_ops::{MorphosyntaxBatchItem, MwtDict};
 use crate::error::ServerError;
 use crate::execution::morphotag::progress::BackendProgressPort;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry_and_progress};
@@ -23,14 +23,15 @@ struct LanguageBatchGroup {
     indices: Vec<usize>,
 }
 
-fn language_groups_for_items(
-    items: &[BatchItemWithPosition],
+fn language_groups_for_items<T: AsRef<MorphosyntaxBatchItem>>(
+    items: &[T],
     fallback_lang: &LanguageCode3,
 ) -> Result<Vec<LanguageBatchGroup>, ServerError> {
     let mut groups: Vec<LanguageBatchGroup> = Vec::new();
     let mut positions: HashMap<String, usize> = HashMap::new();
 
-    for (idx, (_, _, item, _)) in items.iter().enumerate() {
+    for (idx, item) in items.iter().enumerate() {
+        let item = item.as_ref();
         let effective_lang = if item.lang.as_ref().is_empty() {
             fallback_lang.clone()
         } else {
@@ -64,9 +65,9 @@ fn language_groups_for_items(
 /// to separate workers.  This is transparent to callers, the returned
 /// responses are always parallel to the input `items` slice, each admitted
 /// with the model that produced it.
-pub(crate) async fn infer_batch(
+pub(crate) async fn infer_batch<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     pool: &WorkerPool,
-    items: &[BatchItemWithPosition],
+    items: &[T],
     lang: &LanguageCode3,
     mwt: &MwtDict,
     retokenize: bool,
@@ -96,9 +97,9 @@ pub(crate) async fn infer_batch(
 /// engine failures, for example the cross-file batch driver, which
 /// marks only the file that contributed a failing item as failed
 /// while letting the other files in the batch continue.
-pub(crate) async fn infer_batch_per_item(
+pub(crate) async fn infer_batch_per_item<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     pool: &WorkerPool,
-    items: &[BatchItemWithPosition],
+    items: &[T],
     lang: &LanguageCode3,
     mwt: &MwtDict,
     retokenize: bool,
@@ -155,11 +156,7 @@ pub(crate) async fn infer_batch_per_item(
     }
 
     for group in dispatchable {
-        let group_items: Vec<BatchItemWithPosition> = group
-            .indices
-            .iter()
-            .map(|&idx| items[idx].clone())
-            .collect();
+        let group_items: Vec<&T> = group.indices.iter().map(|&idx| &items[idx]).collect();
         let responses = infer_batch_homogeneous(
             pool,
             &group_items,
@@ -221,9 +218,9 @@ fn partition_groups_by_stanza_support(
     (dispatchable, fallback)
 }
 
-async fn infer_batch_homogeneous(
+async fn infer_batch_homogeneous<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     pool: &WorkerPool,
-    items: &[BatchItemWithPosition],
+    items: &[T],
     lang: &LanguageCode3,
     mwt: &MwtDict,
     retokenize: bool,
@@ -279,7 +276,7 @@ async fn infer_batch_homogeneous(
     }
 
     let chunk_size = items.len().div_ceil(num_chunks);
-    let chunks: Vec<&[BatchItemWithPosition]> = items.chunks(chunk_size).collect();
+    let chunks: Vec<&[T]> = items.chunks(chunk_size).collect();
     info!(
         items = items.len(),
         chunks = chunks.len(),
@@ -381,16 +378,17 @@ impl ChunkProgressBridge {
 ///
 /// This is the original `infer_batch` body, extracted so it can be called
 /// once (fast path) or N times concurrently (chunked path).
-async fn infer_batch_single(
+async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     pool: &WorkerPool,
-    items: &[BatchItemWithPosition],
+    items: &[T],
     lang: &LanguageCode3,
     mwt: &MwtDict,
     retokenize: bool,
     progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     cancellation: Cancellation<'_>,
 ) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
-    let payload_items: Vec<_> = items.iter().map(|(_, _, item, _)| item.clone()).collect();
+    let payload_items: Vec<MorphosyntaxBatchItem> =
+        items.iter().map(|item| item.as_ref().clone()).collect();
 
     let artifacts = PreparedArtifactRuntimeV2::new("morphosyntax_v2").map_err(|error| {
         ServerError::Validation(format!(
@@ -469,7 +467,11 @@ async fn infer_batch_single(
                 // failure back to the file that contributed this
                 // item: matches the BA2 "one bad utterance
                 // abandons the file" semantics.
-                let words_sent = &payload_items[i].words;
+                let words_sent: Vec<&str> = payload_items[i]
+                    .words()
+                    .iter()
+                    .map(|word| word.text().as_str())
+                    .collect();
                 let diagnostics = diagnose_parse_failure(&raw_sentences);
                 let diag_str = if diagnostics.is_empty() {
                     "no structural issues detected by diagnostics".to_string()
@@ -527,22 +529,14 @@ fn compute_chunk_count(item_count: usize, max_workers: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat_ops::morphosyntax_ops::MorphosyntaxBatchItem;
     use talkbank_model::Span;
     use talkbank_model::Terminator;
 
-    fn batch_item(lang: &str) -> BatchItemWithPosition {
-        (
-            0,
-            0,
-            MorphosyntaxBatchItem {
-                words: Vec::new(),
-                terminator: Terminator::Period { span: Span::DUMMY },
-                special_forms: Vec::new(),
-                lang: talkbank_model::model::LanguageCode::new(lang)
-                    .expect("valid test language code"),
-            },
+    fn batch_item(lang: &str) -> MorphosyntaxBatchItem {
+        MorphosyntaxBatchItem::new(
             Vec::new(),
+            Terminator::Period { span: Span::DUMMY },
+            talkbank_model::model::LanguageCode::new(lang).expect("valid test language code"),
         )
     }
 

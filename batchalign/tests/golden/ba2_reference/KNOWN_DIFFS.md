@@ -12,6 +12,11 @@ that naturally differ (`@PID`, `@Date`, `@Tape Location`, etc.).
 
 ## Morphotag
 
+Morphotag is no longer checked by `assert_ba2_parity()`: its differences are
+reported, not asserted, by `scripts/ba2-morphotag-divergence.sh` (a
+`compare-runs morphotag` report; see the book's testing page). The entries
+below explain differences that report shows.
+
 ### %gra ROOT convention (all languages)
 
 BA2 uses self-referencing ROOT: `4|7|ROOT` (word 4 points to word 7, which is itself the root).
@@ -20,7 +25,7 @@ BA3 uses UD-standard ROOT: `4|0|ROOT` (root points to 0, the conventional UD sen
 This affects every `%gra` line in every language. BA3's convention is correct per
 Universal Dependencies. The difference is systematic and intentional.
 
-**Status:** Intentional BA3 improvement. Parity assertion normalizes ROOT targets.
+**Status:** Intentional BA3 improvement.
 
 ### mm-hmm tokenization (English)
 
@@ -36,7 +41,7 @@ Stanza version difference in tokenization of hyphenated interjections.
 BA3 may reorder `@Participants` and `@ID` lines relative to BA2.
 Both orderings are valid CHAT.
 
-**Status:** Cosmetic. Parity assertion ignores participant ordering.
+**Status:** Cosmetic.
 
 ## Utseg
 

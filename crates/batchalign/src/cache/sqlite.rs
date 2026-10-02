@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use batchalign_types::machine_time::MachineTime;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
@@ -191,7 +191,7 @@ impl CacheBackend for SqliteBackend {
         ba_version: &str,
         data: &serde_json::Value,
     ) -> Result<(), CacheError> {
-        let created_at = Utc::now().to_rfc3339();
+        let created_at = MachineTime::now().to_string();
         let data_blob = serde_json::to_string(data)?;
 
         sqlx::query(
@@ -222,7 +222,7 @@ impl CacheBackend for SqliteBackend {
             return Ok(());
         }
 
-        let created_at = Utc::now().to_rfc3339();
+        let created_at = MachineTime::now().to_string();
 
         let mut tx = self.pool.begin().await?;
         for (key, data) in entries {

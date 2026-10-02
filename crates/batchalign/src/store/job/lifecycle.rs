@@ -24,10 +24,11 @@ use tokio_util::sync::CancellationToken;
 
 use std::collections::BTreeSet;
 
-use crate::api::{FileStatusKind, JobStatus, StatusChange, UnixTimestamp};
+use crate::api::{FileStatusKind, JobStatus, MachineTime, StatusChange};
 
 use super::Job;
 use super::types::RecoveryDisposition;
+use crate::store::FilePhase;
 
 impl Job {
     /// Return whether the job's cancellation token has been triggered.
@@ -41,8 +42,8 @@ impl Job {
             .execution
             .file_statuses
             .values()
-            .filter(|file_status| file_status.status.is_terminal())
-            .map(|file_status| file_status.status)
+            .filter(|file_status| file_status.status().is_terminal())
+            .map(|file_status| file_status.status())
             .collect();
         !terminal.is_empty()
             && terminal
@@ -68,8 +69,8 @@ impl Job {
         self.execution
             .file_statuses
             .values()
-            .filter(|file_status| file_status.status.is_terminal())
-            .any(|file_status| file_status.status == FileStatusKind::Error)
+            .filter(|file_status| file_status.status().is_terminal())
+            .any(|file_status| file_status.status() == FileStatusKind::Error)
     }
 
     /// Apply a status change if the state machine permits it.
@@ -99,19 +100,46 @@ impl Job {
         true
     }
 
+    /// Stop the job at `at`, if its status allows: the status image's
+    /// [`JobStatusColumns::stopped`] transition, applied to the live job.
+    /// Returns whether it fired.
+    ///
+    /// [`JobStatusColumns::stopped`]: super::JobStatusColumns::stopped
+    fn stop(&mut self, stop: super::Stop, at: MachineTime) -> bool {
+        if !self.set_status(stop.status(), StatusChange::Interrupt) {
+            return false;
+        }
+        let image = self.status_columns().stopped(stop, at);
+        self.adopt_status_columns(image);
+        true
+    }
+
+    /// Make the live job hold `image`, every column of it. Destructured
+    /// whole, so a column added to the image cannot be left out here, and a
+    /// transition stated on the image is the transition the live job takes.
+    fn adopt_status_columns(&mut self, image: super::JobStatusColumns) {
+        let super::JobStatusColumns {
+            status,
+            error,
+            completed_at,
+            num_workers,
+            next_eligible_at,
+        } = image;
+        self.execution.status = status;
+        self.execution.error = error;
+        self.schedule.completed_at = completed_at;
+        self.schedule.num_workers = num_workers;
+        self.schedule.next_eligible_at = next_eligible_at;
+    }
+
     /// Request cancellation and, when still active, transition to cancelled.
     pub(crate) fn request_cancellation(
         &mut self,
-        completed_at: UnixTimestamp,
-    ) -> Option<UnixTimestamp> {
+        completed_at: MachineTime,
+    ) -> Option<MachineTime> {
         self.runtime.cancel_token.cancel();
-        if self.set_status(JobStatus::Cancelled, StatusChange::Interrupt) {
-            self.schedule.completed_at = Some(completed_at);
-            self.schedule.next_eligible_at = None;
-            Some(completed_at)
-        } else {
-            None
-        }
+        self.stop(super::Stop::Cancelled, completed_at)
+            .then_some(completed_at)
     }
 
     /// Re-queue the job after memory pressure prevented dispatch.
@@ -120,7 +148,7 @@ impl Job {
     /// status, so requeuing a cancelled job resurrects it. Reproduction:
     /// `cancelled_job_is_not_requeued_by_the_memory_gate`.
     #[must_use = "an ignored refusal requeues a job that is no longer active"]
-    pub(crate) fn requeue_after_memory_gate(&mut self, retry_at: UnixTimestamp) -> bool {
+    pub(crate) fn requeue_after_memory_gate(&mut self, retry_at: MachineTime) -> bool {
         if !self.set_status(JobStatus::Queued, StatusChange::MemoryRequeue) {
             return false;
         }
@@ -146,15 +174,10 @@ impl Job {
     /// impact is worse than the audit row: a job the user cancelled reports
     /// itself Running.
     ///
-    /// Refusing makes the caller's `let ... else { return }` skip its
-    /// `db_update_job(status: Running)` write, so registry and database agree
-    /// on `Cancelled`.
-    ///
-    /// That is necessary but not sufficient on its own: `runner::execution`
-    /// calls `record_job_worker_count` on the very next line, which used to
-    /// persist a hardcoded `Running` and reopened the same desync. Every
-    /// writer now goes through [`Job::set_status`] and the
-    /// [`JobStatus::can_transition_to`] table.
+    /// Refusing leaves the job `Cancelled`, and the database row is written
+    /// from the job as it is (`Job::status_columns`), so registry and
+    /// database agree. Every status writer goes through [`Job::set_status`]
+    /// and the [`JobStatus::can_transition_to`] table.
     #[must_use = "a dropped refusal silently resurrects a cancelled job"]
     pub(crate) fn mark_running(&mut self) -> bool {
         if !self.set_status(JobStatus::Running, StatusChange::Dispatch) {
@@ -174,7 +197,7 @@ impl Job {
     /// Refuses for a job that is no longer active, so a late dispatch error
     /// cannot overwrite a user's `Cancelled` with `Failed`.
     #[must_use = "an ignored refusal overwrites a terminal status"]
-    pub(crate) fn fail(&mut self, error: &str, completed_at: UnixTimestamp) -> bool {
+    pub(crate) fn fail(&mut self, error: &str, completed_at: MachineTime) -> bool {
         if !self.set_status(JobStatus::Failed, StatusChange::Finalize) {
             return false;
         }
@@ -189,9 +212,10 @@ impl Job {
     /// `JobStatus::is_terminal()` returns `true` for `Interrupted`, the
     /// recovery sequence special-cases it:
     ///
-    /// 1. `db.recover_interrupted()` at startup is a SQL migration that
-    ///    flips `running|queued` rows to `interrupted`; it does **not** touch
-    ///    rows already written as `interrupted` (such as the rows written here).
+    /// 1. `db.recover_interrupted()` at startup moves `running|queued` rows
+    ///    through `JobStatusColumns::stopped`, the transition this one
+    ///    applies; it does **not** touch rows already written as
+    ///    `interrupted` (such as the rows written here).
     /// 2. `load_from_db()` then reads each row and, for any job with
     ///    `status ∈ {Interrupted, Running}`, calls
     ///    `Job::reconcile_recovered_runtime_state()` which transitions the
@@ -204,7 +228,7 @@ impl Job {
     /// showed it as a permanent user cancel even though no user pressed cancel.
     ///
     /// We deliberately set `completed_at = Some(_)` here because that is what
-    /// `recover_interrupted()` itself does for the rows it migrates, and
+    /// `recover_interrupted()` itself writes for the rows it recovers, and
     /// downstream queries (e.g. dashboard "completed_at" projections) expect
     /// the field to be populated for any non-active row.  The recovery flow
     /// rewrites both `status` and `completed_at` when it transitions to
@@ -212,11 +236,9 @@ impl Job {
     ///
     /// Returns `true` if the transition fired; `false` if the job was already
     /// in a terminal state and could not be moved.
-    pub(crate) fn interrupt_for_shutdown(&mut self, completed_at: UnixTimestamp) -> bool {
+    pub(crate) fn interrupt_for_shutdown(&mut self, completed_at: MachineTime) -> bool {
         self.runtime.cancel_token.cancel();
-        if self.set_status(JobStatus::Interrupted, StatusChange::Interrupt) {
-            self.schedule.completed_at = Some(completed_at);
-            self.schedule.next_eligible_at = None;
+        if self.stop(super::Stop::Interrupted, completed_at) {
             self.clear_lease();
             self.runtime.runner_active = false;
             true
@@ -234,11 +256,7 @@ impl Job {
     /// File-level bookkeeping still runs either way, because those counters
     /// describe the files and are true regardless of the job's status.
     #[must_use = "a refused finalize must not be persisted either"]
-    pub(crate) fn finalize(
-        &mut self,
-        final_status: JobStatus,
-        completed_at: UnixTimestamp,
-    ) -> bool {
+    pub(crate) fn finalize(&mut self, final_status: JobStatus, completed_at: MachineTime) -> bool {
         let applied = self.set_status(final_status, StatusChange::Finalize);
         // When finalizing as Failed, surface WHY: aggregate the per-file error
         // messages into the job-level error so the dashboard, jobs.db, and the
@@ -260,7 +278,7 @@ impl Job {
             .execution
             .file_statuses
             .values()
-            .filter(|file_status| file_status.status.is_terminal())
+            .filter(|file_status| file_status.status().is_terminal())
             .count() as i64;
         applied
     }
@@ -276,9 +294,9 @@ impl Job {
         let mut messages: BTreeSet<&str> = BTreeSet::new();
         let mut failed_files = 0usize;
         for file_status in self.execution.file_statuses.values() {
-            if file_status.status == FileStatusKind::Error {
+            if let FilePhase::Error { failure, .. } = &file_status.phase {
                 failed_files += 1;
-                if let Some(message) = file_status.error.as_deref() {
+                if let Some(message) = failure.message() {
                     messages.insert(message);
                 }
             }
@@ -314,17 +332,8 @@ impl Job {
     /// Reset the job so unfinished files may run again from queued state.
     pub(crate) fn prepare_for_restart(&mut self) {
         for file_status in self.execution.file_statuses.values_mut() {
-            if file_status.status != FileStatusKind::Done {
-                file_status.status = FileStatusKind::Queued;
-                file_status.error = None;
-                file_status.error_category = None;
-                file_status.started_at = None;
-                file_status.finished_at = None;
-                file_status.next_eligible_at = None;
-                file_status.current_attempt_id = None;
-                file_status.progress_current = None;
-                file_status.progress_total = None;
-                file_status.progress_stage = None;
+            if file_status.status() != FileStatusKind::Done {
+                file_status.requeue();
             }
         }
 
@@ -351,7 +360,7 @@ impl Job {
             .execution
             .file_statuses
             .values()
-            .filter(|file_status| file_status.status == FileStatusKind::Done)
+            .filter(|file_status| file_status.status() == FileStatusKind::Done)
             .count() as i64;
         self.execution
             .results
@@ -364,22 +373,18 @@ impl Job {
             .execution
             .file_statuses
             .values()
-            .any(|file_status| file_status.status.is_resumable());
+            .any(|file_status| file_status.status().is_resumable());
 
         if has_resumable {
             for file_status in self.execution.file_statuses.values_mut() {
-                if file_status.status.is_resumable() {
-                    file_status.status = FileStatusKind::Queued;
-                    file_status.started_at = None;
-                    file_status.finished_at = None;
-                    file_status.next_eligible_at = None;
-                    file_status.current_attempt_id = None;
-                    file_status.progress_current = None;
-                    file_status.progress_total = None;
-                    file_status.progress_stage = None;
+                if file_status.status().is_resumable() {
+                    file_status.requeue();
                 }
             }
             let _ = self.set_status(JobStatus::Queued, StatusChange::Reconcile);
+            // A requeued job has not failed: an error from an earlier run is
+            // not carried into the new one.
+            self.execution.error = None;
             self.schedule.completed_at = None;
             self.schedule.next_eligible_at = None;
             self.clear_lease();
@@ -389,7 +394,7 @@ impl Job {
                 .execution
                 .file_statuses
                 .values()
-                .all(|file_status| file_status.status == FileStatusKind::Error);
+                .all(|file_status| file_status.status() == FileStatusKind::Error);
             let reconciled = if all_errored {
                 JobStatus::Failed
             } else {
@@ -417,7 +422,6 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::UnixTimestamp;
     use crate::scheduling::FailureCategory;
     use crate::store::job::test_support::{running_job_fixture, three_file_job_fixture};
     use crate::store::job::types::FileFailureRecord;
@@ -432,7 +436,7 @@ mod tests {
     #[test]
     fn interrupt_for_shutdown_writes_interrupted_not_cancelled() {
         let mut job = running_job_fixture();
-        let now = UnixTimestamp(1_777_300_000.0);
+        let now = crate::unix_time(1_777_300_000.0);
 
         let did_transition = job.interrupt_for_shutdown(now);
 
@@ -452,6 +456,32 @@ mod tests {
             "completed_at is populated to match recover_interrupted's existing convention"
         );
         assert!(!job.runtime.runner_active, "runner claim is released");
+    }
+
+    /// A live stop leaves the job's whole status image as the shared
+    /// transition states it (`JobStatusColumns::stopped`), the image startup
+    /// recovery writes: every column, not only the ones the stop changes.
+    #[test]
+    fn a_live_stop_is_the_shared_transition_on_every_column() {
+        for (stop, apply) in [
+            (
+                super::super::Stop::Interrupted,
+                Job::interrupt_for_shutdown as fn(&mut Job, MachineTime) -> bool,
+            ),
+            (super::super::Stop::Cancelled, |job: &mut Job, at| {
+                job.request_cancellation(at).is_some()
+            }),
+        ] {
+            let mut job = running_job_fixture();
+            job.execution.error = Some("an earlier failure".into());
+            job.schedule.num_workers = Some(3);
+            job.schedule.next_eligible_at = Some(crate::unix_time(1_777_200_000.0));
+            let now = crate::unix_time(1_777_300_000.0);
+            let expected = job.status_columns().stopped(stop, now);
+
+            assert!(apply(&mut job, now), "{stop:?}");
+            assert_eq!(job.status_columns(), expected, "{stop:?}");
+        }
     }
 
     /// Regression: 2026-05-11 morphotag job `150c824a-48e`.
@@ -477,9 +507,9 @@ mod tests {
     #[test]
     fn any_terminal_files_failed_detects_partial_failure_shape() {
         let mut job = three_file_job_fixture();
-        let started = UnixTimestamp(1_778_517_977.7);
-        let finished_done = UnixTimestamp(1_778_518_056.4);
-        let finished_error = UnixTimestamp(1_778_518_053.6);
+        let started = crate::unix_time(1_778_517_977.7);
+        let finished_done = crate::unix_time(1_778_518_056.4);
+        let finished_error = crate::unix_time(1_778_518_053.6);
 
         // 60home-3.cha succeeds (the only file with an actual output
         // on disk after the incident).
@@ -495,7 +525,7 @@ mod tests {
                 &FileFailureRecord {
                     message: "worker protocol error".into(),
                     category: FailureCategory::ProviderTerminal,
-                    finished_at: finished_error,
+                    finished_at: crate::store::EventTime::fixed(finished_error),
                 },
             ));
         }
@@ -528,8 +558,8 @@ mod tests {
     #[test]
     fn any_terminal_files_failed_true_when_all_files_error() {
         let mut job = three_file_job_fixture();
-        let started = UnixTimestamp(1_778_517_977.7);
-        let finished = UnixTimestamp(1_778_518_056.4);
+        let started = crate::unix_time(1_778_517_977.7);
+        let finished = crate::unix_time(1_778_518_056.4);
         for filename in ["65-3.cha", "60home-3.cha", "65home-3.cha"] {
             assert!(job.mark_file_processing(filename, started));
             assert!(job.mark_file_error(
@@ -537,7 +567,7 @@ mod tests {
                 &FileFailureRecord {
                     message: "worker error".into(),
                     category: FailureCategory::ProviderTerminal,
-                    finished_at: finished,
+                    finished_at: crate::store::EventTime::fixed(finished),
                 },
             ));
         }
@@ -555,15 +585,18 @@ mod tests {
             .file_statuses
             .get_mut("job-file.cha")
             .expect("fixture file present");
-        file.status = FileStatusKind::Error;
-        file.error = None;
+        file.phase = FilePhase::Error {
+            started_at: None,
+            finished_at: None,
+            failure: crate::store::FileFailure::of_failed_row(None, None),
+        };
 
         // Assert the transition was APPLIED rather than discarding the result.
         // `finalize` is `#[must_use]` precisely because a refused transition
         // leaves the job in its prior status, and every assertion below would
         // then be checking the fixture's own state instead of finalize's work.
         assert!(
-            job.finalize(JobStatus::Failed, UnixTimestamp(1_778_518_060.0)),
+            job.finalize(JobStatus::Failed, crate::unix_time(1_778_518_060.0)),
             "Running -> Failed under StatusChange::Finalize must be applied"
         );
 
@@ -584,15 +617,15 @@ mod tests {
     #[test]
     fn reconcile_recovered_failed_job_records_file_failure_reason() {
         let mut job = running_job_fixture();
-        let started = UnixTimestamp(1_778_517_900.0);
-        let finished = UnixTimestamp(1_778_518_000.0);
+        let started = crate::unix_time(1_778_517_900.0);
+        let finished = crate::unix_time(1_778_518_000.0);
         assert!(job.mark_file_processing("job-file.cha", started));
         assert!(job.mark_file_error(
             "job-file.cha",
             &FileFailureRecord {
                 message: "worker bootstrap error: md5 mismatch".into(),
                 category: FailureCategory::WorkerBootstrap,
-                finished_at: finished,
+                finished_at: crate::store::EventTime::fixed(finished),
             },
         ));
         assert!(

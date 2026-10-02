@@ -3,19 +3,26 @@
 mod deprel;
 mod extract;
 mod merge;
+#[cfg(test)]
+pub(crate) mod pipeline_tests;
 mod plan;
-mod spans;
 mod splice;
 
-pub use deprel::{
-    PosConstraint, UdDeprel, deprel_to_pos_constraint, infer_deprel_from_pos,
-    refine_with_dependents,
+pub use crate::morphosyntax::alignment::{
+    AlignedUd, AlignedWord, HeadTarget, SpanWordPosition, UdAlignment, UdAlignmentError,
+    UdSentenceError, UdTokenIndex, UdTokens, WordSpace,
 };
-pub use extract::{L2DeferredPosition, PrimaryStructuralInfo, extract_l2_deferred_positions};
+pub use deprel::{PosConstraint, UdDeprel, deprel_to_pos_constraint, infer_deprel_from_pos};
+pub(crate) use extract::{ItemPlacement, RetokenizedItems};
+pub use extract::{
+    L2DeferredPosition, L2ExtractError, L2Extraction, PrimaryStructuralInfo, UnalignedL2Utterance,
+};
 pub use merge::{
-    MergedL2Morphology, SecondaryUdContext, merge_planned_secondary_span, merge_primary_secondary,
-    merge_primary_secondary_with_context, resolve_merged_pos, resolve_merged_pos_with_context,
+    L2MergeError, MergedL2Span, ModelAssignedPos, PosSource, SecondaryUdContext,
+    merge_planned_secondary_span,
 };
-pub use plan::{L2Attachment, L2DispatchPlan, L2SpanPlan, plan_dispatch_spans};
-pub use spans::{L2Span, group_l2_spans};
-pub use splice::{SpliceOutcome, apply_l2_fallback, splice_l2_into_chat};
+pub use plan::{
+    AsPlanned, ExternalRelation, L2Attachment, L2DispatchPlan, L2SpanPlan, RelationStage,
+    plan_dispatch_spans,
+};
+pub use splice::{SpliceOutcome, splice_l2_into_chat};

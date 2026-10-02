@@ -86,6 +86,15 @@ impl HandshakeSlot {
         }
     }
 
+    /// The lock file guarding this slot's handshake: see [`HandshakeLock`].
+    /// Never deleted, so every holder locks the same file.
+    fn lock_filename(self) -> &'static str {
+        match self {
+            Self::Main => "server.pid.lock",
+            Self::Sidecar => "sidecar-server.pid.lock",
+        }
+    }
+
     /// The value to pass on a child's command line.
     ///
     /// `const` so it can be the clap `default_value` too, making that a third
@@ -249,6 +258,10 @@ pub enum HandshakeError {
         /// The file involved.
         path: PathBuf,
     },
+    /// The blocking task that took the slot's lock (off the async runtime)
+    /// did not finish: it panicked or was cancelled.
+    #[error("server handshake task did not finish: {0}")]
+    Task(String),
 }
 
 impl ServerHandshake {
@@ -367,52 +380,190 @@ impl ServerHandshake {
         })
     }
 
-    /// Record a server that has bound and is listening.
+    /// Record THIS process as a server that has bound and is listening.
     ///
     /// Called by the server itself, after the bind succeeds, because it is the
-    /// only process that knows the answer.
+    /// only process that knows the answer. The PID is this process's own, never
+    /// a caller's choice, and the returned [`PublishedHandshake`] is the only
+    /// way the server can later take its record down: it removes the file only
+    /// while the record still names this process, so a server that is
+    /// stopping cannot delete the handshake a replacement server has since
+    /// published.
     pub fn publish_listening(
         state_dir: &Path,
         slot: HandshakeSlot,
-        pid: u32,
         port: BoundPort,
-    ) -> Result<(), HandshakeError> {
-        Self::write(state_dir, slot, HandshakeRecord { pid, port: port.0 })
+    ) -> Result<PublishedHandshake, HandshakeError> {
+        let pid = std::process::id();
+        let lock = HandshakeLock::acquire(state_dir, slot)?;
+        Self::write(&lock, HandshakeRecord { pid, port: port.0 })?;
+        drop(lock);
+        Ok(PublishedHandshake {
+            state_dir: state_dir.to_path_buf(),
+            slot,
+            pid,
+        })
     }
 
-    /// Atomically replace the handshake file.
-    fn write(
-        state_dir: &Path,
-        slot: HandshakeSlot,
-        record: HandshakeRecord,
-    ) -> Result<(), HandshakeError> {
-        let path = Self::path_in(state_dir, slot);
+    /// Atomically replace the handshake file. Takes the slot's
+    /// [`HandshakeLock`] as proof that no removal is between its read and its
+    /// delete.
+    fn write(lock: &HandshakeLock, record: HandshakeRecord) -> Result<(), HandshakeError> {
+        let path = Self::path_in(&lock.state_dir, lock.slot);
         let io = |source| HandshakeError::Io {
             path: path.clone(),
             source,
         };
-        std::fs::create_dir_all(state_dir).map_err(io)?;
-        // Temp-and-rename so a concurrent reader never sees a half-written
-        // record. The temp file is per-PID so two servers racing to publish
-        // cannot truncate each other's temp file mid-write.
-        let tmp = path.with_extension(format!("tmp.{}", record.pid));
+        // Atomic, so a concurrent reader never sees a half-written record,
+        // through a uniquely named temporary file, so two servers racing to
+        // publish cannot truncate each other's.
         let encoded = serde_json::to_string(&record).map_err(|error| HandshakeError::Io {
             path: path.clone(),
             source: std::io::Error::other(error),
         })?;
-        std::fs::write(&tmp, encoded).map_err(io)?;
-        std::fs::rename(&tmp, &path).map_err(io)?;
-        Ok(())
+        crate::atomic_file::write_atomically(
+            &path,
+            encoded.as_bytes(),
+            crate::atomic_file::Existing::Replace,
+            crate::atomic_file::Audience::Owner,
+        )
+        .map_err(io)
     }
 
-    /// Remove the handshake file. A missing file is not an error.
-    pub fn remove(state_dir: &Path, slot: HandshakeSlot) -> Result<(), HandshakeError> {
-        let path = Self::path_in(state_dir, slot);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(HandshakeError::Io { path, source }),
+    /// Remove the handshake only while it names `pid`.
+    ///
+    /// The one way a handshake is taken down: the stopping server through
+    /// [`PublishedHandshake::retire`], and the CLI for a server it has
+    /// stopped or found dead (under the start lock). A record naming another
+    /// process belongs to a server that replaced this one and is left alone;
+    /// an unreadable record is left alone too, since it may name a live
+    /// server. A missing file is not an error.
+    ///
+    /// The read and the delete happen under the slot's [`HandshakeLock`],
+    /// which publishing takes too, so a replacement server cannot publish
+    /// between them: without it, a stopping server could read its own record,
+    /// lose the race to a replacement's publish, and delete the replacement's
+    /// handshake.
+    pub(crate) fn remove_if_names(
+        state_dir: &Path,
+        slot: HandshakeSlot,
+        pid: u32,
+    ) -> Result<Removal, HandshakeError> {
+        // A missing state directory holds no record, and removing one must
+        // not create the directory and a lock file to find that out.
+        match HandshakeLock::acquire_in_existing(state_dir, slot)? {
+            Some(lock) => Self::remove_locked(&lock, pid),
+            None => Ok(Removal::Absent),
         }
+    }
+
+    /// [`Self::remove_if_names`] for a holder of the slot's lock.
+    fn remove_locked(lock: &HandshakeLock, pid: u32) -> Result<Removal, HandshakeError> {
+        let path = Self::path_in(&lock.state_dir, lock.slot);
+        match Self::read(&lock.state_dir, lock.slot)? {
+            None => Ok(Removal::Absent),
+            Some(record) if record.pid() != pid => Ok(Removal::NamesAnother { pid: record.pid() }),
+            Some(_) => match std::fs::remove_file(&path) {
+                Ok(()) => Ok(Removal::Removed),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Removal::Absent),
+                Err(source) => Err(HandshakeError::Io { path, source }),
+            },
+        }
+    }
+}
+
+/// Exclusive hold of one slot's handshake for a write or a read-then-delete.
+///
+/// An OS file lock on `<handshake>.lock`, held while this value lives. Only
+/// [`ServerHandshake::publish_listening`] and
+/// [`ServerHandshake::remove_if_names`] take it, each for one file operation,
+/// and [`ServerHandshake::write`] and [`ServerHandshake::remove_locked`] take
+/// it as a parameter, so writing or removing the record without holding it
+/// does not compile.
+///
+/// Deliberately NOT the CLI's per-profile `DaemonStartLock`: the CLI holds
+/// that one while it spawns a server and waits for its handshake, and while it
+/// stops a server and waits for it to exit. A server that took it to publish
+/// or retire would wait on a CLI that is waiting on the server. This lock is
+/// held for one file operation and never across a wait, so it cannot
+/// deadlock with anything.
+struct HandshakeLock {
+    state_dir: PathBuf,
+    slot: HandshakeSlot,
+    /// The OS lock on the slot's lock file; dropping it releases the lock.
+    #[expect(
+        dead_code,
+        reason = "held for its lifetime; dropping it releases the lock"
+    )]
+    held: crate::file_lock::HeldFileLock,
+}
+
+impl HandshakeLock {
+    /// Take the slot's lock, creating the state directory if it is missing,
+    /// and waiting while another process holds it (only for the length of
+    /// one file operation).
+    fn acquire(state_dir: &Path, slot: HandshakeSlot) -> Result<Self, HandshakeError> {
+        let path = Self::path(state_dir, slot);
+        let held = crate::file_lock::HeldFileLock::acquire(&path)
+            .map_err(|source| HandshakeError::Io { path, source })?;
+        Ok(Self {
+            state_dir: state_dir.to_path_buf(),
+            slot,
+            held,
+        })
+    }
+
+    /// Take the slot's lock only if the state directory exists: `None` when
+    /// it does not.
+    fn acquire_in_existing(
+        state_dir: &Path,
+        slot: HandshakeSlot,
+    ) -> Result<Option<Self>, HandshakeError> {
+        let path = Self::path(state_dir, slot);
+        let held = crate::file_lock::HeldFileLock::acquire_in_existing_directory(&path)
+            .map_err(|source| HandshakeError::Io { path, source })?;
+        Ok(held.map(|held| Self {
+            state_dir: state_dir.to_path_buf(),
+            slot,
+            held,
+        }))
+    }
+
+    /// The slot's lock file.
+    fn path(state_dir: &Path, slot: HandshakeSlot) -> PathBuf {
+        state_dir.join(slot.lock_filename())
+    }
+}
+
+/// What [`ServerHandshake::remove_if_names`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    /// The record named the process and was removed.
+    Removed,
+    /// There was no record.
+    Absent,
+    /// The record names a different process (a server that replaced the one
+    /// being retired) and was left in place.
+    NamesAnother {
+        /// The process the record names.
+        pid: u32,
+    },
+}
+
+/// This server's own published handshake: proof that it wrote the record,
+/// and the only way it can take it down.
+#[derive(Debug)]
+#[must_use = "retire the handshake when the server stops, or it is left naming a dead process"]
+pub struct PublishedHandshake {
+    state_dir: PathBuf,
+    slot: HandshakeSlot,
+    pid: u32,
+}
+
+impl PublishedHandshake {
+    /// Remove the record if it still names this process.
+    pub fn retire(self) -> Result<Removal, HandshakeError> {
+        ServerHandshake::remove_if_names(&self.state_dir, self.slot, self.pid)
     }
 }
 
@@ -422,6 +573,19 @@ mod tests {
 
     fn dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    /// Removing a handshake from a state directory that does not exist finds
+    /// none, and creates neither the directory nor a lock file.
+    #[test]
+    fn removal_in_a_missing_state_directory_creates_nothing() {
+        let d = dir();
+        let missing = d.path().join("no-state-yet");
+        assert_eq!(
+            ServerHandshake::remove_if_names(&missing, HandshakeSlot::Main, 1).expect("remove"),
+            Removal::Absent
+        );
+        assert!(!missing.exists());
     }
 
     /// A `BoundPort` for a test, built the way the module itself can.
@@ -442,10 +606,22 @@ mod tests {
         let d = dir();
         let main_port = bound(41001);
         let side_port = bound(41002);
-        ServerHandshake::publish_listening(d.path(), HandshakeSlot::Main, 1, main_port)
-            .expect("publish main");
-        ServerHandshake::publish_listening(d.path(), HandshakeSlot::Sidecar, 2, side_port)
-            .expect("publish sidecar");
+        ServerHandshake::write(
+            &HandshakeLock::acquire(d.path(), HandshakeSlot::Main).expect("lock"),
+            HandshakeRecord {
+                pid: 1,
+                port: main_port.0,
+            },
+        )
+        .expect("publish main");
+        ServerHandshake::write(
+            &HandshakeLock::acquire(d.path(), HandshakeSlot::Sidecar).expect("lock"),
+            HandshakeRecord {
+                pid: 2,
+                port: side_port.0,
+            },
+        )
+        .expect("publish sidecar");
 
         let main = ServerHandshake::read(d.path(), HandshakeSlot::Main)
             .expect("read main")
@@ -464,11 +640,23 @@ mod tests {
     fn removing_one_slot_leaves_the_other() {
         let d = dir();
         let port = bound(41003);
-        ServerHandshake::publish_listening(d.path(), HandshakeSlot::Main, 1, port)
-            .expect("publish main");
-        ServerHandshake::publish_listening(d.path(), HandshakeSlot::Sidecar, 2, port)
-            .expect("publish sidecar");
-        ServerHandshake::remove(d.path(), HandshakeSlot::Main).expect("remove main");
+        ServerHandshake::write(
+            &HandshakeLock::acquire(d.path(), HandshakeSlot::Main).expect("lock"),
+            HandshakeRecord {
+                pid: 1,
+                port: port.0,
+            },
+        )
+        .expect("publish main");
+        ServerHandshake::write(
+            &HandshakeLock::acquire(d.path(), HandshakeSlot::Sidecar).expect("lock"),
+            HandshakeRecord {
+                pid: 2,
+                port: port.0,
+            },
+        )
+        .expect("publish sidecar");
+        ServerHandshake::remove_if_names(d.path(), HandshakeSlot::Main, 1).expect("remove main");
 
         assert_eq!(
             ServerHandshake::read(d.path(), HandshakeSlot::Main).expect("read main"),
@@ -479,6 +667,52 @@ mod tests {
                 .expect("read sidecar")
                 .is_some(),
             "the sidecar record must survive removing the main one"
+        );
+    }
+
+    /// A stopping server takes down only its own record: once a replacement
+    /// has published, retiring the old server's handshake leaves the new one.
+    #[test]
+    fn retiring_leaves_a_replacement_servers_record() {
+        let d = dir();
+        let published =
+            ServerHandshake::publish_listening(d.path(), HandshakeSlot::Main, bound(41004))
+                .expect("publish ours");
+        // A replacement server (another process) publishes over it.
+        let replacement = std::process::id().wrapping_add(1);
+        ServerHandshake::write(
+            &HandshakeLock::acquire(d.path(), HandshakeSlot::Main).expect("lock"),
+            HandshakeRecord {
+                pid: replacement,
+                port: bound(41005).0,
+            },
+        )
+        .expect("replacement publishes");
+
+        assert_eq!(
+            published.retire().expect("retire"),
+            Removal::NamesAnother { pid: replacement }
+        );
+        assert_eq!(
+            ServerHandshake::read(d.path(), HandshakeSlot::Main)
+                .expect("read")
+                .map(ServerHandshake::pid),
+            Some(replacement),
+            "the replacement's record must survive"
+        );
+    }
+
+    /// Retiring our own record removes it.
+    #[test]
+    fn retiring_our_own_record_removes_it() {
+        let d = dir();
+        let published =
+            ServerHandshake::publish_listening(d.path(), HandshakeSlot::Main, bound(41006))
+                .expect("publish");
+        assert_eq!(published.retire().expect("retire"), Removal::Removed);
+        assert_eq!(
+            ServerHandshake::read(d.path(), HandshakeSlot::Main).expect("read"),
+            None
         );
     }
 
@@ -497,8 +731,14 @@ mod tests {
     fn a_listening_server_round_trips() {
         let d = dir();
         let port = bound(54321);
-        ServerHandshake::publish_listening(d.path(), HandshakeSlot::Main, 4242, port)
-            .expect("publish");
+        ServerHandshake::write(
+            &HandshakeLock::acquire(d.path(), HandshakeSlot::Main).expect("lock"),
+            HandshakeRecord {
+                pid: 4242,
+                port: port.0,
+            },
+        )
+        .expect("publish");
         let read = ServerHandshake::read(d.path(), HandshakeSlot::Main)
             .expect("read")
             .expect("present");
@@ -561,5 +801,49 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
         let bound = BoundPort::from_listener_addr(addr).expect("a bound listener has a port");
         assert_eq!(bound.get(), addr.port());
+    }
+
+    /// Publishing and removing exclude each other: while one holds the slot's
+    /// lock (here, a retire between its read and its delete), no other
+    /// holder can get it, so a replacement's publish cannot land between a
+    /// stopping server's read of its own record and its delete. Checked with
+    /// a second, non-blocking acquire of the lock file, which is how a second
+    /// process would see it; no sleeps.
+    ///
+    /// The release is checked at once after the drop. That is deterministic
+    /// because the lock is unlocked explicitly on drop: released by closing
+    /// alone, it stayed held while any concurrently forked child (other tests
+    /// spawn processes) still shared the descriptor, and this check failed
+    /// intermittently.
+    #[test]
+    fn a_publish_cannot_land_inside_a_removal() {
+        use crate::file_lock::HeldFileLock;
+        let d = dir();
+        let main = HandshakeLock::path(d.path(), HandshakeSlot::Main);
+        let held = HandshakeLock::acquire(d.path(), HandshakeSlot::Main).expect("lock");
+        assert!(
+            HeldFileLock::try_acquire(&main).expect("try").is_none(),
+            "a second holder must wait while a removal holds the lock"
+        );
+        // The other slot has its own lock and is not held up.
+        let sidecar = HandshakeLock::path(d.path(), HandshakeSlot::Sidecar);
+        assert!(HeldFileLock::try_acquire(&sidecar).expect("try").is_some());
+        drop(held);
+        assert!(
+            HeldFileLock::try_acquire(&main).expect("try").is_some(),
+            "released when the holder drops"
+        );
+    }
+
+    /// Retiring into a state directory that does not exist finds nothing to
+    /// remove; it does not fail creating the lock file.
+    #[test]
+    fn a_removal_in_a_missing_state_directory_is_absent() {
+        let d = dir();
+        let missing = d.path().join("never-created");
+        assert_eq!(
+            ServerHandshake::remove_if_names(&missing, HandshakeSlot::Main, 1).expect("remove"),
+            Removal::Absent
+        );
     }
 }

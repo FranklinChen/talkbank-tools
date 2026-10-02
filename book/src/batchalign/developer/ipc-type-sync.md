@@ -1,7 +1,7 @@
 # Rust→Python IPC Type Sync
 
 **Status:** Current
-**Last updated:** 2026-05-19 22:53 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 ## Problem
 
@@ -128,22 +128,22 @@ Use `#[schemars(with = "...")]` to override the schema with the wire format:
 
 ```rust,ignore
 #[schemars(with = "String")]
-pub lang: talkbank_model::model::LanguageCode,
-
-#[schemars(with = "Vec<(Option<String>, Option<String>)>")]
-pub special_forms: Vec<(Option<FormType>, Option<LanguageResolution>)>,
+lang: &'a talkbank_model::model::LanguageCode,
 ```
 
-### For types with custom serialization
+### For types whose wire shape differs from the Rust shape
 
-When a field has `#[serde(serialize_with = "...")]`, the schemars derive
-won't know the wire format. Always pair it with `#[schemars(with = "...")]`
-to describe the JSON shape:
+When the Rust type is richer than what crosses the boundary, describe the
+wire in a private mirror that derives `Serialize` and `JsonSchema`, and
+implement both traits on the Rust type by delegating to it.
+`MorphosyntaxBatchItem` does this: its words are `BatchWord` records (text
+and role), and its mirror `MorphosyntaxBatchItemWire` writes them as the
+`words` and `special_forms` arrays, under the item's own schema name and
+description, so the published schema did not change.
 
 ```text
-#[serde(serialize_with = "serialize_special_forms")]
 #[schemars(with = "Vec<(Option<String>, Option<String>)>")]
-pub special_forms: ...
+special_forms: Vec<(Option<String>, Option<String>)>,
 ```
 
 ## Adding a New Engine

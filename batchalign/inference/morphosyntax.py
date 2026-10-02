@@ -34,6 +34,9 @@ from batchalign.providers import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
+    ItemFailed,
+    ItemOutcome,
+    ItemProduced,
     WorkerJSONValue,
 )
 
@@ -699,7 +702,7 @@ class LanguageGroupFailure:
         ``crates/batchalign/src/morphosyntax/worker.rs`` does with any
         per-item error.
         """
-        return InferResponse(error=self.message(), elapsed_s=0.0)
+        return InferResponse.unexecuted(ItemFailed(error=self.message()))
 
 
 _UNDECIDED_ERROR = (
@@ -754,7 +757,7 @@ def _analysis(
     lang: LanguageCode,
     stanza_version: str | None,
     pipeline: MorphosyntaxPipelineV2,
-) -> InferResponse:
+) -> ItemOutcome:
     """One analyzed item, carrying the model identity every analysis names.
 
     Takes the repaired sentence, not raw words and a repair list: the type
@@ -770,8 +773,8 @@ def _analysis(
     With no Stanza version there is no honest identity, so the item fails.
     """
     if stanza_version is None:
-        return InferResponse(error=_NO_STANZA_VERSION_ERROR, elapsed_s=0.0)
-    return InferResponse(
+        return ItemFailed(error=_NO_STANZA_VERSION_ERROR)
+    return ItemProduced(
         result={
             "kind": "analyzed",
             "raw_sentences": [list(sentence.words)],
@@ -781,44 +784,8 @@ def _analysis(
                 "pipeline": pipeline.value,
             },
             "repairs": [repair.wire() for repair in sentence.repairs],
-        },
-        elapsed_s=0.0,
+        }
     )
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class _TimedItem:
-    """One item's own response beside the elapsed time of that item's own work.
-
-    There is no constructor that ACCEPTS a duration: [`measure`] is the only
-    route to a value of this type, and it times the call it wraps. A batch
-    total therefore has no signature to travel through, which is exactly what
-    the old ``settled[0] = InferResponse(..., elapsed_s=batch_total)`` line
-    had. Same shape, and the same reason, as ``_TimedItem`` in
-    ``batchalign/inference/utseg.py``.
-    """
-
-    outcome: InferResponse
-    elapsed_s: float
-
-    @classmethod
-    def measure(cls, work: Callable[[], InferResponse]) -> _TimedItem:
-        """Run one item's own work and attribute exactly that item's time."""
-        started_at = time.monotonic()
-        outcome = work()
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "outcome", outcome)
-        object.__setattr__(instance, "elapsed_s", time.monotonic() - started_at)
-        return instance
-
-    @property
-    def response(self) -> InferResponse:
-        """Lower this item's own outcome and its own timing onto the wire."""
-        return InferResponse(
-            result=self.outcome.result,
-            error=self.outcome.error,
-            elapsed_s=self.elapsed_s,
-        )
 
 
 def _analyzed_item(
@@ -830,7 +797,7 @@ def _analyzed_item(
     lang: LanguageCode,
     stanza_version: str | None,
     pipeline: MorphosyntaxPipelineV2,
-) -> InferResponse:
+) -> ItemOutcome:
     """One item's own post-Stanza work, as a single call that can be timed.
 
     Everything here is attributable to THIS item: taking back the terminator
@@ -857,10 +824,12 @@ def _finalized(results: list[InferResponse | None]) -> BatchInferResponse:
     ``_UNDECIDED_ERROR``).
 
     Nothing is stamped onto an item here. Every response that reports a
-    duration got it from ``_TimedItem.measure``, which timed that item's own
-    work, and the rest report 0.0 because no work is attributable to them: an
+    duration got it from ``InferResponse.timed``, which timed that item's own
+    work, and the rest report none (``null``, built by
+    ``InferResponse.unexecuted``) because no work is attributable to them: an
     item whose payload never parsed, an utterance with no words, and every item
-    of a language group that failed before per-item work began.
+    of a language group that failed before per-item work began. Until
+    2026-10-01 those reported ``0.0``, which reads as a measurement.
 
     Until 2026-09-16 this function took the batch's total elapsed time and
     wrote it onto ``results[0]``. That inflated the first item by every other
@@ -877,7 +846,9 @@ def _finalized(results: list[InferResponse | None]) -> BatchInferResponse:
     """
     return BatchInferResponse(
         results=[
-            r if r is not None else InferResponse(error=_UNDECIDED_ERROR, elapsed_s=0.0)
+            r
+            if r is not None
+            else InferResponse.unexecuted(ItemFailed(error=_UNDECIDED_ERROR))
             for r in results
         ]
     )
@@ -966,10 +937,12 @@ def batch_infer_morphosyntax(
     by_lang: dict[LanguageCode, list[StanzaInput]] = {}
     for i, item in enumerate(items):
         if item is None:
-            results[i] = InferResponse(error="Invalid batch item", elapsed_s=0.0)
+            results[i] = InferResponse.unexecuted(
+                ItemFailed(error="Invalid batch item")
+            )
             continue
         if not item.words:
-            results[i] = InferResponse(result=_NO_WORDS_RESULT, elapsed_s=0.0)
+            results[i] = InferResponse.unexecuted(ItemProduced(result=_NO_WORDS_RESULT))
             continue
 
         words = list(item.words)
@@ -1144,7 +1117,7 @@ def batch_infer_morphosyntax(
                     # while the validators sat unit-tested and uncalled, and
                     # `PAD` and `IOB` reached the published corpora. A step the
                     # type system requires cannot be dropped again.
-                    results[idx] = _TimedItem.measure(
+                    results[idx] = InferResponse.timed(
                         partial(
                             _analyzed_item,
                             lang_items[i],
@@ -1155,7 +1128,7 @@ def batch_infer_morphosyntax(
                             stanza_version=stanza_version,
                             pipeline=pipeline,
                         )
-                    ).response
+                    )
         except Exception as e:
             # The narration stays, but it is no longer the only place the fact
             # goes: a log line is where lost information looks like it was

@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use tracing::{error, info, warn};
 
@@ -81,7 +80,7 @@ impl WorkerPool {
     pub fn start_background_tasks(&self) -> Option<tokio::task::JoinHandle<()>> {
         let groups = self.groups.clone();
         let cancel = self.cancel.clone();
-        let health_interval = Duration::from_secs(self.config.health_check_interval_s);
+        let health_interval = self.config.health_check_interval_s.duration();
         let pool_config = self.config.clone();
         let observed_worker_runtimes = self.observed_worker_runtimes.clone();
         // The loop restarts dead workers, so it needs the pool's runtime for
@@ -410,8 +409,7 @@ fn worker_config_for_key(
         ready_timeout_s: pool_config.ready_timeout_s,
         verbose: pool_config.verbose,
         runtime: pool_config.runtime.clone(),
-        audio_task_timeout_s: pool_config.audio_task_timeout_s,
-        analysis_task_timeout_s: pool_config.analysis_task_timeout_s,
+        task_timeouts: pool_config.task_timeouts,
         test_delay_ms: pool_config.test_delay_ms,
     })
 }

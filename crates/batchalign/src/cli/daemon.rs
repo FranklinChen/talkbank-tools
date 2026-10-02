@@ -16,17 +16,18 @@
 //!
 //! `DaemonInfo` carries a `build_hash` (set at write time from
 //! [`crate::build_hash()`]).  `ensure_daemon_locked()` compares it against
-//! the current binary's hash and auto-restarts on mismatch.  Old daemon.json
-//! files that lack `build_hash` fall back to version comparison.
+//! the current binary's hash and auto-restarts on mismatch. A daemon.json
+//! that lacks `build_hash`, or cannot be read at all, is an
+//! [`UnreadableRecord`]: the start is refused and the file kept, since it may
+//! name a live daemon.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use std::num::NonZeroU16;
 
-use crate::config::{PortRequest, RuntimeLayout};
-use crate::server_handshake::{HandshakeSlot, ServerHandshake};
-use fs2::FileExt;
+use crate::config::{PortRequest, RuntimeLayout, ServerConfig};
+use crate::server_handshake::{HandshakeError, HandshakeSlot, ServerHandshake};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -112,19 +113,6 @@ pub(crate) fn local_port(layout: &RuntimeLayout, configured: PortRequest) -> Opt
     // request is a usable guess for the first case; an ephemeral one leaves
     // nothing to guess with, and guessing is what this change removed.
     configured.fixed()
-}
-
-/// Return the port REQUEST from `server.yaml` (or the default).
-///
-/// A request, not a port: see [`PortRequest`]. The auto-daemon path needs a
-/// concrete number before the child binds, so it must decide what to do with
-/// an ephemeral request rather than being handed a plausible-looking integer.
-fn configured_port_request(layout: &RuntimeLayout) -> Result<PortRequest, CliError> {
-    let (cfg, warnings) = crate::config::load_validated_config_from_layout(layout, None)?;
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
-    Ok(cfg.port)
 }
 
 // ---------------------------------------------------------------------------
@@ -231,14 +219,10 @@ impl DaemonProfile {
 pub struct DaemonInfo {
     /// OS process ID of the daemon.
     pub pid: u32,
-    /// Daemon version string (for stale-binary detection).
-    #[serde(default)]
-    pub version: String,
-    /// Unix timestamp when the daemon was started.
-    #[serde(default)]
-    pub started_at: f64,
-    /// Build fingerprint: empty for old state files (falls back to version).
-    #[serde(default)]
+    /// The build identity of the binary that started the daemon, compared
+    /// with this binary's to decide whether the daemon is stale. Required:
+    /// a state file without one is unreadable (see [`StateFile`]), never
+    /// compared by version number instead.
     pub build_hash: String,
     /// The daemon process's *resolved* `force_cpu` value (operator
     /// intent merged with the host-facts recommendation), captured at
@@ -256,78 +240,112 @@ pub struct DaemonInfo {
     /// files trigger one self-correcting restart on first contact
     /// post-upgrade: Apple Silicon hosts go from raw=false to
     /// resolved=true and the next invocation kicks the daemon over.
-    #[serde(default)]
     pub force_cpu: bool,
     /// The daemon's resolved `allow_mps` value (the explicit Apple-GPU
     /// opt-in), captured at spawn time, compared by `runtime_mismatch`
-    /// the same way as `force_cpu`. `#[serde(default)]` keeps older
-    /// daemon.json files readable (they resolve to `false`, matching
-    /// the pre-flag behavior, so no spurious restart).
-    #[serde(default)]
+    /// the same way as `force_cpu`.
     pub allow_mps: bool,
-    /// The `--workers` value the daemon was started with, if any.
-    /// `None` means either the operator didn't pass `--workers` at
-    /// startup (so the daemon resolved its own per-job parallelism
-    /// from host facts) or the daemon.json file pre-dates this field.
-    /// Used by the warm-reuse path to fire the `--workers` shadowing
+    /// The `--workers` value the daemon was started with; `None` when the
+    /// operator didn't pass `--workers` (the daemon resolved its own
+    /// per-job parallelism from host facts). Used by the warm-reuse path to fire the `--workers` shadowing
     /// warning only when the requested value actually differs from
     /// the running daemon's: eliminating false positives when the
     /// operator re-passes a value that already matches.
-    #[serde(default)]
-    pub workers: Option<u32>,
-    /// The `--timeout` value the daemon was started with, if any.
-    /// Same backcompat + same false-positive elimination story as
-    /// `workers`, applied to the daemon's per-task ceiling
-    /// (`audio_task_timeout_s`).
-    #[serde(default)]
-    pub audio_task_timeout_s: Option<u64>,
+    pub workers: Option<crate::api::NumWorkers>,
+    /// The `--timeout` value the daemon was started with; `None` when it
+    /// was not passed. Same false-positive elimination as `workers`,
+    /// applied to the daemon's per-task ceiling. A `daemon.json` written
+    /// before the type refused zero may hold `0`, read as "not passed".
+    #[serde(default, deserialize_with = "crate::config::zero_as_no_override")]
+    pub audio_task_timeout_s: Option<crate::api::PositiveSeconds>,
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+/// What the operator asked of a daemon on this invocation: the CLI's device
+/// switches and the two values fixed at a daemon's startup.
+///
+/// One value instead of the `(bool, bool, Option<usize>, Option<u64>)` that
+/// every function from `ensure_daemon` to `start_daemon` used to take
+/// positionally, with the worker count cast to `u32` to persist it and back
+/// to `usize` to compare it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonRequest {
+    /// `--force-cpu`.
+    pub force_cpu: bool,
+    /// `--allow-mps`.
+    pub allow_mps: bool,
+    /// `--workers`, when passed.
+    pub workers: Option<crate::api::NumWorkers>,
+    /// `--timeout`, when passed.
+    pub timeout: Option<crate::api::PositiveSeconds>,
+}
+
 /// Return the main daemon URL or `None` if the daemon cannot be started.
+///
+/// `config` is the caller's loaded `server.yaml`: the daemon path reads the
+/// port request, the verbosity and the device settings from it rather than
+/// loading the file again (it used to load it up to four times). A state file
+/// that cannot be read refuses the start (see [`UnreadableRecord`]) rather
+/// than writing a new record over one that may name a live daemon.
 pub async fn ensure_daemon(
-    force_cpu: bool,
-    allow_mps: bool,
-    workers: Option<usize>,
-    timeout: Option<u64>,
+    layout: &RuntimeLayout,
+    config: &ServerConfig,
+    request: DaemonRequest,
 ) -> Result<Option<String>, CliError> {
-    ensure_daemon_for(DaemonProfile::Main, force_cpu, allow_mps, workers, timeout).await
+    ensure_daemon_for(DaemonProfile::Main, layout, config, request).await
 }
 
 /// Return the sidecar daemon URL or `None` if the daemon cannot be started.
 pub async fn ensure_sidecar_daemon(
-    force_cpu: bool,
-    allow_mps: bool,
-    workers: Option<usize>,
-    timeout: Option<u64>,
+    layout: &RuntimeLayout,
+    config: &ServerConfig,
+    request: DaemonRequest,
 ) -> Result<Option<String>, CliError> {
-    ensure_daemon_for(
-        DaemonProfile::Sidecar,
-        force_cpu,
-        allow_mps,
-        workers,
-        timeout,
-    )
-    .await
+    ensure_daemon_for(DaemonProfile::Sidecar, layout, config, request).await
 }
 
-/// Stop the main daemon. Returns `true` if a process was killed.
-pub async fn stop_daemon() -> Result<bool, CliError> {
-    stop_profile(DaemonProfile::Main)
+/// What a stop found and did.
+///
+/// It replaced a `bool` that said only whether a signal was sent, so
+/// "nothing recorded", "recorded but already gone" and "a record that cannot
+/// be read, left in place" all printed "No server process found".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// A recorded, live process was stopped and its record removed.
+    Stopped {
+        /// The process that was stopped.
+        pid: u32,
+    },
+    /// Nothing was recorded.
+    NotRunning,
+    /// A record named a process that had already exited; the record was
+    /// removed.
+    AlreadyDead {
+        /// The process the record named.
+        pid: u32,
+    },
+    /// A record exists but cannot be read. It may name a live process, so
+    /// it was left in place and nothing was signalled.
+    Unreadable(UnreadableRecord),
 }
 
-/// Stop the sidecar daemon. Returns `true` if a process was killed.
-pub async fn stop_sidecar_daemon() -> Result<bool, CliError> {
-    stop_profile(DaemonProfile::Sidecar)
+/// Stop the main daemon.
+pub async fn stop_daemon() -> Result<StopOutcome, CliError> {
+    stop_profile(DaemonProfile::Main).await
+}
+
+/// Stop the sidecar daemon.
+pub async fn stop_sidecar_daemon() -> Result<StopOutcome, CliError> {
+    stop_profile(DaemonProfile::Sidecar).await
 }
 
 /// Read the main daemon state file. Public for status checks.
-pub fn read_daemon_info() -> Option<DaemonInfo> {
+pub fn read_daemon_info() -> Result<Option<DaemonInfo>, UnreadableRecord> {
     let layout = runtime_layout();
-    read_daemon_info_for(DaemonProfile::Main, layout.state_dir())
+    StateFile::read(DaemonProfile::Main, layout.state_dir()).recorded()
 }
 
 // ---------------------------------------------------------------------------
@@ -336,60 +354,162 @@ pub fn read_daemon_info() -> Option<DaemonInfo> {
 
 async fn ensure_daemon_for(
     profile: DaemonProfile,
-    force_cpu: bool,
-    allow_mps: bool,
-    workers: Option<usize>,
-    timeout: Option<u64>,
+    layout: &RuntimeLayout,
+    config: &ServerConfig,
+    request: DaemonRequest,
 ) -> Result<Option<String>, CliError> {
-    let layout = runtime_layout();
-    let dir = layout.state_dir();
-    std::fs::create_dir_all(dir)?;
-
-    let lock_path = profile.lock_file(dir);
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-
-    match lock_file.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(_) => {
-            debug!(profile = profile.label(), "Waiting for daemon lock...");
-            lock_file.lock_exclusive()?;
-        }
-    }
-
-    let result =
-        ensure_daemon_locked(profile, &layout, force_cpu, allow_mps, workers, timeout).await;
-    drop(lock_file);
+    let lock = DaemonStartLock::acquire_async(profile, layout.state_dir()).await?;
+    let result = ensure_daemon_locked(&lock, layout, config, request).await;
+    drop(lock);
     result
 }
 
-fn stop_profile(profile: DaemonProfile) -> Result<bool, CliError> {
-    let layout = runtime_layout();
-    let dir = layout.state_dir();
-    let info = match read_daemon_info_for(profile, dir) {
-        Some(i) => i,
-        None => return Ok(false),
-    };
-
-    let killed = stop_server_process(info.pid);
-    cleanup_state_file_for(profile, dir);
-    Ok(killed)
+/// The start lock of one daemon profile, held for as long as this value
+/// lives. Only [`DaemonStartLock::acquire_async`] makes one, and
+/// [`ensure_daemon_locked`] and [`start_daemon`] take it instead of a bare
+/// profile, so checking, starting or replacing a daemon without holding that
+/// profile's lock does not compile, and neither does doing it under another
+/// profile's lock. Stopping (`stop_profile`) takes it too, and writing or
+/// removing the state file needs it.
+struct DaemonStartLock {
+    profile: DaemonProfile,
+    /// The state directory the lock (and every file it guards) lives in.
+    state_dir: PathBuf,
+    /// The OS lock; holding this field is holding the lock, and dropping it
+    /// releases the lock.
+    #[expect(
+        dead_code,
+        reason = "held for its lifetime; dropping it releases the lock"
+    )]
+    held: crate::file_lock::HeldFileLock,
 }
 
-/// Check if the daemon state file indicates a stale binary.
-///
-/// If `build_hash` is present in the state file, compare against the current
-/// build hash.  Otherwise, fall back to a version comparison (backward compat
-/// with old state files).
-fn is_stale(info: &DaemonInfo) -> bool {
-    if !info.build_hash.is_empty() {
-        return info.build_hash != crate::build_hash();
+impl DaemonStartLock {
+    /// [`Self::acquire_async`] on the calling thread, for tests.
+    #[cfg(test)]
+    fn acquire(profile: DaemonProfile, state_dir: &Path) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            profile,
+            state_dir: state_dir.to_path_buf(),
+            held: crate::file_lock::HeldFileLock::acquire(profile.lock_file(state_dir))?,
+        })
     }
-    // Old state file: fall back to version comparison
-    info.version != current_version()
+
+    /// Take `profile`'s lock in `state_dir` off the async runtime, waiting
+    /// while another `batchalign3` process holds it. Only "held elsewhere"
+    /// means wait; any other failure is an error, never mistaken for
+    /// contention.
+    async fn acquire_async(
+        profile: DaemonProfile,
+        state_dir: &Path,
+    ) -> Result<Self, std::io::Error> {
+        let held =
+            crate::file_lock::HeldFileLock::acquire_async(profile.lock_file(state_dir)).await?;
+        Ok(Self {
+            profile,
+            state_dir: state_dir.to_path_buf(),
+            held,
+        })
+    }
+
+    /// The profile's state file, as it is now.
+    fn read_state(&self) -> StateFile {
+        StateFile::read(self.profile, &self.state_dir)
+    }
+
+    /// Record the daemon this lock's holder just started.
+    fn write_info(&self, info: &DaemonInfo) -> Result<(), CliError> {
+        let state_path = self.profile.state_file(&self.state_dir);
+        crate::atomic_file::write_atomically(
+            &state_path,
+            serde_json::to_string(info)?.as_bytes(),
+            crate::atomic_file::Existing::Replace,
+            crate::atomic_file::Audience::Owner,
+        )?;
+        Ok(())
+    }
+
+    /// Remove the profile's state file. Already absent is success; any
+    /// other failure is an error, since a state file left behind names a
+    /// daemon that no longer runs.
+    fn remove_state(&self) -> Result<(), std::io::Error> {
+        match std::fs::remove_file(self.profile.state_file(&self.state_dir)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The profile's server handshake, as it is now. The one read both the
+    /// manual-server probe and `serve stop` use.
+    fn read_handshake(&self) -> Result<Option<ServerHandshake>, HandshakeError> {
+        ServerHandshake::read(&self.state_dir, self.profile.handshake_slot())
+    }
+
+    /// Remove the profile's server handshake (`server.pid` for the main
+    /// profile) for a process that is gone, only while the record still
+    /// names that process.
+    fn remove_handshake_of(&self, pid: u32) -> Result<(), CliError> {
+        ServerHandshake::remove_if_names(&self.state_dir, self.profile.handshake_slot(), pid)
+            .map(drop)
+            .map_err(|error| CliError::Io(std::io::Error::other(error.to_string())))
+    }
+}
+
+/// Stop `profile`'s daemon under its start lock, so a stop cannot race a
+/// start (or another stop) of the same profile, and remove its state file.
+/// A state file that cannot be read is left in place and said so: it may
+/// still name a live daemon.
+async fn stop_profile(profile: DaemonProfile) -> Result<StopOutcome, CliError> {
+    let layout = runtime_layout();
+    let lock = DaemonStartLock::acquire_async(profile, layout.state_dir()).await?;
+    let info = match lock.read_state().recorded() {
+        Ok(Some(info)) => info,
+        Ok(None) => return Ok(StopOutcome::NotRunning),
+        Err(unreadable) => return Ok(StopOutcome::Unreadable(unreadable)),
+    };
+    // A PID that is no longer alive is not signalled: it may have been reused.
+    let outcome = if is_process_alive(info.pid) && stop_server_process(info.pid) {
+        StopOutcome::Stopped { pid: info.pid }
+    } else {
+        StopOutcome::AlreadyDead { pid: info.pid }
+    };
+    lock.remove_state()?;
+    Ok(outcome)
+}
+
+/// `serve stop`: stop the server recorded in the main handshake, under the
+/// main profile's lock, so it cannot race a daemon start. An unreadable
+/// handshake is left in place and said so: it may still name a live server.
+pub(crate) async fn stop_manual_server(layout: &RuntimeLayout) -> Result<StopOutcome, CliError> {
+    let lock = DaemonStartLock::acquire_async(DaemonProfile::Main, layout.state_dir()).await?;
+    let handshake = match lock.read_handshake() {
+        Ok(Some(handshake)) => handshake,
+        Ok(None) => return Ok(StopOutcome::NotRunning),
+        Err(error) => {
+            return Ok(StopOutcome::Unreadable(UnreadableRecord {
+                path: ServerHandshake::path_in(&lock.state_dir, HandshakeSlot::Main),
+                reason: error.to_string(),
+            }));
+        }
+    };
+    // Both states carry a PID, and stopping is the same act either way: a
+    // server that has spawned but not yet bound still needs killing. A PID
+    // that is no longer alive is not signalled, since it may have been reused.
+    let pid = handshake.pid();
+    let outcome = if is_process_alive(pid) && stop_server_process(pid) {
+        StopOutcome::Stopped { pid }
+    } else {
+        StopOutcome::AlreadyDead { pid }
+    };
+    lock.remove_handshake_of(pid)?;
+    Ok(outcome)
+}
+
+/// Whether the daemon was started by a different build than this one:
+/// build identity, never a version number.
+fn is_stale(info: &DaemonInfo) -> bool {
+    info.build_hash != crate::build_hash()
 }
 
 fn runtime_mismatch(info: &DaemonInfo, flags: DaemonDeviceFlags) -> bool {
@@ -439,16 +559,14 @@ struct DaemonDeviceFlags {
 /// Used by `ensure_daemon_locked` for restart decisions and by
 /// `start_daemon` for the value persisted to `DaemonInfo`.
 ///
-/// A missing or unreadable `server.yaml` falls back to
-/// `ServerConfig::default()`: the same behavior `serve_cmd::start`
-/// has, so the resolved value computed here matches what the daemon
-/// process will see when it boots.
+/// Reads the caller's loaded config, so the value resolved here is the one
+/// the daemon process will boot with from the same file.
 fn resolve_device_flags_for_daemon(
-    layout: &RuntimeLayout,
+    config: &ServerConfig,
     cli_force_cpu: bool,
     cli_allow_mps: bool,
 ) -> DaemonDeviceFlags {
-    let mut cfg = crate::config::load_config_from_layout(layout, None).unwrap_or_default();
+    let mut cfg = config.clone();
     if cli_force_cpu {
         cfg.force_cpu = Some(true);
     }
@@ -465,16 +583,15 @@ fn resolve_device_flags_for_daemon(
 }
 
 async fn ensure_daemon_locked(
-    profile: DaemonProfile,
+    lock: &DaemonStartLock,
     layout: &RuntimeLayout,
-    force_cpu: bool,
-    allow_mps: bool,
-    workers: Option<usize>,
-    timeout: Option<u64>,
+    config: &ServerConfig,
+    request: DaemonRequest,
 ) -> Result<Option<String>, CliError> {
+    let profile = lock.profile;
     let dir = layout.state_dir();
     if profile.check_manual_server()
-        && let Some(url) = detect_manual_server(layout).await?
+        && let Some(url) = detect_manual_server(lock, config.port).await?
     {
         return Ok(Some(url));
     }
@@ -483,32 +600,30 @@ async fn ensure_daemon_locked(
     // restart decision (vs. stored DaemonInfo) and the values persisted
     // when start_daemon writes a new DaemonInfo. Resolving here keeps
     // both consistent.
-    let device_flags = resolve_device_flags_for_daemon(layout, force_cpu, allow_mps);
+    let device_flags =
+        resolve_device_flags_for_daemon(config, request.force_cpu, request.allow_mps);
+    let start = DaemonStart {
+        port: config.port,
+        verbose: config.verbose,
+        flags: device_flags,
+        workers: request.workers,
+        timeout: request.timeout,
+    };
 
-    if let Some(info) = read_daemon_info_for(profile, dir) {
+    // An unreadable state file refuses the start: it may name a live daemon,
+    // and writing a new record over it would strand that process.
+    if let Some(info) = lock.read_state().recorded()? {
         if is_process_alive(info.pid) {
             if is_stale(&info) {
                 eprintln!(
                     "Restarting {} daemon (stale build: {} -> {})...",
                     profile.label(),
-                    if info.build_hash.is_empty() {
-                        &info.version
-                    } else {
-                        &info.build_hash
-                    },
+                    info.build_hash,
                     crate::build_hash(),
                 );
                 stop_server_process(info.pid);
-                cleanup_state_file_for(profile, dir);
-                return start_daemon(
-                    profile,
-                    layout,
-                    configured_port_request(layout)?,
-                    device_flags,
-                    workers,
-                    timeout,
-                )
-                .await;
+                lock.remove_state()?;
+                return start_daemon(lock, layout, start).await;
             }
 
             if runtime_mismatch(&info, device_flags) {
@@ -521,16 +636,8 @@ async fn ensure_daemon_locked(
                     device_flags.resolved_allow_mps,
                 );
                 stop_server_process(info.pid);
-                cleanup_state_file_for(profile, dir);
-                return start_daemon(
-                    profile,
-                    layout,
-                    configured_port_request(layout)?,
-                    device_flags,
-                    workers,
-                    timeout,
-                )
-                .await;
+                lock.remove_state()?;
+                return start_daemon(lock, layout, start).await;
             }
 
             // The port comes from the handshake, which is where a bound
@@ -552,14 +659,15 @@ async fn ensure_daemon_locked(
                 // answer here: the running daemon may be processing
                 // other operators' jobs, and killing it would discard
                 // their in-flight work. Warning is honest signal.
-                if flag_shadows_daemon(timeout, info.audio_task_timeout_s) {
-                    let running = info
-                        .audio_task_timeout_s
-                        .map(|s| format!("{s}s"))
-                        .unwrap_or_else(|| "<unknown: daemon pre-dates this field>".to_string());
-                    let requested = timeout
-                        .map(|s| format!("{s}s"))
-                        .unwrap_or_else(|| "<not set>".to_string());
+                if flag_shadows_daemon(request.timeout, info.audio_task_timeout_s) {
+                    let running = match info.audio_task_timeout_s {
+                        Some(s) => format!("{s}s"),
+                        None => "<not set>".to_owned(),
+                    };
+                    let requested = match request.timeout {
+                        Some(s) => format!("{s}s"),
+                        None => "<not set>".to_owned(),
+                    };
                     eprintln!(
                         "warning: --timeout {requested} requested but the {} daemon was \
                          started with --timeout {running}. The per-task ceiling stays at \
@@ -569,15 +677,15 @@ async fn ensure_daemon_locked(
                         profile.label(),
                     );
                 }
-                let info_workers = info.workers.map(|n| n as usize);
-                if flag_shadows_daemon(workers, info_workers) {
-                    let running = info
-                        .workers
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "<unknown: daemon pre-dates this field>".to_string());
-                    let requested = workers
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "<not set>".to_string());
+                if flag_shadows_daemon(request.workers, info.workers) {
+                    let running = match info.workers {
+                        Some(n) => n.to_string(),
+                        None => "<not set>".to_owned(),
+                    };
+                    let requested = match request.workers {
+                        Some(n) => n.to_string(),
+                        None => "<not set>".to_owned(),
+                    };
                     eprintln!(
                         "warning: --workers {requested} requested but the {} daemon was \
                          started with --workers {running}. Per-job parallelism stays at \
@@ -591,16 +699,8 @@ async fn ensure_daemon_locked(
             }
 
             stop_server_process(info.pid);
-            cleanup_state_file_for(profile, dir);
-            return start_daemon(
-                profile,
-                layout,
-                configured_port_request(layout)?,
-                device_flags,
-                workers,
-                timeout,
-            )
-            .await;
+            lock.remove_state()?;
+            return start_daemon(lock, layout, start).await;
         }
         // Process is dead but state file exists -- stale PID file.
         debug!(
@@ -608,23 +708,10 @@ async fn ensure_daemon_locked(
             pid = info.pid,
             "Cleaning up stale daemon state file (process is dead)"
         );
-        cleanup_state_file_for(profile, dir);
+        lock.remove_state()?;
     }
 
-    // Read the port REQUEST only on the path that actually spawns. It used to
-    // be read at the top of this function and discarded on the warm-reuse
-    // path, which is the common one: a second `server.yaml` parse plus an
-    // `is_dir()` per configured media root, and every config warning printed a
-    // second time, on every invocation that found a healthy daemon.
-    start_daemon(
-        profile,
-        layout,
-        configured_port_request(layout)?,
-        device_flags,
-        workers,
-        timeout,
-    )
-    .await
+    start_daemon(lock, layout, start).await
 }
 
 /// Find a manually-started server, if one is running and reachable.
@@ -634,9 +721,11 @@ async fn ensure_daemon_locked(
 /// for, which for an ephemeral request names no port at all, and even for a
 /// fixed request can differ from reality if the file was edited after the
 /// server started.
-async fn detect_manual_server(layout: &RuntimeLayout) -> Result<Option<String>, CliError> {
-    let state_dir = layout.state_dir();
-    let handshake = match ServerHandshake::read(state_dir, HandshakeSlot::Main) {
+async fn detect_manual_server(
+    lock: &DaemonStartLock,
+    configured: PortRequest,
+) -> Result<Option<String>, CliError> {
+    let handshake = match lock.read_handshake() {
         Ok(Some(handshake)) => handshake,
         Ok(None) => return Ok(None),
         Err(error) => {
@@ -651,7 +740,7 @@ async fn detect_manual_server(layout: &RuntimeLayout) -> Result<Option<String>, 
     let pid = handshake.pid();
     if !is_process_alive(pid) {
         debug!(pid, "Removing stale server handshake (process is dead)");
-        let _ = ServerHandshake::remove(state_dir, HandshakeSlot::Main);
+        lock.remove_handshake_of(pid)?;
         return Ok(None);
     }
 
@@ -663,11 +752,7 @@ async fn detect_manual_server(layout: &RuntimeLayout) -> Result<Option<String>, 
             // is a usable guess for the older-server case; an ephemeral request
             // leaves nothing to guess with, and guessing is what this change
             // exists to stop.
-            let (cfg, warnings) = crate::config::load_validated_config_from_layout(layout, None)?;
-            for warning in warnings {
-                eprintln!("warning: {warning}");
-            }
-            match cfg.port.fixed() {
+            match configured.fixed() {
                 Some(port) => {
                     debug!(
                         pid,
@@ -934,18 +1019,36 @@ fn describe_port_holder(_port: u16) -> Option<String> {
     None
 }
 
+/// What a daemon is started with, taken from the caller's config and request.
+///
 /// `flags` carries the raw CLI switches (which control the spawned
 /// subprocess's arguments: operator intent verbatim) and the resolved
 /// values (persisted to `DaemonInfo` so later `runtime_mismatch`
 /// calls compare apples to apples).
-async fn start_daemon(
-    profile: DaemonProfile,
-    layout: &RuntimeLayout,
+#[derive(Debug, Clone, Copy)]
+struct DaemonStart {
+    /// The port REQUEST from `server.yaml`, which may be ephemeral.
     port: PortRequest,
+    /// `server.yaml`'s `verbose`, passed on as `-v` flags.
+    verbose: u8,
     flags: DaemonDeviceFlags,
-    workers: Option<usize>,
-    timeout: Option<u64>,
+    workers: Option<crate::api::NumWorkers>,
+    timeout: Option<crate::api::PositiveSeconds>,
+}
+
+async fn start_daemon(
+    lock: &DaemonStartLock,
+    layout: &RuntimeLayout,
+    start: DaemonStart,
 ) -> Result<Option<String>, CliError> {
+    let DaemonStart {
+        port,
+        verbose,
+        flags,
+        workers,
+        timeout,
+    } = start;
+    let profile = lock.profile;
     let dir = layout.state_dir();
     let python = profile.default_python(dir);
     if profile.require_sidecar_python_file() && !Path::new(&python).is_file() {
@@ -1005,19 +1108,9 @@ async fn start_daemon(
     let exe = crate::cli::self_exe::resolve_self_exe();
     let mut cmd = std::process::Command::new(&exe);
 
-    // Read verbose level from server.yaml so fleet deployments can set
-    // `verbose: 1` for INFO-level logging without hardcoding in the binary.
-    let config_verbose = if layout.config_path().exists() {
-        {
-            crate::config::load_config_from_layout(layout, None)
-                .ok()
-                .map(|cfg| cfg.verbose)
-                .unwrap_or(0)
-        }
-    } else {
-        0
-    };
-    for _ in 0..config_verbose {
+    // `verbose` from server.yaml, so fleet deployments can set `verbose: 1`
+    // for INFO-level logging without hardcoding it in the binary.
+    for _ in 0..verbose {
         cmd.arg("-v");
     }
 
@@ -1103,12 +1196,6 @@ async fn start_daemon(
     };
 
     let pid = proc.id();
-    // Persist the resolved value, not the CLI raw bool, so future
-    // restart decisions compare against the same merged result the
-    // daemon process is actually running with. workers/timeout are
-    // captured raw so the warm-reuse warning can name the exact value
-    // the daemon was started with.
-    let persisted_workers = workers.map(|n| n as u32);
 
     // Wait for the child to publish the port it BOUND before recording
     // anything. `daemon.json` used to be written here with the port we asked
@@ -1132,12 +1219,17 @@ async fn start_daemon(
                 log_path.display()
             );
             stop_server_process(pid);
-            cleanup_state_file_for(profile, dir);
+            lock.remove_state()?;
             return Ok(None);
         }
     };
     let port = bound.get();
-    write_daemon_info_for(profile, dir, pid, flags, persisted_workers, timeout)?;
+    // Persist the resolved device values, not the CLI raw bools, so future
+    // restart decisions compare against the same merged result the daemon
+    // process is actually running with. workers/timeout are recorded as
+    // passed so the warm-reuse warning can name what the daemon was started
+    // with.
+    lock.write_info(&daemon_info(pid, flags, workers, timeout))?;
 
     if wait_for_health_until(pid, port, deadline).await {
         eprintln!(
@@ -1154,7 +1246,7 @@ async fn start_daemon(
         port, "Daemon failed to become healthy"
     );
     stop_server_process(pid);
-    cleanup_state_file_for(profile, dir);
+    lock.remove_state()?;
 
     eprintln!(
         "warning: could not start local daemon. Check {}\n\
@@ -1218,71 +1310,94 @@ async fn health_check(port: u16) -> bool {
         .is_ok()
 }
 
-fn read_daemon_info_for(profile: DaemonProfile, dir: &Path) -> Option<DaemonInfo> {
-    let path = profile.state_file(dir);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            eprintln!(
-                "warning: failed to read daemon state at {}: {}",
-                path.display(),
-                error
-            );
-            return None;
+/// What a profile's state file says.
+#[derive(Debug)]
+enum StateFile {
+    /// No state file: no daemon of this profile is recorded.
+    Absent,
+    /// A daemon is recorded.
+    Recorded(DaemonInfo),
+    /// A state file that cannot be read. It may still name a live daemon,
+    /// so it is reported and left in place, never deleted: the same policy
+    /// as an unreadable server handshake.
+    Unreadable {
+        /// The file.
+        path: PathBuf,
+        /// Why it could not be read.
+        reason: String,
+    },
+}
+
+impl StateFile {
+    /// Read `profile`'s state file in `dir`. Takes no lock and changes
+    /// nothing, so status checks may call it freely.
+    fn read(profile: DaemonProfile, dir: &Path) -> Self {
+        let path = profile.state_file(dir);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::Absent,
+            Err(error) => {
+                return Self::Unreadable {
+                    path,
+                    reason: error.to_string(),
+                };
+            }
+        };
+        match serde_json::from_str(&text) {
+            Ok(info) => Self::Recorded(info),
+            Err(error) => Self::Unreadable {
+                path,
+                reason: error.to_string(),
+            },
         }
-    };
-    match serde_json::from_str(&text) {
-        Ok(info) => Some(info),
-        Err(error) => {
-            eprintln!(
-                "warning: ignoring corrupt daemon state at {}: {}",
-                path.display(),
-                error
-            );
-            let _ = std::fs::remove_file(&path);
-            None
+    }
+
+    /// The recorded daemon, or why the record cannot be read. An unreadable
+    /// record is an error for the caller to act on, never "no daemon": it
+    /// may name one that is running.
+    fn recorded(self) -> Result<Option<DaemonInfo>, UnreadableRecord> {
+        match self {
+            Self::Absent => Ok(None),
+            Self::Recorded(info) => Ok(Some(info)),
+            Self::Unreadable { path, reason } => Err(UnreadableRecord { path, reason }),
         }
     }
 }
 
-fn write_daemon_info_for(
-    profile: DaemonProfile,
-    dir: &Path,
+/// A daemon state file or server handshake that exists but cannot be read.
+///
+/// It may still name a running process, so it is never treated as "nothing
+/// running": a start refuses rather than write a new record over it, and a
+/// stop leaves it in place.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "cannot read {} ({reason}). It may name a running batchalign3 server, so nothing \
+     was started or stopped over it. Check whether that process is still running \
+     (stop it if so), then remove the file and retry",
+    path.display()
+)]
+pub struct UnreadableRecord {
+    /// The file.
+    pub path: PathBuf,
+    /// Why it could not be read.
+    pub reason: String,
+}
+
+/// The record of the daemon this binary just started.
+fn daemon_info(
     pid: u32,
     flags: DaemonDeviceFlags,
-    workers: Option<u32>,
-    audio_task_timeout_s: Option<u64>,
-) -> Result<(), CliError> {
-    let started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            CliError::Io(std::io::Error::other(format!(
-                "system clock before unix epoch while writing daemon state: {error}"
-            )))
-        })?
-        .as_secs_f64();
-    let info = DaemonInfo {
+    workers: Option<crate::api::NumWorkers>,
+    audio_task_timeout_s: Option<crate::api::PositiveSeconds>,
+) -> DaemonInfo {
+    DaemonInfo {
         pid,
-        version: current_version(),
-        started_at,
         build_hash: crate::build_hash().to_string(),
         force_cpu: flags.resolved_force_cpu,
         allow_mps: flags.resolved_allow_mps,
         workers,
         audio_task_timeout_s,
-    };
-
-    std::fs::create_dir_all(dir)?;
-    let state_path = profile.state_file(dir);
-    let tmp = state_path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_string(&info)?)?;
-    std::fs::rename(&tmp, &state_path)?;
-    Ok(())
-}
-
-fn cleanup_state_file_for(profile: DaemonProfile, dir: &Path) {
-    let _ = std::fs::remove_file(profile.state_file(dir));
+    }
 }
 
 /// Whether a process exists, via `kill(pid, 0)`.
@@ -1374,10 +1489,6 @@ fn wait_for_exit(pid: u32, limit: std::time::Duration) -> bool {
     }
 }
 
-fn current_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1405,15 +1516,12 @@ mod tests {
     /// individual tests focused on the field they pin.
     fn info_with(
         build_hash: String,
-        version: String,
         force_cpu: bool,
-        workers: Option<u32>,
-        audio_task_timeout_s: Option<u64>,
+        workers: Option<crate::api::NumWorkers>,
+        audio_task_timeout_s: Option<crate::api::PositiveSeconds>,
     ) -> DaemonInfo {
         DaemonInfo {
             pid: 1,
-            version,
-            started_at: 0.0,
             build_hash,
             force_cpu,
             allow_mps: false,
@@ -1424,126 +1532,148 @@ mod tests {
 
     #[test]
     fn daemon_info_roundtrip() {
-        let info = DaemonInfo {
-            pid: 12345,
-            version: "1.0.0".to_string(),
-            started_at: 1700000000.0,
-            build_hash: "1.0.0-abc1234-1700000000".to_string(),
-            force_cpu: true,
-            allow_mps: false,
-            workers: Some(4),
-            audio_task_timeout_s: Some(3600),
-        };
+        let info = info_with(
+            "1.0.0-abc1234-1700000000".to_string(),
+            true,
+            Some(crate::api::NumWorkers(4)),
+            Some(crate::api::PositiveSeconds::literal::<3600>()),
+        );
         let json = serde_json::to_string(&info).unwrap();
         let back: DaemonInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.pid, 12345);
-        assert_eq!(back.version, "1.0.0");
+        assert_eq!(back.pid, 1);
         assert_eq!(back.build_hash, "1.0.0-abc1234-1700000000");
-        assert_eq!(back.workers, Some(4));
-        assert_eq!(back.audio_task_timeout_s, Some(3600));
+        assert_eq!(back.workers, Some(crate::api::NumWorkers(4)));
+        assert_eq!(
+            back.audio_task_timeout_s
+                .map(crate::api::PositiveSeconds::get),
+            Some(3600)
+        );
     }
 
+    /// A state file without the build that wrote it cannot say whether its
+    /// daemon is stale, so it is unreadable: reported and left in place,
+    /// never compared by version number.
     #[test]
-    fn daemon_info_missing_build_hash() {
-        // Old state files lack build_hash, should default to empty
-        let json = r#"{"pid": 999, "port": 8000, "version": "1.0.0"}"#;
-        let info: DaemonInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(info.build_hash, "");
-        // Old state files also lack workers/audio_task_timeout_s, both
-        // must default to None so the flag-shadowing warning falls back
-        // to fire-on-any-passing-the-flag (the pre-persisted behavior).
-        assert_eq!(info.workers, None);
-        assert_eq!(info.audio_task_timeout_s, None);
+    fn a_state_file_without_a_build_hash_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("daemon.json"),
+            r#"{"pid": 999, "version": "1.0.0", "force_cpu": false, "allow_mps": false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            StateFile::read(DaemonProfile::Main, dir.path()),
+            StateFile::Unreadable { .. }
+        ));
+        assert!(dir.path().join("daemon.json").exists(), "left in place");
     }
 
     #[test]
     fn is_stale_detects_build_hash_mismatch() {
-        let info = info_with(
-            "old-build-hash".to_string(),
-            current_version(),
-            false,
-            None,
-            None,
-        );
+        let info = info_with("old-build-hash".to_string(), false, None, None);
         // Our build hash is different from "old-build-hash"
         assert!(is_stale(&info));
     }
 
     #[test]
-    fn is_stale_falls_back_to_version_when_no_build_hash() {
-        let info = info_with(String::new(), "0.0.0-fake".to_string(), false, None, None);
-        assert!(is_stale(&info));
-
-        let info_current = info_with(String::new(), current_version(), false, None, None);
-        assert!(!is_stale(&info_current));
-    }
-
-    #[test]
     fn is_stale_same_build_hash() {
-        let info = info_with(
-            crate::build_hash().to_string(),
-            current_version(),
-            false,
-            None,
-            None,
-        );
+        let info = info_with(crate::build_hash().to_string(), false, None, None);
         assert!(!is_stale(&info));
     }
 
     #[test]
-    fn read_daemon_info_missing_file() {
+    fn an_absent_state_file_reads_as_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_daemon_info_for(DaemonProfile::Main, dir.path()).is_none());
+        assert!(matches!(
+            StateFile::read(DaemonProfile::Main, dir.path()),
+            StateFile::Absent
+        ));
     }
 
     #[test]
-    fn read_daemon_info_malformed_json() {
+    fn malformed_state_reads_as_unreadable() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("daemon.json"), "not json at all").unwrap();
-        assert!(read_daemon_info_for(DaemonProfile::Main, dir.path()).is_none());
+        assert!(matches!(
+            StateFile::read(DaemonProfile::Main, dir.path()),
+            StateFile::Unreadable { .. }
+        ));
     }
 
+    /// Reading an unreadable state file under the lock (what `stop_profile`
+    /// and the ensure path do) is an error naming the file, never "no
+    /// daemon", and the file is left in place: it may still name a live
+    /// daemon, and deleting or overwriting it would strand that process.
     #[test]
-    fn read_daemon_info_missing_version_field() {
+    fn an_unreadable_state_file_is_left_in_place_when_read_under_the_lock() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("daemon.json"),
-            r#"{"pid": 999, "port": 8000}"#,
-        )
-        .unwrap();
-        let info = read_daemon_info_for(DaemonProfile::Main, dir.path()).unwrap();
-        assert_eq!(info.pid, 999);
-        // version defaults to "" via serde(default)
-        assert_eq!(info.version, "");
-        assert_eq!(info.build_hash, "");
-        assert!(!info.force_cpu);
+        std::fs::write(dir.path().join("daemon.json"), "not json at all").unwrap();
+        let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
+        let unreadable = lock.read_state().recorded().unwrap_err();
+        assert_eq!(unreadable.path, dir.path().join("daemon.json"));
+        assert!(dir.path().join("daemon.json").exists());
+    }
+
+    /// The ensure path refuses on a state file it cannot read, naming the
+    /// file, instead of starting a daemon and writing a record over one that
+    /// may name a live daemon.
+    #[tokio::test]
+    async fn ensure_refuses_over_an_unreadable_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RuntimeLayout::from_state_dir(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("daemon.json"), "not json at all").unwrap();
+        let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
+        let request = DaemonRequest {
+            force_cpu: false,
+            allow_mps: false,
+            workers: None,
+            timeout: None,
+        };
+        let refused = ensure_daemon_locked(&lock, &layout, &ServerConfig::default(), request)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, CliError::UnreadableRecord(record)
+                if record.path == dir.path().join("daemon.json")),
+            "{refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("daemon.json")).unwrap(),
+            "not json at all",
+            "the record is left exactly as it was"
+        );
     }
 
     #[test]
     fn write_read_daemon_info_roundtrip() {
         for profile in [DaemonProfile::Main, DaemonProfile::Sidecar] {
             let dir = tempfile::tempdir().unwrap();
-            write_daemon_info_for(
-                profile,
-                dir.path(),
+            let lock = DaemonStartLock::acquire(profile, dir.path()).unwrap();
+            let flags = DaemonDeviceFlags {
+                cli_force_cpu: true,
+                cli_allow_mps: false,
+                resolved_force_cpu: true,
+                resolved_allow_mps: false,
+            };
+            lock.write_info(&daemon_info(
                 42,
-                DaemonDeviceFlags {
-                    cli_force_cpu: true,
-                    cli_allow_mps: false,
-                    resolved_force_cpu: true,
-                    resolved_allow_mps: false,
-                },
-                Some(6),
-                Some(1800),
-            )
+                flags,
+                Some(crate::api::NumWorkers(6)),
+                Some(crate::api::PositiveSeconds::literal::<1800>()),
+            ))
             .unwrap();
-            let info = read_daemon_info_for(profile, dir.path()).unwrap();
+            let StateFile::Recorded(info) = lock.read_state() else {
+                panic!("the written record reads back");
+            };
             assert_eq!(info.pid, 42);
-            assert_eq!(info.version, current_version());
             assert_eq!(info.build_hash, crate::build_hash());
             assert!(info.force_cpu);
-            assert_eq!(info.workers, Some(6));
-            assert_eq!(info.audio_task_timeout_s, Some(1800));
+            assert_eq!(info.workers, Some(crate::api::NumWorkers(6)));
+            assert_eq!(
+                info.audio_task_timeout_s
+                    .map(crate::api::PositiveSeconds::get),
+                Some(1800)
+            );
         }
     }
 
@@ -1552,46 +1682,30 @@ mod tests {
         // Daemon started without --workers or --timeout (the common
         // server-mode case where host facts pick the parallelism).
         let dir = tempfile::tempdir().unwrap();
-        write_daemon_info_for(
-            DaemonProfile::Main,
-            dir.path(),
-            7,
-            NO_DEVICE_FLAGS,
-            None,
-            None,
-        )
-        .unwrap();
-        let info = read_daemon_info_for(DaemonProfile::Main, dir.path()).unwrap();
+        let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
+        lock.write_info(&daemon_info(7, NO_DEVICE_FLAGS, None, None))
+            .unwrap();
+        let StateFile::Recorded(info) = lock.read_state() else {
+            panic!("the written record reads back");
+        };
         assert_eq!(info.workers, None);
         assert_eq!(info.audio_task_timeout_s, None);
     }
 
     #[test]
-    fn cleanup_state_file_removes() {
+    fn remove_state_removes_the_record() {
         let dir = tempfile::tempdir().unwrap();
-        write_daemon_info_for(
-            DaemonProfile::Main,
-            dir.path(),
-            1,
-            NO_DEVICE_FLAGS,
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(read_daemon_info_for(DaemonProfile::Main, dir.path()).is_some());
-        cleanup_state_file_for(DaemonProfile::Main, dir.path());
-        assert!(read_daemon_info_for(DaemonProfile::Main, dir.path()).is_none());
+        let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
+        lock.write_info(&daemon_info(1, NO_DEVICE_FLAGS, None, None))
+            .unwrap();
+        assert!(matches!(lock.read_state(), StateFile::Recorded(_)));
+        lock.remove_state().unwrap();
+        assert!(matches!(lock.read_state(), StateFile::Absent));
     }
 
     #[test]
     fn runtime_mismatch_detects_force_cpu_changes() {
-        let info = info_with(
-            crate::build_hash().to_string(),
-            current_version(),
-            false,
-            None,
-            None,
-        );
+        let info = info_with(crate::build_hash().to_string(), false, None, None);
         assert!(runtime_mismatch(&info, resolved_flags(true, false)));
         assert!(!runtime_mismatch(&info, resolved_flags(false, false)));
     }
@@ -1634,12 +1748,9 @@ mod tests {
     /// the operator-override-wins contract from `EffectiveConfig`.
     #[test]
     fn resolve_force_cpu_for_daemon_cli_override_always_resolves_true() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = RuntimeLayout::from_state_dir(dir.path().join("state"));
-        std::fs::create_dir_all(layout.state_dir()).unwrap();
-        // Empty server.yaml -> ServerConfig::default() -> force_cpu = None.
-        // CLI flag = true should still resolve to true on every host.
-        let resolved = resolve_device_flags_for_daemon(&layout, true, false);
+        // The default config has force_cpu = None. The CLI flag = true should
+        // still resolve to true on every host.
+        let resolved = resolve_device_flags_for_daemon(&ServerConfig::default(), true, false);
         assert!(
             resolved.resolved_force_cpu,
             "CLI --force-cpu must resolve to true regardless of host facts"
@@ -1651,11 +1762,12 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_state_file_idempotent() {
+    fn removing_an_absent_record_succeeds() {
         let dir = tempfile::tempdir().unwrap();
-        // Cleaning up a nonexistent file should not panic
-        cleanup_state_file_for(DaemonProfile::Main, dir.path());
-        cleanup_state_file_for(DaemonProfile::Main, dir.path());
+        // Removing a state file that is already gone succeeds.
+        let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
+        lock.remove_state().unwrap();
+        lock.remove_state().unwrap();
     }
 
     #[test]
@@ -1665,10 +1777,8 @@ mod tests {
     }
 
     #[test]
-    fn configured_port_request_defaults_to_a_fixed_port() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = RuntimeLayout::from_state_dir(dir.path().join("state"));
-        let request = configured_port_request(&layout).unwrap();
+    fn the_default_port_request_is_a_fixed_port() {
+        let request = ServerConfig::default().port;
         assert!(
             request.fixed().is_some(),
             "the default must be a fixed port, so the auto-daemon path works \
@@ -1802,6 +1912,44 @@ mod tests {
             PortOccupant::ExistingDaemon {
                 build_hash: crate::build_hash().to_owned(),
             }
+        );
+    }
+
+    /// A second acquirer of a profile's start lock waits until the first
+    /// releases it. std's `try_lock` reports contention as `WouldBlock`, which
+    /// `acquire` turns into a blocking wait and never into an error; the fs2
+    /// code before it treated every failed attempt as contention.
+    #[test]
+    fn a_second_acquirer_waits_for_the_first_to_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let state_dir = dir.path().to_path_buf();
+        let waiter = std::thread::spawn(move || {
+            let second = DaemonStartLock::acquire(DaemonProfile::Main, &state_dir);
+            sender.send(second.map(|lock| lock.profile)).unwrap();
+        });
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a held lock was acquired a second time"
+        );
+        drop(first);
+        let second = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the released lock was never acquired");
+        assert_eq!(second.unwrap(), DaemonProfile::Main);
+        waiter.join().unwrap();
+    }
+
+    /// Each profile has its own lock file, so holding one never blocks the other.
+    #[test]
+    fn profiles_lock_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
+        let sidecar = DaemonStartLock::acquire(DaemonProfile::Sidecar, dir.path()).unwrap();
+        assert_eq!(
+            (main.profile, sidecar.profile),
+            (DaemonProfile::Main, DaemonProfile::Sidecar)
         );
     }
 }

@@ -47,8 +47,8 @@
 )]
 
 use batchalign_transform::morphosyntax::{
-    MappingContext, MultilingualPolicy, UdId, UdPunctable, UdSentence, UdWord, UniversalPos,
-    collect_payloads, declared_languages, map_ud_sentence,
+    MappingContext, MultilingualPolicy, UdId, UdPunctable, UdSentence, UdWord, UdWordAnalysis,
+    UniversalPos, collect_payloads, declared_languages, map_ud_sentence,
 };
 use talkbank_model::ParseValidateOptions;
 use talkbank_model::model::LanguageCode;
@@ -142,14 +142,14 @@ fn bug_009_level_pitch_separator_no_space_must_not_leak_into_stanza_payload() ->
         "expected one batch item for the single utterance"
     );
 
-    let (_line_idx, _utt_idx, batch_item, _extracted) = &collected.batch_items[0];
+    let batch_item = collected.batch_items[0].item();
 
     // CONTRACT: no payload word may equal `→` or contain it as a
     // substring. The parser knows `→` is a separator
     // (`word_segment_forbidden_first_symbols` per the symbol
     // registry), and that classification must reach the Stanza
     // boundary.
-    for (idx, word) in batch_item.words.iter().enumerate() {
+    for (idx, word) in batch_item.words().iter().map(|w| w.text()).enumerate() {
         assert!(
             !word.as_str().contains('→'),
             "BUG-009: Stanza payload word #{idx} = {word:?} contains a \
@@ -164,7 +164,11 @@ fn bug_009_level_pitch_separator_no_space_must_not_leak_into_stanza_payload() ->
     // Stronger contract: the payload word should be exactly `Yes`
     // (the separator is stripped at the AST boundary, not the word
     // boundary).
-    let actual_strs: Vec<&str> = batch_item.words.iter().map(|w| w.as_str()).collect();
+    let actual_strs: Vec<&str> = batch_item
+        .words()
+        .iter()
+        .map(|w| w.text().as_str())
+        .collect();
     assert_eq!(
         actual_strs,
         vec!["Yes"],
@@ -195,9 +199,9 @@ fn bug_009_level_pitch_separator_in_long_utterance_with_bullet_must_not_leak() -
         1,
         "expected one batch item for the single utterance"
     );
-    let (_, _, batch_item, _) = &collected.batch_items[0];
+    let batch_item = collected.batch_items[0].item();
 
-    for (idx, word) in batch_item.words.iter().enumerate() {
+    for (idx, word) in batch_item.words().iter().map(|w| w.text()).enumerate() {
         assert!(
             !word.as_str().contains('→'),
             "BUG-009: Stanza payload word #{idx} = {word:?} contains \
@@ -207,7 +211,7 @@ fn bug_009_level_pitch_separator_in_long_utterance_with_bullet_must_not_leak() -
     }
 
     // Must also not contain the audio bullet markers as words.
-    for word in &batch_item.words {
+    for word in batch_item.words().iter().map(|w| w.text()) {
         assert!(
             !word.as_str().contains('\u{0015}') && !word.as_str().contains('_'),
             "BUG-009: Stanza payload word {word:?} contains audio \
@@ -471,7 +475,7 @@ fn assert_current_gra_matches_adjudicated_gold(
 fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResult {
     let sentence = UdSentence {
         words: vec![
-            UdWord {
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "wake".to_string(),
                 lemma: "wake".to_string(),
@@ -482,8 +486,8 @@ fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResul
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "up".to_string(),
                 lemma: "up".to_string(),
@@ -494,8 +498,8 @@ fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResul
                 deprel: "compound:prt".to_string(),
                 deps: None,
                 misc: None,
-            },
-            UdWord {
+            }),
+            UdWord::from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: ".".to_string(),
                 lemma: ".".to_string(),
@@ -506,7 +510,7 @@ fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResul
                 deprel: "punct".to_string(),
                 deps: None,
                 misc: None,
-            },
+            }),
         ],
     };
     let ctx = MappingContext {
@@ -616,8 +620,8 @@ fn current_e724_genitive_cycle_must_attach_case_marker_under_year() -> TestResul
 // Code-switch spans: a `<...> [@s:hin]` span must reach L2 dispatch.
 //
 // The payload collector read a word's OWN `@s` marker only, so every
-// unmarked word inside a span looked unlanguaged, was skipped by
-// `group_l2_spans`, and got morphotagged against the tier language.
+// unmarked word inside a span looked unlanguaged, was not deferred to
+// L2 dispatch, and got morphotagged against the tier language.
 // chatter 0.15.0 made the extractor carry the GOVERNING mark; this is
 // the boundary test that the pipeline actually consumes it.
 // =====================================================================
@@ -644,13 +648,17 @@ fn a_code_switch_span_reaches_the_stanza_payload_as_its_own_language() -> TestRe
     let collected = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll);
     assert_eq!(collected.batch_items.len(), 1, "one utterance, one item");
 
-    let (_line_idx, _utt_idx, batch_item, _extracted) = &collected.batch_items[0];
+    let batch_item = collected.batch_items[0].item();
     let hin = LanguageCode::new("hin").expect("valid test language code");
 
     let resolved: Vec<Option<&talkbank_model::validation::LanguageResolution>> = batch_item
-        .special_forms
+        .words()
         .iter()
-        .map(|(_, r)| r.as_ref())
+        .map(|w| match w.role() {
+            batchalign_transform::morphosyntax::WordRole::CodeSwitched(r) => Some(r),
+            batchalign_transform::morphosyntax::WordRole::Analysed
+            | batchalign_transform::morphosyntax::WordRole::SpecialForm(_) => None,
+        })
         .collect();
 
     // `I` and `said` are outside the span and carry no mark of their own.
@@ -711,8 +719,9 @@ fn injection_rejects_response_cardinality_without_mutating_chat() -> TestResult 
     Ok(())
 }
 
-/// Payload positions are an external library boundary; a stale position must
-/// return an error rather than panic, even when Stanza returns no sentences.
+/// Payloads injected into a file other than the one they were collected from
+/// name stale positions; injection must return an error rather than panic,
+/// even when Stanza returns no sentences.
 #[test]
 fn injection_rejects_stale_position_without_panicking() -> TestResult {
     use batchalign_transform::morphosyntax::{
@@ -721,11 +730,14 @@ fn injection_rejects_stale_position_without_panicking() -> TestResult {
     let parser = TreeSitterParser::new()?;
     let language = LanguageCode::new("eng")?;
     let mut chat = parse_one_utterance("hello .")?;
-    let before = batchalign_transform::serialize::to_chat_string(&chat);
     let languages = declared_languages(&chat, &language);
-    let mut items =
+    let items =
         collect_payloads(&chat, &language, &languages, MultilingualPolicy::ProcessAll).batch_items;
-    items[0].0 = chat.lines.len();
+    // The file changes after collection: its one utterance is gone, so the
+    // collected position names a header or the end.
+    chat.lines
+        .retain(|line| !matches!(line, talkbank_model::Line::Utterance(_)));
+    let before = batchalign_transform::serialize::to_chat_string(&chat);
     let result = inject_results(
         &parser,
         &mut chat,

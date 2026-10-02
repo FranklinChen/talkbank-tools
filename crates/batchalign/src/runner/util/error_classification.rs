@@ -30,15 +30,22 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         WorkerError::ReadyTimeout { .. } => FailureCategory::WorkerTimeout,
         WorkerError::HealthCheckFailed(_) => FailureCategory::WorkerTimeout,
         WorkerError::ProcessExited { .. } => FailureCategory::WorkerCrash,
-        WorkerError::Protocol(message) if message.contains("timeout") => {
-            FailureCategory::WorkerTimeout
-        }
+        // The worker went away under the request, as a crash takes it away;
+        // the remedy is the same, a retry on another worker.
+        WorkerError::WorkerRetired => FailureCategory::WorkerCrash,
+        // The worker's stream is no longer trusted, so it is retired; a
+        // retry runs on another worker.
+        WorkerError::OutputNoise { .. } => FailureCategory::WorkerCrash,
+        WorkerError::Timeout { .. } => FailureCategory::WorkerTimeout,
         WorkerError::Protocol(_) => FailureCategory::WorkerProtocol,
         // A report that breaks the capability contract is a protocol
         // disagreement between the server and the worker build.
         WorkerError::CapabilitiesRefused(_) => FailureCategory::WorkerProtocol,
         WorkerError::Io(_) => FailureCategory::WorkerCrash,
         WorkerError::WorkerResponse(_) => FailureCategory::ProviderTransient,
+        // The worker refused the request the server built: the two disagree
+        // about the protocol, and the same request is refused again.
+        WorkerError::RequestRefused(_) => FailureCategory::WorkerProtocol,
         // Bootstrap-class worker errors are deterministic across retries:
         // a missing model file, a failed catalog download, or an
         // unsupported language will produce the same failure on every
@@ -108,6 +115,7 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         ServerError::Database(_)
         | ServerError::Migration(_)
         | ServerError::Persistence(_)
+        | ServerError::StoredLease(_)
         | ServerError::MediaTiming(_)
         | ServerError::OutputParse(_) => FailureCategory::System,
         ServerError::JobNotFound(_)

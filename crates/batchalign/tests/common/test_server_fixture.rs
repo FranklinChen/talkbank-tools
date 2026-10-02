@@ -43,8 +43,8 @@ use batchalign::api::MemoryMb;
 use batchalign::config::{RuntimeLayout, ServerConfig};
 use batchalign::worker::pool::PoolConfig;
 use batchalign::{
-    AppState, PreparedWorkers, RegistryDiscovery, create_test_app_with_prepared_workers,
-    prepare_workers,
+    AppState, AppStorageOverrides, PreparedWorkers, RegistryDiscovery,
+    create_test_app_with_prepared_workers, prepare_workers,
 };
 use tokio::sync::oneshot;
 
@@ -416,14 +416,17 @@ async fn start_session(
     let (router, state) = create_test_app_with_prepared_workers(
         session_config,
         layout,
-        None,
-        None,
-        Some(cache_dir),
+        AppStorageOverrides {
+            jobs_dir: None,
+            db_dir: None,
+            cache_dir: Some(cache_dir),
+        },
         // This build's own identity: the CLI refuses a server of any other
         // build before submitting work, so a fixture hash would make every
         // explicit-server test a build-mismatch refusal.
         Some(batchalign::build_hash().into()),
         backend.prepared_workers.clone(),
+        std::sync::Arc::new(batchalign::clock::SystemClock),
     )
     .await
     .map_err(|error| format!("could not create test-echo app: {error}"))?;
@@ -476,7 +479,7 @@ fn test_echo_server_config() -> ServerConfig {
     ServerConfig {
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
-        job_ttl_days: batchalign::config::JobTtlDays::new(7),
+        job_ttl_days: batchalign::config::JobTtlDays::literal::<7>(),
         memory_gate_mb: Some(MemoryMb(0)),
         ..Default::default()
     }
@@ -490,8 +493,8 @@ fn test_echo_pool_config(python_path: &str) -> PoolConfig {
     PoolConfig {
         python_path: python_path.into(),
         test_echo: true,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: Default::default(),

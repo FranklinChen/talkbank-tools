@@ -1105,7 +1105,7 @@ mod tests {
 
     #[test]
     fn cached_group_timing_admission_accepts_an_exact_versioned_envelope() {
-        use crate::api::DurationSeconds;
+        use crate::api::NonNegativeSeconds;
         use crate::types::engines::FaEngineName;
         use crate::types::worker_v2::{
             ExecuteResponseV2, IndexedWordTimingResultV2, TaskResultV2, WorkerRequestIdV2,
@@ -1118,7 +1118,7 @@ mod tests {
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
                 indexed_timings: vec![None, None],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
         let raw = raw_evidence::FaRawEvidence::admit_requested(
             &response,
@@ -1179,7 +1179,7 @@ mod tests {
 
     #[test]
     fn raw_evidence_is_replayed_before_a_derived_timing_hit() {
-        use crate::api::DurationSeconds;
+        use crate::api::NonNegativeSeconds;
         use crate::chat_ops::fa::{FaGroup, FaWord, TimeSpan};
         use crate::chat_ops::{UtteranceIdx, WordIdx};
         use crate::types::engines::FaEngineName;
@@ -1204,7 +1204,7 @@ mod tests {
             TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
                 indexed_timings: vec![None],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
         let raw = raw_evidence::FaRawEvidence::admit_requested(
             &response,

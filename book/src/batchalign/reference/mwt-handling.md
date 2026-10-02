@@ -125,7 +125,7 @@ are distinct:
 - **`Word`** (CHAT AST node): Lives on the main tier.  Created only
   during CHAT parsing.  Immutable during morphosyntax processing.
 - **`UdWord`** (Stanza output): Deserialized from Stanza's JSON.
-  Consumed by `map_ud_word_to_mor()` to produce `Mor` nodes.  Never
+  Consumed by `map_ud_word()` to produce `Mor` nodes.  Never
   stored in the CHAT AST.
 - **`Mor`** (morphology node): Lives on the %mor dependent tier.
   Contains POS category, lemma, and features.  One `Mor` per original
@@ -502,10 +502,10 @@ All paths below are under `crates/batchalign-transform/src/morphosyntax/`.
 
 | Component | File | Description |
 |-----------|------|-------------|
-| MWT grouping (merge mode) | `sentence_mapping.rs:81::map_ud_sentence` | `UdId::Range` groups MWT components under one CHAT word index |
-| MWT grouping (expand mode) | `sentence_mapping.rs:24::map_ud_sentence_expanded` | Per-component MOR for `--retokenize` |
+| MWT grouping (merge mode) | `sentence_mapping.rs::map_ud_sentence` | `UdId::Range` groups MWT components under one CHAT word index |
+| MWT grouping (expand mode) | `sentence_mapping.rs::map_ud_sentence_expanded` | Per-component MOR for `--retokenize` |
 | Clitic assembly | `mapping_helpers.rs:60::assemble_mors` | Joins MWT components with `~` (post-clitic) or `$` (pre-clitic) |
-| POS mapping | `mor_word.rs:13::map_ud_word_to_mor` | UD UPOS → CHAT category; `clean_lemma` at `mor_word.rs:81` with empty-string fallback |
+| POS mapping | `mor_word.rs:13::map_ud_word` | UD UPOS → CHAT category; `clean_lemma` at `mor_word.rs:81` with empty-string fallback |
 | English rules | `lang_en.rs` | Irregular verbs (200+), suffix patterns per POS |
 | French rules | `lang_fr.rs` | Pronominal clitics, APM, case agreement |
 | Japanese rules | `lang_ja.rs` | Verb conjugation (140+ patterns) |

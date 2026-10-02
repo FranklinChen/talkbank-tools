@@ -15,15 +15,20 @@
         "elements": [
           {
             "value": "nei5",
-            "start_s": 0.1,
-            "end_s": 0.4,
+            "timing": {
+              "kind": "timed",
+              "start_ms": 100,
+              "end_ms": 400
+            },
             "kind": "text",
             "confidence": 0.91
           },
           {
             "value": "\u3002",
-            "start_s": null,
-            "end_s": null,
+            "timing": {
+              "kind": "untimed",
+              "cause": "provider_reported_no_timing"
+            },
             "kind": "punctuation",
             "confidence": null
           }

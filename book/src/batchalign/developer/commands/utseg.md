@@ -1,7 +1,7 @@
 # utseg: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-16 08:18 EDT
+**Last updated:** 2026-10-01 20:24 EDT
 
 Implementation guide for the `utseg` command. For user-facing documentation,
 see [User Guide: utseg](../../user-guide/commands/utseg.md).
@@ -44,17 +44,26 @@ without rerunning the boundary model, but it is not a production result cache.
 
 Rust freezes the text batch in a prepared artifact, then sends
 `execute_v2(task="utseg")` with the language and explicit Stanza-fallback
-authorization. Each result item has exactly one success representation:
+authorization. Each result item (`UtsegItemResultV2`) is one of four states,
+tagged on `kind`:
 
-- `assignments`: one group ID per request word. A boundary-model result also
-  carries `boundary_model_evidence`, including model identity and one typed
-  evidence state per word.
-- `trees`: raw constituency trees from the explicitly authorized Stanza
-  fallback. Rust computes assignments from the trees.
-- `error`: a per-item failure with no success payload.
+- `boundary_model`: `assignments`, one group ID per request word, and
+  `boundary_model_evidence`, including model identity and one typed evidence
+  state per word.
+- `unattributed`: `assignments` from a worker that ran no model (one word is
+  one utterance).
+- `constituency`: raw constituency `trees` from the explicitly authorized
+  Stanza fallback. Rust reads them as a `ConstituencyParse` (at least one
+  tree, every tree readable; anything else is the item's failure, never a
+  segmentation into one utterance) and computes the assignments from it.
+  The worker reports a parse that produced no tree as a failure too.
+- `failed`: a per-item failure, with its `error`. A constituency parse that
+  raises, or a request no Stanza pipeline could be built for, is one.
 
-`AdmittedUtsegPrediction` rejects error/success mixtures, assignments plus
-trees, evidence without assignments, empty model identity, and any assignment
+Mixtures (an error beside a success, assignments beside trees, evidence
+without assignments) are not values of the type; the worker bridge parses each
+item through it, and an item that does not parse is that item's failure.
+`AdmittedUtsegPrediction` rejects an empty model identity and any assignment
 or evidence length that differs from the request words. Its variants preserve
 boundary-model, unobserved direct-assignment, and constituency sources, and the
 batch path keeps them all the way to the stamp, which is how a file's `engine=`

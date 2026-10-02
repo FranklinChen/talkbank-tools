@@ -657,60 +657,40 @@ pub(crate) fn admit_prediction(
     }
 }
 
-/// Validate one raw worker item before it can become an applicable response.
+/// Validate one worker item before it can become an applicable response.
 ///
-/// Classifies the worker's mutually exclusive success payloads into one
-/// [`UtsegPredictionOrigin`] and hands the result to [`admit_prediction`],
-/// which owns every check that follows.
+/// The item is one of the worker's real states, so each maps to one
+/// [`UtsegPredictionOrigin`] (or its failure) and [`admit_prediction`] owns
+/// every check that follows.
 fn admit_worker_item(
     request: &UtsegBatchItem,
     result: &UtsegItemResultV2,
 ) -> Result<AdmittedUtsegPrediction, String> {
-    if let Some(error) = &result.error {
-        if result.assignments.is_some()
-            || result.trees.is_some()
-            || result.boundary_model_evidence.is_some()
-        {
-            return Err("utseg V2 returned an error together with a success payload".to_owned());
-        }
-        return Err(error.clone());
-    }
-
-    let (assignments, origin) = match (
-        &result.assignments,
-        &result.trees,
-        &result.boundary_model_evidence,
-    ) {
-        (Some(_), Some(_), _) => {
-            return Err(
-                "utseg V2 returned both direct assignments and constituency trees".to_owned(),
-            );
-        }
-        (None, None, Some(_)) => {
-            return Err(
-                "utseg V2 returned boundary evidence without direct assignments".to_owned(),
-            );
-        }
-        (None, None, None) => {
-            return Err("utseg V2 returned no assignments, no trees, and no error".to_owned());
-        }
-        (None, Some(_), Some(_)) => {
-            return Err("utseg V2 returned boundary evidence with constituency trees".to_owned());
-        }
-        (Some(assignments), None, Some(evidence)) => (
+    match result {
+        UtsegItemResultV2::Failed { error } => Err(error.clone()),
+        UtsegItemResultV2::BoundaryModel {
+            assignments,
+            boundary_model_evidence,
+        } => admit_prediction(
+            request,
             assignments.clone(),
-            UtsegPredictionOrigin::BoundaryModel(evidence),
+            UtsegPredictionOrigin::BoundaryModel(boundary_model_evidence),
         ),
-        (Some(assignments), None, None) => {
-            (assignments.clone(), UtsegPredictionOrigin::UnnamedWorker)
-        }
-        (None, Some(trees), None) => (
-            utseg_compute::compute_assignments(trees, request.words.len()),
+        UtsegItemResultV2::Unattributed { assignments } => admit_prediction(
+            request,
+            assignments.clone(),
+            UtsegPredictionOrigin::UnnamedWorker,
+        ),
+        // A parse with no tree, or a tree that does not read, is the item's
+        // failure: segmenting by what is left would read as one utterance.
+        UtsegItemResultV2::Constituency { trees } => admit_prediction(
+            request,
+            utseg_compute::ConstituencyParse::read(trees)
+                .map_err(|error| format!("utseg constituency parse {error}"))?
+                .assignments(request.words.len()),
             UtsegPredictionOrigin::Constituency,
         ),
-    };
-
-    admit_prediction(request, assignments, origin)
+    }
 }
 
 /// Dispatch and admit a batch without erasing its inference-source state.
@@ -849,10 +829,9 @@ mod tests {
     }
 
     fn boundary_result(evidence_words: usize) -> UtsegItemResultV2 {
-        UtsegItemResultV2 {
-            assignments: Some(vec![0, 1]),
-            trees: None,
-            boundary_model_evidence: Some(UtsegBoundaryModelEvidenceV2 {
+        UtsegItemResultV2::BoundaryModel {
+            assignments: vec![0, 1],
+            boundary_model_evidence: UtsegBoundaryModelEvidenceV2 {
                 model_id: "talkbank/utterance-boundary".to_owned(),
                 model_revision: test_commit(),
                 normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
@@ -881,8 +860,23 @@ mod tests {
                         }
                     })
                     .collect(),
-            }),
-            error: None,
+            },
+        }
+    }
+
+    /// The assignments and evidence of a boundary-model fixture, for a test
+    /// to change.
+    fn boundary_parts(
+        result: &mut UtsegItemResultV2,
+    ) -> (&mut Vec<usize>, &mut UtsegBoundaryModelEvidenceV2) {
+        match result {
+            UtsegItemResultV2::BoundaryModel {
+                assignments,
+                boundary_model_evidence,
+            } => (assignments, boundary_model_evidence),
+            UtsegItemResultV2::Unattributed { .. }
+            | UtsegItemResultV2::Constituency { .. }
+            | UtsegItemResultV2::Failed { .. } => panic!("a boundary-model fixture"),
         }
     }
 
@@ -910,10 +904,24 @@ mod tests {
         assert!(error.contains("1 boundary evidence states"));
     }
 
+    /// A constituency item with no tree, or with a tree that does not read,
+    /// is the item's failure: it used to segment into one utterance.
+    #[test]
+    fn refuses_a_constituency_parse_with_no_tree_or_an_unreadable_tree() {
+        for trees in [vec![], vec!["not a tree".to_string()]] {
+            let error = admit_worker_item(
+                &two_word_request(),
+                &UtsegItemResultV2::Constituency { trees },
+            )
+            .expect_err("no segmentation without a readable parse");
+            assert!(error.contains("utseg constituency parse"), "{error}");
+        }
+    }
+
     #[test]
     fn refuses_assignments_that_disagree_with_applied_boundary_evidence() {
         let mut result = boundary_result(2);
-        result.assignments = Some(vec![0, 0]);
+        *boundary_parts(&mut result).0 = vec![0, 0];
 
         let error = admit_worker_item(&two_word_request(), &result)
             .expect_err("evidence and assignments must describe one decision");
@@ -924,10 +932,7 @@ mod tests {
     #[test]
     fn refuses_applied_actions_that_disagree_with_declared_policy() {
         let mut result = boundary_result(2);
-        let evidence = result
-            .boundary_model_evidence
-            .as_mut()
-            .expect("fixture has boundary evidence");
+        let evidence = boundary_parts(&mut result).1;
         evidence.word_evidence[1] = UtsegWordBoundaryEvidenceV2::Classified {
             raw_action: UtsegBoundaryActionV2::CapitalizedOnset,
             applied_action: UtsegBoundaryActionV2::CapitalizedOnset,
@@ -944,10 +949,7 @@ mod tests {
     #[test]
     fn typed_candidate_policy_rederives_assignments_from_raw_evidence() {
         let mut result = boundary_result(2);
-        let evidence = result
-            .boundary_model_evidence
-            .as_mut()
-            .expect("fixture has evidence");
+        let evidence = boundary_parts(&mut result).1;
         evidence.word_evidence[0] = UtsegWordBoundaryEvidenceV2::Classified {
             raw_action: UtsegBoundaryActionV2::PeriodBoundary,
             applied_action: UtsegBoundaryActionV2::Ordinary,
@@ -960,7 +962,7 @@ mod tests {
             boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(800_000)
                 .expect("probability"),
         };
-        result.assignments = Some(vec![0, 0]);
+        *boundary_parts(&mut result).0 = vec![0, 0];
         let request = two_word_request();
         let admitted = admit_worker_item(&request, &result)
             .expect("baseline evidence")
@@ -981,10 +983,7 @@ mod tests {
     #[test]
     fn a_receipt_the_local_policy_produced_is_accepted() {
         let mut result = boundary_result(2);
-        let evidence = result
-            .boundary_model_evidence
-            .as_mut()
-            .expect("fixture has evidence");
+        let evidence = boundary_parts(&mut result).1;
         evidence.word_evidence[0] = UtsegWordBoundaryEvidenceV2::Classified {
             raw_action: UtsegBoundaryActionV2::PeriodBoundary,
             applied_action: UtsegBoundaryActionV2::Ordinary,
@@ -997,7 +996,7 @@ mod tests {
             boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(800_000)
                 .expect("probability"),
         };
-        result.assignments = Some(vec![0, 0]);
+        *boundary_parts(&mut result).0 = vec![0, 0];
         let request = two_word_request();
         let reapplied = admit_worker_item(&request, &result)
             .expect("baseline evidence")
@@ -1106,18 +1105,16 @@ mod tests {
                 boundary_probability_micros: probability,
             });
         }
-        let result = UtsegItemResultV2 {
-            assignments: Some(vec![0; words.len()]),
-            trees: None,
-            boundary_model_evidence: Some(UtsegBoundaryModelEvidenceV2 {
+        let result = UtsegItemResultV2::BoundaryModel {
+            assignments: vec![0; words.len()],
+            boundary_model_evidence: UtsegBoundaryModelEvidenceV2 {
                 model_id: "model".into(),
                 model_revision: test_commit(),
                 normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
                 adjacency_policy_revision:
                     UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
                 word_evidence: evidence_words,
-            }),
-            error: None,
+            },
         };
 
         let admitted = admit_worker_item(&request, &result)

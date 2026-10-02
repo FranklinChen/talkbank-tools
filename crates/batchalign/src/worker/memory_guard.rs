@@ -120,10 +120,10 @@ impl SpawnPermit {
     /// that never gets its PID written into the lease falls back to
     /// the older "owner_pid is daemon" behaviour, which is the
     /// pre-fix status quo: strictly no worse than today.
-    pub fn set_worker_pid(&self, worker_pid: u32) {
+    pub fn set_worker_pid(&self, worker_pid: crate::worker::WorkerPid) {
         if let Err(error) = self.host_lease.set_worker_pid(worker_pid) {
             warn!(
-                worker_pid,
+                worker_pid = worker_pid.0,
                 error = %error,
                 "Failed to tag host-memory lease with worker PID; ghost-slot reaping will fall back to owner_pid",
             );
@@ -208,7 +208,7 @@ pub async fn acquire_spawn_permit(config: &WorkerConfig) -> Result<SpawnPermit, 
     let profile = config.profile;
     let lang = config.lang.clone();
     let engine_overrides = config.engine_overrides.clone();
-    let timeout = Duration::from_secs(config.ready_timeout_s.max(1));
+    let timeout = config.ready_timeout_s.duration();
     let host_lease = crate::blocking::spawn_in_span(move || {
         coordinator.acquire_worker_startup_lease(
             profile,
@@ -312,7 +312,7 @@ mod tests {
                 HostMemoryRuntimeConfig::from_sources(
                     temp.path().join("host-memory.json"),
                     MemoryMb(1_000_000_000),
-                    1,
+                    crate::config::WorkerStartupLimit::literal::<1>(),
                 ),
                 crate::types::runtime::MemoryTier::detect(),
             ),

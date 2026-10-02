@@ -1,6 +1,5 @@
 //! HTTP route handlers: composing all sub-routers with middleware.
 
-pub mod bug_reports;
 pub mod dashboard;
 pub mod health;
 pub mod jobs;
@@ -39,7 +38,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(health::router())
         .merge(jobs::router())
         .merge(media_list::router())
-        .merge(bug_reports::router())
         .merge(dashboard::router_with_dashboard_dir(
             state.environment.paths.dashboard_dir.clone(),
         ))

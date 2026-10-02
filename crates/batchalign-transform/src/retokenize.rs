@@ -36,9 +36,26 @@ use rebuild::{RetokenizeContext, rebuild_content};
 #[derive(Debug, Clone)]
 pub struct WordTokenMapping {
     inner: Vec<SmallVec<[usize; 4]>>,
+    basis: MappingBasis,
+}
+
+/// What a [`WordTokenMapping`] was built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MappingBasis {
+    /// The words' and the tokens' texts concatenate to the same string, and
+    /// each word maps to the tokens covering its own characters.
+    Text,
+    /// The texts diverged; words were spread over tokens by position and
+    /// length alone, so a word's tokens may hold another word's text.
+    Length,
 }
 
 impl WordTokenMapping {
+    /// What the mapping was built from.
+    pub fn basis(&self) -> MappingBasis {
+        self.basis
+    }
+
     /// Number of original words this mapping covers.
     pub fn word_count(&self) -> usize {
         self.inner.len()
@@ -70,7 +87,10 @@ pub fn build_word_token_mapping(
     stanza_tokens: &[String],
 ) -> WordTokenMapping {
     if let Some(mapping) = try_deterministic_word_token_mapping(original_words, stanza_tokens) {
-        return WordTokenMapping { inner: mapping };
+        return WordTokenMapping {
+            inner: mapping,
+            basis: MappingBasis::Text,
+        };
     }
 
     tracing::warn!(
@@ -81,6 +101,7 @@ pub fn build_word_token_mapping(
 
     WordTokenMapping {
         inner: build_length_fallback_mapping(original_words.len(), stanza_tokens.len()),
+        basis: MappingBasis::Length,
     }
 }
 
@@ -193,11 +214,20 @@ fn build_length_fallback_mapping(
 }
 
 /// Retokenize an utterance to match NLP tokenization, then inject morphosyntax.
+///
+/// `mapping` is the caller's mapping of `original_words` to `stanza_tokens`
+/// ([`build_word_token_mapping`]), the one it also placed items by, so the
+/// rebuild and the placement read the same mapping.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the rebuild consumes the utterance, its words, the tokens, their mapping and the three injected parts"
+)]
 pub fn retokenize_utterance(
     parser: &talkbank_parser::TreeSitterParser,
     utterance: &mut Utterance,
     original_words: &[ExtractedWord],
     stanza_tokens: &[String],
+    mapping: &WordTokenMapping,
     mors: Vec<Mor>,
     terminator: talkbank_model::Terminator,
     gra_relations: Vec<GrammaticalRelation>,
@@ -210,11 +240,9 @@ pub fn retokenize_utterance(
     let terminator_surface = terminator.to_string();
     let expected_terminator = Some(terminator_surface.as_str());
 
-    let mapping = build_word_token_mapping(original_words, stanza_tokens);
-
     let mut ctx = RetokenizeContext {
         parser,
-        mapping: &mapping,
+        mapping,
         stanza_tokens,
         original_words,
         mors: &mors,

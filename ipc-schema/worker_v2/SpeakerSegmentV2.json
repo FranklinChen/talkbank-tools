@@ -1,33 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SpeakerSegmentV2",
-  "description": "One raw speaker diarization segment returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
+  "description": "One raw speaker diarization segment returned by Python.\n\nOn the wire `{\"start_ms\", \"end_ms\", \"speaker\"}`; the two bounds are one\n[`AdmittedInterval`], admitted when the segment is read, so an inverted,\nnegative or out-of-range segment is refused at the boundary and no\nconsumer checks the order again.",
   "type": "object",
   "properties": {
     "end_ms": {
-      "description": "Segment end in milliseconds.",
-      "$ref": "#/$defs/DurationMs"
+      "description": "The end, in milliseconds; never before the start.",
+      "type": "integer",
+      "format": "int64",
+      "maximum": 1000000000000,
+      "minimum": 0
     },
     "speaker": {
       "description": "Stable speaker label chosen by the model adapter.",
       "type": "string"
     },
     "start_ms": {
-      "description": "Segment start in milliseconds.",
-      "$ref": "#/$defs/DurationMs"
+      "description": "The start, in milliseconds from the start of the media.",
+      "type": "integer",
+      "format": "int64",
+      "maximum": 1000000000000,
+      "minimum": 0
     }
   },
   "required": [
     "start_ms",
     "end_ms",
     "speaker"
-  ],
-  "$defs": {
-    "DurationMs": {
-      "description": "A LENGTH of time in milliseconds. Not a position.\n\nThis docstring read \"Duration or audio position\" until 2026-08-15, and\nthe `or` was the defect: one type standing for two facts means nothing\ncan notice a length passed where an offset belongs. `MediaWindow` stored\nits two file offsets in it for exactly that reason.\n\nA POSITION measured from the start of a recording is\n`batchalign::time::FileMs`; one measured from the start of an alignment\nwindow is `batchalign::time::WindowMs`. Use those for offsets, and this\nonly for genuine durations (`max_group_ms`, `tight_buffer_ms`).\n\nStill carried by the `worker_v2` IPC types, whose `start_ms` / `end_ms`\nfields ARE positions and are not yet converted. Two DIFFERENT decisions\nhide behind that, and only one waits on anyone else: the wire type here\nmirrors the Python side, but the hop after it\n(`batchalign::chat_ops::nlp::types::FaIndexedTiming`) is entirely ours,\nis not Python-facing, and serializes identically to a `WindowMs`. Typing\nthat one needs no coordination. See `batchalign::time` for what else\nblocks retiring the duplicate `Ms`, and for which direction a merge\nwould have to go.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0
-    }
-  }
+  ]
 }

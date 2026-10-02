@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-09-30 13:50 EDT
+**Last updated:** 2026-10-01 17:35 EDT
 
 ## Philosophy
 
@@ -125,7 +125,7 @@ without maintaining a second, stale crate layout.
 flowchart TD
     fast["Tier 1: Fast Tests\n(make test / cargo test)\nUnit + protocol + test-echo integration\nNo models, no GPU\n~5s, safe, fully parallel"]
     ml["Tier 2: ML Golden Tests\n(make batchalign-test-ml-golden)\nReal Whisper + Stanza + pyannote\nSkips are FAILURES, not passes\nSerialized (profile test-threads=1)\n~5min, 8-12 GB peak RAM"]
-    pygolden["Tier 3: Python Golden\n(uv run pytest -m golden)\nbatchalign_core extension\n~10-30s, 1-2 GB"]
+    pygolden["Tier 3: Python Golden\n(make batchalign-test-python-golden)\nreal Stanza models\n~2min on ming, 1-2 GB"]
 
     fast -->|"routine dev loop\n(every edit)"| safe(["Safe on any machine"])
     ml -->|"opt-in only\n(pre-release, inference changes)"| danger(["Serialized, never\nrun with bare cargo test"])
@@ -409,9 +409,41 @@ make batchalign-test-ml-golden
 # Python (fast only by default)
 uv run pytest
 
-# Python golden/integration
-uv run pytest -m golden
+# Python golden (every failure reported; see below) and integration
+make batchalign-test-python-golden
 uv run pytest -m integration
+```
+
+`make batchalign-test-python-golden` runs `pytest batchalign/tests -m golden`
+with `--maxfail` raised. The test conftest stops an interactive run at the
+first failure unless `--maxfail` is given, which is right while fixing one
+test and wrong for adjudicating a Stanza bump, where every failure has to be
+seen and attributed (`batchalign/tests/_stanza_confirmation.py`,
+`BUMP_PROCEDURE`). The same procedure runs the Rust ML golden morphotag suite,
+whose insta snapshots (L2 included) change with the model:
+
+```bash
+cargo test -p batchalign --features ml-golden --test ml_golden -- --test-threads=1 ml_golden::morphotag::golden
+```
+
+## Mapping identity harness
+
+A change to the UD-to-`%mor` mapping should be proved output-identical, or its
+differences listed, on real Stanza analyses, without a server or a deploy.
+`crates/batchalign-transform/examples/mor_render_harness.rs` splits morphotag
+at the worker boundary: `collect` writes the worker items BA3 would send for a
+set of transcripts, `scripts/analyze_mor_harness_items.py` runs the real worker
+over them once and saves its analyses, and `render` turns the saved analyses
+into CHAT with BA3's own `parse_raw_stanza_output` and `inject_results`. Render
+before and after a change and `diff -r` the two trees. The harness covers the
+mapping, not
+the job layer around it (incremental reuse, `@s` L2 dispatch, `$POS` hints, the
+`@Options: CA` pass-through).
+
+```bash
+cargo run -p batchalign-transform --example mor_render_harness -- collect ROOT items.jsonl FILE...
+uv run --no-sync python scripts/analyze_mor_harness_items.py items.jsonl analyses.jsonl
+cargo run -p batchalign-transform --example mor_render_harness -- render ROOT analyses.jsonl OUT FILE...
 ```
 
 ## Nextest configuration
@@ -494,7 +526,7 @@ All ML tests live in one binary (`ml_golden`) with submodules:
 |-----------|------|--------|
 | `golden` | Text NLP golden snapshots | Stanza |
 | `golden_audio` | Audio transcription/alignment | Whisper, Wave2Vec, pyannote |
-| `golden_parity` | Batchalign2 output parity | Stanza |
+| `coref::parity`, `utseg::parity`, `translate::parity` | Batchalign2 output parity (exact) | Stanza |
 | `live_server_fixture` | Full server with live workers | Mixed |
 | `profile_verification` | Worker pool profile grouping | Wave2Vec, Stanza |
 | `option_receipt` | Option propagation differential tests | Stanza, Wave2Vec |
@@ -513,7 +545,7 @@ All ML tests live in one binary (`ml_golden`) with submodules:
 | Workflow helpers | cargo | `cargo test -p batchalign --test contract_suite workflow_helpers::` | None | ~2s | Yes |
 | JSON compat | cargo | `cargo test -p batchalign --test contract_suite json_compat::` | None | ~1s | Yes |
 | ML tests (all) | cargo | `make batchalign-test-ml-golden` | Mixed | ~5min | **No** |
-| Python golden | pytest | `uv run pytest -m golden` | batchalign_core | ~10s | **No** |
+| Python golden | pytest | `make batchalign-test-python-golden` | real Stanza | ~2min | **No** |
 | Python integration | pytest | `uv run pytest -m integration` | Worker | ~5s | **No** |
 | Cantonese ASR engines | pytest | `uv run pytest batchalign/tests/languages/cantonese/` | FunASR+ | ~2min | **No** |
 
@@ -530,14 +562,44 @@ Run ML tests based on what changed, not as a habit:
 | Worker pool, dispatch, or lifecycle | `--profile ml` |
 | FA pipeline or UTR | `--profile ml` |
 | Morphosyntax injection or retokenization | `--profile ml` |
+| L2 (`@s`) extract, plan, merge or splice | `l2::` lib tests (fast), then `ml_golden::morphotag::golden_l2` |
 | Pre-release or large refactor | Full `--profile ml` |
 | Adding a new language | `--profile ml` |
+
+## BA2 morphotag divergence report
+
+Morphotag is compared with Batchalign 2 by a report, not a test. BA2's
+January 2026 outputs (`batchalign/tests/golden/ba2_reference/morphotag/` and
+`morphotag_retok/`, from BA2 commit `84ad500b`) are a point of comparison:
+BA3 departs from them on purpose (UD root convention, no invented `%mor`
+features, its own L2 merge), so exact equality is the wrong question, and a
+difference is evidence for a reader to classify.
+
+```bash
+scripts/ba2-morphotag-divergence.sh OUTPUT_DIR
+```
+
+The script morphotags the parity fixtures (`batchalign/tests/support/parity/`)
+that have a BA2 reference, once with the default tokenization and once with
+`--retokenize`, through the `batchalign3` on `PATH` (or `$BATCHALIGN3`) and its
+managed server. For each mode it writes the two run manifests, a comparison
+plan, and the [`compare-runs morphotag`](../user-guide/commands/compare-runs.md)
+report under `OUTPUT_DIR/MODE/report/runs/COMPARISON_ID/`: per token,
+tokenization, lemma, POS, feature-set, clitic, head and relation differences.
+The BA3 manifest names the binary's build identity, so a report says which
+build it describes. Fixtures BA3 produced no output for (refused as invalid
+CHAT, or failed; the morphotag log says which) are listed in
+`OUTPUT_DIR/MODE/no-output.txt` and left out; a pair `compare-runs` cannot
+parse is recorded in the report as unpairable.
+
+The other commands' BA2 checks (`coref`, `utseg`, `translate`) are still exact
+parity tests in the ML suite.
 
 ## Python tests
 
 ```bash
 uv run pytest                                           # Fast only
-uv run pytest -m golden -v                              # Golden snapshots
+make batchalign-test-python-golden                      # Golden (every failure)
 uv run pytest -m integration -v                         # Integration
 uv run pytest -m "golden or integration" -v             # Both
 uv run pytest batchalign/tests/test_batch_infer_dispatch.py -v  # Specific file

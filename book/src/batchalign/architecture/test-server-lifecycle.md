@@ -1,7 +1,7 @@
 # Test Server and Worker Lifecycle
 
 **Status:** Current
-**Last updated:** 2026-05-19 22:58 EDT
+**Last updated:** 2026-10-01 17:40 EDT
 
 ## The problem
 
@@ -85,7 +85,7 @@ graph TB
         subgraph "Test Threads"
             T1["golden::morphotag_eng_simple"]
             T2["golden_audio::align_eng_wav2vec"]
-            T3["golden_parity::parity_morphotag_eng"]
+            T3["utseg::parity::parity_utseg_eng_multi"]
         end
 
         T1 -->|"Semaphore acquire"| SEM["Semaphore(1)"]

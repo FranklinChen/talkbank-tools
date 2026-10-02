@@ -18,7 +18,6 @@ use super::traces::{
     FaTimelineTrace, FaTimingDecisionTrace, RetokenizationTrace, TimedWordTrace, TimingTrace,
     UtteranceTrace, WordTrace,
 };
-use crate::api::DurationSeconds;
 
 // ---------------------------------------------------------------------------
 // Forced alignment
@@ -173,8 +172,8 @@ pub fn snapshot_into_pipeline_trace(snapshot: AsrPipelineSnapshot) -> AsrPipelin
             .iter()
             .map(|e| AsrTokenTrace {
                 value: e.value.as_str().to_owned(),
-                ts: e.ts.as_f64().map(DurationSeconds),
-                end_ts: e.end_ts.as_f64().map(DurationSeconds),
+                ts: e.ts,
+                end_ts: e.end_ts,
                 token_type: format!("{:?}", e.kind).to_lowercase(),
             })
             .collect(),
@@ -263,14 +262,14 @@ mod fa_result_tests {
 
     #[test]
     fn asr_trace_preserves_missing_and_zero_endpoints() {
-        use batchalign_transform::asr_postprocess::{
-            AsrElement, AsrElementKind, AsrRawText, AsrTimestampSecs,
-        };
+        use crate::api::AudioPositionSeconds;
+        use batchalign_transform::asr_postprocess::{AsrElement, AsrElementKind, AsrRawText};
+        let zero = Some(AudioPositionSeconds::try_from(0.0).expect("zero is a position"));
         let snapshot = AsrPipelineSnapshot {
             raw_elements: vec![AsrElement {
                 value: AsrRawText::new("hello"),
-                ts: AsrTimestampSecs::Absent,
-                end_ts: AsrTimestampSecs::Observed(0.0),
+                ts: None,
+                end_ts: zero,
                 kind: AsrElementKind::Text,
             }],
             ..Default::default()
@@ -281,7 +280,7 @@ mod fa_result_tests {
         assert_eq!(json["raw_tokens"][0]["end_ts"], 0.0);
         let decoded: AsrPipelineTrace = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.raw_tokens[0].ts, None);
-        assert_eq!(decoded.raw_tokens[0].end_ts, Some(DurationSeconds(0.0)));
+        assert_eq!(decoded.raw_tokens[0].end_ts, zero);
     }
 
     #[test]

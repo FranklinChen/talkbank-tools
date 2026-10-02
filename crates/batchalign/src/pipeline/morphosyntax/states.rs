@@ -2,9 +2,9 @@
 
 use super::{resolve_per_file_lang, unsupported_primary_language_error};
 use crate::chat_ops::morphosyntax_ops::{
-    BatchItemWithPosition, MultilingualPolicy, MwtDict, PosHintEvidence, TokenizationMode,
+    CollectedUtterance, MultilingualPolicy, MwtDict, PosHintEvidence, TokenizationMode,
     apply_pos_hint_evidence, clear_morphosyntax, collect_payloads, collect_pos_hints,
-    declared_languages, l2, remove_empty_morphosyntax_placeholders, validate_mor_alignment,
+    declared_languages, remove_empty_morphosyntax_placeholders, validate_mor_alignment,
 };
 use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::morphosyntax::identity::{AdmittedMorphosyntaxResponse, AppliedAnalyses};
@@ -70,7 +70,7 @@ pub(super) struct Parsed {
 pub(super) struct Admitted;
 pub(super) struct Prepared;
 pub(super) struct Collected {
-    items: Vec<BatchItemWithPosition>,
+    items: Vec<CollectedUtterance>,
     hints: HintPlan,
 }
 pub(super) struct Inferred {
@@ -257,11 +257,6 @@ impl Analysis<Inferred> {
         match work {
             InferenceWork::NoWork => {}
             InferenceWork::Responses { batch, hints } => {
-                let deferred = if options.l2.should_analyze() {
-                    l2::extract_l2_deferred_positions(batch.items(), batch.responses())
-                } else {
-                    Vec::new()
-                };
                 let injection = batch
                     .inject(
                         &crate::chat_parser(),
@@ -272,11 +267,18 @@ impl Analysis<Inferred> {
                     .map_err(|e| {
                         ServerError::Validation(format!("Result injection failed: {e}"))
                     })?;
+                // The `@s` positions come from the analysis injection mapped,
+                // in the items it wrote.
+                let deferred = if options.l2.should_analyze() {
+                    injection.l2.into_reported_positions()
+                } else {
+                    Vec::new()
+                };
                 if !deferred.is_empty() {
                     applied.extend(
                         crate::morphosyntax::dispatch_secondary_l2(
                             &mut self.chat,
-                            &deferred,
+                            deferred,
                             options.services,
                             "single-file",
                         )

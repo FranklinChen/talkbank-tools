@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         TaskResultV2,
     )
 
+import time
 from dataclasses import dataclass, field
 
 from batchalign.worker._asr_v2 import (
@@ -69,7 +70,7 @@ from batchalign.worker._text_v2 import (
     execute_translate_request_v2,
     execute_utseg_request_v2,
 )
-from batchalign.worker._types import _state
+from batchalign.worker._types import _state, sleep_test_delay
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
     ExecuteRequestV2,
@@ -132,9 +133,15 @@ def execute_request_v2(
     *,
     host: WorkerExecutionHostV2 | None = None,
 ) -> ExecuteResponseV2:
-    """Execute one typed V2 worker request against the loaded runtime."""
+    """Execute one typed V2 worker request against the loaded runtime.
 
-    invalid_request_response = _validate_request_boundary(request)
+    Every response this function builds itself (a refused request, an
+    unsupported task, a test echo) reports the time from receipt to reply,
+    measured here; none of them invents one.
+    """
+    started_at = time.monotonic()
+
+    invalid_request_response = _validate_request_boundary(request, started_at)
     if invalid_request_response is not None:
         return invalid_request_response
 
@@ -142,12 +149,9 @@ def execute_request_v2(
     # This enables integration tests for the concurrent dispatch path
     # (SharedGpuWorker) without loading real ML models.
     if _state.test_echo:
-        import time
-
         from batchalign.worker._types_v2 import ExecuteSuccessV2
 
-        if _state.test_delay_ms > 0:
-            time.sleep(_state.test_delay_ms / 1000.0)
+        sleep_test_delay()
 
         # The payload is an EMPTY placeholder of the requested task's own
         # result kind: transport tests read only the request_id, but the
@@ -162,7 +166,7 @@ def execute_request_v2(
             request_id=request.request_id,
             outcome=ExecuteSuccessV2(),
             result=_echo_placeholder_result(request.payload),
-            elapsed_s=0.001,
+            elapsed_s=_seconds_since(started_at),
         )
 
     execution_host = host or build_default_execution_host_v2()
@@ -194,7 +198,7 @@ def execute_request_v2(
         case InferenceTaskV2.AVQI:
             return execute_avqi_request_v2(request, execution_host.avqi)
         case _:
-            return _unsupported_task_response(request)
+            return _unsupported_task_response(request, started_at)
 
 
 def _echo_model_identity(request: AsrRequestV2) -> AsrModelIdentityV2:
@@ -384,7 +388,14 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
             assert_never(payload)
 
 
-def _unsupported_task_response(request: ExecuteRequestV2) -> ExecuteResponseV2:
+def _seconds_since(started_at: float) -> float:
+    """Seconds from a ``time.monotonic()`` reading to now."""
+    return time.monotonic() - started_at
+
+
+def _unsupported_task_response(
+    request: ExecuteRequestV2, started_at: float
+) -> ExecuteResponseV2:
     """Return a typed error for V2 tasks that are not live yet."""
 
     return ExecuteResponseV2(
@@ -397,11 +408,13 @@ def _unsupported_task_response(request: ExecuteRequestV2) -> ExecuteResponseV2:
             ),
         ),
         result=None,
-        elapsed_s=0.0,
+        elapsed_s=_seconds_since(started_at),
     )
 
 
-def _validate_request_boundary(request: ExecuteRequestV2) -> ExecuteResponseV2 | None:
+def _validate_request_boundary(
+    request: ExecuteRequestV2, started_at: float
+) -> ExecuteResponseV2 | None:
     """Reject mismatched top-level task/payload combinations before dispatch."""
 
     payload_kind = getattr(request.payload, "kind", None)
@@ -409,11 +422,13 @@ def _validate_request_boundary(request: ExecuteRequestV2) -> ExecuteResponseV2 |
         return _invalid_payload_response(
             request,
             "execute payload did not include a task kind discriminator",
+            started_at,
         )
     if request.task.value != payload_kind:
         return _invalid_payload_response(
             request,
             f"execute payload kind {payload_kind} does not match task {request.task.value}",
+            started_at,
         )
     return None
 
@@ -421,6 +436,7 @@ def _validate_request_boundary(request: ExecuteRequestV2) -> ExecuteResponseV2 |
 def _invalid_payload_response(
     request: ExecuteRequestV2,
     message: str,
+    started_at: float,
 ) -> ExecuteResponseV2:
     """Return one typed invalid-payload protocol response."""
 
@@ -431,7 +447,7 @@ def _invalid_payload_response(
             message=message,
         ),
         result=None,
-        elapsed_s=0.0,
+        elapsed_s=_seconds_since(started_at),
     )
 
 

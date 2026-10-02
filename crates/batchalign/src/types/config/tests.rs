@@ -14,7 +14,7 @@ fn default_config() {
     assert_eq!(cfg.default_lang, "eng"); // PartialEq<&str>
     assert_eq!(cfg.job_ttl_days.get(), 7);
     assert!(cfg.auto_daemon);
-    assert_eq!(cfg.worker_health_interval_s, 30);
+    assert_eq!(cfg.worker_health_interval_s.get(), 30);
     // `memory_gate_mb` defaults to `None`. The fallback value is
     // delivered by `resolved_memory_gate_mb()`, which now resolves
     // to the hardcoded `MIN_FREE_MEMORY_MB` floor (2 GB), the
@@ -28,9 +28,9 @@ fn default_config() {
     );
     assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
     assert_eq!(cfg.max_workers_per_key, None);
-    assert_eq!(cfg.worker_ready_timeout_s, 300);
+    assert_eq!(cfg.worker_ready_timeout_s.get(), 300);
     assert_eq!(cfg.max_body_bytes_mb, MemoryMb(512));
-    assert_eq!(cfg.memory_gate_timeout_s, 120);
+    assert_eq!(cfg.memory_gate_timeout_s.get(), 120);
     assert_eq!(cfg.memory_gate_poll_s.get(), 5);
     assert_eq!(cfg.memory_warning_mb, MemoryMb(4096));
     // `gpu_thread_pool_size` defaults to `None` post-host-facts-migration.
@@ -38,9 +38,11 @@ fn default_config() {
     // CUDA-functional hosts and 1 elsewhere); tests that need an explicit
     // value set `Some(...)` directly. See `host_facts/effective.rs`.
     assert_eq!(cfg.gpu_thread_pool_size, None);
-    assert_eq!(cfg.local_lease_ttl_s, 300);
-    assert_eq!(cfg.audio_task_timeout_s, 0);
-    assert_eq!(cfg.analysis_task_timeout_s, 0);
+    assert_eq!(cfg.local_lease_ttl, crate::config::LeaseTtl::DEFAULT);
+    assert_eq!(cfg.audio_task_timeout_s, None);
+    assert_eq!(cfg.analysis_task_timeout_s, None);
+    assert_eq!(cfg.ensure_task_timeout_s, None);
+    assert_eq!(cfg.worker_registry_path, None);
 }
 
 #[test]
@@ -56,7 +58,7 @@ port: 9000
 max_concurrent_jobs: 4
 auto_daemon: true
 "#;
-    let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str(yaml).unwrap();
     assert_eq!(cfg.media_roots.len(), 2);
     assert_eq!(cfg.media_roots[0].as_str(), "/data/media");
     assert_eq!(
@@ -72,7 +74,7 @@ auto_daemon: true
 #[test]
 fn deserialize_empty_yaml() {
     let yaml = "{}";
-    let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str(yaml).unwrap();
     assert_eq!(cfg, ServerConfig::default());
 }
 
@@ -82,28 +84,23 @@ fn deserialize_rejects_unknown_fields() {
 port: 9000
 warmup: false
 "#;
-    let error = serde_yaml::from_str::<ServerConfig>(yaml).unwrap_err();
+    let error = yaml_serde::from_str::<ServerConfig>(yaml).unwrap_err();
     assert!(
         error.to_string().contains("unknown field `warmup`"),
         "unexpected error: {error}"
     );
 }
 
+/// A scalar below its floor is refused by every route in, naming the field.
 #[test]
-fn constructors_admit_bad_values_before_validation() {
-    // Constructors admit positive runtime values and preserve each correction
-    // for the pure warning pass. Validation no longer repairs mutable fields.
-    let cfg = ServerConfig {
-        job_ttl_days: JobTtlDays::new(0),
-        memory_gate_poll_s: MemoryGatePollSeconds::new(0),
-        max_concurrent_worker_startups: WorkerStartupLimit::new(0),
-        ..Default::default()
-    };
-    let warnings = cfg.validate();
-    assert_eq!(cfg.job_ttl_days.get(), 1);
-    assert_eq!(cfg.memory_gate_poll_s.get(), 1);
-    assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
-    assert_eq!(warnings.len(), 3);
+fn non_positive_scalars_are_refused_not_corrected() {
+    assert_eq!(
+        JobTtlDays::try_from(0).map_err(|refused| refused.field),
+        Err("job_ttl_days")
+    );
+    assert!(MemoryGatePollSeconds::try_from(0).is_err());
+    assert!(WorkerStartupLimit::try_from(0).is_err());
+    assert_eq!(JobTtlDays::literal::<7>().get(), 7);
 }
 
 #[test]
@@ -112,41 +109,41 @@ fn load_missing_file_returns_defaults() {
     assert_eq!(cfg, ServerConfig::default());
 }
 
-/// Out-of-range scalars are clamped with a warning; `port` deliberately is NOT.
+/// POLICY (since 2026-10-01): a positive scalar written as zero or below is
+/// refused where `server.yaml` is read, naming the field; `port: 0` is not,
+/// because 0 is not out of range for a port. TCP defines it as "let the OS
+/// choose", and [`PortRequest`](crate::config::PortRequest) says so in the type.
 ///
-/// POLICY, not an invariant, so it stays a test: each clamp is a choice with a
-/// real alternative (rejecting the config outright would also be defensible).
-///
-/// `port` used to be clamped here too, 0 to 8000. It no longer is, because 0 is
-/// not out of range: TCP defines it as "let the OS choose a free port", and
-/// [`PortRequest`](crate::config::PortRequest) now says so in the type. The
-/// clamp was what made an ephemeral request impossible to write down, and it
-/// silently aimed a server at the busiest port on the machine. Hence four bad
-/// values and three warnings.
+/// Refusal replaced a correction to one with a warning that only some loaders
+/// printed, so `doctor` passed a config the server then ran differently. The
+/// legacy `0` of the auto-tuned and override fields (`gpu_thread_pool_size`
+/// here) still reads as "absent", which is what it always meant.
 #[test]
-fn load_validated_config_clamps_bad_values_but_not_the_port() {
+fn load_refuses_non_positive_scalars_but_not_an_ephemeral_port() {
     let dir = tempfile::tempdir().unwrap();
     let state_dir = dir.path().join("state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let config_path = state_dir.join("server.yaml");
-    std::fs::write(
-        &config_path,
-        "port: 0\njob_ttl_days: 0\nmemory_gate_poll_s: 0\nmax_concurrent_worker_startups: 0\ngpu_thread_pool_size: 0\n",
-    )
-    .unwrap();
-
     let layout = RuntimeLayout::from_state_dir(state_dir);
-    let (cfg, warnings) = load_validated_config_from_layout(&layout, None).unwrap();
-    // NOT clamped to 8000: 0 is a legal request meaning "OS chooses".
+
+    for field in [
+        "job_ttl_days",
+        "memory_gate_poll_s",
+        "memory_gate_timeout_s",
+        "max_concurrent_worker_startups",
+    ] {
+        std::fs::write(&config_path, format!("{field}: 0\n")).unwrap();
+        let error = load_config_from_layout(&layout, None).unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Parse(_, message) if message.contains(field)),
+            "{field}: {error}"
+        );
+    }
+
+    std::fs::write(&config_path, "port: 0\ngpu_thread_pool_size: 0\n").unwrap();
+    let cfg = load_config_from_layout(&layout, None).unwrap();
     assert_eq!(cfg.port, crate::config::PortRequest::Ephemeral);
-    assert_eq!(cfg.job_ttl_days.get(), 1);
-    assert_eq!(cfg.memory_gate_poll_s.get(), 1);
-    assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
-    // Legacy `gpu_thread_pool_size: 0` in YAML now collapses to `None`
-    // via the `zero_as_none` serde shim, no validator warning fires.
     assert_eq!(cfg.gpu_thread_pool_size, None);
-    // Three, not four: the port no longer warns because it is no longer wrong.
-    assert_eq!(warnings.len(), 3, "got: {warnings:?}");
 }
 
 #[test]
@@ -179,10 +176,6 @@ fn runtime_layout_derives_owned_subpaths() {
     assert_eq!(
         layout.logs_dir(),
         PathBuf::from("/tmp/batchalign-state/logs")
-    );
-    assert_eq!(
-        layout.bug_reports_dir(),
-        PathBuf::from("/tmp/batchalign-state/bug-reports")
     );
     assert_eq!(
         layout.dashboard_dir(),
@@ -222,31 +215,31 @@ fn runtime_layout_load_config_uses_layout_config_path() {
 
 #[test]
 fn force_cpu_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("{}").unwrap();
     assert_eq!(cfg.force_cpu, None);
 }
 
 #[test]
 fn force_cpu_explicit_true_preserves_some_true() {
-    let cfg: ServerConfig = serde_yaml::from_str("force_cpu: true\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("force_cpu: true\n").unwrap();
     assert_eq!(cfg.force_cpu, Some(true));
 }
 
 #[test]
 fn allow_mps_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("port: 8001\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("port: 8001\n").unwrap();
     assert_eq!(cfg.allow_mps, None);
 }
 
 #[test]
 fn allow_mps_explicit_true_preserves_some_true() {
-    let cfg: ServerConfig = serde_yaml::from_str("allow_mps: true\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("allow_mps: true\n").unwrap();
     assert_eq!(cfg.allow_mps, Some(true));
 }
 
 #[test]
 fn force_cpu_explicit_false_preserves_some_false() {
-    let cfg: ServerConfig = serde_yaml::from_str("force_cpu: false\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("force_cpu: false\n").unwrap();
     assert_eq!(cfg.force_cpu, Some(false));
 }
 
@@ -257,8 +250,8 @@ fn force_cpu_round_trip_canonical_form() {
             force_cpu: v,
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&original).unwrap();
+        let parsed: ServerConfig = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(parsed.force_cpu, v, "round-trip lost data for {v:?}");
         match v {
             None => assert!(
@@ -298,19 +291,19 @@ fn force_cpu_propagates_to_config_overrides() {
 
 #[test]
 fn max_workers_per_key_legacy_zero_deserializes_to_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_workers_per_key: 0\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_workers_per_key: 0\n").unwrap();
     assert_eq!(cfg.max_workers_per_key, None);
 }
 
 #[test]
 fn max_workers_per_key_explicit_value_preserves_some() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_workers_per_key: 6\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_workers_per_key: 6\n").unwrap();
     assert_eq!(cfg.max_workers_per_key, Some(6));
 }
 
 #[test]
 fn max_workers_per_key_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("{}").unwrap();
     assert_eq!(cfg.max_workers_per_key, None);
 }
 
@@ -321,8 +314,8 @@ fn max_workers_per_key_round_trip_canonical_form() {
             max_workers_per_key: v,
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&original).unwrap();
+        let parsed: ServerConfig = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(
             parsed.max_workers_per_key, v,
             "round-trip lost data for {v:?}"
@@ -382,19 +375,19 @@ fn max_workers_per_key_none_leaves_every_profile_override_none() {
 
 #[test]
 fn memory_gate_mb_legacy_zero_deserializes_to_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("memory_gate_mb: 0\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("memory_gate_mb: 0\n").unwrap();
     assert_eq!(cfg.memory_gate_mb, None);
 }
 
 #[test]
 fn memory_gate_mb_explicit_value_preserves_some() {
-    let cfg: ServerConfig = serde_yaml::from_str("memory_gate_mb: 8192\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("memory_gate_mb: 8192\n").unwrap();
     assert_eq!(cfg.memory_gate_mb, Some(MemoryMb(8192)));
 }
 
 #[test]
 fn memory_gate_mb_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("{}").unwrap();
     assert_eq!(cfg.memory_gate_mb, None);
 }
 
@@ -405,8 +398,8 @@ fn memory_gate_mb_round_trip_canonical_form() {
             memory_gate_mb: v,
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&original).unwrap();
+        let parsed: ServerConfig = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(parsed.memory_gate_mb, v, "round-trip lost data for {v:?}");
         match v {
             None => assert!(
@@ -434,19 +427,19 @@ fn memory_gate_mb_round_trip_canonical_form() {
 
 #[test]
 fn max_concurrent_jobs_legacy_zero_deserializes_to_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_concurrent_jobs: 0\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_concurrent_jobs: 0\n").unwrap();
     assert_eq!(cfg.max_concurrent_jobs, None);
 }
 
 #[test]
 fn max_concurrent_jobs_explicit_value_preserves_some() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_concurrent_jobs: 4\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_concurrent_jobs: 4\n").unwrap();
     assert_eq!(cfg.max_concurrent_jobs, Some(4));
 }
 
 #[test]
 fn max_concurrent_jobs_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("{}").unwrap();
     assert_eq!(cfg.max_concurrent_jobs, None);
 }
 
@@ -457,8 +450,8 @@ fn max_concurrent_jobs_round_trip_canonical_form() {
             max_concurrent_jobs: v,
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&original).unwrap();
+        let parsed: ServerConfig = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(
             parsed.max_concurrent_jobs, v,
             "round-trip lost data for {v:?}"
@@ -488,19 +481,19 @@ fn max_concurrent_jobs_round_trip_canonical_form() {
 
 #[test]
 fn max_workers_per_job_legacy_zero_deserializes_to_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_workers_per_job: 0\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_workers_per_job: 0\n").unwrap();
     assert_eq!(cfg.max_workers_per_job, None);
 }
 
 #[test]
 fn max_workers_per_job_explicit_value_preserves_some() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_workers_per_job: 3\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_workers_per_job: 3\n").unwrap();
     assert_eq!(cfg.max_workers_per_job, Some(3));
 }
 
 #[test]
 fn max_workers_per_job_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("{}").unwrap();
     assert_eq!(cfg.max_workers_per_job, None);
 }
 
@@ -511,8 +504,8 @@ fn max_workers_per_job_round_trip_canonical_form() {
             max_workers_per_job: v,
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&original).unwrap();
+        let parsed: ServerConfig = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(
             parsed.max_workers_per_job, v,
             "round-trip lost data for {v:?}"
@@ -543,19 +536,19 @@ fn max_workers_per_job_round_trip_canonical_form() {
 
 #[test]
 fn max_total_workers_legacy_zero_deserializes_to_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_total_workers: 0\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_total_workers: 0\n").unwrap();
     assert_eq!(cfg.max_total_workers, None);
 }
 
 #[test]
 fn max_total_workers_explicit_value_preserves_some() {
-    let cfg: ServerConfig = serde_yaml::from_str("max_total_workers: 12\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("max_total_workers: 12\n").unwrap();
     assert_eq!(cfg.max_total_workers, Some(12));
 }
 
 #[test]
 fn max_total_workers_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("{}").unwrap();
     assert_eq!(cfg.max_total_workers, None);
 }
 
@@ -566,8 +559,8 @@ fn max_total_workers_round_trip_canonical_form() {
             max_total_workers: v,
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&original).unwrap();
+        let parsed: ServerConfig = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(
             parsed.max_total_workers, v,
             "round-trip lost data for {v:?}"
@@ -597,19 +590,19 @@ fn max_total_workers_round_trip_canonical_form() {
 
 #[test]
 fn gpu_thread_pool_size_legacy_zero_deserializes_to_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("gpu_thread_pool_size: 0\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("gpu_thread_pool_size: 0\n").unwrap();
     assert_eq!(cfg.gpu_thread_pool_size, None);
 }
 
 #[test]
 fn gpu_thread_pool_size_explicit_value_preserves_some() {
-    let cfg: ServerConfig = serde_yaml::from_str("gpu_thread_pool_size: 7\n").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("gpu_thread_pool_size: 7\n").unwrap();
     assert_eq!(cfg.gpu_thread_pool_size, Some(7));
 }
 
 #[test]
 fn gpu_thread_pool_size_field_absent_yields_none() {
-    let cfg: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str("{}").unwrap();
     assert_eq!(cfg.gpu_thread_pool_size, None);
 }
 
@@ -622,8 +615,8 @@ fn gpu_thread_pool_size_round_trip_canonical_form() {
             gpu_thread_pool_size: v,
             ..Default::default()
         };
-        let yaml = serde_yaml::to_string(&original).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = yaml_serde::to_string(&original).unwrap();
+        let parsed: ServerConfig = yaml_serde::from_str(&yaml).unwrap();
         assert_eq!(
             parsed.gpu_thread_pool_size, v,
             "round-trip lost data for {v:?}"
@@ -736,7 +729,7 @@ fn resolved_tier_yaml_with_overrides() {
 memory_tier: small
 stanza_startup_mb: 4000
 "#;
-    let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+    let cfg: ServerConfig = yaml_serde::from_str(yaml).unwrap();
     let tier = cfg.resolved_memory_tier();
     assert_eq!(tier.kind, crate::types::runtime::MemoryTierKind::Small);
     // Stanza overridden from small default (3000) to 4000
@@ -757,17 +750,13 @@ fn explicit_memory_gate_overrides_tier_default() {
 
 #[test]
 fn config_admission_does_not_probe_media_paths() {
-    // A nonexistent path is no longer a warning: loading admits syntax and
-    // scalar policy, while on-demand media access owns availability.
-    let cfg: ServerConfig = serde_yaml::from_str(
-        "media_roots: [/unavailable-volume/media]\nmedia_mappings: {bank: /unavailable-volume/bank}\njob_ttl_days: -5\n"
-    ).unwrap();
-    assert_eq!(cfg.job_ttl_days.get(), 1);
-    let warnings = cfg.validate();
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("job_ttl_days"));
-    let encoded = serde_yaml::to_string(&cfg).unwrap();
-    let admitted: ServerConfig = serde_yaml::from_str(&encoded).unwrap();
-    assert_eq!(admitted.job_ttl_days.get(), 1);
-    assert!(admitted.validate().is_empty());
+    // A nonexistent path is not refused: loading admits syntax and scalar
+    // policy, while on-demand media access owns availability.
+    let cfg: ServerConfig = yaml_serde::from_str(
+        "media_roots: [/unavailable-volume/media]\nmedia_mappings: {bank: /unavailable-volume/bank}\n",
+    )
+    .unwrap();
+    let encoded = yaml_serde::to_string(&cfg).unwrap();
+    let admitted: ServerConfig = yaml_serde::from_str(&encoded).unwrap();
+    assert_eq!(admitted, cfg);
 }

@@ -13,8 +13,8 @@
 //! 20 ms per audio frame.
 //!
 //! Kept dependency-free (plain `Vec<f32>` matrices) so the algorithm is
-//! testable without any model or tensor runtime; the candle integration
-//! layers on top.
+//! testable without any model or tensor runtime; a model integration layers
+//! on top (the candle one lived in the retired Whisper pilot crate).
 
 /// A dense row-major matrix of attention costs: `rows` = text tokens,
 /// `cols` = audio frames.

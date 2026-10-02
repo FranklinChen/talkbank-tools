@@ -237,7 +237,7 @@ fn result_kind(result: &TaskResultV2) -> &'static str {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
-    use crate::api::DurationSeconds;
+    use crate::api::NonNegativeSeconds;
     use crate::chat_ops::speaker_identity::RequestedSpan;
     use crate::media::window::MediaWindow;
     use crate::time::FileMs;
@@ -286,7 +286,7 @@ mod tests {
                     })
                     .collect(),
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         )
     }
 

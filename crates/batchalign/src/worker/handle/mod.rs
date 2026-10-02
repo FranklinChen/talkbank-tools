@@ -16,13 +16,15 @@ pub mod spawn;
 
 pub use config::{WorkerConfig, WorkerRuntimeConfig};
 pub use spawn::spawn_tcp_daemon;
-// Re-exported for use across the crate (notably ``worker::tcp_handle``)
-// without making the whole ``protocol`` submodule public. ``WorkerErrorKind``
-// is the shared on-the-wire discriminator for ``{"op":"error", ...}``
-// responses; see the type's own doc.
-pub(crate) use protocol::WorkerErrorKind;
-
-use std::time::Duration;
+// The wire envelopes and the reported-failure mapping are shared by every
+// transport (`worker::tcp_handle` and the shared GPU reader read the same
+// lines), without making the whole `protocol` submodule public.
+#[cfg(test)]
+pub(crate) use protocol::MAX_RESPONSE_STDOUT_NOISE_LINES;
+pub(crate) use protocol::{
+    CapabilitiesRequest, ControlRequestId, EnsureTaskRequest, NoiseLimit, NoiseRun,
+    ReportedFailure, WireLine, WorkerRequest, WorkerResponse, excerpt,
+};
 
 use crate::worker::WorkerPid;
 use crate::worker::error::WorkerError;
@@ -72,7 +74,7 @@ pub struct WorkerHandle {
     last_activity: tokio::time::Instant,
     /// Rust-side cache of tasks loaded via `ensure_task`. Skips redundant IPC
     /// round-trips for already-loaded tasks in LazyProfile mode.
-    loaded_tasks: std::collections::HashSet<String>,
+    loaded_tasks: std::collections::HashSet<crate::worker::InferTask>,
     /// Receiver for stderr lines captured by the background drain task.
     ///
     /// The drain task sends each non-empty stderr line through this channel.
@@ -141,7 +143,7 @@ impl WorkerHandle {
         // 2026-05-01). `child.id()` returns `None` only if the child
         // has already been awaited, which has not happened here.
         if let Some(child_pid) = child.id() {
-            spawn_permit.set_worker_pid(child_pid);
+            spawn_permit.set_worker_pid(crate::worker::WorkerPid(child_pid));
         }
         // Move the permit into a `_` binding so it remains live for
         // the rest of the spawn window (RAII semantics for the
@@ -161,7 +163,7 @@ impl WorkerHandle {
         );
 
         let ready = match tokio::time::timeout(
-            Duration::from_secs(config.ready_timeout_s),
+            config.ready_timeout_s.duration(),
             Self::read_ready_line(&mut stdout_reader),
         )
         .await
@@ -378,7 +380,7 @@ mod tests {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: 300,
+            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
             runtime: WorkerRuntimeConfig::from_sources(
                 true,
@@ -403,7 +405,7 @@ mod tests {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: 300,
+            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
             runtime: WorkerRuntimeConfig::from_sources(
                 false,
@@ -516,7 +518,7 @@ mod tests {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: 300,
+            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
             runtime: WorkerRuntimeConfig::from_sources(
                 false,
@@ -545,7 +547,7 @@ mod tests {
                 num_speakers: NumSpeakers(1),
                 engine_overrides: r#"{"asr":"tencent"}"#.to_string(),
                 test_echo: false,
-                ready_timeout_s: 300,
+                ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
                 verbose: 0,
                 runtime: WorkerRuntimeConfig::from_sources(
                     false,

@@ -1,6 +1,5 @@
 //! Offline replay of global UTR word-to-token evidence.
 
-use std::io::Write;
 use std::path::Path;
 
 use serde::Serialize;
@@ -41,19 +40,12 @@ impl SerializedUtrAlignmentReport {
 
     /// Atomically publish without replacing an existing evidence artifact.
     fn persist_noclobber(self, output: &Path) -> Result<(), CliError> {
-        let parent = output
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-        staged.write_all(&self.0)?;
-        staged.as_file().sync_all()?;
-        let published = staged
-            .persist_noclobber(output)
-            .map_err(|error| CliError::Io(error.error))?;
-        published.sync_all()?;
-        #[cfg(unix)]
-        std::fs::File::open(parent)?.sync_all()?;
+        crate::atomic_file::write_atomically(
+            output,
+            &self.0,
+            crate::atomic_file::Existing::Keep,
+            crate::atomic_file::Audience::UmaskDefault,
+        )?;
         Ok(())
     }
 }

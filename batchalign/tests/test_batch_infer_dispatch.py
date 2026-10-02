@@ -17,6 +17,7 @@ from batchalign.worker._types import (
     BatchInferResponse,
     InferResponse,
     InferTask,
+    ItemProduced,
     _state,
 )
 
@@ -114,13 +115,14 @@ class TestDispatchRouting:
             for raw_item in req.items:
                 assert isinstance(raw_item, dict)
                 results.append(
-                    InferResponse(
-                        result={
-                            "kind": "translated",
-                            "raw_translation": str(raw_item["text"]).upper(),
-                            "engine": "test-engine",
-                        },
-                        elapsed_s=0.0,
+                    InferResponse.timed(
+                        lambda raw_item=raw_item: ItemProduced(
+                            result={
+                                "kind": "translated",
+                                "raw_translation": str(raw_item["text"]).upper(),
+                                "engine": "test-engine",
+                            }
+                        )
                     )
                 )
             return BatchInferResponse(results=results)

@@ -1,211 +1,102 @@
 # L2 Morphotag: Current Status
 
 **Status:** Current
-**Last updated:** 2026-05-20 10:24 EDT
+**Last updated:** 2026-10-01 17:37 EDT
 
-> **L2 dispatch is now on by default.** Aggregate
-> evaluation across 19 language pairs (17 at 100% dispatch; `cym,eng`
-> at 99.8% and `eng,yue,zho` at 99.9%; **99.96% aggregate**) triggered
-> removal of `--experimental-l2-morphotag` and addition of
-> `--no-l2-morphotag` (opt-out).
+L2 dispatch is on by default (`--no-l2-morphotag` opts out). It routes
+`@s` (code-switched) words to the Stanza model of their own language and
+combines that analysis with the primary model's attachment of the span.
+The design is in [L2 Morphotag](l2-morphotag.md); changes are recorded in
+the repository's `CHANGELOG.md`.
 
-## What's Done
+## What is in place
 
-### Feature: L2 dispatch (default; opt out via `--no-l2-morphotag`)
+### Ownership rule
 
-Routes @s (code-switched) words to secondary language Stanza models
-and merges the results with the primary model's structural analysis.
-Replaces `L2|xxx` with real morphological analysis.
+- The secondary model owns each `@s` word's category, lemma and features,
+  and the relations inside the span it analysed.
+- The primary model owns the span's attachment: the host word it hangs
+  from and its relation.
+- Where the primary's relation contradicts the category of the secondary
+  root that carries it, the relation is corrected
+  (`ExternalRelation::Corrected`); the category never is.
+- A phrasal-verb particle (`compound:prt` to a secondary VERB) is written
+  PART.
 
-**Quality:** ~95% acceptable on German-English (hogan2), ~90% on
-Spanish-English (herring12), ~97% on French-Dutch (Anouk). 100% splice
-rate (zero L2|xxx remaining when flag is on).
-
-### Architecture
+### Modules
 
 ```text
-morphosyntax/l2/
-├── deprel.rs: UdDeprel newtype, deprel→POS constraint mapping
-├── plan.rs: contiguous span planning + host attachment planning
-├── merge.rs: POS resolution (6-level priority), planned Mor-based merge
-├── extract.rs: primary structural info extraction from UD responses
-├── spans.rs: contiguous span grouping for secondary dispatch
-├── splice.rs: splice merged Mor into ChatFile
-└── tests.rs: unit-test coverage for merge/splice/dispatch behavior
+crates/batchalign-transform/src/morphosyntax/l2/
+├── alignment.rs: UdAlignment, the one CHAT-word to UD-word alignment
+├── extract.rs: deferred @s positions and the primary's structure for them
+├── plan.rs: contiguous spans (owning their positions) and L2Attachment
+├── merge.rs: MergedL2Span, ModelAssignedPos, the external relation
+├── deprel.rs: UdDeprel, relation-to-category check, relation inference
+├── splice.rs: splice merged spans into the ChatFile, validate, roll back
+└── pipeline_tests.rs: end-to-end tests on recorded worker analyses
 ```
 
-**Dispatch** (`batch.rs:dispatch_secondary_l2`):
-- Plan per-utterance contiguous spans and host attachments in `plan.rs`
-- Dispatch to secondary Stanza workers via `infer_batch`
-- Map responses via `map_ud_sentence` (handles MWT Range tokens)
-- Merge with primary structural info via `merge_planned_secondary_span`
-- Splice into ChatFile via `splice_l2_into_chat`
+**Dispatch** (`crates/batchalign/src/morphosyntax/batch.rs`,
+`dispatch_secondary_l2`): plan spans from the deferred positions, send
+each span to a secondary Stanza worker (`infer_batch`, Stanza owning
+tokenization), merge each response with its span
+(`merge_planned_secondary_span`), and splice the merged spans
+(`splice_l2_into_chat`). The batch, single-file and incremental paths all
+call it.
 
-All 3 code paths wired: batch, single-file pipeline, incremental.
+### Fallback and reporting
 
-### Key Design Decisions
+Every `@s` word keeps the `L2|xxx` the primary pass wrote unless its span
+splices, and every way to keep it is reported:
 
-1. **POS resolution priority:** copula check → constraint agreement →
-   closed-class function word override → NOUN/PROPN override →
-   primary structural fallback → constraint best guess
-
-2. **Secondary model's NOUN/PROPN always trusted** over primary deprel
-   constraint (primary assigns wrong deprels to foreign words)
-
-3. **GRA correction:** when resolved POS contradicts primary deprel,
-   infer correct deprel from POS + head POS
-
-4. **UdDeprel newtype:** typed distinction between UD lowercase and
-   CHAT uppercase deprel labels
+| Where | Cause | Report |
+|-------|-------|--------|
+| extract | primary analysis does not align to the utterance's words | `L2Extraction::unaligned`, logged by `into_reported_positions` |
+| dispatch | no Stanza model for the target, or dispatch failed | `L2 morphotag:` log lines with the word count |
+| merge | secondary analysis does not align, map, or has no root | `L2MergeError`, logged with line and word count |
+| splice | the spliced `%gra` breaks an invariant | categorised warning, span rolled back |
 
 ### Tests
 
-- focused Rust unit tests for planning, merge, splice, and phrasal-verb behavior
-- ML golden tests for eng-spa, deu-eng, contractions, and flag-off regression
-
-### Documentation
-
-- `l2-morphotag.md`: design, architecture, Mermaid diagrams
-- `l2-morphotag-literature.md`: 11-citation literature survey
-- `l2-eval-runs/`: aggregate ungating evidence (per-pair and per-word CSVs from the evaluation suite)
+- `alignment.rs`: the alignment across a contraction, multi-word-token
+  representatives, terminator rows, and each refusal.
+- `pipeline_tests.rs`: end-to-end runs (payload collection, extraction,
+  primary injection, planning, merge, splice) on UD analyses recorded from
+  BA3's worker on Stanza 1.15.0: an `@s` word after a contraction, a span
+  after a contraction, phrasal verbs with a terminator row, the span's
+  external relation and its correction, categories both models agree on,
+  a secondary verb, and the `time out` compound noun.
+- `plan.rs`, `merge.rs`, `extract.rs`, `splice.rs`: unit tests of each step.
+- ML golden (`crates/batchalign/tests/ml_golden/morphotag/golden_l2.rs`):
+  real models through a live session for eng-spa, deu-eng, contractions,
+  phrasal verbs, cat-spa, dan-eng, fra-nld, and the flag-off case. Each
+  assertion prints the `%mor` line it inspects.
 
 ### Input policy and repair tooling
 
-- E255 now rejects whole-utterance same-language all-`@s` patterns at
+- E255 rejects whole-utterance same-language all-`@s` patterns at
   validation time; transcripts should use `[- lang]`.
 - E254 is warn-only when explicit `@s:LANG` names a language absent from
   `@Languages`; dispatch still uses the explicit target language.
-- `chatter debug fix-s` now repairs both transcript-side issues: it rewrites the
+- `chatter debug fix-s` repairs both transcript-side issues: it rewrites the
   qualifying whole-utterance `@s` pattern, appends missing explicit languages
   to `@Languages`, and leaves already-correct files untouched.
 
-## What's Not Done
-
-(No known open items. The phrasal-verb gap listed here previously was
-resolved, see below.)
-
-## Recently Fixed
-
-### Phrasal-verb recognition: FIXED
-
-Stanza returns `compound:prt` for true verb-particle constructions
-(`wake up`, `give up`, `figure out`), but the L2 merge algorithm used
-to process each `@s` word in isolation and could not see that relation.
-Two consequences:
-
-1. When the primary parser tagged a foreign verb with `advmod` (common
-   for German parsing English), the deprel constraint rejected the
-   secondary's VERB at Priority 2 and downgraded the head to ADV
-   (e.g. `give@s up@s` → `adv|give adp|up`).
-2. The particle's UPOS ADP was trusted by Priority 3 (closed-class) as
-   `adp|up`, not the CHAT-conventional `part|up`.
-
-**Fix.** `merge_primary_secondary_with_context` now accepts a
-`SecondaryUdContext { sentence, word_position }` and checks:
-
-- the current word is a phrasal-verb particle (its own deprel is
-  `compound:prt`) → promote UPOS to `Part`, set `corrected_deprel` to
-  `compound:prt` so the CHAT %gra tier becomes `COMPOUND-PRT`;
-- the current word is a phrasal-verb head (some sibling has deprel
-  `compound:prt` with head pointing to this word) and the secondary
-  UPOS is Verb → keep Verb, overriding the primary constraint.
-
-Priority 0 runs before the existing priority chain, mirroring the
-Priority 4 NOUN/PROPN override that is already in place for content
-nouns. No Python changes, no cache-key changes.
-
-**Evidence.** Running the pre-fix vs post-fix binary on a German-English
-fixture:
-
-```text
-Before: die kinder give@s up@s immer  →  adv|give-Fin-Imp-S adp|up
-After:  die kinder give@s up@s immer  →  verb|give-Fin-Imp-S part|up
-```
-
-The isolated Stanza probe that anchored the test expectations lived
-in the maintainers' L2-eval working area outside this public repo;
-the locked behaviour now lives in
-`crates/batchalign/src/chat_ops/morphosyntax_ops/l2/tests.rs` and
-the golden test cited below.
-
-**Test coverage.**
-
-- `crates/batchalign/src/chat_ops/morphosyntax_ops/l2/tests.rs`: four unit
-  tests exercising each merge branch (particle promotion, head
-  promotion, non-phrasal ADP regression, non-VERB secondary safety).
-- `crates/batchalign/tests/ml_golden/morphotag/golden_l2.rs::golden_l2_morphotag_phrasal_verbs`
- , end-to-end ML golden test on `wake up` / `give up` / `pick up` /
-  `time out`, asserting `verb|X part|up` for the first three and
-  `noun|time adp|out` for the (non-phrasal) compound noun.
-
-## Earlier Fixes
-
-### MWT Hint Preservation Regression: FIXED
-
-A follow-up Python regression in `batchalign/inference/_tokenizer_realign.py`
-silently stripped Stanza's `(text, True)` MWT hint tuples before the Rust
-char-DP aligner saw them. Stanza's tokenizer natively emits those tuples for
-English contractions, and its MWT processor relies on them to expand Range
-tokens. With the hint gone, MWT never fired and L2 contractions regressed
-despite an earlier Rust-side fix being present.
-
-**Fix:** `_realign_sentence` / `_conform` now overlay Stanza's own tuples onto
-aligner output where lengths match and no merging happened. Applies to every
-language in `MWT_LANGS`.
-
-**Evidence, 4 L2 ML-golden tests all pass:**
-
-- `golden_l2_morphotag_eng_contractions`: `it's@s:eng` → `pron|it~aux|be`,
-  `don't@s:eng` → `aux|do~part|not`
-- `golden_l2_morphotag_eng_spa`: Spanish-English code-switching, ~90%
-  acceptable
-- `golden_l2_morphotag_deu_eng`: German-English, ~95% acceptable
-- `golden_l2_morphotag_off_produces_l2_xxx`: flag-off regression guard
-
-The prior "MWT blocker" note in this document is LIFTED.
-
 ### Interaction with the English grammatical-invariant rewrite
 
-A new Rust rewrite rule (see
-[Stanza Limitations, Defect 1](stanza-limitations.md)) runs on the
-**primary** English UD analysis to fix Stanza's
-copula-vs-possessive failure (`the sink's overflowing`). L2
-extraction operates on the ORIGINAL `ud_responses`: captured at
-`crates/batchalign/src/pipeline/morphosyntax.rs:387` (assignment),
-then read by `l2::extract_l2_deferred_positions` at `:411` before
-`std::mem::take(&mut ctx.ud_responses)` at `:426`, with L2 splice
-gated on `!l2_deferred.is_empty()` at `:435`. The English rewrite
-runs after that capture, so it cannot corrupt L2 position mapping.
-The two features are decoupled by design.
+A Rust rewrite rule (see [Stanza Limitations, Defect 1](stanza-limitations.md))
+runs on the **primary** English UD analysis inside injection. L2
+extraction reads the primary responses before injection takes them, so the
+rewrite cannot change what extraction aligns.
 
-## Earlier Fixes (MWT contraction)
+## What is not done
 
-### MWT Contraction Expansion: FIXED
+- Host words whose primary head is a span word attach to the span's first
+  chunk (chatter's splice), not to the secondary root; see Limitations in
+  [L2 Morphotag](l2-morphotag.md#limitations).
 
-English contractions (`it's@s`, `don't@s`) now get proper clitic
-morphology: `pron|it~aux|be`, `aux|do~part|not`.
+## Documentation
 
-**Root cause:** Three bugs prevented MWT expansion in the L2 path:
-1. `"en"` missing from `MWT_LANGS` → English pipeline loaded without
-   MWT processor (dead English-specific branch in `_stanza_loading.py`)
-2. The Rust injection layer at
-   `crates/batchalign-transform/src/morphosyntax/injection.rs`
-   included Range parent tokens in the token vector → MOR count
-   mismatch → `retokenize_utterance()` (at
-   `crates/batchalign-transform/src/retokenize.rs:195`) failed
-3. `map_ud_sentence()` merged Range components into clitics, wrong for
-   the Retokenize path where each component needs its own MOR item
-
-**Fix:** Added `"en"` to `MWT_LANGS`, filtered Range parents from token
-vector, new `map_ud_sentence_expanded()` for the Retokenize path, and
-flipped `retokenize=false` to `true` in the L2 secondary dispatch
-(`batch.rs:dispatch_secondary_l2`).
-
-**Golden test:** `golden_l2_morphotag_eng_contractions` verifies
-`it's@s:eng` → `pron|it~aux|be` and `don't@s:eng` → `aux|do~part|not`.
-
-### Primary `--retokenize` for non-CJK: FIXED
-
-The `--retokenize` flag now works for English (and all MWT languages).
-`golden_morphotag_retokenize_eng` shows expanded output matching BA2:
-`gonna eat cookies .` → `gon na eat cookies .` with per-component MOR.
+- `l2-morphotag.md`: design, architecture, index spaces, Mermaid diagrams
+- `l2-morphotag-literature.md`: literature survey
+- `l2-eval-runs/`: aggregate evaluation evidence (per-pair and per-word CSVs)

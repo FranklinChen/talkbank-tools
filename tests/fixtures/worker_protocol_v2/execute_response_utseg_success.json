@@ -7,11 +7,13 @@
     "kind": "utseg_result",
     "items": [
       {
+        "kind": "constituency",
         "trees": [
           "(ROOT (S hello world))"
         ]
       },
       {
+        "kind": "failed",
         "error": "Invalid batch item"
       }
     ]

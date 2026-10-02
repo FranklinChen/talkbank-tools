@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-09-30 10:16 EDT
+**Last updated:** 2026-10-01 09:52 EDT
 
 ## Overview
 
@@ -124,7 +124,7 @@ Implements content-fingerprinted WAV conversion with file-locking and atomic wri
    requested time window in their own strict-recipe namespace.
 4. **Cache lookup**: check the media cache directory for
    `{fingerprint}.wav`. If it exists, return immediately (cache hit).
-5. **Lock**: acquire exclusive `fs2` file lock on `{fingerprint}.wav.lock`
+5. **Lock**: acquire an exclusive std `File::lock` on `{fingerprint}.wav.lock`
    to prevent concurrent ffmpeg invocations for the same source file. This
    is important for parallel FA processing where multiple groups reference
    the same audio.
@@ -434,4 +434,4 @@ Total: **16,739 MP4 files** across all volumes.
   bound its windows without it and fails the file with a host error when it
   is missing; the transcribe path falls back to a named decode-budget ceiling.
 - **blake3** crate for content fingerprinting.
-- **fs2** crate for cross-platform file locking.
+- std `File::lock` (Rust 1.89+) for cross-platform file locking.

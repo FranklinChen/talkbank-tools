@@ -18,9 +18,7 @@ use tracing::{error, info, warn};
 use crate::api::{JobId, JobStatus};
 use crate::host_memory::{HostMemoryCoordinator, HostMemoryError, JobExecutionPlan};
 use crate::scheduling::FailureCategory;
-use crate::store::{
-    JobCompletionSnapshot, JobStore, LeaseRenewalOutcome, RunnerJobSnapshot, unix_now,
-};
+use crate::store::{JobCompletionSnapshot, JobStore, LeaseRenewalOutcome, RunnerJobSnapshot};
 
 use super::context::{
     DirectExecutionHost, DispatchHostContext, ExecutionReservationError, HostedJobRunOutcome,
@@ -69,8 +67,8 @@ pub(crate) fn job_task(
             // of letting it sit "running" for a day (2026-07-09 field
             // incident: 24h at 24/345 with zero log output). Detection
             // only; the operator decides whether to cancel/restart.
-            const STALL_ALARM_S: f64 = 1800.0;
-            let interval = std::time::Duration::from_secs(JobStore::LOCAL_LEASE_HEARTBEAT_S);
+            const STALL_ALARM: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            let interval = crate::config::LEASE_HEARTBEAT;
             loop {
                 tokio::time::sleep(interval).await;
                 if lease_store.renew_job_lease(&lease_job_id).await == LeaseRenewalOutcome::Stop {
@@ -78,11 +76,11 @@ pub(crate) fn job_task(
                 }
                 if let Some(last_activity) = lease_store.last_file_activity_at(&lease_job_id).await
                 {
-                    let idle_s = unix_now().0 - last_activity.0;
-                    if idle_s > STALL_ALARM_S {
+                    let idle = lease_store.now().saturating_duration_since(last_activity);
+                    if idle > STALL_ALARM {
                         error!(
                             job_id = %lease_job_id,
-                            idle_minutes = (idle_s / 60.0) as u64,
+                            idle_minutes = idle.as_secs() / 60,
                             "job appears STALLED: no file activity while the runner is live"
                         );
                     }
@@ -96,11 +94,11 @@ pub(crate) fn job_task(
                 // eligible again, then re-spawn after the backoff deadline. Without this,
                 // the job stays Queued with next_eligible_at set but no runner
                 // permanently blocking new submissions for the same files.
-                let delay_secs = (retry_at.0 - unix_now().0).max(0.0);
+                let delay = retry_at.saturating_duration_since(host.store.now());
                 let host_retry = host.clone();
                 let job_id_retry = job_id.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+                    tokio::time::sleep(delay).await;
                     job_task(job_id_retry, host_retry).await;
                 });
             }
@@ -192,7 +190,7 @@ async fn run_hosted_job(
                         job_id.clone(),
                     ));
                 }
-                Some(crate::store::BeginRunnerOutcome::Started(generation)) => {
+                Some(crate::store::BeginRunnerOutcome::Started { generation, .. }) => {
                     break generation;
                 }
                 Some(crate::store::BeginRunnerOutcome::RunnerStillLive) => {
@@ -253,7 +251,7 @@ async fn run_hosted_job(
         }) => match &memory_gate_policy {
             MemoryGateFailurePolicy::Queued { orchestrator } => {
                 let disposition = orchestrator
-                    .handle_memory_gate_rejection(&sink, job_id, requested_workers, &error)
+                    .handle_memory_gate_rejection(&sink, job_id)
                     .await?;
                 match disposition {
                     super::context::MemoryGateRejectionDisposition::Requeued { retry_at } => {
@@ -272,13 +270,13 @@ async fn run_hosted_job(
             MemoryGateFailurePolicy::FailJob => {
                 let message = error.to_string();
                 sink.bump_memory_gate_aborts().await;
-                sink.fail_job(job_id, &message, unix_now()).await;
+                sink.fail_job(job_id, &message).await;
                 return Err(crate::error::ServerError::MemoryPressure(message));
             }
         },
         Err(ExecutionReservationError::Fatal(error)) => {
             let message = error.to_string();
-            sink.fail_job(job_id, &message, unix_now()).await;
+            sink.fail_job(job_id, &message).await;
             return Err(error);
         }
     };
@@ -371,7 +369,7 @@ async fn run_hosted_job(
         .await
     {
         let message = error.to_string();
-        sink.fail_job(job_id, &message, unix_now()).await;
+        sink.fail_job(job_id, &message).await;
         return Err(error);
     }
 
@@ -400,7 +398,7 @@ async fn run_hosted_job(
         return Ok(HostedJobRunOutcome::Completed);
     };
 
-    let completed_at = unix_now();
+    let completed_at = sink.now();
     let final_status = finalize_status(&completion, forced_errors);
 
     let failure_reason = sink
@@ -482,7 +480,7 @@ async fn reserve_job_execution(
         command,
         job.dispatch.lang.to_worker_language()
     );
-    let timeout = Duration::from_secs(host.config().memory_gate_timeout_s);
+    let timeout = host.config().memory_gate_timeout_s.duration();
     let poll_interval = Duration::from_secs(host.config().memory_gate_poll_s.get());
     let plan = crate::blocking::spawn_in_span(move || {
         coordinator.wait_for_job_execution_plan(
@@ -524,14 +522,13 @@ pub(super) async fn record_preflight_media_failures(
     file_list: &[crate::store::PendingJobFile],
     media_failures: &HashMap<usize, String>,
 ) -> HashSet<usize> {
-    let now = unix_now();
     let mut failed_indices = HashSet::with_capacity(media_failures.len());
 
     for (&idx, err_msg) in media_failures {
         failed_indices.insert(idx);
         if let Some(file) = file_list.iter().find(|file| file.file_index == idx) {
             FileRunTracker::new(sink, job_id, &file.filename)
-                .record_setup_failure(now, err_msg, FailureCategory::Validation, now)
+                .record_setup_failure(err_msg, FailureCategory::Validation)
                 .await;
         }
     }
@@ -610,7 +607,6 @@ mod tests {
         assert_eq!(finalize_status(&completion, 1), JobStatus::Failed);
     }
 
-    use crate::api::NumWorkers;
     use crate::cache::UtteranceCache;
     use crate::config::{RuntimeLayout, ServerConfig};
     use crate::db::JobDB;
@@ -629,8 +625,6 @@ mod tests {
             &self,
             _sink: &Arc<dyn RunnerEventSink>,
             _job_id: &JobId,
-            _requested_workers: NumWorkers,
-            _error: &HostMemoryError,
         ) -> Result<MemoryGateRejectionDisposition, crate::error::ServerError> {
             panic!("memory-gate path must not be reached when the job is missing from the store")
         }
@@ -650,7 +644,12 @@ mod tests {
             memory_gate_mb: None,
             ..ServerConfig::default()
         };
-        let store = Arc::new(JobStore::new(config, Some(db), ws_tx));
+        let store = Arc::new(JobStore::new(
+            config,
+            Some(db),
+            ws_tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        ));
         let pool = Arc::new(WorkerPool::new(PoolConfig {
             test_echo: true,
             ..Default::default()

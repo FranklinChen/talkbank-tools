@@ -34,9 +34,8 @@ use tracing::Instrument;
 use crate::api::{DisplayPath, JobId};
 use crate::runner::job_scope::{FileTaskScope, SpawnScope};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition};
-use crate::store::unix_now;
 
-use super::tracker::{set_file_error, set_file_progress};
+use super::tracker::set_file_progress;
 use super::{FileTaskOutcome, RunnerEventSink};
 
 // ---------------------------------------------------------------------------
@@ -198,14 +197,15 @@ pub(crate) async fn force_terminal_file_states(
         return 0;
     }
 
-    let now = unix_now();
+    let now = sink.now();
     for filename in &unfinished {
         let last_status = sink
             .file_status_label(job_id, filename)
             .await
             .unwrap_or_default();
         let msg = format!("File did not reach terminal status (last status: {last_status})");
-        set_file_error(sink, job_id, filename, &msg, FailureCategory::System, now).await;
+        sink.mark_file_error(job_id, filename, &msg, FailureCategory::System, now)
+            .await;
     }
 
     sink.bump_forced_terminal_errors(unfinished.len()).await;
@@ -230,7 +230,7 @@ pub(crate) async fn record_file_cancelled_before_dispatch(
     job_id: &JobId,
     filename: &str,
 ) {
-    let finished_at = unix_now();
+    let finished_at = sink.now();
     let message = "dispatch cancelled before this file's task was ever started".to_owned();
 
     sink.finish_file_attempt(
@@ -243,8 +243,7 @@ pub(crate) async fn record_file_cancelled_before_dispatch(
     )
     .await;
 
-    set_file_error(
-        sink,
+    sink.mark_file_error(
         job_id,
         filename,
         &message,
@@ -279,7 +278,7 @@ async fn record_abnormal_file_task_exit(
     role: &str,
     exit: FileTaskExit,
 ) {
-    let finished_at = unix_now();
+    let finished_at = sink.now();
     let (message, category, outcome) = match exit {
         FileTaskExit::Cancelled => (
             format!("{role} stopped after job cancellation before recording a terminal file state"),
@@ -308,5 +307,6 @@ async fn record_abnormal_file_task_exit(
     )
     .await;
 
-    set_file_error(sink, job_id, filename, &message, category, finished_at).await;
+    sink.mark_file_error(job_id, filename, &message, category, finished_at)
+        .await;
 }

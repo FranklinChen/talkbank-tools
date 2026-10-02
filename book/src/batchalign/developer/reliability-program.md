@@ -1,7 +1,7 @@
 # Long-Term Reliability Program
 
 **Status:** Current
-**Last updated:** 2026-05-21 15:15 EDT
+**Last updated:** 2026-10-01 17:34 EDT
 
 This document defines the ongoing reliability practices for batchalign3.
 It covers corpus-level regression testing, failure tracking, stress/recovery
@@ -35,10 +35,10 @@ Schedule regular regression runs against the full TalkBank corpus data.
   class, ≥ 256 GB RAM) for full corpus runs. Developer machines may
   run small targeted subsets but must never attempt the full corpus
   (OOM risk).
-- **Golden baselines:** stored in `batchalign/tests/golden/`. Each
-  baseline is a deterministic snapshot of pipeline output for a
-  fixed set of input files. (`batchalign3` is the CLI name; the
-  package directory is `batchalign/`.)
+- **Golden baselines:** the ML golden snapshots of
+  `crates/batchalign/tests/ml_golden/` (insta snapshots under
+  `crates/batchalign/tests/ml_golden/snapshots/`). Each is a
+  deterministic snapshot of pipeline output for a fixed input.
 - **Comparison tool:** diff golden output against new run output. Any
   difference is either an intentional change (update the baseline with a
   commit message explaining why) or a regression (file a bug).

@@ -56,7 +56,7 @@ fn echo_config(python: String) -> WorkerConfig {
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
         test_echo: true,
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     }
 }
@@ -123,11 +123,11 @@ async fn checkout_distinct_rust_only_field_still_shares_worker() {
     // never reaches the Python child. Differing values must NOT partition
     // the pool.
     let cfg_a = WorkerConfig {
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..echo_config(python.clone())
     };
     let cfg_b = WorkerConfig {
-        ready_timeout_s: 90,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<90>(),
         ..echo_config(python)
     };
 

@@ -17,7 +17,7 @@ expression: report
     },
     "disk_free_mb_for_cache": 500000,
     "hostname": "test-host",
-    "detection_timestamp": 1700000000.0,
+    "detection_timestamp": "2023-11-14T22:13:20.000Z",
     "detection_warnings": []
   },
   "effective": {

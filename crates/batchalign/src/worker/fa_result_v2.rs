@@ -36,7 +36,7 @@ pub fn parse_forced_alignment_result_v2(
                 .iter()
                 .map(|token| FaRawToken {
                     text: token.text.clone(),
-                    time_s: token.time_s.0,
+                    time_s: token.time_s,
                 })
                 .collect(),
         },
@@ -126,7 +126,7 @@ mod tests {
     use crate::chat_ops::fa::FaWord;
     use crate::chat_ops::{UtteranceIdx, WordIdx};
 
-    use crate::api::{DurationMs, DurationSeconds};
+    use crate::api::{AudioPositionSeconds, DurationMs, NonNegativeSeconds};
     use crate::types::worker_v2::{
         ExecuteResponseV2, IndexedWordTimingResultV2, IndexedWordTimingV2, TaskResultV2,
         WhisperTokenTimingResultV2, WhisperTokenTimingV2, WorkerRequestIdV2,
@@ -172,15 +172,15 @@ mod tests {
                 tokens: vec![
                     WhisperTokenTimingV2 {
                         text: "hello".into(),
-                        time_s: DurationSeconds(0.10),
+                        time_s: AudioPositionSeconds::try_from(0.10).expect("fixture onset"),
                     },
                     WhisperTokenTimingV2 {
                         text: "world".into(),
-                        time_s: DurationSeconds(0.35),
+                        time_s: AudioPositionSeconds::try_from(0.35).expect("fixture onset"),
                     },
                 ],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let timings = parse_forced_alignment_result_v2(
@@ -210,7 +210,7 @@ mod tests {
                     None,
                 ],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let timings = parse_forced_alignment_result_v2(
@@ -234,7 +234,7 @@ mod tests {
             TaskResultV2::TranslationResult(crate::types::worker_v2::TranslationResultV2 {
                 items: vec![crate::types::worker_v2::TranslationItemResultV2::BlankInput],
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let error = parse_forced_alignment_result_v2(

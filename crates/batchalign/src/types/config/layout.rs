@@ -68,11 +68,6 @@ impl RuntimeLayout {
         self.state_dir.join("logs")
     }
 
-    /// Runtime bug-report directory under the owned state root.
-    pub fn bug_reports_dir(&self) -> PathBuf {
-        self.state_dir.join("bug-reports")
-    }
-
     /// Runtime dashboard asset directory under the owned state root.
     pub fn dashboard_dir(&self) -> PathBuf {
         self.state_dir.join("dashboard")

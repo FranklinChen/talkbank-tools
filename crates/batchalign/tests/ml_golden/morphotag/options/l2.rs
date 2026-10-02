@@ -6,7 +6,7 @@ use batchalign::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use batchalign::worker::InferTask;
 
 use super::super::fixtures::{ENG_SIMPLE, ENG_SPA_L2, ENG_XYZ_L2};
-use super::super::helpers::find_mor_line_for;
+use crate::ml_golden::golden::helpers::find_mor_line_for;
 
 fn morphotag_options(no_l2_morphotag: bool) -> CommandOptions {
     CommandOptions::Morphotag(MorphotagOptions {

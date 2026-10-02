@@ -1,6 +1,8 @@
 //! Row types: flat DB rows mapping 1:1 to SQLite table columns.
 
+use crate::api::MachineTime;
 use crate::options::CommandOptions;
+use crate::scheduling::LeaseRecord;
 
 /// Flat representation of a row from the `jobs` SQLite table.
 ///
@@ -79,24 +81,25 @@ pub struct JobRow {
     pub source_dir: String,
 
     /// Column `submitted_by TEXT NOT NULL DEFAULT ''`.
-    /// IP address or Tailscale hostname of the submitter. Used for
-    /// conflict detection (duplicate jobs from the same submitter).
+    /// The submitting client's address, `''` when none was recorded. Raw
+    /// here; `store::Submitter::from_columns` is the one reader that turns
+    /// it, with the name, into an `Option<Submitter>`.
     pub submitted_by: String,
 
     /// Column `submitted_by_name TEXT NOT NULL DEFAULT ''`.
-    /// Human-readable hostname of the submitter (resolved via Tailscale
-    /// API or reverse DNS). For display in the dashboard.
+    /// The name the address resolved to, `''` when none was recorded. Read
+    /// only through `store::Submitter::from_columns`.
     pub submitted_by_name: String,
 
     /// Column `submitted_at REAL NOT NULL`.
     /// Unix timestamp (seconds since epoch, with fractional part) when the
     /// job was submitted.
-    pub submitted_at: f64,
+    pub submitted_at: MachineTime,
 
     /// Column `completed_at REAL` (nullable).
     /// Unix timestamp when the job reached a terminal state (`"completed"`,
     /// `"failed"`, `"cancelled"`, `"interrupted"`). `None` while still active.
-    pub completed_at: Option<f64>,
+    pub completed_at: Option<MachineTime>,
 
     /// Column `num_workers INTEGER` (nullable).
     /// Number of workers assigned to this job once it starts running.
@@ -105,22 +108,18 @@ pub struct JobRow {
 
     /// Column `next_eligible_at REAL` (nullable).
     /// Earliest unix timestamp when a deferred job should be retried.
-    pub next_eligible_at: Option<f64>,
-    /// Column `leased_by_node TEXT` (nullable).
-    /// Identifier of the node that currently owns the job lease.
-    pub leased_by_node: Option<String>,
-    /// Column `lease_expires_at REAL` (nullable).
-    /// Earliest unix timestamp when the current lease should expire.
-    pub lease_expires_at: Option<f64>,
-    /// Column `lease_heartbeat_at REAL` (nullable).
-    /// Unix timestamp of the last lease heartbeat or claim.
-    pub lease_heartbeat_at: Option<f64>,
+    pub next_eligible_at: Option<MachineTime>,
+    /// Columns `leased_by_node TEXT`, `lease_expires_at REAL` and
+    /// `lease_heartbeat_at REAL` (all nullable, written together): the lease,
+    /// or `None` when all three are NULL. A row holding some but not all of
+    /// them fails to load.
+    pub lease: Option<LeaseRecord>,
 
     /// Column `last_cancelled_at REAL` (nullable). Most recent cancel
     /// attempt's timestamp; `None` until at least one cancel arrives.
     /// Denormalized projection of the `cancellations` audit table for
     /// recovery hydration without a JOIN.
-    pub last_cancelled_at: Option<f64>,
+    pub last_cancelled_at: Option<MachineTime>,
     /// Column `last_cancelled_source TEXT` (nullable). Wire-format source
     /// of the most recent cancel (`tui`, `api`, `signal`, ...).
     pub last_cancelled_source: Option<String>,
@@ -181,12 +180,6 @@ pub struct FileStatusRow {
     /// `"worker_crash"`). Used by the dashboard to group failures.
     pub error_category: Option<String>,
 
-    /// Column `bug_report_id TEXT` (nullable).
-    /// UUID linking to a bug report under `~/.batchalign3/bug-reports/`
-    /// if a bug report was filed for this file's failure. `None` when no
-    /// bug report exists.
-    pub bug_report_id: Option<String>,
-
     /// Column `content_type TEXT NOT NULL DEFAULT 'chat'`.
     /// MIME-like content descriptor for the result file. Typically
     /// `"chat"` for `.cha` output or `"csv"` for analysis results.
@@ -195,16 +188,16 @@ pub struct FileStatusRow {
     /// Column `started_at REAL` (nullable).
     /// Unix timestamp (seconds since epoch) when processing of this file
     /// began. `None` while queued.
-    pub started_at: Option<f64>,
+    pub started_at: Option<MachineTime>,
 
     /// Column `finished_at REAL` (nullable).
     /// Unix timestamp (seconds since epoch) when processing of this file
     /// finished (success or failure). `None` while still processing.
-    pub finished_at: Option<f64>,
+    pub finished_at: Option<MachineTime>,
 
     /// Column `next_eligible_at REAL` (nullable).
     /// Earliest unix timestamp when a deferred retry may start.
-    pub next_eligible_at: Option<f64>,
+    pub next_eligible_at: Option<MachineTime>,
 }
 
 /// Flat representation of a row from the `attempts` SQLite table.
@@ -229,10 +222,10 @@ pub struct AttemptRow {
     pub attempt_number: i32,
     /// Start timestamp, unix seconds with fractional precision. Column
     /// `started_at REAL NOT NULL`.
-    pub started_at: f64,
+    pub started_at: MachineTime,
     /// Finish timestamp, unix seconds with fractional precision. Column
     /// `finished_at REAL`.
-    pub finished_at: Option<f64>,
+    pub finished_at: Option<MachineTime>,
     /// Final outcome string (snake_case). Column `outcome TEXT NOT NULL`.
     pub outcome: String,
     /// Broad failure category string (snake_case). Column

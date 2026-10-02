@@ -1,10 +1,10 @@
 //! File-level job-state mutations on [`JobStore`].
 
-use crate::api::{DisplayPath, FileStatusKind, JobId, UnixTimestamp};
+use crate::api::{DisplayPath, JobId};
 use crate::scheduling::{AttemptOutcome, RetryDisposition, WorkUnitKind};
 
 use super::super::{
-    AttemptFinishRecord, AttemptStartRecord, CompletedFileOutput, FileFailureRecord,
+    AttemptFinishRecord, AttemptStartRecord, CompletedFileOutput, EventTime, FileFailureRecord,
     FileProgressRecord, FileRetryRecord, JobStore, PersistedFileUpdate,
 };
 
@@ -14,11 +14,11 @@ impl JobStore {
         &self,
         job_id: &JobId,
         filename: &str,
-        started_at: UnixTimestamp,
+        started_at: EventTime,
     ) {
         let Some(update) = self
             .registry
-            .mark_file_processing(job_id, filename, started_at)
+            .mark_file_processing(job_id, filename, started_at.instant())
             .await
         else {
             return;
@@ -29,14 +29,8 @@ impl JobStore {
             job_id,
             PersistedFileUpdate {
                 filename,
-                status: FileStatusKind::Processing,
-                error: None,
-                error_category: None,
-                bug_report_id: None,
+                phase: &update.phase,
                 content_type: None,
-                started_at: Some(started_at),
-                finished_at: None,
-                next_eligible_at: None,
             },
         )
         .await;
@@ -47,7 +41,7 @@ impl JobStore {
         &self,
         job_id: &JobId,
         filename: &str,
-        finished_at: UnixTimestamp,
+        finished_at: EventTime,
         result: Option<CompletedFileOutput>,
     ) {
         let persisted_content_type: Option<String> = result
@@ -56,7 +50,7 @@ impl JobStore {
 
         let Some(update) = self
             .registry
-            .mark_file_done(job_id, filename, finished_at, result)
+            .mark_file_done(job_id, filename, finished_at.instant(), result)
             .await
         else {
             return;
@@ -67,14 +61,8 @@ impl JobStore {
             job_id,
             PersistedFileUpdate {
                 filename,
-                status: FileStatusKind::Done,
-                error: None,
-                error_category: None,
-                bug_report_id: None,
+                phase: &update.phase,
                 content_type: persisted_content_type.as_deref(),
-                started_at: None,
-                finished_at: Some(finished_at),
-                next_eligible_at: None,
             },
         )
         .await;
@@ -96,19 +84,12 @@ impl JobStore {
         };
         self.notify_file_update(&update.job_id, update.file, update.completed_files);
 
-        let error_category = failure.category.to_string();
         self.db_update_file(
             job_id,
             PersistedFileUpdate {
                 filename,
-                status: FileStatusKind::Error,
-                error: Some(&failure.message),
-                error_category: Some(error_category.as_str()),
-                bug_report_id: None,
+                phase: &update.phase,
                 content_type: None,
-                started_at: None,
-                finished_at: Some(failure.finished_at),
-                next_eligible_at: None,
             },
         )
         .await;
@@ -131,11 +112,11 @@ impl JobStore {
         job_id: &JobId,
         filename: &str,
         work_unit_kind: WorkUnitKind,
-        started_at: UnixTimestamp,
+        started_at: EventTime,
     ) {
         let Some(update) = self
             .registry
-            .start_file_attempt(job_id, filename, started_at)
+            .start_file_attempt(job_id, filename, started_at.instant())
             .await
         else {
             return;
@@ -146,14 +127,8 @@ impl JobStore {
             job_id,
             PersistedFileUpdate {
                 filename,
-                status: FileStatusKind::Processing,
-                error: None,
-                error_category: None,
-                bug_report_id: None,
+                phase: &update.phase,
                 content_type: None,
-                started_at: Some(started_at),
-                finished_at: None,
-                next_eligible_at: None,
             },
         )
         .await;
@@ -185,19 +160,12 @@ impl JobStore {
         };
         self.notify_file_update(&update.job_id, update.file, update.completed_files);
 
-        let error_category = retry.category.to_string();
         self.db_update_file(
             job_id,
             PersistedFileUpdate {
                 filename,
-                status: FileStatusKind::Processing,
-                error: Some(&retry.message),
-                error_category: Some(error_category.as_str()),
-                bug_report_id: None,
+                phase: &update.phase,
                 content_type: None,
-                started_at: None,
-                finished_at: Some(retry.finished_at),
-                next_eligible_at: Some(retry.retry_at),
             },
         )
         .await;
@@ -252,7 +220,7 @@ impl JobStore {
 mod tests {
     use tokio::sync::broadcast;
 
-    use crate::api::{ContentType, FileStatusKind, JobId, ReleasedCommand, UnixTimestamp};
+    use crate::api::{ContentType, FileStatusKind, JobId, ReleasedCommand};
     use crate::scheduling::FailureCategory;
     use crate::store::queries::tests::{make_job, test_config};
     use crate::ws::BROADCAST_CAPACITY;
@@ -263,7 +231,12 @@ mod tests {
     #[tokio::test]
     async fn mark_file_done_records_result() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
         store
             .submit(make_job(
                 "job-1",
@@ -277,7 +250,7 @@ mod tests {
             .mark_file_done(
                 &JobId::from("job-1"),
                 "a.cha",
-                UnixTimestamp(10.0),
+                crate::store::EventTime::fixed(crate::unix_time(10.0)),
                 Some(CompletedFileOutput {
                     filename: DisplayPath::from("a.cha"),
                     content_type: ContentType::Chat,
@@ -295,7 +268,12 @@ mod tests {
     #[tokio::test]
     async fn mark_file_retry_pending_sets_deadline() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(test_config(), None, tx);
+        let store = JobStore::new(
+            test_config(),
+            None,
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
         store
             .submit(make_job(
                 "job-1",
@@ -312,8 +290,8 @@ mod tests {
                 &FileRetryRecord {
                     message: "retry later".into(),
                     category: FailureCategory::WorkerTimeout,
-                    finished_at: UnixTimestamp(10.0),
-                    retry_at: UnixTimestamp(20.0),
+                    finished_at: crate::store::EventTime::fixed(crate::unix_time(10.0)),
+                    retry_at: crate::unix_time(20.0),
                 },
             )
             .await;
@@ -325,6 +303,6 @@ mod tests {
             .find(|status| status.filename == "a.cha")
             .unwrap();
         assert_eq!(file.status, FileStatusKind::Processing);
-        assert_eq!(file.next_eligible_at, Some(UnixTimestamp(20.0)));
+        assert_eq!(file.next_eligible_at, Some(crate::unix_time(20.0)));
     }
 }

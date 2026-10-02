@@ -4,16 +4,17 @@
 //! but the transcription pipeline still expects the established Rust
 //! `AsrResponse` domain. This module keeps that normalization in Rust.
 
-use crate::api::{DurationSeconds, LanguageCode3, NonNegativeSeconds};
+use crate::api::LanguageCode3;
 use crate::transcribe::{AsrResponse, AsrToken};
 use crate::types::worker_v2::{
-    AsrBackendV2, AsrElementKindV2, AsrIdentityMismatchV2, AsrRequestedModelsV2, ExecuteResponseV2,
-    SpeakerAttributionV2, TaskResultV2, WhisperChunkResultV2,
+    AsrBackendV2, AsrElementKindV2, AsrElementTimingV2, AsrIdentityMismatchV2,
+    AsrRequestedModelsV2, ExecuteResponseV2, SpeakerAttributionV2, TaskResultV2,
+    WhisperChunkResultV2,
 };
 use crate::worker::chunk_spans::MonotoneChunkSpans;
 use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
 use batchalign_transform::asr_postprocess::{
-    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, AsrTimestampSecs, SpeakerIndex,
+    AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, SpeakerIndex,
 };
 use tracing::warn;
 
@@ -113,10 +114,11 @@ pub fn parse_asr_response_v2(
                                 return None;
                             }
 
+                            let (start_s, end_s) = element_positions(element.timing);
                             Some(AsrToken {
                                 text: text.to_string(),
-                                start_s: element.start_s.map(DurationSeconds::from),
-                                end_s: element.end_s.map(DurationSeconds::from),
+                                start_s,
+                                end_s,
                                 // `None` is this field's own spelling of "no
                                 // speaker label", which is exactly what an
                                 // undiarized engine reports. It used to receive
@@ -143,14 +145,11 @@ pub fn parse_asr_response_v2(
                                         if text.is_empty() {
                                             return None;
                                         }
+                                        let (ts, end_ts) = element_positions(element.timing);
                                         Some(AsrElement {
                                             value: AsrRawText::new(text),
-                                            ts: AsrTimestampSecs::from(
-                                                element.start_s.map(NonNegativeSeconds::get),
-                                            ),
-                                            end_ts: AsrTimestampSecs::from(
-                                                element.end_s.map(NonNegativeSeconds::get),
-                                            ),
+                                            ts,
+                                            end_ts,
                                             kind: match element.kind {
                                                 AsrElementKindV2::Text => AsrElementKind::Text,
                                                 AsrElementKindV2::Punctuation => {
@@ -227,6 +226,30 @@ fn speaker_label(attribution: &SpeakerAttributionV2) -> Option<String> {
 /// - **Undiarized**: the single track of a recording nobody separated. This is
 ///   the ONE place that number is chosen, and it is chosen because the engine
 ///   said it separates nobody, not because a label was missing.
+///
+/// An element's admitted timing as the two optional positions the
+/// transcript's token and element types still store.
+///
+/// The one lossy step, named so it is a signature: an untimed element's
+/// cause stops here (it was logged where the bounds were read), and its
+/// positions are absent rather than invented. A timed element's positions
+/// are its admitted interval's, so the transcript side admits them again
+/// without refusal.
+fn element_positions(
+    timing: AsrElementTimingV2,
+) -> (
+    Option<crate::api::AudioPositionSeconds>,
+    Option<crate::api::AudioPositionSeconds>,
+) {
+    match timing.interval() {
+        Some(interval) => {
+            let (start, end) = interval.as_positions();
+            (Some(start), Some(end))
+        }
+        None => (None, None),
+    }
+}
+
 fn speaker_index(attribution: &SpeakerAttributionV2) -> SpeakerIndex {
     match attribution {
         SpeakerAttributionV2::Attributed { label } => {
@@ -257,7 +280,9 @@ pub(crate) fn whisper_chunk_result_to_asr_response(
     fallback_lang: Option<&LanguageCode3>,
 ) -> Result<AsrResponse, String> {
     // Both producers' seams are settled here, once, whatever they sent.
-    let spans = MonotoneChunkSpans::project(&result.chunks);
+    let spans = MonotoneChunkSpans::project(&result.chunks).map_err(|refused| {
+        format!("Whisper chunk boundaries could not be fitted as audio positions: {refused}")
+    })?;
     if spans.adjusted_boundaries() > 0 {
         warn!(
             moved = spans.adjusted_boundaries(),
@@ -316,13 +341,18 @@ fn resolve_worker_lang(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::LanguageCode3;
+    use crate::api::{AudioPositionSeconds, LanguageCode3, NonNegativeSeconds};
     use crate::types::worker_v2::{
         AsrElementKindV2, AsrElementV2, AsrModelIdentityV2, AsrMonologueV2, ExecuteResponseV2,
         HubCommitV2, LoadedModelV2, ModelIdV2, MonologueAsrResultV2, ObservedRevisionV2,
         RequestedModelV2, RequestedRevisionV2, TaskResultV2, WhisperChunkResultV2,
         WhisperChunkSpanV2, WorkerRequestIdV2,
     };
+
+    /// A fixture position; every literal in this module is a valid one.
+    fn at(seconds: f64) -> Option<AudioPositionSeconds> {
+        Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
+    }
 
     /// The commit the plan pins in these fixtures.
     const PINNED: &str = "06f233fe06e710322aca913c1bc4249a0d71fce1";
@@ -368,8 +398,14 @@ mod tests {
     }
 
     /// A wire bound, through the same proof the deserializer uses.
-    fn seconds(value: f64) -> NonNegativeSeconds {
-        NonNegativeSeconds::try_from(value).expect("test bound")
+    fn seconds(value: f64) -> AudioPositionSeconds {
+        AudioPositionSeconds::try_from(value).expect("test bound")
+    }
+
+    /// An element timed from `start` to `end` seconds.
+    fn timed(start: f64, end: f64) -> AsrElementTimingV2 {
+        AsrElementTimingV2::admit_positions(Some(seconds(start)), Some(seconds(end)))
+            .expect("an ordered fixture pair")
     }
 
     #[test]
@@ -393,7 +429,7 @@ mod tests {
                 ],
                 model: test_identity(),
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let parsed = parse_asr_response_v2(
@@ -407,7 +443,7 @@ mod tests {
         assert_eq!(parsed.lang, "eng");
         assert_eq!(parsed.tokens.len(), 2);
         assert_eq!(parsed.tokens[0].text, "hello");
-        assert_eq!(parsed.tokens[1].end_s, Some(DurationSeconds(1.0)));
+        assert_eq!(parsed.tokens[1].end_s, at(1.0));
     }
 
     #[test]
@@ -423,22 +459,21 @@ mod tests {
                     elements: vec![
                         AsrElementV2 {
                             value: "nei5".into(),
-                            start_s: Some(seconds(0.1)),
-                            end_s: Some(seconds(0.4)),
+                            timing: timed(0.1, 0.4),
                             kind: AsrElementKindV2::Text,
                             confidence: Some(0.9),
                         },
                         AsrElementV2 {
                             value: ",".into(),
-                            start_s: None,
-                            end_s: None,
+                            timing: AsrElementTimingV2::Untimed {
+                                cause: batchalign_types::interval::UntimedCause::ProviderReportedNoTiming,
+                            },
                             kind: AsrElementKindV2::Punctuation,
                             confidence: None,
                         },
                         AsrElementV2 {
                             value: "hou2".into(),
-                            start_s: Some(seconds(0.5)),
-                            end_s: Some(seconds(0.8)),
+                            timing: timed(0.5, 0.8),
                             kind: AsrElementKindV2::Text,
                             confidence: None,
                         },
@@ -446,7 +481,7 @@ mod tests {
                 }],
                 model: test_identity(),
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let parsed = parse_asr_response_v2(
@@ -463,8 +498,8 @@ mod tests {
         assert_eq!(parsed.tokens[0].confidence, Some(0.9));
         assert_eq!(parsed.tokens[1].text, "hou2");
         let monologues = parsed.source_monologues.unwrap();
-        assert_eq!(monologues[0].elements[1].ts, AsrTimestampSecs::Absent);
-        assert_eq!(monologues[0].elements[1].end_ts, AsrTimestampSecs::Absent);
+        assert_eq!(monologues[0].elements[1].ts, None);
+        assert_eq!(monologues[0].elements[1].end_ts, None);
     }
 
     /// The server's own admission. A worker that loaded a commit the plan did
@@ -498,7 +533,7 @@ mod tests {
                     },
                 },
             }),
-            DurationSeconds(0.01),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
         let Err(refusal) = parse_asr_response_v2(

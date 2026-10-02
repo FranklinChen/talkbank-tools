@@ -10,7 +10,7 @@
     },
     "time_s": {
       "description": "Token onset timestamp in seconds.",
-      "$ref": "#/$defs/DurationSeconds"
+      "$ref": "#/$defs/AudioPositionSeconds"
     }
   },
   "required": [
@@ -18,10 +18,11 @@
     "time_s"
   ],
   "$defs": {
-    "DurationSeconds": {
-      "description": "Duration measured in fractional seconds.",
+    "AudioPositionSeconds": {
+      "description": "A point in the audio, in finite non-negative seconds from its start.",
       "type": "number",
-      "format": "double"
+      "format": "double",
+      "minimum": 0.0
     }
   }
 }

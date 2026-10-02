@@ -50,8 +50,8 @@ async fn golden_morphotag_eng_simple() {
     assert_completed_without_errors("morphotag_eng_simple", &info, &results);
     let output = &results[0].content;
     let file = parse_output(output, "morphotag_eng_simple");
-    assert!(has_mor_tier(&file));
-    assert!(has_gra_tier(&file));
+    assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
+    assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
     assert_golden_snapshot!("morphotag_eng_simple", output);
 }
 
@@ -154,9 +154,10 @@ async fn golden_morphotag_spa_simple() {
     }
 
     assert_completed_without_errors("morphotag_spa_simple", &info, &results);
-    let file = parse_output(&results[0].content, "morphotag_spa_simple");
-    assert!(has_mor_tier(&file));
-    assert!(has_gra_tier(&file));
+    let output = &results[0].content;
+    let file = parse_output(output, "morphotag_spa_simple");
+    assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
+    assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
     assert_golden_snapshot!("morphotag_spa_simple", &results[0].content);
 }
 
@@ -184,9 +185,10 @@ async fn golden_morphotag_retokenize_eng() {
         .await;
 
     assert_completed_without_errors("morphotag_retokenize_eng", &info, &results);
-    let file = parse_output(&results[0].content, "morphotag_retokenize_eng");
-    assert!(has_mor_tier(&file));
-    assert!(has_gra_tier(&file));
+    let output = &results[0].content;
+    let file = parse_output(output, "morphotag_retokenize_eng");
+    assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
+    assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
     assert_golden_snapshot!("morphotag_retokenize_eng", &results[0].content);
 }
 
@@ -279,7 +281,10 @@ async fn golden_morphotag_cache_is_faster() {
         elapsed1.as_secs_f64() / elapsed2.as_secs_f64()
     );
     if elapsed1.as_secs_f64() > 1.0 {
-        assert!(elapsed2 < elapsed1);
+        assert!(
+            elapsed2 < elapsed1,
+            "the warm run must be faster: cold={elapsed1:?}, warm={elapsed2:?}"
+        );
     }
 }
 
@@ -340,8 +345,8 @@ async fn golden_morphotag_ita_single_word_utterances_are_not_split() {
     assert_completed_without_errors("morphotag_ita_single_word", &info, &results);
     let output = &results[0].content;
     let file = parse_output(output, "morphotag_ita_single_word");
-    assert!(has_mor_tier(&file));
-    assert!(has_gra_tier(&file));
+    assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
+    assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
 
     // Each lexical word must keep its own part of speech, with no clitic split.
     for (utterance, expected_pos, expected_lemma) in [

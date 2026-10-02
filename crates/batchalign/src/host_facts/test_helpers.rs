@@ -13,7 +13,12 @@
 //! The fixtures themselves are tiny pure-data builders, no state,
 //! no I/O, so the public surface cost is essentially zero.
 
-use crate::api::UnixTimestamp;
+use crate::api::MachineTime;
+
+/// The one detection instant every fixture reports.
+fn detected_at() -> MachineTime {
+    MachineTime::from_timestamp(jiff::Timestamp::constant(1_700_000_000, 0))
+}
 
 use super::{CpuArch, GpuPresence, HostFacts, MpsExclusionReason, OperatingSystem};
 
@@ -38,7 +43,7 @@ pub fn apple_silicon_64gb() -> HostFacts {
         },
         disk_free_mb_for_cache: Some(500_000),
         hostname: "test-host".to_owned(),
-        detection_timestamp: UnixTimestamp::from(1_700_000_000.0),
+        detection_timestamp: detected_at(),
         detection_warnings: Vec::new(),
     }
 }
@@ -68,7 +73,7 @@ pub fn laptop_16gb() -> HostFacts {
         gpu: GpuPresence::None,
         disk_free_mb_for_cache: Some(50_000),
         hostname: "test-laptop".to_owned(),
-        detection_timestamp: UnixTimestamp::from(1_700_000_000.0),
+        detection_timestamp: detected_at(),
         detection_warnings: Vec::new(),
     }
 }
@@ -92,7 +97,7 @@ pub fn linux_cuda_24gb() -> HostFacts {
         },
         disk_free_mb_for_cache: Some(1_000_000),
         hostname: "test-cuda".to_owned(),
-        detection_timestamp: UnixTimestamp::from(1_700_000_000.0),
+        detection_timestamp: detected_at(),
         detection_warnings: Vec::new(),
     }
 }

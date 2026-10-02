@@ -69,8 +69,8 @@ fn test_pool(python: String) -> WorkerPool {
     common::test_server_fixture::isolate_host_memory_ledger();
     WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 600, // disable periodic health checks
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(), // disable periodic health checks
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -94,7 +94,7 @@ async fn worker_killed_mid_batch_infer_returns_error() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         // Add a delay so we have time to kill the worker mid-request
         test_delay_ms: 5000,
         ..Default::default()
@@ -142,7 +142,7 @@ async fn pool_recovers_after_worker_crash() {
         )
         .await
         .expect("first dispatch failed");
-    assert_eq!(response.results[0].result, Some(item));
+    assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
 
     // Get the worker PID and kill it.
     let summary = pool.worker_summary().await;
@@ -168,7 +168,7 @@ async fn pool_recovers_after_worker_crash() {
         )
         .await
         .expect("recovery dispatch should succeed after worker crash");
-    assert_eq!(response2.results[0].result, Some(item2));
+    assert_eq!(response2.results[0].outcome.result().cloned(), Some(item2));
 
     pool.shutdown().await;
 }
@@ -266,7 +266,7 @@ async fn worker_death_before_ready_surfaces_stderr() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -298,7 +298,7 @@ async fn worker_ready_timeout_fires() {
         // Use an impossibly short timeout (100ms) so the worker can't possibly start in time
         // ... except test-echo workers start very fast. Instead, use a bad python path
         // to ensure the worker never sends a ready signal.
-        ready_timeout_s: 1,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<1>(),
         ..Default::default()
     };
 
@@ -331,8 +331,8 @@ async fn fast_health_check_interval_does_not_break_dispatch() {
     let python = require_python!();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 1, // fast health checks
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<1>(), // fast health checks
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -349,7 +349,7 @@ async fn fast_health_check_interval_does_not_break_dispatch() {
         )
         .await
         .expect("dispatch should succeed");
-    assert_eq!(response.results[0].result, Some(item));
+    assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
 
     pool.shutdown().await;
 }
@@ -394,15 +394,15 @@ async fn multi_file_job_produces_per_file_results() {
     let config = ServerConfig {
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
-        job_ttl_days: batchalign::config::JobTtlDays::new(7),
+        job_ttl_days: batchalign::config::JobTtlDays::literal::<7>(),
         memory_gate_mb: Some(MemoryMb(0)),
         ..Default::default()
     };
     let pool_config = PoolConfig {
         python_path: python,
         test_echo: true,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: Default::default(),
@@ -415,6 +415,7 @@ async fn multi_file_job_produces_per_file_results() {
         Some(jobs_dir.to_string_lossy().into()),
         Some(db_dir),
         Some("partial-test".into()),
+        std::sync::Arc::new(batchalign::clock::SystemClock),
     )
     .await
     .expect("create_test_app");

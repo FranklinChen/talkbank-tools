@@ -19,7 +19,7 @@ import wave
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from batchalign.inference._domain_types import AudioPath, LanguageCode
 from batchalign.inference.asr import (
@@ -29,11 +29,12 @@ from batchalign.inference.asr import (
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
-    InferResponse,
 )
 
 from ._common import (
     EngineOverrides,
+    ProviderNotLoaded,
+    answer_asr_batch,
     read_asr_config,
 )
 
@@ -354,47 +355,20 @@ def infer_aliyun_asr_v2(item: AsrBatchItem) -> MonologueAsrResponse:
     return _transcribe_to_monologues(item.audio_path)
 
 
+def _transcribe_item(item: AsrBatchItem) -> MonologueAsrResponse:
+    """Transcribe one batch item's audio."""
+    return _transcribe_to_monologues(item.audio_path)
+
+
 def infer_aliyun_asr(req: BatchInferRequest) -> BatchInferResponse:
     """Process a batch of ASR items via Aliyun NLS.
 
     Each item is an :class:`AsrBatchItem`. Returns a tagged monologue
     payload per item so Rust can own normalization and postprocessing.
     """
-    if not _ak_id:
-        raise RuntimeError("load_aliyun_asr() must be called before infer_aliyun_asr()")
-
-    t0 = time.monotonic()
-    n = len(req.items)
-    results: list[InferResponse] = []
-
-    for item_idx, raw_item in enumerate(req.items):
-        try:
-            item = AsrBatchItem.model_validate(raw_item)
-        except ValidationError:
-            results.append(InferResponse(error="Invalid AsrBatchItem", elapsed_s=0.0))
-            continue
-
-        try:
-            response = _transcribe_to_monologues(item.audio_path)
-            results.append(InferResponse(result=response.model_dump(), elapsed_s=0.0))
-        except Exception as e:
-            L.warning(
-                "Aliyun ASR failed for item %d (%s): %s",
-                item_idx,
-                item.audio_path,
-                e,
-                exc_info=True,
-            )
-            results.append(InferResponse(error=str(e), elapsed_s=0.0))
-
-    elapsed = time.monotonic() - t0
-    if results:
-        first = results[0]
-        results[0] = InferResponse(
-            result=first.result,
-            error=first.error,
-            elapsed_s=elapsed,
-        )
-
-    L.info("batch_infer aliyun_asr: %d items, %.3fs", n, elapsed)
-    return BatchInferResponse(results=results)
+    transcribe = (
+        ProviderNotLoaded("Aliyun ASR provider not loaded: call load_aliyun_asr first")
+        if not _ak_id
+        else _transcribe_item
+    )
+    return answer_asr_batch("aliyun_asr", req.items, transcribe)

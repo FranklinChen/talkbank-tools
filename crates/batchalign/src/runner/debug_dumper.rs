@@ -8,10 +8,7 @@
 #[cfg(test)]
 use crate::revai::FetchedRevAsrEvidence;
 
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use crate::chat_ops::fa::utr::{AsrTimingToken, UtrResult};
 use serde::{Deserialize, Serialize};
@@ -52,20 +49,12 @@ impl SerializedArtifact {
     }
 
     fn persist(self, path: &Path) -> Result<(), std::io::Error> {
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("artifact path has no parent: {}", path.display()),
-            )
-        })?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        temp.write_all(&self.0)?;
-        temp.as_file().sync_all()?;
-        let persisted = temp.persist(path).map_err(|error| error.error)?;
-        persisted.sync_all()?;
-        #[cfg(unix)]
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
+        crate::atomic_file::write_atomically(
+            path,
+            &self.0,
+            crate::atomic_file::Existing::Replace,
+            crate::atomic_file::Audience::Owner,
+        )
     }
 }
 
@@ -631,10 +620,10 @@ mod tests {
     use crate::types::traces::{FaDecisionTrace, FaTimingDecisionTrace};
     use crate::types::worker_v2::{SpeakerBackendV2, SpeakerSegmentV2};
 
-    fn speaker_segment(speaker: &str, start_ms: u64, end_ms: u64) -> SpeakerSegmentV2 {
+    fn speaker_segment(speaker: &str, start_ms: i64, end_ms: i64) -> SpeakerSegmentV2 {
         SpeakerSegmentV2 {
-            start_ms: DurationMs(start_ms),
-            end_ms: DurationMs(end_ms),
+            interval: batchalign_types::interval::AdmittedInterval::admit_millis(start_ms, end_ms)
+                .expect("ordered"),
             speaker: speaker.to_owned(),
         }
     }

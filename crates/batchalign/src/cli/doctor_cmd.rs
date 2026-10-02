@@ -27,7 +27,10 @@ struct CheckResult {
     name: String,
     status: CheckStatus,
     detail: String,
-    duration_ms: u64,
+    /// How long the check took; `None` for a check that is a reading rather
+    /// than a timed probe (memory, the config load), shown as untimed and
+    /// written as `null`, never as a measured `0`.
+    duration_ms: Option<u64>,
 }
 
 /// Outcome of a diagnostic check.
@@ -386,11 +389,35 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
             CheckStatus::Fail
         },
         detail: format!("{available_mb} MB available / {total_mb} MB total"),
-        duration_ms: 0,
+        duration_ms: None,
     });
 
+    // --- Server config ---
+    // A malformed server.yaml is a failed check, not a silent default: the
+    // host-facts report below then uses the defaults, and says so here.
+    let config = match load_doctor_server_config() {
+        Ok(config) => {
+            results.push(CheckResult {
+                name: "server_config".into(),
+                status: CheckStatus::Pass,
+                detail: "server.yaml reads (or is absent: defaults)".into(),
+                duration_ms: None,
+            });
+            config
+        }
+        Err(error) => {
+            results.push(CheckResult {
+                name: "server_config".into(),
+                status: CheckStatus::Fail,
+                detail: format!("{error}; the host-facts report below uses the defaults"),
+                duration_ms: None,
+            });
+            crate::config::ServerConfig::default()
+        }
+    };
+
     // --- Host-facts report ---
-    let host_facts_report = build_host_facts_report();
+    let host_facts_report = build_host_facts_report(&config);
 
     // --- Output ---
     let any_fail = results
@@ -406,9 +433,13 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
                     CheckStatus::Fail => "\u{2717}",
                     CheckStatus::Skip => "-",
                 };
+                let timing = match r.duration_ms {
+                    Some(ms) => format!(" ({ms} ms)"),
+                    None => String::new(),
+                };
                 eprintln!(
-                    "  {icon} [{:>4}] {:25} {} ({} ms)",
-                    r.status, r.name, r.detail, r.duration_ms
+                    "  {icon} [{:>4}] {:25} {}{timing}",
+                    r.status, r.name, r.detail
                 );
             }
             print_host_facts_human(&host_facts_report);
@@ -454,7 +485,7 @@ fn run_host_facts_only(
     format: &crate::cli::args::DoctorFormat,
     warnings_as_errors: bool,
 ) -> Result<(), CliError> {
-    let report = build_host_facts_report();
+    let report = build_host_facts_report(&load_doctor_server_config()?);
     let any_validation_error = !report.validation.errors.is_empty();
     let any_warning = !report.validation.warnings.is_empty();
     match format {
@@ -516,7 +547,7 @@ fn check_exit_outcome(
 /// requested format. Unknown knob names produce a usage error
 /// listing the valid choices.
 fn run_explain(knob: &str, format: &crate::cli::args::DoctorFormat) -> Result<(), CliError> {
-    let config = load_doctor_server_config();
+    let config = load_doctor_server_config()?;
     let facts = RealHostFactsSource.detect();
     let explanation = explain_knob(knob, &config, &facts).ok_or_else(|| {
         CliError::InvalidArgument(format!(
@@ -738,9 +769,8 @@ fn print_explanation_human(e: &KnobExplanation) {
 /// Production entry point: loads the deployed `server.yaml` and
 /// detects facts via [`RealHostFactsSource`], then delegates to the
 /// pure [`build_host_facts_report_from`] for the actual assembly.
-fn build_host_facts_report() -> HostFactsReport {
-    let config = load_doctor_server_config();
-    build_host_facts_report_from(&config, &RealHostFactsSource)
+fn build_host_facts_report(config: &crate::config::ServerConfig) -> HostFactsReport {
+    build_host_facts_report_from(config, &RealHostFactsSource)
 }
 
 /// Pure assembly: bundles a [`HostFacts`] snapshot, the resolved
@@ -765,13 +795,12 @@ fn build_host_facts_report_from(
 }
 
 /// Best-effort load of the deployed `server.yaml` for validation. A
-/// missing or unreadable config falls back to `ServerConfig::default()`
-/// so `doctor` always produces a report; the failure mode (no
-/// overrides therefore no override-vs-fact warnings) is the right
-/// behavior for an operator running `doctor` on a fresh checkout.
-fn load_doctor_server_config() -> crate::config::ServerConfig {
+/// missing config is the default config (a fresh checkout); an unreadable
+/// or malformed one is returned as the error it is, for the caller to
+/// report.
+fn load_doctor_server_config() -> Result<crate::config::ServerConfig, crate::config::ConfigError> {
     let layout = RuntimeLayout::from_env();
-    config::load_config_from_layout(&layout, None).unwrap_or_default()
+    config::load_config_from_layout(&layout, None)
 }
 
 /// Render the host-facts section in human-readable form.
@@ -994,7 +1023,7 @@ fn record(
         name: name.into(),
         status,
         detail,
-        duration_ms,
+        duration_ms: Some(duration_ms),
     });
 }
 
@@ -1317,7 +1346,7 @@ fn smoke_batch_items(
     Ok(collection
         .batch_items
         .into_iter()
-        .map(|(_line, _utt, item, _words)| item)
+        .map(crate::chat_ops::morphosyntax_ops::CollectedUtterance::into_item)
         .collect())
 }
 

@@ -89,7 +89,7 @@ impl ExecuteFailureRead {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::api::DurationSeconds;
+    use crate::api::NonNegativeSeconds;
     use crate::types::worker_v2::{ProtocolErrorCodeV2, SpeakerResultV2, WorkerRequestIdV2};
 
     // NOTE (2026-08-21): this module used to also test "success with no
@@ -109,7 +109,7 @@ mod tests {
             WorkerRequestIdV2::from("req-1".to_owned()),
             ProtocolErrorCodeV2::ModelUnavailable,
             "no speaker host loaded".to_owned(),
-            DurationSeconds(0.0),
+            NonNegativeSeconds::ZERO,
         );
 
         let error = require_success_result(&failed, "speaker")
@@ -136,7 +136,7 @@ mod tests {
             ProtocolErrorCodeV2::ModelAccessDenied,
             "could not download the Hugging Face model at pyannote/speaker-diarization-community-1"
                 .to_owned(),
-            DurationSeconds(0.0),
+            NonNegativeSeconds::ZERO,
         );
 
         let error = require_success_result(&failed, "speaker")
@@ -159,7 +159,7 @@ mod tests {
             WorkerRequestIdV2::from("req-1".to_owned()),
             ProtocolErrorCodeV2::RuntimeFailure,
             "boom".to_owned(),
-            DurationSeconds(0.0),
+            NonNegativeSeconds::ZERO,
         );
 
         let error = require_success_result(&failed, "ASR")
@@ -178,7 +178,7 @@ mod tests {
                     segments: Vec::new(),
                 },
             }),
-            DurationSeconds(0.0),
+            NonNegativeSeconds::ZERO,
         );
 
         assert!(matches!(

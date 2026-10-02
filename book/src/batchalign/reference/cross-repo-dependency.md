@@ -1,7 +1,7 @@
 # Workspace Crate Dependency Contract
 
 **Status:** Current
-**Last updated:** 2026-05-20 01:20 EDT
+**Last updated:** 2026-10-01 15:39 EDT
 
 ## Overview
 
@@ -46,7 +46,7 @@ the tree.
 | `talkbank-model` | `batchalign` (runtime) | CHAT data model, validation, alignment types |
 | `talkbank-parser` | `batchalign` (runtime) | CHAT parsing via tree-sitter |
 | `talkbank-transform` | `batchalign`, `batchalign-pyo3` | Pipelines, CHAT↔JSON, alignment, morphosyntax, Cantonese normalisation, ASR post-processing, tokenizer realignment |
-| `batchalign-types` | `batchalign`, `batchalign-pyo3` | Shared domain newtypes + V2 worker IPC contracts |
+| `batchalign-types` | `batchalign`, `batchalign-pyo3`, `batchalign-transform` | Shared domain newtypes + V2 worker IPC contracts |
 
 ## Compatibility Rules
 

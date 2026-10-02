@@ -125,12 +125,12 @@ fn test_pool(python: String) -> WorkerPool {
     common::test_server_fixture::isolate_host_memory_ledger();
     WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 600, // disable during test
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(), // disable during test
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        worker_registry_path: test_state_dir().join("workers.json").display().to_string(),
+        worker_registry_path: Some(test_state_dir().join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(test_state_dir().to_path_buf()),
             ..Default::default()
@@ -211,7 +211,7 @@ async fn dropping_pool_reaps_owned_tcp_daemons() {
             test_echo: true,
             profile: WorkerProfile::Gpu,
             lang: WorkerLanguage::from(LanguageCode3::eng()),
-            ready_timeout_s: 30,
+            ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
             runtime: WorkerRuntimeConfig {
                 state_dir: Some(test_state_dir().to_path_buf()),
                 server_instance_id: Some(pool.current_server_instance_id().to_string()),
@@ -692,7 +692,7 @@ async fn stanza_worker_survives_many_sequential_requests() {
             .await
             .unwrap_or_else(|e| panic!("stanza dispatch failed on request {i}: {e}"));
         assert_eq!(
-            response.results[0].result,
+            response.results[0].outcome.result().cloned(),
             Some(item),
             "echo mismatch on request {i}"
         );
@@ -711,7 +711,7 @@ async fn stanza_worker_survives_many_sequential_requests() {
 // ---------------------------------------------------------------------------
 
 /// A worker with artificial delay causes a request timeout, which the pool
-/// surfaces as a WorkerError::Protocol (containing "timeout"). This verifies
+/// surfaces as a typed `WorkerError::Timeout`. This verifies
 /// that timeouts are detected rather than hanging forever.
 #[tokio::test]
 async fn gpu_request_with_short_timeout_fails_cleanly() {
@@ -721,13 +721,16 @@ async fn gpu_request_with_short_timeout_fails_cleanly() {
     // worker has a 5-second delay. This should trigger a timeout.
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: Default::default(),
-        audio_task_timeout_s: 2, // 2-second timeout
+        task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
+            audio: Some(batchalign::api::PositiveSeconds::literal::<2>()),
+            analysis: None,
+        }, // 2-second timeout
         ..Default::default()
     });
 
@@ -778,7 +781,7 @@ async fn worker_with_delay_responds_when_timeout_is_generous() {
         test_delay_ms: 500, // 500ms delay
         profile: batchalign::worker::WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: 30,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         ..Default::default()
     };
 
@@ -803,7 +806,10 @@ async fn worker_with_delay_responds_when_timeout_is_generous() {
         elapsed
     );
     assert_eq!(resp.results.len(), 1);
-    assert_eq!(resp.results[0].result, Some(json!({"test": true})));
+    assert_eq!(
+        resp.results[0].outcome.result().cloned(),
+        Some(json!({"test": true}))
+    );
 
     handle.shutdown().await.expect("shutdown failed");
 }
@@ -834,7 +840,7 @@ async fn stanza_sequential_dispatch_reuses_worker() {
             )
             .await
             .expect("stanza dispatch failed");
-        assert_eq!(response.results[0].result, Some(item));
+        assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
     }
 
     // All 5 requests should have used 1 worker.
@@ -856,25 +862,15 @@ async fn stanza_sequential_dispatch_reuses_worker() {
 /// caller's per-request timeout must govern the *work-time* of its own
 /// request; never the queue-wait while earlier requests are being served.
 ///
-/// Reproduces an operator's hung Malayalam corpus job (`04a11009-1d0`, 2026-04-25)
-/// at unit-test scale. With `gpu_thread_pool_size = 2` the Python worker's
+/// At unit-test scale: with `gpu_thread_pool_size = 2` the Python worker's
 /// `ThreadPoolExecutor` serves two execute_v2 at a time; with
 /// `test_delay_ms = 200` each response takes ~200 ms; with N=16 callers the
 /// last response arrives around t = 1.6 s. With `audio_task_timeout_s = 1`
-/// the per-request timeout is 1 s; well above any single response's
-/// work-time but below the *queue-wait + work-time* the late callers see
-/// today, because the timer is started at `pending.insert()` (before
-/// `stdin.lock()`), not at the moment the worker actually begins the work.
-///
-/// This test is RED today: the late callers fail with
-///   "timeout (1s) waiting for GPU execute_v2 response (request_id=...)"
-/// matching the production failure on `brian`.
-///
-/// It will go GREEN after the fix in `SharedGpuWorker::execute_v2` that
-/// serializes the entire (registration + write + await) cycle around a
-/// per-worker `tokio::sync::Mutex`, so each caller's timer only ticks
-/// during its own work; which is the only honest representation of "one
-/// shared GPU worker process can perform one execute_v2 at a time."
+/// the per-request timeout is 1 s: above any single response's work-time but
+/// below the queue-wait plus work-time of the late callers. Every caller
+/// succeeds because the dispatch permit is taken before the timer starts, so
+/// a late caller's timer covers only its own work. A caller that times out
+/// is a typed `WorkerError::Timeout` naming `execute_v2`.
 #[tokio::test]
 async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_timeout() {
     let python = require_python!();
@@ -891,8 +887,8 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
     // out instead of queueing on it, and this queue could not form.
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -900,7 +896,10 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
             gpu_thread_pool_size: 2,
             ..Default::default()
         },
-        audio_task_timeout_s: 1,
+        task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
+            audio: Some(batchalign::api::PositiveSeconds::literal::<1>()),
+            analysis: None,
+        },
         test_delay_ms: 200,
         ..Default::default()
     });
@@ -940,14 +939,11 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
                 );
                 succeeded += 1;
             }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("timeout") && msg.contains("execute_v2") {
-                    timed_out += 1;
-                } else {
-                    other_errors.push(format!("dispatch {i}: {msg}"));
-                }
-            }
+            Err(batchalign::worker::error::WorkerError::Timeout {
+                waited_for: batchalign::worker::error::WorkerWait::ExecuteV2 { .. },
+                ..
+            }) => timed_out += 1,
+            Err(e) => other_errors.push(format!("dispatch {i}: {e}")),
         }
     }
 
@@ -1025,8 +1021,8 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
     // instead keeps the property sharp and makes it load-tolerant.
     let pool = std::sync::Arc::new(WorkerPool::new(PoolConfig {
         python_path: python,
-        health_check_interval_s: 600,
-        ready_timeout_s: 30,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         test_echo: true,
         test_delay_ms: 60_000,
         max_workers_per_key: PerProfile::uniform(1),
@@ -1035,7 +1031,10 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
             gpu_thread_pool_size: 1,
             ..Default::default()
         },
-        audio_task_timeout_s: 30,
+        task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
+            audio: Some(batchalign::api::PositiveSeconds::literal::<30>()),
+            analysis: None,
+        },
         ..Default::default()
     }));
 
@@ -1361,12 +1360,12 @@ async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
 
     let pool = std::sync::Arc::new(WorkerPool::new(PoolConfig {
         python_path: shim.display().to_string(),
-        health_check_interval_s: 600,
-        ready_timeout_s: SLOW_KEY_READY_TIMEOUT_S,
+        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<SLOW_KEY_READY_TIMEOUT_S>(),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        worker_registry_path: test_state_dir().join("workers.json").display().to_string(),
+        worker_registry_path: Some(test_state_dir().join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(test_state_dir().to_path_buf()),
             ..Default::default()

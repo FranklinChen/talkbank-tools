@@ -6,14 +6,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::api::{
     DisplayPath, JobId, JobStatus, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand,
-    UnixTimestamp,
 };
 use crate::db::JobDB;
 use crate::options::{CommandOptions, CommonOptions, OpensmileOptions};
 use crate::scheduling::{AttemptOutcome, FailureCategory, WorkUnitKind};
 use crate::store::{
     FileStatus, Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
-    JobLeaseState, JobRuntimeControl, JobScheduleState, JobSourceContext, JobStore, PendingJobFile,
+    JobRuntimeControl, JobScheduleState, JobSourceContext, JobStore, PendingJobFile,
 };
 use crate::ws::BROADCAST_CAPACITY;
 
@@ -48,8 +47,10 @@ fn make_media_job(job_id: &str, source_path: &str) -> Job {
             debug_traces: false,
         },
         source: JobSourceContext {
-            submitted_by: "127.0.0.1".into(),
-            submitted_by_name: "localhost".into(),
+            submitter: Some(crate::store::Submitter::client(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                "localhost".into(),
+            )),
             source_dir: Default::default(),
         },
         filesystem: JobFilesystemConfig {
@@ -72,15 +73,11 @@ fn make_media_job(job_id: &str, source_path: &str) -> Job {
             completed_files: 0,
         },
         schedule: JobScheduleState {
-            submitted_at: UnixTimestamp(1.0),
+            submitted_at: crate::unix_time(1.0),
             completed_at: None,
             next_eligible_at: None,
             num_workers: None,
-            lease: JobLeaseState {
-                leased_by_node: None,
-                expires_at: None,
-                heartbeat_at: None,
-            },
+            lease: None,
             last_cancel: None,
         },
         runtime: JobRuntimeControl {
@@ -150,6 +147,7 @@ async fn preflight_media_failure_records_setup_attempt() {
         crate::config::ServerConfig::default(),
         Some(db.clone()),
         tx,
+        std::sync::Arc::new(crate::clock::SystemClock),
     ));
     store
         .submit(make_media_job(

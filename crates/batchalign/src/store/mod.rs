@@ -12,24 +12,26 @@
 //! presents its synchronization primitives as just public fields to poke.
 
 mod counters;
+mod event_time;
 mod job;
 pub(crate) mod queries;
 mod registry;
 
+pub use event_time::EventTime;
 pub use job::*;
-pub(crate) use job::{CompletedFileOutput, FileFailureRecord, FileProgressRecord, FileRetryRecord};
-pub(crate) use queries::LeaseRenewalOutcome;
-pub(crate) use queries::{
-    AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate, PersistedJobUpdate,
+pub(crate) use job::{
+    CompletedFileOutput, FileFailureRecord, FileProgressRecord, FileRetryRecord, JobStatusColumns,
+    Stop,
 };
+pub(crate) use queries::LeaseRenewalOutcome;
+pub(crate) use queries::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};
 pub(crate) use registry::JobCompletionSnapshot;
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::{
     ContentType, DisplayPath, FileProgressStage, FileStatusEntry, FileStatusKind, JobStatus,
-    NodeId, UnixTimestamp,
+    MachineTime, NodeId, NonNegativeSeconds,
 };
 use crate::config::ServerConfig;
 use crate::host_policy::HostExecutionPolicy;
@@ -48,65 +50,460 @@ use registry::JobRegistry;
 // Per-file status
 // ---------------------------------------------------------------------------
 
+/// Why a file's attempt failed, as far as it is known.
+///
+/// This build records a message and a category for every failure
+/// ([`FileFailure::recorded`]). A row another build wrote may hold one of the
+/// two, or (on a failed row) neither; those shapes are read only at the
+/// database boundary ([`FileFailure::from_columns`],
+/// [`FileFailure::of_failed_row`]). The shape is private, so no other code
+/// can make a failure this build did not record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFailure(Failure);
+
+/// The shapes a failure can have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Failure {
+    /// A message and a category, as this build records every failure.
+    Recorded {
+        message: String,
+        category: FailureCategory,
+    },
+    /// A stored message with no category.
+    MessageOnly(String),
+    /// A stored category with no message.
+    CategoryOnly(FailureCategory),
+    /// A stored failed row that named neither: the file failed, and nothing
+    /// says why.
+    Unrecorded,
+}
+
+impl FileFailure {
+    /// A failure this build records: always both a message and a category.
+    pub fn recorded(message: String, category: FailureCategory) -> Self {
+        Self(Failure::Recorded { message, category })
+    }
+
+    /// The failure stored columns hold; `None` when they hold neither. For
+    /// a phase whose failure is optional (the attempt before an
+    /// interruption).
+    pub(crate) fn from_columns(
+        message: Option<String>,
+        category: Option<FailureCategory>,
+    ) -> Option<Self> {
+        match (message, category) {
+            (None, None) => None,
+            (message, category) => Some(Self::of_failed_row(message, category)),
+        }
+    }
+
+    /// The failure of a stored row that says the file failed (an error, or
+    /// a pending retry): its columns, or [`Failure::Unrecorded`] when they
+    /// hold neither.
+    pub(crate) fn of_failed_row(
+        message: Option<String>,
+        category: Option<FailureCategory>,
+    ) -> Self {
+        Self(match (message, category) {
+            (Some(message), Some(category)) => Failure::Recorded { message, category },
+            (Some(message), None) => Failure::MessageOnly(message),
+            (None, Some(category)) => Failure::CategoryOnly(category),
+            (None, None) => Failure::Unrecorded,
+        })
+    }
+
+    /// The message, when one was recorded.
+    pub fn message(&self) -> Option<&str> {
+        match &self.0 {
+            Failure::Recorded { message, .. } | Failure::MessageOnly(message) => Some(message),
+            Failure::CategoryOnly(_) | Failure::Unrecorded => None,
+        }
+    }
+
+    /// The category, when one was recorded.
+    pub fn category(&self) -> Option<FailureCategory> {
+        match &self.0 {
+            Failure::Recorded { category, .. } | Failure::CategoryOnly(category) => Some(*category),
+            Failure::MessageOnly(_) | Failure::Unrecorded => None,
+        }
+    }
+}
+
+/// Where a file is in its lifecycle, carrying only the times and the failure
+/// that phase has.
+///
+/// A finish time exists only on `Done` and `Error`, a retry deadline only on
+/// `RetryPending`, a failure only where one happened, and a queued file has
+/// no times at all.
+///
+/// The times are `Option` only for rows recovered from storage written by a
+/// build that did not record them; every transition this build makes records
+/// them. A failed phase (`RetryPending`, `Error`) always has its failure; a
+/// stored one that named none says so ([`FileFailure::of_failed_row`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilePhase {
+    /// Waiting to be dispatched; nothing has run.
+    Queued,
+    /// An attempt is running.
+    Processing {
+        /// When the running attempt started.
+        started_at: Option<MachineTime>,
+    },
+    /// The last attempt failed transiently; the next may run at `retry_at`.
+    /// Still in flight, so it has no finish time and no duration.
+    RetryPending {
+        /// When the failed attempt started.
+        started_at: Option<MachineTime>,
+        /// When the failed attempt ended (stall-alarm activity, attempt
+        /// history), deliberately not the file's finish time.
+        failed_at: Option<MachineTime>,
+        /// Earliest time the next attempt may run.
+        retry_at: MachineTime,
+        /// Why the attempt failed.
+        failure: FileFailure,
+    },
+    /// Finished successfully. Terminal.
+    Done {
+        /// When the successful attempt started.
+        started_at: Option<MachineTime>,
+        /// When it finished.
+        finished_at: Option<MachineTime>,
+    },
+    /// Finished with an error. Terminal.
+    Error {
+        /// When the failed attempt started (absent for a setup refusal that
+        /// never started processing).
+        started_at: Option<MachineTime>,
+        /// When it failed.
+        finished_at: Option<MachineTime>,
+        /// Why.
+        failure: FileFailure,
+    },
+    /// In flight when the server stopped; resumable on restart.
+    Interrupted {
+        /// When the interrupted attempt started.
+        started_at: Option<MachineTime>,
+        /// The failure of the attempt before it, if it was awaiting a retry.
+        last_failure: Option<FileFailure>,
+    },
+}
+
+impl FilePhase {
+    /// The API's status vocabulary. A pending retry is still `Processing`.
+    pub fn kind(&self) -> FileStatusKind {
+        match self {
+            Self::Queued => FileStatusKind::Queued,
+            Self::Processing { .. } | Self::RetryPending { .. } => FileStatusKind::Processing,
+            Self::Done { .. } => FileStatusKind::Done,
+            Self::Error { .. } => FileStatusKind::Error,
+            Self::Interrupted { .. } => FileStatusKind::Interrupted,
+        }
+    }
+
+    /// When the current or last attempt started.
+    pub fn started_at(&self) -> Option<MachineTime> {
+        match self {
+            Self::Queued => None,
+            Self::Processing { started_at }
+            | Self::RetryPending { started_at, .. }
+            | Self::Done { started_at, .. }
+            | Self::Error { started_at, .. }
+            | Self::Interrupted { started_at, .. } => *started_at,
+        }
+    }
+
+    /// When the file finished: only a terminal file has finished.
+    pub fn finished_at(&self) -> Option<MachineTime> {
+        match self {
+            Self::Done { finished_at, .. } | Self::Error { finished_at, .. } => *finished_at,
+            Self::Queued
+            | Self::Processing { .. }
+            | Self::RetryPending { .. }
+            | Self::Interrupted { .. } => None,
+        }
+    }
+
+    /// The failure this phase carries, if any.
+    pub fn failure(&self) -> Option<&FileFailure> {
+        match self {
+            Self::RetryPending { failure, .. } | Self::Error { failure, .. } => Some(failure),
+            Self::Interrupted { last_failure, .. } => last_failure.as_ref(),
+            Self::Queued | Self::Processing { .. } | Self::Done { .. } => None,
+        }
+    }
+
+    /// The phase a file is in after the server stopped under it: an
+    /// in-flight phase (queued, processing, awaiting a retry) becomes
+    /// `Interrupted`, keeping its start and the failure it was retrying;
+    /// a terminal or already interrupted phase is unchanged.
+    pub(crate) fn interrupted(self) -> Self {
+        match self {
+            Self::Queued => Self::Interrupted {
+                started_at: None,
+                last_failure: None,
+            },
+            Self::Processing { started_at } => Self::Interrupted {
+                started_at,
+                last_failure: None,
+            },
+            Self::RetryPending {
+                started_at,
+                failure,
+                ..
+            } => Self::Interrupted {
+                started_at,
+                last_failure: Some(failure),
+            },
+            unchanged @ (Self::Done { .. } | Self::Error { .. } | Self::Interrupted { .. }) => {
+                unchanged
+            }
+        }
+    }
+
+    /// When a pending retry may run.
+    pub fn next_eligible_at(&self) -> Option<MachineTime> {
+        match self {
+            Self::RetryPending { retry_at, .. } => Some(*retry_at),
+            Self::Queued
+            | Self::Processing { .. }
+            | Self::Done { .. }
+            | Self::Error { .. }
+            | Self::Interrupted { .. } => None,
+        }
+    }
+
+    /// The latest moment this file is known to have moved (stall alarm).
+    pub fn last_activity_at(&self) -> Option<MachineTime> {
+        let failed_at = match self {
+            Self::RetryPending { failed_at, .. } => *failed_at,
+            Self::Queued
+            | Self::Processing { .. }
+            | Self::Done { .. }
+            | Self::Error { .. }
+            | Self::Interrupted { .. } => None,
+        };
+        [self.started_at(), self.finished_at(), failed_at]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+
+    /// The `file_statuses` columns this phase owns, every one of them, with
+    /// `None` written as NULL.
+    ///
+    /// The ONE route from a phase to a row: every write of a file's phase
+    /// goes through it (the insert of a new job's rows as `Queued`,
+    /// `JobDB::update_file_status` for every transition, startup
+    /// interruption and the recovery requeue, both of which call it), all
+    /// binding it with `db::update::bind_phase_columns`; [`Self::from_row`]
+    /// is its inverse. A write therefore replaces the whole column set, so a
+    /// column the new phase does not own cannot survive from an earlier one
+    /// (a file that failed and then succeeded is stored `done` with no
+    /// error).
+    pub(crate) fn columns(&self) -> FilePhaseColumns<'_> {
+        let failure = self.failure();
+        let no_columns = FilePhaseColumns {
+            status: self.kind(),
+            error: failure.and_then(FileFailure::message),
+            error_category: failure.and_then(FileFailure::category),
+            started_at: None,
+            finished_at: None,
+            next_eligible_at: None,
+        };
+        match self {
+            Self::Queued => no_columns,
+            Self::Processing { started_at } => FilePhaseColumns {
+                started_at: *started_at,
+                ..no_columns
+            },
+            Self::RetryPending {
+                started_at,
+                failed_at,
+                retry_at,
+                ..
+            } => FilePhaseColumns {
+                started_at: *started_at,
+                // The failed attempt's end, stored in `finished_at`; the
+                // deadline is what tells `from_row` it is not a finish time.
+                finished_at: *failed_at,
+                next_eligible_at: Some(*retry_at),
+                ..no_columns
+            },
+            Self::Done {
+                started_at,
+                finished_at,
+            } => FilePhaseColumns {
+                started_at: *started_at,
+                finished_at: *finished_at,
+                ..no_columns
+            },
+            Self::Error {
+                started_at,
+                finished_at,
+                ..
+            } => FilePhaseColumns {
+                started_at: *started_at,
+                finished_at: *finished_at,
+                ..no_columns
+            },
+            Self::Interrupted { started_at, .. } => FilePhaseColumns {
+                started_at: *started_at,
+                ..no_columns
+            },
+        }
+    }
+
+    /// Rebuild a phase from a persisted `file_statuses` row: the database
+    /// boundary, where the columns stay as they are. The inverse of
+    /// [`Self::columns`].
+    ///
+    /// A `processing` row with a retry deadline is a pending retry (its
+    /// `finished_at` column is the failed attempt's end). Columns a phase does
+    /// not own are not carried into it, and every one that held a value is
+    /// reported, by one rule for every phase: whatever [`Self::columns`] of
+    /// the rebuilt phase would not write back. This build never writes such a
+    /// column, so a report names a row written by another build or by hand.
+    pub(crate) fn from_row(row: FilePhaseColumns<'_>) -> (Self, Option<String>) {
+        let FilePhaseColumns {
+            status: kind,
+            error,
+            error_category,
+            started_at,
+            finished_at,
+            next_eligible_at,
+        } = row;
+        let message = error.map(str::to_owned);
+        let held = RowHeld {
+            started_at: started_at.is_some(),
+            finished_at: finished_at.is_some(),
+            next_eligible_at: next_eligible_at.is_some(),
+            failure: message.is_some() || error_category.is_some(),
+        };
+        let phase = match (kind, next_eligible_at) {
+            (FileStatusKind::Processing, Some(retry_at)) => Self::RetryPending {
+                started_at,
+                failed_at: finished_at,
+                retry_at,
+                failure: FileFailure::of_failed_row(message, error_category),
+            },
+            (FileStatusKind::Processing, None) => Self::Processing { started_at },
+            (FileStatusKind::Error, _) => Self::Error {
+                started_at,
+                finished_at,
+                failure: FileFailure::of_failed_row(message, error_category),
+            },
+            (FileStatusKind::Interrupted, _) => Self::Interrupted {
+                started_at,
+                last_failure: FileFailure::from_columns(message, error_category),
+            },
+            (FileStatusKind::Done, _) => Self::Done {
+                started_at,
+                finished_at,
+            },
+            (FileStatusKind::Queued, _) => Self::Queued,
+        };
+        let dropped = held.not_kept_by(&phase.columns());
+        let report = (!dropped.is_empty()).then(|| {
+            format!(
+                "the {kind} row held {}, which {} not kept",
+                dropped.join(", "),
+                if dropped.len() == 1 { "was" } else { "were" }
+            )
+        });
+        (phase, report)
+    }
+}
+
+/// Which phase-owned columns a persisted row held a value in.
+struct RowHeld {
+    started_at: bool,
+    finished_at: bool,
+    next_eligible_at: bool,
+    failure: bool,
+}
+
+impl RowHeld {
+    /// The columns the row held that `kept` (the rebuilt phase's own column
+    /// image) does not write back.
+    fn not_kept_by(&self, kept: &FilePhaseColumns<'_>) -> Vec<&'static str> {
+        let kept_failure = kept.error.is_some() || kept.error_category.is_some();
+        [
+            (self.started_at && kept.started_at.is_none(), "started_at"),
+            (
+                self.finished_at && kept.finished_at.is_none(),
+                "finished_at",
+            ),
+            (
+                self.next_eligible_at && kept.next_eligible_at.is_none(),
+                "next_eligible_at",
+            ),
+            (self.failure && !kept_failure, "an error"),
+        ]
+        .into_iter()
+        .filter_map(|(dropped, column)| dropped.then_some(column))
+        .collect()
+    }
+}
+
+/// The `file_statuses` columns a [`FilePhase`] owns, NULLs included: the
+/// image [`FilePhase::columns`] writes and [`FilePhase::from_row`] reads.
+///
+/// The row writers take the [`FilePhase`] and derive this themselves, so a
+/// write cannot name a column combination no phase has. A reader builds one
+/// from a stored row and hands it to [`FilePhase::from_row`] whole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FilePhaseColumns<'a> {
+    /// The `status` column.
+    pub status: FileStatusKind,
+    /// The `error` column.
+    pub error: Option<&'a str>,
+    /// The `error_category` column.
+    pub error_category: Option<FailureCategory>,
+    /// The `started_at` column.
+    pub started_at: Option<MachineTime>,
+    /// The `finished_at` column: the finish time, or a pending retry's
+    /// failed-attempt end.
+    pub finished_at: Option<MachineTime>,
+    /// The `next_eligible_at` column: a pending retry's deadline.
+    pub next_eligible_at: Option<MachineTime>,
+}
+
+/// Ephemeral progress of an in-flight file, for live display only (never
+/// persisted).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileProgress {
+    /// Current step (e.g. utterance index).
+    pub current: Option<i64>,
+    /// Total expected steps.
+    pub total: Option<i64>,
+    /// Stable code for the current stage; the API derives the label.
+    pub stage: Option<FileProgressStage>,
+}
+
 /// Tracks the processing state of a single file within a job.
 ///
-/// Each file begins in `Queued` status and progresses through `Processing` to a
-/// terminal state (`Done` or `Error`).  Progress fields are ephemeral (not
-/// persisted to SQLite) and are cleared on job restart.
+/// Each file begins `Queued` and moves through `Processing` (and possibly
+/// `RetryPending`) to `Done` or `Error`; see [`FilePhase`]. Progress is
+/// ephemeral (not persisted to SQLite) and is cleared on job restart.
 #[derive(Debug, Clone)]
 pub struct FileStatus {
     /// Display path for this file, unique within the parent job. May be a
     /// bare basename (`"sample.cha"`) or a relative path (`"PWA/TYO_a1.cha"`)
     /// depending on whether the input had subdirectories.
     pub filename: DisplayPath,
-    /// Current lifecycle phase: Queued -> Processing -> Done | Error.
-    /// `Interrupted` is only set during DB recovery for files that were in-flight
-    /// when the server crashed.
-    pub status: FileStatusKind,
-    /// Human-readable error message, set when `status` is `Error`.
-    pub error: Option<String>,
-    /// Broad error classification (e.g. `"parse_error"`, `"worker_crash"`).
-    /// Used by the dashboard to group failures.
-    pub error_category: Option<FailureCategory>,
-    /// Structured error codes from CHAT validation (e.g. `["E362", "E701"]`).
-    /// Ephemeral -- not persisted to SQLite on restart.
-    pub error_codes: Option<Vec<String>>,
-    /// One-indexed line number in the source file where the error occurred.
-    /// `None` when the error is not localized to a specific line.
-    pub error_line: Option<i64>,
-    /// Opaque identifier linking to a detailed bug report stored on disk.
-    /// Generated by the pre-serialization validation layer when output fails
-    /// semantic checks.
-    pub bug_report_id: Option<String>,
+    /// Where the file is, with the times and failure that phase has.
+    pub phase: FilePhase,
     /// What the command decided about stamping this file with provenance,
     /// recorded when the file completed.
     /// Ephemeral -- not persisted to SQLite, so a status restored on restart
     /// reads `Unrecorded`.
     pub stamp: crate::api::FileStampOutcome,
-    /// Unix timestamp (seconds since epoch) when processing began for this file.
-    /// `None` while the file is still queued.
-    pub started_at: Option<UnixTimestamp>,
-    /// Unix timestamp (seconds since epoch) when processing finished (success or
-    /// error).  `None` while the file is in-flight.
-    pub finished_at: Option<UnixTimestamp>,
-    /// Earliest unix timestamp when a deferred retry may run. `None` when no
-    /// retry is currently scheduled for the file.
-    pub next_eligible_at: Option<UnixTimestamp>,
     /// Durable identifier of the currently active attempt row for this file.
     /// Ephemeral -- restored as `None` on startup and recreated on the next
     /// dispatch when unfinished files are resumed.
     pub current_attempt_id: Option<String>,
-    /// Current progress step within this file (e.g. utterance index).
-    /// Ephemeral -- used for live progress display only.
-    pub progress_current: Option<i64>,
-    /// Total expected steps for this file (e.g. total utterances).
-    /// Ephemeral -- used for live progress display only.
-    pub progress_total: Option<i64>,
-    /// Stable code for the current progress phase.
-    ///
-    /// The server derives the human-readable label from this enum when it
-    /// projects the in-memory status into the API response model.
-    pub progress_stage: Option<FileProgressStage>,
+    /// Live progress. Ephemeral.
+    pub progress: FileProgress,
 }
 
 impl FileStatus {
@@ -114,42 +511,52 @@ impl FileStatus {
     pub fn new(filename: DisplayPath) -> Self {
         Self {
             filename,
-            status: FileStatusKind::Queued,
-            error: None,
-            error_category: None,
-            error_codes: None,
-            error_line: None,
-            bug_report_id: None,
+            phase: FilePhase::Queued,
             stamp: crate::api::FileStampOutcome::Unrecorded,
-            started_at: None,
-            finished_at: None,
-            next_eligible_at: None,
             current_attempt_id: None,
-            progress_current: None,
-            progress_total: None,
-            progress_stage: None,
+            progress: FileProgress::default(),
         }
+    }
+
+    /// The API status of this file.
+    pub fn status(&self) -> FileStatusKind {
+        self.phase.kind()
+    }
+
+    /// Back to queued, as on a restart: no times, no failure, no attempt,
+    /// no progress.
+    pub(crate) fn requeue(&mut self) {
+        self.phase = FilePhase::Queued;
+        self.current_attempt_id = None;
+        self.progress = FileProgress::default();
     }
 
     /// Convert to the API response type.
     pub fn to_entry(&self) -> FileStatusEntry {
+        let started_at = self.phase.started_at();
+        let finished_at = self.phase.finished_at();
+        let failure = self.phase.failure();
         FileStatusEntry {
             filename: self.filename.clone(),
-            status: self.status,
-            error: self.error.clone(),
-            error_category: self.error_category,
+            status: self.phase.kind(),
+            error: failure.and_then(FileFailure::message).map(str::to_owned),
+            error_category: failure.and_then(FileFailure::category),
             stamp: self.stamp.clone(),
-            error_codes: self.error_codes.clone(),
-            error_line: self.error_line,
-            bug_report_id: self.bug_report_id.clone(),
-            started_at: self.started_at,
-            finished_at: self.finished_at,
-            next_eligible_at: self.next_eligible_at,
-            progress_current: self.progress_current,
-            progress_total: self.progress_total,
-            progress_stage: self.progress_stage,
+            started_at,
+            finished_at,
+            duration_s: match (started_at, finished_at) {
+                (Some(started), Some(finished)) => {
+                    Some(NonNegativeSeconds::between(started, finished))
+                }
+                (None, _) | (_, None) => None,
+            },
+            next_eligible_at: self.phase.next_eligible_at(),
+            progress_current: self.progress.current,
+            progress_total: self.progress.total,
+            progress_stage: self.progress.stage,
             progress_label: self
-                .progress_stage
+                .progress
+                .stage
                 .map(FileProgressStage::label)
                 .map(str::to_string),
         }
@@ -250,15 +657,24 @@ pub struct JobStore {
     node_id: NodeId,
     trace_store: crate::trace_store::TraceStore,
     max_concurrent: usize,
+    /// The one source of the current time for the store and its runners.
+    clock: Arc<dyn crate::clock::Clock>,
 }
 
 impl JobStore {
-    /// Create a new `JobStore` with the given configuration, optional database, and
-    /// broadcast channel for WebSocket notifications.
+    /// Create a `JobStore` with the given configuration, optional database,
+    /// broadcast channel for WebSocket notifications, and the clock every
+    /// time it records is read from.
+    ///
+    /// The clock is required: it is created once where the program is
+    /// composed (the server, the direct host) and handed down, so there is
+    /// no second clock for a store to fall back to. Tests pass a
+    /// `ManualClock` where they need exact instants.
     pub fn new(
         config: ServerConfig,
         db: Option<Arc<JobDB>>,
         ws_tx: broadcast::Sender<WsEvent>,
+        clock: Arc<dyn crate::clock::Clock>,
     ) -> Self {
         // `Some(n)` is an explicit operator override; `None` falls
         // through to the host-aware auto-tune. (Future host-facts
@@ -284,7 +700,19 @@ impl JobStore {
             trace_store: crate::trace_store::TraceStore::new(),
             config,
             max_concurrent,
+            clock,
         }
+    }
+
+    /// Now, by the store's clock.
+    pub(crate) fn now(&self) -> MachineTime {
+        self.clock.now()
+    }
+
+    /// Now, by the store's clock, as the time of an event being recorded.
+    /// The only production source of an [`EventTime`].
+    pub(crate) fn event_time(&self) -> EventTime {
+        EventTime::from_store_clock(self.clock.now())
     }
 
     /// Borrow the immutable server configuration owned by the store.
@@ -315,29 +743,4 @@ impl JobStore {
 #[cfg(test)]
 fn auto_max_concurrent_from(by_cpu: usize, by_memory: usize) -> usize {
     host_auto_max_concurrent_from(by_cpu, by_memory)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-pub(crate) fn unix_now() -> UnixTimestamp {
-    UnixTimestamp(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64(),
-    )
-}
-
-/// Convert a Unix timestamp to ISO 8601 string.
-pub fn ts_iso(ts: UnixTimestamp) -> String {
-    use chrono::{DateTime, Utc};
-    if !ts.0.is_finite() {
-        return format!("invalid-unix-timestamp({})", ts.0);
-    }
-
-    DateTime::<Utc>::from_timestamp_millis((ts.0 * 1000.0).round() as i64)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| format!("invalid-unix-timestamp({})", ts.0))
 }

@@ -5,10 +5,12 @@
 //! machinery: callers use the higher-level [`WorkerHandle`](super::WorkerHandle)
 //! methods.
 
-use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2};
+use crate::types::worker_v2::{
+    ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2, WorkerErrorKind,
+};
 use crate::worker::{
-    BatchInferRequest, BatchInferResponse, InferRequest, InferResponse, WorkerCapabilities,
-    WorkerHealthResponse, WorkerPid,
+    BatchInferRequest, BatchInferResponse, InferRequest, InferResponse, InferTask,
+    WorkerCapabilities, WorkerHealthResponse, WorkerPid,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -21,8 +23,101 @@ pub(super) const STARTUP_STDERR_TAIL_CHARS: usize = 2_000;
 /// Maximum non-JSON preamble lines to tolerate before the ready signal.
 pub(super) const MAX_READY_STDOUT_PREAMBLE_LINES: usize = 32;
 
-/// Maximum non-protocol stdout lines to tolerate while waiting for a response.
-pub(super) const MAX_RESPONSE_STDOUT_NOISE_LINES: usize = 8;
+/// Consecutive non-protocol lines a reader tolerates before it stops
+/// trusting the stream.
+pub(crate) const MAX_RESPONSE_STDOUT_NOISE_LINES: usize = 8;
+
+/// How much of a refused line a log or error message carries.
+const LINE_EXCERPT_CHARS: usize = 200;
+
+/// The start of a line, for a log or an error message.
+pub(crate) fn excerpt(line: &str) -> String {
+    match line.char_indices().nth(LINE_EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}...", &line[..cut]),
+        None => line.to_owned(),
+    }
+}
+
+/// One line read from a worker's protocol stream, by the one rule every
+/// reader (sequential stdio, sequential TCP, shared GPU) applies: a JSON
+/// object is a protocol message, a blank line is nothing, and anything else
+/// (text, a JSON scalar or array) is noise.
+pub(crate) enum WireLine {
+    /// Whitespace only.
+    Blank,
+    /// A JSON object: a message the reader decodes, or refuses as a
+    /// protocol violation.
+    Message(serde_json::Value),
+    /// Not a protocol message.
+    Noise,
+}
+
+impl WireLine {
+    /// Classify one line.
+    pub(crate) fn classify(line: &str) -> Self {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Self::Blank;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value @ serde_json::Value::Object(_)) => Self::Message(value),
+            Ok(
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_)
+                | serde_json::Value::Array(_),
+            )
+            | Err(_) => Self::Noise,
+        }
+    }
+}
+
+/// A run of consecutive noise lines on one stream, ended by a message.
+#[derive(Default)]
+pub(crate) struct NoiseRun {
+    consecutive: usize,
+}
+
+/// A stream that reached [`MAX_RESPONSE_STDOUT_NOISE_LINES`] consecutive
+/// noise lines: it is not trusted further.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NoiseLimit {
+    /// The last noise line, as an [`excerpt`].
+    pub(crate) last_line: String,
+}
+
+impl NoiseLimit {
+    /// The error a waiter on such a stream receives: retryable, since the
+    /// worker is retired and the request can run on another.
+    pub(crate) fn into_worker_error(self) -> WorkerError {
+        WorkerError::OutputNoise {
+            last_line: self.last_line,
+        }
+    }
+}
+
+impl NoiseRun {
+    /// A message ends the run.
+    pub(crate) fn message(&mut self) {
+        self.consecutive = 0;
+    }
+
+    /// Count one noise line; the limit once the run reaches it.
+    pub(crate) fn noise(&mut self, line: &str) -> Result<(), NoiseLimit> {
+        self.consecutive += 1;
+        let last_line = excerpt(line.trim());
+        warn!(
+            line = %last_line,
+            consecutive = self.consecutive,
+            "worker: ignoring a line that is not a protocol message"
+        );
+        if self.consecutive >= MAX_RESPONSE_STDOUT_NOISE_LINES {
+            return Err(NoiseLimit { last_line });
+        }
+        Ok(())
+    }
+}
 
 /// Maximum bytes of response/error text to include in a failure dump.
 const FAILED_REQUEST_DUMP_MAX_RESPONSE_BYTES: usize = 1_024 * 1_024;
@@ -46,28 +141,68 @@ pub(super) struct TcpReadySignal {
     pub port: Option<u16>,
 }
 
-/// Internal wire-level request envelope sent to Python.
+/// Wire-level request envelope sent to a Python worker, over stdio or TCP.
 #[derive(Debug, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-pub(super) enum WorkerRequest<'a> {
+pub(crate) enum WorkerRequest<'a> {
     Infer { request: &'a InferRequest },
     BatchInfer { request: &'a BatchInferRequest },
     ExecuteV2 { request: &'a ExecuteRequestV2 },
-    EnsureTask { request: EnsureTaskRequest },
+    EnsureTask { request: EnsureTaskRequest<'a> },
     Health,
-    Capabilities,
+    Capabilities { request: CapabilitiesRequest<'a> },
     Shutdown,
+}
+
+/// The id a control request (`capabilities`, `ensure_task`) carries.
+///
+/// The worker tags a failure line with the `request_id` of the request that
+/// failed, so carrying one lets a reader tell which control op a failure
+/// answers. The shared GPU reader depends on it: a control op that timed out
+/// can still be answered late, and that late failure must not answer the
+/// next op. Minted only by [`ControlRequestId::next`], so no two control
+/// requests of one server share an id, and the `control-` prefix keeps the
+/// ids apart from V2 dispatch ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct ControlRequestId(String);
+
+impl ControlRequestId {
+    /// A fresh id, unique within this server process.
+    pub(crate) fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(format!("control-{n}"))
+    }
+
+    /// Whether a line's raw `request_id` names this request.
+    pub(crate) fn names(&self, raw: &str) -> bool {
+        self.0 == raw
+    }
+}
+
+impl std::fmt::Display for ControlRequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Request payload for the `capabilities` IPC operation: only its id.
+#[derive(Debug, Serialize)]
+pub(crate) struct CapabilitiesRequest<'a> {
+    pub(crate) request_id: &'a ControlRequestId,
 }
 
 /// Request payload for the `ensure_task` IPC operation.
 #[derive(Debug, Serialize)]
-pub(super) struct EnsureTaskRequest {
-    pub(super) task: String,
+pub(crate) struct EnsureTaskRequest<'a> {
+    pub(crate) request_id: &'a ControlRequestId,
+    pub(crate) task: InferTask,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) engine_overrides: Option<std::collections::BTreeMap<String, String>>,
+    pub(crate) engine_overrides: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
-/// Internal wire-level response envelope read from Python.
+/// Wire-level response envelope read from a Python worker, over stdio or TCP.
 ///
 /// The `progress_v2` variant carries intermediate progress events emitted by
 /// long-running V2 tasks.  Workers emit zero or more progress lines before the
@@ -75,7 +210,7 @@ pub(super) struct EnsureTaskRequest {
 /// multiplexed read loop.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-pub(super) enum WorkerResponse {
+pub(crate) enum WorkerResponse {
     Infer {
         response: InferResponse,
     },
@@ -98,50 +233,55 @@ pub(super) enum WorkerResponse {
         response: WorkerCapabilities,
     },
     Shutdown,
-    Error {
-        error: String,
-        /// Distinguishes deterministic bootstrap-class failures from
-        /// per-request runtime failures. Optional: legacy workers that don't
-        /// emit the field default to [`WorkerErrorKind::Runtime`], preserving
-        /// existing retry behavior. Bootstrap-kind errors classify as
-        /// terminal; see [`WorkerErrorKind`] for details.
-        #[serde(default)]
-        kind: WorkerErrorKind,
-    },
+    Error(ReportedFailure),
 }
 
-/// Discriminator for worker error responses on the wire.
+/// A failure the worker reported in an `{"op":"error"}` line: its own
+/// diagnosis and the required [`WorkerErrorKind`].
 ///
-/// Workers emit ``"runtime"`` for per-request failures (the default
-/// retryable) and ``"bootstrap"`` for deterministic model-load /
-/// catalog-download / package-import failures (terminal, retrying with
-/// the same configuration produces the same failure).
-///
-/// Surfaced from the JSON wire as the optional ``kind`` field on
-/// ``{"op": "error", ...}`` responses. The default of ``Runtime`` is
-/// load-bearing for backward compatibility with workers that don't yet
-/// emit the field; do not change the default without coordinating a
-/// matching Python-side rollout.
-#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum WorkerErrorKind {
-    /// Per-request failure: retry MAY succeed (different inputs, transient
-    /// resource state). The default for backward compatibility.
-    #[default]
-    Runtime,
-    /// Deterministic bootstrap failure: model loading, catalog download,
-    /// import error, missing-model-with-offline-mode, etc. Retrying the
-    /// same worker with the same configuration produces the same failure.
-    Bootstrap,
+/// Every reader, sequential or shared GPU, turns one into a [`WorkerError`]
+/// through the methods here, so the same line means the same error on every
+/// transport and for every op.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct ReportedFailure {
+    /// The worker's own diagnosis.
+    #[serde(rename = "error")]
+    pub(crate) message: String,
+    /// What a retry could change.
+    pub(crate) kind: WorkerErrorKind,
 }
 
-impl WorkerErrorKind {
-    /// Convert the wire kind into a typed [`WorkerError`].
-    pub(crate) fn into_worker_error(self, message: String) -> WorkerError {
-        match self {
-            WorkerErrorKind::Runtime => WorkerError::WorkerResponse(message),
-            WorkerErrorKind::Bootstrap => WorkerError::Bootstrap(message),
+impl ReportedFailure {
+    /// The failure as the error of a request the worker had admitted (infer,
+    /// batch_infer, execute_v2, capabilities).
+    pub(crate) fn into_worker_error(self) -> WorkerError {
+        match self.kind {
+            WorkerErrorKind::Runtime => WorkerError::WorkerResponse(self.message),
+            WorkerErrorKind::Bootstrap => WorkerError::Bootstrap(self.message),
+            WorkerErrorKind::InvalidRequest => WorkerError::RequestRefused(self.message),
         }
+    }
+
+    /// The failure as the error of an `ensure_task`, the on-demand model load.
+    ///
+    /// Any failure the worker reports while loading is bootstrap-class: the
+    /// same load fails the same way again, so a `runtime` kind is not trusted
+    /// to make it retryable. A refused request stays a refusal.
+    pub(crate) fn into_ensure_task_error(self) -> WorkerError {
+        match self.kind {
+            WorkerErrorKind::Runtime | WorkerErrorKind::Bootstrap => {
+                WorkerError::Bootstrap(format!("ensure_task failed: {}", self.message))
+            }
+            WorkerErrorKind::InvalidRequest => {
+                WorkerError::RequestRefused(format!("ensure_task refused: {}", self.message))
+            }
+        }
+    }
+
+    /// The failure as the answer to a health probe: whatever the kind, the
+    /// worker is not healthy.
+    pub(crate) fn into_health_error(self) -> WorkerError {
+        WorkerError::HealthCheckFailed(self.message)
     }
 }
 
@@ -168,7 +308,8 @@ pub(super) fn dump_failed_ipc_request(
         return;
     }
 
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S%3f");
+    // UTC (a `Timestamp` formats in UTC), milliseconds, no separators.
+    let timestamp = jiff::Timestamp::now().strftime("%Y%m%d_%H%M%S%3f");
     let path = fallback_dir.join(format!("failed_ipc_{timestamp}.json"));
 
     let truncated_response = response_fragment.map(|r| {
