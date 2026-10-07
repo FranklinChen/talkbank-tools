@@ -18,7 +18,8 @@
 //!    use that directly.
 //! 3. For that monotonic region, if the subsequence is missing or ambiguous, use one
 //!    Hirschberg DP alignment of the region's words against its tokens
-//!    (`dp_align::align`).
+//!    (`dp_align::CorrespondenceAnalysis::observe`, which runs
+//!    `dp_align::align`).
 //! 4. Retain selection separately from correspondences common to every optimum
 //!    of the declared order model. Only common endpoint proof permits a hint;
 //!    a complete candidate hull can bound FA search without choosing a repeat,

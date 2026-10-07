@@ -21,12 +21,24 @@ ROOT = Path(__file__).resolve().parents[2]
 # - compare/engine.rs: one whole-file transcript comparison, shared by WER
 #   evaluation; window alignment and rotation no longer add separate calls.
 # - compare/cross_run.rs: cross-run agreement metrics for `compare-runs`.
-# - chat_ops/fa/utr.rs: UTR global alignment, correctness critical and not
-#   avoidable.
-# - chat_ops/fa/utr/two_pass.rs: overlap-aware UTR timing recovery.
+#
+# UTR no longer calls `dp_align::align` directly: it reaches the same DP
+# through `CorrespondenceAnalysis::observe`, tracked below.
 ALLOWED_DP_ALIGN_CALLS = {
     "crates/batchalign-transform/src/compare/cross_run.rs": 1,
     "crates/batchalign-transform/src/compare/engine.rs": 1,
+}
+
+# Allowlisted `CorrespondenceAnalysis::observe` call sites. `observe` runs one
+# `dp_align::align` (the selected path) and a budgeted common-correspondence
+# admission over the same pair, so each call is the same O(n*m) decision:
+#
+# - chat_ops/fa/utr.rs: UTR alignment of one anchored region's words against
+#   its ASR tokens, correctness critical and not avoidable; regions bound n
+#   and m.
+# - chat_ops/fa/utr/two_pass.rs: overlap-aware UTR timing recovery, one
+#   windowed utterance at a time.
+ALLOWED_CORRESPONDENCE_OBSERVE_CALLS = {
     "crates/batchalign/src/chat_ops/fa/utr.rs": 1,
     "crates/batchalign/src/chat_ops/fa/utr/two_pass.rs": 1,
 }
@@ -73,6 +85,7 @@ def test_chat_ops_dp_calls_are_allowlisted() -> None:
     dp_call_src = sorted(path for root in dp_call_roots for path in root.rglob("*.rs"))
     align_hits = _scan_paths(dp_call_src, r"\bdp_align::align\s*\(")
     align_chars_hits = _scan_paths(dp_call_src, r"\bdp_align::align_chars\s*\(")
+    observe_hits = _scan_paths(dp_call_src, r"\bCorrespondenceAnalysis::observe\s*\(")
 
     actual = Counter(rel for rel, _, _ in align_hits)
     assert dict(sorted(actual.items())) == ALLOWED_DP_ALIGN_CALLS, (
@@ -89,4 +102,19 @@ def test_chat_ops_dp_calls_are_allowlisted() -> None:
         "stricter bar: a character-level site is allowlisted only with the "
         "bound on its input named in the reason.\n"
         f"expected: {ALLOWED_DP_ALIGN_CHARS_CALLS}\ngot:      {dict(sorted(actual_chars.items()))}"
+    )
+    # Production call sites only: the type's own unit tests exercise it on
+    # fixed toy inputs.
+    actual_observe = Counter(
+        rel
+        for rel, _, _ in observe_hits
+        if not rel.endswith("/tests.rs") and "/tests/" not in rel
+    )
+    assert (
+        dict(sorted(actual_observe.items())) == ALLOWED_CORRESPONDENCE_OBSERVE_CALLS
+    ), (
+        "CorrespondenceAnalysis::observe call sites changed. Each runs the "
+        "O(n*m) DP; same rule as dp_align::align above.\n"
+        f"expected: {ALLOWED_CORRESPONDENCE_OBSERVE_CALLS}\n"
+        f"got:      {dict(sorted(actual_observe.items()))}"
     )

@@ -173,7 +173,7 @@ def _translate_adapter(
             TranslateInferenceRequest(
                 source_lang=source_lang,
                 target_lang=target_lang,
-                items=[item.model_dump(mode="json") for item in batch.items],
+                items=tuple(item.model_dump(mode="json") for item in batch.items),
             )
         )
 

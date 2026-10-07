@@ -129,7 +129,7 @@ def build_translate_batch_infer_handler() -> BatchInferHandler:
     def _handler(req: BatchInferRequest) -> BatchInferResponse:
         try:
             request = TranslateInferenceRequest(
-                source_lang=req.lang, target_lang="eng", items=req.items
+                source_lang=req.lang, target_lang="eng", items=tuple(req.items)
             )
         except ValidationError as error:
             return unsupported_batch_infer(
