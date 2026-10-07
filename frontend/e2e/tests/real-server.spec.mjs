@@ -538,6 +538,18 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     // per-file statuses + `completed_at`, so a timestamp-diff predicate
     // is unreliable across backends. Trust the page assertions below
     //; they are what actually validate the dashboard's restart UX.
+    //
+    // The restart response means the server has already requeued the job,
+    // so a `failed` status observed now is the restarted run's own: wait
+    // for it rather than assuming the refusal lands before the reload (on
+    // a slower runner the page showed the requeued, error-free row).
+    await waitForJobStatus(
+      request,
+      harness.baseUrl,
+      jobId,
+      (status) => status === "failed",
+      120_000
+    );
     await page.reload({ waitUntil: "domcontentloaded" });
 
     await expect(page.getByRole("button", { name: "Restart" })).toBeVisible();
