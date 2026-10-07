@@ -279,11 +279,18 @@ function makeChatFile(filename, utterance, { language = "eng" } = {}) {
   };
 }
 
+// CHAT writes numbers out in words: a bare numeral is not a legal word
+// (E220), so each sample is told apart by a spelled number.
+const SAMPLE_NUMBERS = ["zero", "one", "two", "three", "four", "five", "six", "seven"];
+
 function buildChatFiles(prefix, count) {
+  if (count > SAMPLE_NUMBERS.length) {
+    throw new Error(`at most ${SAMPLE_NUMBERS.length} sample files have spelled numbers`);
+  }
   return Array.from({ length: count }, (_, index) =>
     makeChatFile(
       `${prefix}-${String(index).padStart(2, "0")}.cha`,
-      `hello from react dashboard sample ${index}`
+      `hello from react dashboard sample ${SAMPLE_NUMBERS[index]}`
     )
   );
 }
@@ -463,13 +470,13 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     request,
   }) => {
     test.setTimeout(360_000);
-    // morphotag resolves language per-file from @Languages:; embed an
-    // unsupported language code there to provoke a worker-bootstrap
-    // failure, mirroring what the old job-level `lang: "zzz"` did
-    // before the LanguageSpec::PerFile contract.
+    // morphotag resolves language per-file from @Languages:; declare a real
+    // language Stanza has no pipeline for (Serbian, as the Rust tests do)
+    // to provoke the per-file refusal. A placeholder code such as `zzz` no
+    // longer reaches analysis: CHAT admission refuses it first (E519).
     const files = [
       makeChatFile("real-failure.cha", "this job should fail cleanly", {
-        language: "zzz",
+        language: "srp",
       }),
     ];
     const submitted = await submitMorphotagJob(request, harness.baseUrl, {
@@ -501,8 +508,11 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     // as a per-file Validation error from the morphotag pipeline rather
     // than as the legacy "failed to parse ready signal" worker-bootstrap
     // crash. The error message names the unsupported lang and the
-    // Stanza-support cause; that is what the dashboard surfaces.
-    await expect(page.locator("table").getByText(/not supported by Stanza/)).toBeVisible();
+    // Stanza-support cause; the file row shows its start (the cell truncates
+    // long errors), and the results endpoint below carries the whole cause.
+    await expect(
+      page.locator("table").getByText(/analysis unavailable for primary @Languages 'srp'/),
+    ).toBeVisible();
 
     const failedResults = await fetchJobResults(request, harness.baseUrl, jobId);
     expect(failedResults.status).toBe("failed");
@@ -531,7 +541,9 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
 
     await expect(page.getByRole("button", { name: "Restart" })).toBeVisible();
-    await expect(page.locator("table").getByText(/not supported by Stanza/)).toBeVisible();
+    await expect(
+      page.locator("table").getByText(/analysis unavailable for primary @Languages 'srp'/),
+    ).toBeVisible();
 
     await page.getByRole("button", { name: "Delete" }).click();
     await expect(page).toHaveURL(new RegExp(`${harness.baseUrl}/dashboard/?$`));
