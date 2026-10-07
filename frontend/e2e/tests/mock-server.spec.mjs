@@ -228,12 +228,28 @@ async function startHarness() {
           makeFileStatus("noisy.cha", "diagnosed", {
             started_at: "2026-02-25T00:00:01.000Z",
             finished_at: "2026-02-25T00:00:02.000Z",
+            // The wire shape of `FileOutputDiagnostics`: the judged
+            // findings (bar, count, first findings, where the full list
+            // is) and the shortfalls.
             diagnostics: {
-              findings: [
-                "E220 a digit inside a word",
-                "E241 a reserved marker in the wrong case",
-              ],
-              skipped_stages: ["skipped morphosyntax: it requires an admitted document"],
+              findings: {
+                bar: "construction",
+                finding_count: 2,
+                findings_by_code: [
+                  { code: "E220", count: 1 },
+                  { code: "E241", count: 1 },
+                ],
+                first_findings: [
+                  { code: "E220", level: "main_tier_valid", message: "a digit inside a word" },
+                  {
+                    code: "E241",
+                    level: "main_tier_valid",
+                    message: "a reserved marker in the wrong case",
+                  },
+                ],
+                full_findings: { kind: "inline" },
+              },
+              shortfalls: [{ kind: "stage_skipped", stage: "morphosyntax" }],
             },
           }),
         ],
@@ -588,7 +604,7 @@ test("a file written with diagnostics renders as written output, not as an error
     });
     await expect(page.getByText("noisy.cha")).toBeVisible();
     await expect(
-      page.getByText("written, 2 diagnostics, 1 stage skipped").first(),
+      page.getByText("written, 2 diagnostics, 1 requested stage not applied").first(),
     ).toBeVisible();
     await expect(page.getByRole("tab", { name: /Diagnosed/ })).toBeVisible();
     await expect(page.getByRole("tab", { name: /Errors/ })).toBeDisabled();
